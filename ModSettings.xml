@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModSettings>
+    <Global>
+        <Tab name="Music">
+            <Category name="General Music" displayKey="generalMusicDisplayKey">
+                <Selector
+                        name="Disable Menu Music"
+                        displayKey="disableMenuMusicDisplayKey"
+                        tooltipKey="disableMenuMusicTooltipKey"
+                        defaultValue="false"
+                >
+                    <Property type="arrayValues" allowedValues="true,false"/>
+                </Selector>
+                <Selector
+                        name="Custom Menu Music File"
+                        displayKey="customMenuMusicFileDisplayKey"
+                        tooltipKey="customMenuMusicFileTooltipKey"
+                        defaultValue=""
+                >
+                    <Property type="text"/>
+                </Selector>
+            </Category>
+            <Category name="Behavior" displayKey="behaviorDisplayKey">
+                <Selector
+                        name="Menu Music Pause Type"
+                        displayKey="menuMusicPauseTypeDisplayKey"
+                        tooltipKey="menuMusicPauseTypeTooltipKey"
+                        defaultValue="stop"
+                >
+                    <Property type="arrayValues" allowedValues="stop,fade"/>
+                </Selector>
+                <Selector
+                        name="Fade Duration (seconds)"
+                        displayKey="fadeDurationDisplayKey"
+                        tooltipKey="fadeDurationTooltipKey"
+                        defaultValue="2.0"
+                >
+                    <Property type="number"/>
+                </Selector>
+            </Category>
+        </Tab>
+    </Global>
+</ModSettings>
