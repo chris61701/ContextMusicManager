@@ -1,134 +1,183 @@
-﻿using Audio;
-using CMM;
-using DynamicMusic;
-using HarmonyLib;
+﻿using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.Diagnostics.Tracing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices.ComTypes;
-using System.Runtime.Remoting.Contexts;
-using System.Text;
-using UAI;
-using UniLinq;
 using UnityEngine;
-using UnityEngine.Assertions.Must;
 using UnityEngine.Networking;
-using static EntityDrone;
 
 namespace CMM
 {
+    // ─── Track ordering mode (global) ───────────────────────────────────────────
+    public enum TrackOrderMode { Random, RandomNoRepeat, Sequential }
 
+    // ─── Per-context runtime state ───────────────────────────────────────────────
+    public class ContextCache
+    {
+        public AudioClip   cachedClip        = null;   // ready to play instantly
+        public AudioClip   nextCachedClip    = null;   // preloaded ~NextCacheWindow s before end
+        public float       resumePosition    = 0f;     // seconds
+        public float       lastLeftTime      = -1f;    // Time.realtimeSinceStartup when we left
+        public string      lastPlayedFile    = null;   // for RandomNoRepeat
+        public int         sequentialIndex   = 0;      // for Sequential
+        public string[]    directorySnapshot = null;   // file list from last scan
+        public bool        nextClipLoading   = false;  // guard against double-loads
+    }
 
+    // ─── Context definition (unchanged fields, added TrackOrder stub) ─────────────
+    public class Contexts
+    {
+        public string Context              { get; private set; }
+        public string Path                 { get; private set; }
+        public string Fallback             { get; private set; }
+        public bool   CanBeResumed         { get; private set; }
+        public int    TimeUntilContextStale{ get; private set; }
+        public bool   Loop                 { get; private set; }
+        public int    Cooldown             { get; private set; }
+        public int    WarmUp               { get; private set; }
+        public bool   BypassesCooldown     { get; private set; }
+        public bool   CanInterrupt         { get; private set; }
+        public int    Priority             { get; private set; }
+        public bool   PlayOnce             { get; private set; }
+
+        public Contexts(string context = "None", string path = "", string fallback = "None",
+                        bool canberesumed = false, int timeuntilcontextstale = 120,
+                        bool loop = false, int cooldown = 5, int warmup = 3, bool bypassescooldown = false,
+                        bool caninterrupt = false, int priority = 0, bool playOnce = false)
+        {
+            Context               = context;
+            Path                  = path;
+            Fallback              = fallback;
+            CanBeResumed          = canberesumed;
+            TimeUntilContextStale = timeuntilcontextstale;
+            Loop                  = loop;
+            Cooldown              = cooldown;
+            WarmUp                = warmup;
+            BypassesCooldown      = bypassescooldown;
+            CanInterrupt          = caninterrupt;
+            Priority              = priority;
+            PlayOnce              = playOnce;
+        }
+    }
+
+    // ─── Context resolver (unchanged) ────────────────────────────────────────────
     public static class ContextResolver
     {
-
-        static readonly float enemyDetectRange = 20f;
-        static readonly int dangerThreshold = 1;
-        static readonly int criticalThreshold = 4;
-        private static readonly float TraderDetectRange = 40f;
+        static readonly float enemyDetectRange  = 20f;
+        static readonly int   dangerThreshold   = 1;
+        static readonly int   criticalThreshold = 4;
+        static readonly float TraderDetectRange = 40f;
         static string combatState = "None";
-        public static bool inCombat = false;
-        public static bool inVehicle = false;
-
+        public static bool inCombat   = false;
+        public static bool wasInCombat= false;
+        public static bool inVehicle  = false;
+        public static bool wasInVehicle=false;
+        public static bool inTension  = false;
+        public static bool wasTension = false;
+        public static bool atTrader = false;
+        static int tickTracker = 0;
+        static float combatCoolDown = 10f;
+        static float lastAggroTime = 0f;
         public static void resetValues()
         {
-            inCombat = false;
-            inVehicle = false;
+            inCombat = inVehicle = inTension = false;
             combatState = "None";
         }
+
         public static string ResolveContext()
         {
-            inCombat = false;
-            inVehicle = false;
-            int enemyAggroCount = 0;
-            int enemyCount = 0;
-            int enemiesNearby = 0;
-            var world = GameManager.Instance?.World;
+            inCombat = inVehicle = inTension = false;
+            string traderName    = "Trader";
+            bool   traderNearby  = false;
+            int    enemyAggroCount = 0, enemyAlertCount = 0, enemyCount = 0, enemiesNearby = 0;
+            var world  = GameManager.Instance?.World;
             var player = world?.GetPrimaryPlayer();
+            tickTracker++;
 
             if (world == null || player == null) return "None";
-
             var entities = world.Entities.list;
 
             if (player.AttachedToEntity is EntityVehicle vehicle)
             {
-                string vehicleName = vehicle.GetType().Name.ToLower();
+                string vn = vehicle.GetType().Name.ToLower();
                 inVehicle = true;
-                if (vehicleName.Contains("gyrocopter")) return "Vehicle_Gyrocopter";
-                else if (vehicleName.Contains("bicycle")) return "Vehicle_Bicycle";
-                else if (vehicleName.Contains("motorcycle") ||
-                         vehicleName.Contains("minibike")) return "Vehicle_Motorcycle";
-                else if (vehicleName.Contains("4x4") ||
-                         vehicleName.Contains("truck")) return "Vehicle_4x4";
-                else return "Vehicle";
+                if (vn.Contains("gyrocopter")) return "Vehicle_Gyrocopter";
+                if (vn.Contains("bicycle"))    return "Vehicle_Bicycle";
+                if (vn.Contains("motorcycle") || vn.Contains("minibike")) return "Vehicle_Motorcycle";
+                if (vn.Contains("4x4") || vn.Contains("truck"))           return "Vehicle_4x4";
+                return "Vehicle";
             }
 
-            foreach ( var entity in entities )
+            foreach (var entity in entities)
             {
-                if (entity is EntityEnemy enemy)
+                if (entity is EntityTrader trader)
                 {
-                    if (enemy.IsAlive())
+                    if (Vector3.Distance(player.position, trader.position) > TraderDetectRange) continue;
+                    traderNearby = true;
+                    atTrader = true;
+                    string n = trader.EntityName?.ToLower() ?? "";
+                    if (n.Contains("jen"))  traderName = "Trader_Jen";
+                    if (n.Contains("rekt")) traderName = "Trader_Rekt";
+                    if (n.Contains("bob"))  traderName = "Trader_Bob";
+                    if (n.Contains("hugh")) traderName = "Trader_Hugh";
+                    if (n.Contains("joel")) traderName = "Trader_Joel";
+                }
+                else if (entity is EntityEnemy enemy)
+                {
+                    if (!enemy.IsAlive()) continue;
+                    if (Vector3.Distance(player.position, enemy.position) < enemyDetectRange)
+                    { enemyCount++; enemiesNearby++; }
+                    if (enemy.isAlert)
                     {
-                        if (Vector3.Distance(player.position, enemy.position) < enemyDetectRange)
-                        {
-                            //Log.Error("Enemy: " + enemy.entityName + " nearby");
-                            enemyCount++;
-                            enemiesNearby++;
-                        }
+                        if (tickTracker % 10 == 1)
+                            Log.Error($"Enemy: {enemy.entityName} is awere of the player");
                         if (enemy.GetAttackTarget() == player)
                         {
-                            Log.Error("Enemy: " + enemy.entityName + " is aggroed on player");
-                            inCombat = true;
+                            if (tickTracker % 10 == 1) 
+                                Log.Error($"Enemy: {enemy.entityName} is aggroed on player");
+                            lastAggroTime = Time.realtimeSinceStartup;
                             enemyAggroCount++;
+                            inCombat = true;
                         }
+                        enemyAlertCount++;
                     }
                 }
             }
 
-            Log.Error(enemyCount + " enemies nearby.");
+            atTrader = false;
+
+            float CombatCooldownState = Time.realtimeSinceStartup - lastAggroTime;
 
             if (enemyAggroCount >= criticalThreshold)
-            {
-                combatState = "High";
+            {   combatState = "High";
                 return "Combat_High";
             }
-
             if (enemyAggroCount >= dangerThreshold)
             {
-                if (combatState != "High") combatState = "Low";
+                if (combatState != "High")
+                {
+                    combatState = "Low";
+                }
                 return combatState == "High" ? "Combat_High" : "Combat_Low";
             }
 
-            // If combat state was high at the beginning of the encounter, don't change it
-            combatState = "None";
-
-            foreach (var entity in world.Entities.list)
+            if (CombatCooldownState <= combatCoolDown && enemyAlertCount > 0)
             {
-                if (entity is EntityTrader trader)
-                {
-                    float dist = Vector3.Distance(player.position, trader.position);
-                    if (dist > TraderDetectRange) continue;
-
-                    string name = trader.EntityName?.ToLower() ?? "";
-                    if (name.Contains("jen")) return "Trader_Jen";
-                    if (name.Contains("rekt")) return "Trader_Rekt";
-                    if (name.Contains("bob")) return "Trader_Bob";
-                    if (name.Contains("hugh")) return "Trader_Hugh";
-                    if (name.Contains("joel")) return "Trader_Joel";
-                    return "Trader";
-                }
+                // Still within cooldown window even with no active aggro
+                return combatState == "High" ? "Combat_High" : "Combat_Low";
             }
 
-            if (enemiesNearby >= criticalThreshold) return "Tension_High";
-            if (enemiesNearby >= dangerThreshold) return "Tension_Low";
-
+            combatState = "None";
+            if (traderNearby) return traderName;
+            if (enemiesNearby >= criticalThreshold || enemyAlertCount >= criticalThreshold)  return "Tension_High";
+            if (enemiesNearby >= dangerThreshold || enemyAlertCount >= dangerThreshold)    return "Tension_Low";
             return "Ambient";
         }
     }
+
+    // ─── Mod entry point ─────────────────────────────────────────────────────────
     public class Initialize : IModApi
     {
         public void InitMod(Mod __instance)
@@ -138,118 +187,171 @@ namespace CMM
             ContextMusicManager.Init(__instance.Path);
         }
     }
-}
-public class Contexts
-{
-    public string Context { get; private set; }
-    public string Path { get; private set; }
-    public string Fallback { get; private set; }
-    //  Will the track resume if it switches back to this context?
-    public bool CanBeResumed { get; private set; }
-    // How long will the track be held in pause before the it is changed once it returns to this same context
-    public int TimeUntilContextStale { get; private set; }
-    public bool Loop { get; private set; }
-    // Cooldown before the last context can switch to this context
-    public int Cooldown { get; private set; }
-    // Delay before next context should be played
-    public int Delay { get; private set; }
-    // Force the song to play the whole way through?
-    public bool CanInterrupt { get; private set; }
-    public int Priority{ get; private set; }
-    public bool PlayOnce { get; private set; } = false;
 
-    public bool hasValidFiiles = false;
-
-    public Contexts(string context = "None", string path = "", string fallback = "None", bool canberesumed = false, int timeuntilcontextstale = 120, bool loop = false, int cooldown = 5, int delay = 3, bool caninterrupt = false, int priority = 0, bool playOnce = false)
-    {
-        Context = context;
-        Path = path;
-        Fallback = fallback;
-        CanBeResumed = canberesumed;
-        TimeUntilContextStale = timeuntilcontextstale;
-        Loop = loop;
-        Cooldown = cooldown;
-        Delay = delay;
-        CanInterrupt = caninterrupt;
-        Priority = priority;
-        PlayOnce = playOnce;
-    }
-}
-
-class MusicFile
-{
-    public string FilePath { get; set; }
-    public AudioType AudioType { get; set; }
-}
-
-namespace CMM
-{
+    // ─── Coroutine host ──────────────────────────────────────────────────────────
     public class CoRoutine : MonoBehaviour { }
+
+    // ─── Main manager ────────────────────────────────────────────────────────────
     public class ContextMusicManager : MonoBehaviour
     {
-        public static List<Contexts> contexts = new List<Contexts>();
+        // ── Configuration ────────────────────────────────────────────────────────
+        public static TrackOrderMode GlobalTrackOrder      = TrackOrderMode.RandomNoRepeat;
+        public static float          ContextScanCooldown   = 0.5f;   // seconds
+        public static float          StalenessCheckInterval= 30f;    // seconds
+        public static float          NextCacheWindow       = 5f;     // seconds before track end
+        public static float          TrackEndPollInterval  = 0.25f;  // seconds
 
-        public static string MusicDirectory = "/Music";
-
-        public static bool inGame = false;
-        public static bool musicIsPlaying = false;
+        // ── Static state ─────────────────────────────────────────────────────────
+        public static List<Contexts>                    contexts      = new List<Contexts>();
+        public static Dictionary<string, ContextCache> cacheMap      = new Dictionary<string, ContextCache>();
+        public static string  MusicDirectory = "/Music";
+        public static bool    inGame         = false;
+        public static bool    inInventory    = false;
         public static Contexts currentContext;
+        public static string  ModPath;
 
-        public static AudioClip clip;
-        public static string lastClipPlayed;
+        // PlayOnce: remember what context was active before a PlayOnce fired
+        private static string _playOnceReturnContext = null;
 
+        // Coroutine handles
+        private static Coroutine _activeMusicCoroutine  = null;
+        private static Coroutine _nextCacheCoroutine    = null;
+        private static Coroutine _trackEndCoroutine     = null;
+
+        // Audio
+        private static AudioSource  CMM_Primary_Channel;
+        private static GameObject   CMM_Audio_Object;
+        public  static CoRoutine    CMM_CoRoutines;
+        public  static ContextMusicManager Instance;
+
+        // ── Context definitions ───────────────────────────────────────────────────
         public void InitContexts()
         {
-            contexts.Add(new Contexts("Vehicle",            "vehicle",            "Ambient",    true,  30,  false, 5, 1, true, 100, false));
-            contexts.Add(new Contexts("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle",    true,  30,  false, 5, 1, true, 100, false));
-            contexts.Add(new Contexts("Vehicle_Bicycle",    "vehicle/bicycle",    "Vehicle",    true,  30,  false, 5, 1, true, 100, false));
-            contexts.Add(new Contexts("Vehicle_Motorcycle", "vehicle/motorcyle",  "Vehicle",    true,  30,  false, 5, 1, true, 100, false));
-            contexts.Add(new Contexts("Vehicle_4x4",        "vehicle/4x4",        "Vehicle",    true,  30,  false, 5, 1, true, 100, false));
-            contexts.Add(new Contexts("Combat_High",        "combat_high",        "Combat_Low", false, 15,  false, 3, 1, true, 97,  false));
-            contexts.Add(new Contexts("Combat_Low",         "combat_low",         "Tension_Low",false, 15,  false, 3, 1, true, 95,  false));
-            contexts.Add(new Contexts("Spawn",              "stinger",            "Ambient",    false, 0,   false, 3, 0, true, 90,  true ));
-            contexts.Add(new Contexts("Tension_High",       "tension_high",       "Tension_Low",false, 60,  false, 5, 1, true, 87,  false));
-            contexts.Add(new Contexts("Tension_Low",        "tension_low",        "Ambient",    false, 60,  false, 5, 1, true, 85,  false));
-            contexts.Add(new Contexts("Death",              "death",              "Ambient",    false, 0,   false, 3, 0, true, 75,  true ));
-            contexts.Add(new Contexts("Ambient",            "ambient",            "None",       true,  120, false, 5, 0, true, 50,  false));
-            contexts.Add(new Contexts("Trader_Joel",        "trader/joel",        "Trader",     true,  120, false, 5, 0, true, 81,  false));
-            contexts.Add(new Contexts("Trader_Jen",         "trader/jen",         "Trader",     true,  120, false, 5, 0, true, 81,  false));
-            contexts.Add(new Contexts("Trader_Rekt",        "trader/rekt",        "Trader",     true,  120, false, 5, 0, true, 81,  false));
-            contexts.Add(new Contexts("Trader_Bob",         "trader/bob",         "Trader",     true,  120, false, 5, 0, true, 81,  false));
-            contexts.Add(new Contexts("Trader_Hugh",        "trader/hugh",        "Trader",     true,  120, false, 5, 0, true, 81,  false));
-            contexts.Add(new Contexts("Trader",             "trader",             "Ambient",    true,  120, false, 5, 0, true, 50,  false));
-            contexts.Add(new Contexts("None",               "",                   "None",       false, 0,   false, 0, 0, true, 0,   false));
-            contexts.Add(new Contexts("Menu",               "menu",               "Ambient",    false, 0,   true,  0, 3, true, 0,   false));
+            contexts.Add(new Contexts("Vehicle",            "vehicle",            "Ambient",     true,  30,  false, 5, 1, true,  true,  100, false));
+            contexts.Add(new Contexts("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
+            contexts.Add(new Contexts("Vehicle_Bicycle",    "vehicle/bicycle",    "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
+            contexts.Add(new Contexts("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
+            contexts.Add(new Contexts("Vehicle_4x4",        "vehicle/4x4",        "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
+            contexts.Add(new Contexts("Combat_High",        "combat_high",        "Combat_Low",  true,  20,  false, 3, 1, true,  true,  97,  false));
+            contexts.Add(new Contexts("Combat_Low",         "combat_low",         "Tension_Low", true,  20,  false, 3, 1, true,  true,  95,  false));
+            contexts.Add(new Contexts("Death",              "death",              "Ambient",     false, 0,   false, 3, 0, true,  true,  91,  true ));
+            contexts.Add(new Contexts("Spawn",              "stinger",            "Ambient",     false, 0,   false, 3, 0, true,  true,  90,  true ));
+            contexts.Add(new Contexts("Inventory",          "inventory",          "Ambient",     true,  15,  false, 3, 0, true,  true,  88,  true ));
+            contexts.Add(new Contexts("Tension_High",       "tension_high",       "Tension_Low", true,  30,  false, 5, 5, false, true,  87,  false));
+            contexts.Add(new Contexts("Tension_Low",        "tension_low",        "Ambient",     true,  30,  false, 5, 5, false, true,  85,  false));
+            contexts.Add(new Contexts("Trader_Joel",        "trader/joel",        "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Jen",         "trader/jen",         "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Rekt",        "trader/rekt",        "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Bob",         "trader/bob",         "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Hugh",        "trader/hugh",        "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader",             "trader",             "Ambient",     true,  120, false, 5, 3, false, true,  50,  false));
+            contexts.Add(new Contexts("Ambient",            "ambient",            "None",        true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("None",               "",                   "None",        false, 0,   false, 0, 0, true,  true,  0,   false));
+            contexts.Add(new Contexts("Menu",               "menu",               "Ambient",     false, 0,   true,  5, 3, true,  true,  0,   false));
         }
 
-        public static ContextMusicManager Instance;
-        private static AudioSource CMM_Primary_Channel;
-        private static GameObject CMM_Audio_Object;
-        public static CoRoutine CoRoutine;
-        public static string ModPath;
-
-        public static float ContextScanCooldown = 0.5f;
+        // ── Initialisation ────────────────────────────────────────────────────────
         public static void Init(string modPath)
         {
+            ModPath         = modPath;
             CMM_Audio_Object = new GameObject("ContextMusicManager");
             UnityEngine.Object.DontDestroyOnLoad(CMM_Audio_Object);
             Instance = CMM_Audio_Object.AddComponent<ContextMusicManager>();
             Instance.InitContexts();
-            currentContext = GetContext("None");
-            CMM_Primary_Channel = CMM_Audio_Object.AddComponent<AudioSource>();
-            CoRoutine = CMM_Audio_Object.AddComponent<CoRoutine>();
-            CMM_Primary_Channel.volume = GamePrefs.GetFloat(EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-            CMM_Primary_Channel.loop = false;
-            ModPath = modPath;
 
-            // Start Scanning for Context Changes
-            CoRoutine.StartCoroutine(Instance.ContextScanLoop());
-            Log.Error("[Context Music Manager] Initialized!");
+            // Create a cache entry for every context
+            foreach (var ctx in contexts)
+                cacheMap[ctx.Context] = new ContextCache();
+
+            currentContext          = GetContext("None");
+            CMM_Primary_Channel     = CMM_Audio_Object.AddComponent<AudioSource>();
+            CMM_CoRoutines          = CMM_Audio_Object.AddComponent<CoRoutine>();
+            CMM_Primary_Channel.volume = 0f;
+            CMM_Primary_Channel.loop   = false;
+            CMM_CoRoutines.StartCoroutine(Instance.PreloadContext("Menu"));
+
+            CMM_CoRoutines.StartCoroutine(Instance.ContextScanLoop());
+            CMM_CoRoutines.StartCoroutine(Instance.StalenessCheckLoop());
+            Log.Out("[CMM] Initialized!");
         }
-        private static readonly HashSet<string> ValidExtensions = new HashSet<string>
+
+        // ── Called once when we enter the game world ──────────────────────────────
+        public static void OnEnterGame()
         {
-            ".mp3", ".ogg", ".wav"
-        };
+            if (!inGame) return;
+            CMM_CoRoutines.StartCoroutine(Instance.PreloadAllContexts());
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // PRELOADING
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // Sequentially preload one cachedClip per context
+        private IEnumerator PreloadAllContexts()
+        {
+            Log.Out("[CMM] Starting sequential preload for all contexts...");
+            foreach (var ctx in contexts)
+            {
+                if (ctx.Context == "None") continue;
+                yield return StartCoroutine(PreloadContext(ctx.Context));
+            }
+            Log.Out("[CMM] Preload complete.");
+        }
+
+        // Scan directory, pick a file, load it into cacheMap[contextName].cachedClip
+        // If directory is empty, tries the fallback chain (but only one level deep for
+        // preload — if fallback is also empty the clip stays null).
+        private IEnumerator PreloadContext(string contextName)
+        {
+            ContextCache cache = cacheMap[contextName];
+            string filePath = PickNextFile(contextName, avoidFile: null);
+
+            if (filePath == null)
+            {
+                // Try one fallback level
+                Contexts ctx         = GetContext(contextName);
+                string   fallbackName = ctx?.Fallback ?? "None";
+                if (fallbackName != "None" && fallbackName != contextName)
+                {
+                    filePath = PickNextFile(fallbackName, avoidFile: null);
+                    if (filePath == null)
+                    {
+                        Log.Out($"[CMM] Preload: no files for {contextName} or fallback {fallbackName}");
+                        yield break;
+                    }
+                }
+                else
+                {
+                    Log.Out($"[CMM] Preload: no files for {contextName}");
+                    yield break;
+                }
+            }
+
+            AudioType audioType = CheckType(filePath);
+            if (audioType == AudioType.UNKNOWN) { yield break; }
+
+            using (var request = UnityWebRequestMultimedia.GetAudioClip(
+                       "file:///" + filePath.Replace("\\", "/"), audioType))
+            {
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    Log.Error($"[CMM] Preload failed for {contextName}: {request.error}");
+                    yield break;
+                }
+                if (cache.cachedClip != null)
+                    Destroy(cache.cachedClip);
+
+                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = true;
+                cache.cachedClip     = DownloadHandlerAudioClip.GetContent(request);
+                cache.lastPlayedFile = filePath;
+                Log.Out($"[CMM] Preloaded: {contextName}");
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // CONTEXT SCAN LOOP
+        // ─────────────────────────────────────────────────────────────────────────
 
         private IEnumerator ContextScanLoop()
         {
@@ -258,308 +360,446 @@ namespace CMM
                 yield return new WaitForSeconds(ContextScanCooldown);
                 if (!inGame) continue;
 
-                string resolved = ContextResolver.ResolveContext();
+                string   resolved = ContextResolver.ResolveContext();
                 Contexts incoming = GetContext(resolved);
-                if (resolved == currentContext.Context) continue;
-                Log.Out("[Context Music Manager] inCombat is: " + ContextResolver.inCombat);
-                if (resolved != currentContext.Context)
-                {
-                    bool isEscalation = ContextResolver.inCombat && incoming.Priority > currentContext.Priority;
-                    bool isCombatEnding = !ContextResolver.inCombat && currentContext.Context.ToLower().Contains("combat");
-                    bool isVehicleEnding = !ContextResolver.inVehicle && currentContext.Context.ToLower().Contains("vehicle");
+                if (incoming == null || resolved == currentContext.Context) continue;
 
-                    if (isEscalation)
+                bool isCombatEnding  =    !ContextResolver.inCombat   && currentContext.Context.ToLower().Contains("combat");
+                bool isVehicleEnding =    !ContextResolver.inVehicle   && currentContext.Context.ToLower().Contains("vehicle");
+                bool isTensionEnding =    !ContextResolver.inTension   && currentContext.Context.ToLower().Contains("tension");
+                bool isInventoryClosing = !inInventory && currentContext.Context.ToLower().Contains("inventory");
+                bool isLeavingTrader =    !ContextResolver.atTrader && currentContext.Context.ToLower().Contains("trader");
+
+                int bypassPriority = (isCombatEnding || isVehicleEnding || isTensionEnding || isInventoryClosing || isLeavingTrader) ? 0 : -1;
+                SendContextUpdate(resolved, bypassPriority);
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // STALENESS CHECK LOOP
+        // ─────────────────────────────────────────────────────────────────────────
+
+        private IEnumerator StalenessCheckLoop()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(StalenessCheckInterval);
+                if (!inGame) continue;
+
+                float now = Time.realtimeSinceStartup;
+                foreach (var ctx in contexts)
+                {
+                    if (ctx.Context == currentContext.Context) continue;
+                    if (!ctx.CanBeResumed) continue;
+                    if (ctx.TimeUntilContextStale <= 0) continue;
+
+                    ContextCache cache = cacheMap[ctx.Context];
+                    if (cache.lastLeftTime < 0) continue;
+
+                    float elapsed = now - cache.lastLeftTime;
+                    if (elapsed >= ctx.TimeUntilContextStale)
                     {
-                        SendContextUpdate(resolved);
-                    }
-                    else if (isCombatEnding || isVehicleEnding )
-                    {
-                        SendContextUpdate(resolved, 0);
-                    }
-                    else
-                    {
-                        SendContextUpdate(resolved);
+                        Log.Out($"[CMM] Context {ctx.Context} is stale ({elapsed:F0}s). Re-caching.");
+                        cache.resumePosition = 0f;
+                        yield return StartCoroutine(PreloadContext(ctx.Context));
                     }
                 }
             }
         }
 
-        private bool HasValidFiles(string directory)
-        {
-            if (!Directory.Exists(directory)) return false;
-
-            return Directory.GetFiles(directory)
-                .Any(f => ValidExtensions.Contains(
-                    System.IO.Path.GetExtension(f).ToLower()));
-        }
-        public static float GetVolume()
-        {
-            return CMM_Primary_Channel.volume;
-        }
-
-        private bool CheckAllContextsDirectories()
-        {
-            foreach (var context in contexts)
-            {
-                string dir = ModPath + MusicDirectory + "/" + context.Path + "/";
-                if (!HasValidFiles(dir))
-                {
-                    Log.Out("[Context Music Manager] No valid music files found for context: " + context.Context + " in directory: " + dir);
-                    return false;
-                }
-                context.hasValidFiiles = true;
-            }
-            return true;
-        }
-        public static Contexts GetContext(string contextIn)
-        {
-            Contexts ctx = contexts.Find(c => c.Context == contextIn);
-            if (ctx == null)
-            {
-                Log.Out("[Context Music Manager] Context not found: " + contextIn);
-                return null;
-            }
-
-            //Log.Out("Context Music Manager] Attempting to get context:  " + ctx.Context);
-            return ctx;
-        }
+        // ─────────────────────────────────────────────────────────────────────────
+        // SEND CONTEXT UPDATE
+        // ─────────────────────────────────────────────────────────────────────────
 
         public static void SendContextUpdate(string contextIn, int bypassPriority = -1)
         {
             Contexts incoming = GetContext(contextIn);
-            if (incoming == null) { Log.Out("[Context Music Manager] Context " + contextIn + " not found "); return; }
-            if (currentContext.Context == contextIn) return;
+            if (incoming == null) return;
+            if (currentContext != null && currentContext.Context == contextIn) return;
 
-            bool menuOverride = !inGame;
-            // Optional ability to bypass priority checks for certain context changes
-            int comparePriority = bypassPriority >= 0 ? bypassPriority : currentContext.Priority;
-            bool priorityOverride = inGame && incoming.CanInterrupt
-                                           && incoming.Priority > comparePriority;
+            bool menuOverride    = !inGame;
+            int  comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
+            bool priorityOverride = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
 
-            if (inGame)
+            if (!menuOverride && !priorityOverride)
             {
-                Log.Out("[Context Music Manager] Context registers as being inGame");
+                Log.Out($"[CMM] {contextIn} does not have higher priority over {currentContext?.Context}");
+                Log.Out($"[CMM] {contextIn} can{(incoming.CanInterrupt ? "" : "not")} interrupt");
+                return;
             }
 
-            if (incoming.Priority > currentContext.Priority)
-            {
-                Log.Out($"[Context Music Manager] {contextIn} has higher priority over {currentContext.Context}");
-            }
-            else
-            {
-                Log.Out("[Context Music Manager] " + contextIn + " does not have higher priority over " + currentContext.Context);
-            }
+            Log.Out($"[CMM] Context changed: {currentContext?.Context} -> {contextIn}");
 
-            if (incoming.CanInterrupt)
+            // Save resume data for the context we're leaving
+            if (currentContext != null && currentContext.CanBeResumed && CMM_Primary_Channel.isPlaying)
             {
-                Log.Out($"[Context Music Manager] {contextIn} can interrupt");
-            }
-            else
-            {
-                Log.Out($"[Context Music Manager] {contextIn} cannot interrupt");
+                ContextCache leavingCache = cacheMap[currentContext.Context];
+                leavingCache.resumePosition = CMM_Primary_Channel.time;
+                leavingCache.lastLeftTime   = Time.realtimeSinceStartup;
+                Log.Out($"[CMM] Saved resume position for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
             }
 
-            if (!menuOverride && !priorityOverride) return;
-
-            Log.Out("[Context Music Manager] Context changed: " + currentContext.Context + " -> " + contextIn);
-            CMM_Primary_Channel.Stop();
-            currentContext = incoming;
-            TriggerMusic(currentContext.Context);
-        }
-
-        public static void ForceContextUpdate(string contextIn)
-        {
-            Contexts incoming = GetContext(contextIn);
-            if (incoming == null) { Log.Out("[CMM] Context not found: " + contextIn); return; }
-
-            Log.Out("[CMM] Context downgrade: " + currentContext.Context + " -> " + contextIn);
-            CMM_Primary_Channel.Stop();
-            currentContext = incoming;
-            TriggerMusic(currentContext.Context);
-        }
-        void SetVolume(float volume) => CMM_Primary_Channel.volume = Mathf.Clamp01(volume);
-
-        public AudioType CheckType(string inputFile)
-        {
-            string extension = System.IO.Path.GetExtension(inputFile).ToLower();
-            switch (extension)
+            // Handle PlayOnce: snapshot what context we should return to
+            if (incoming.PlayOnce)
             {
-                case ".mp3":
-                    return AudioType.MPEG;
-                case ".ogg":
-                    return AudioType.OGGVORBIS;
-                case ".wav":
-                    return AudioType.WAV;
-                default:
-                    return AudioType.UNKNOWN;
-            }
-        }
-        public string ScanForFiles(string contextIn)
-        {
-            Contexts ctx = GetContext(contextIn);
-            if (ctx == null)
-            {
-                Log.Out("[Context Music Manager] Context " + contextIn + " not found ");
-                return null;
-            }
-
-            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
-
-            if (!System.IO.Directory.Exists(dir))
-            {
-                Log.Out("[Context Music Manager] Directory not found " + dir);
-                ContextFallback(ctx.Fallback);
-                return null;
-            }
-
-            string[] files = System.IO.Directory.GetFiles(dir);
-            if (files.Length == 0) { Log.Out("[Context Music Manager] No files in " + dir); return null; }
-            return files[UnityEngine.Random.Range(0, files.Length)];
-        }
-
-        private void ContextFallback(string fallback)
-        {
-            currentContext = contexts.Find(c => c.Context == fallback);
-            if (fallback == "None") currentContext = GetContext("None");
-            SendContextUpdate(fallback);
-        }
-
-        public IEnumerator ChangeMusic(string contextIn)
-        {
-            Log.Out("[Context Music Manager] ChangeMusic(" + contextIn + ")");
-            string filePath = ScanForFiles(contextIn);
-            if (filePath == null) yield break;
-            AudioType audioType = CheckType(filePath);
-            if (audioType == AudioType.UNKNOWN) yield break;
-
-            // Inline the web request here instead of calling GetMusic()
-            using (var request = UnityWebRequestMultimedia.GetAudioClip("file:///" + filePath.Replace("\\", "/"), audioType))
-            {
-                yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success)
+                string resolved = ContextResolver.ResolveContext();
+                Contexts resolvedCtx = GetContext(resolved);
+                // Walk past any other PlayOnce
+                while (resolvedCtx != null && resolvedCtx.PlayOnce && resolved != incoming.Context)
                 {
-                    Log.Error("[Context Music Manager] Failed to load: " + request.error);
-                    yield break;
+                    if (resolvedCtx.Priority > incoming.Priority)
+                    {
+                        // The resolved PlayOnce has higher priority — let it take over instead
+                        incoming = resolvedCtx;
+                        contextIn = resolved;
+                    }
+                    else
+                    {
+                        resolved    = resolvedCtx.Fallback;
+                        resolvedCtx = GetContext(resolved);
+                    }
                 }
-                clip = DownloadHandlerAudioClip.GetContent(request);
-                currentContext = GetContext(contextIn);
-                Log.Error("[Context Music Manager] Attempting to play next track " + currentContext.Context);
-                PlayMusic(clip, currentContext);
+                _playOnceReturnContext = (resolvedCtx != null && !resolvedCtx.PlayOnce) ? resolved : incoming.Fallback;
+                Log.Out($"[CMM] PlayOnce {contextIn} will return to: {_playOnceReturnContext}");
+            }
+
+            // Walk fallback chain to find a context with actual files
+            string contextToPlay = contextIn;
+            for (int i = 0; i < 5; i++)
+            {
+                ContextCache cache = cacheMap[contextToPlay];
+                if (cache.cachedClip != null)
+                {
+                    currentContext = GetContext(contextToPlay);
+                    TriggerMusic(contextToPlay);
+                    return;
+                }
+                // No cached clip — try fallback
+                Contexts fallbackCtx = GetContext(GetContext(contextToPlay)?.Fallback ?? "None");
+                if (fallbackCtx == null || fallbackCtx.Context == "None" || fallbackCtx.Context == contextToPlay)
+                {
+                    Log.Out($"[CMM] No cached clip for {contextToPlay} or its fallbacks. Silence.");
+                    currentContext = GetContext(contextToPlay);
+                    return;
+                }
+                Log.Out($"[CMM] No cached clip for {contextToPlay}, falling back to {fallbackCtx.Context}");
+                contextToPlay = fallbackCtx.Context;
             }
         }
 
-        public IEnumerator WaitForMusicEnd(string contextIn)
-        {
-            yield return new WaitForSeconds(0.1f);
-
-            while (CMM_Primary_Channel.isPlaying)
-            {
-                yield return new WaitForSeconds(0.5f);
-            }
-            Log.Out("[Context Music Manager] Music has finished playing.");
-            if (!currentContext.PlayOnce)
-            {
-                Log.Out("[Context Music Manager] Context not changed, finding another random file: " + currentContext.Context);
-                TriggerMusic(currentContext.Context);
-            }
-            else
-            {
-                Log.Out("[Context Music Manager] Context is set to play once, switching to fallback context: " + currentContext.Fallback);
-                currentContext = GetContext(currentContext.Fallback);
-                //SendContextUpdate(currentContext.Context);
-            }
-        }
+        // ─────────────────────────────────────────────────────────────────────────
+        // TRIGGER MUSIC  (single entry point for all playback)
+        // ─────────────────────────────────────────────────────────────────────────
 
         public static void TriggerMusic(string contextName)
         {
-            Log.Out("[Context Music Manager] TriggerMusic: " + contextName);
-            CoRoutine.StartCoroutine(Instance.ChangeMusic(contextName));
+            Log.Out($"[CMM] TriggerMusic: {contextName}");
+
+            // Stop any in-flight load
+            if (_activeMusicCoroutine != null)
+            {
+                CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine);
+                _activeMusicCoroutine = null;
+            }
+            if (_nextCacheCoroutine != null)
+            {
+                CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);
+                _nextCacheCoroutine = null;
+            }
+            if (_trackEndCoroutine != null)
+            {
+                CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);
+                _trackEndCoroutine = null;
+            }
+
+            _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(Instance.PlayFromCache(contextName));
         }
 
-        public void PlayMusic(AudioClip clip, Contexts contextIn)
+        // ─────────────────────────────────────────────────────────────────────────
+        // PLAY FROM CACHE
+        // ─────────────────────────────────────────────────────────────────────────
+
+        private IEnumerator PlayFromCache(string contextName)
         {
-            Log.Out("[Context Music Manager] PlayMusic: " + contextIn.Context);
-            CMM_Primary_Channel.loop = contextIn.Loop;
-            CMM_Primary_Channel.clip = clip;
+            Contexts     ctx   = GetContext(contextName);
+            ContextCache cache = cacheMap[contextName];
+
+            // If cachedClip is somehow null at this point, wait briefly for preload
+            float waited = 0f;
+            while (cache.cachedClip == null && waited < 10f)
+            {
+                yield return new WaitForSeconds(0.25f);
+                waited += 0.25f;
+            }
+
+            if (cache.cachedClip == null)
+            {
+                Log.Out($"[CMM] PlayFromCache: still no clip for {contextName} after waiting. Giving up.");
+                yield break;
+            }
+
+            // Check resume
+            float startPosition = 0f;
+            if (ctx.CanBeResumed && cache.resumePosition > 0f)
+            {
+                float elapsed = Time.realtimeSinceStartup - cache.lastLeftTime;
+                if (elapsed < ctx.TimeUntilContextStale)
+                {
+                    startPosition = cache.resumePosition;
+                    Log.Out($"[CMM] Resuming {contextName} at {startPosition:F2}s");
+                }
+                else
+                {
+                    cache.resumePosition = 0f;
+                    Log.Out($"[CMM] Resume position for {contextName} was stale, starting fresh.");
+                }
+            }
+
+            UpdateVolume();
+            CMM_Primary_Channel.Stop();
+            CMM_Primary_Channel.loop  = ctx.Loop;
+            CMM_Primary_Channel.clip  = cache.cachedClip;
+            CMM_Primary_Channel.time  = Mathf.Clamp(startPosition, 0f, cache.cachedClip.length - 0.1f);
             CMM_Primary_Channel.Play();
-            CoRoutine.StartCoroutine(WaitForMusicEnd(contextIn.Context));
+            Log.Out($"[CMM] PlayMusic: {contextName}");
+
+            // Swap nextCachedClip into cachedClip slot for next time (unless PlayOnce)
+            if (!ctx.PlayOnce && cache.nextCachedClip != null)
+            {
+                Destroy(cache.cachedClip);
+                cache.cachedClip     = cache.nextCachedClip;
+                cache.nextCachedClip = null;
+            }
+
+            // Start watching for track end
+            _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(
+                TrackEndWatcher(contextName, cache.cachedClip.length, startPosition));
+
+            // Start preloading the next clip (not for PlayOnce)
+            if (!ctx.PlayOnce)
+            {
+                float remaining = cache.cachedClip.length - startPosition;
+                _nextCacheCoroutine = CMM_CoRoutines.StartCoroutine(
+                    ScheduleNextCacheLoad(contextName, remaining));
+            }
+
+            _activeMusicCoroutine = null;
         }
 
-        private static float lastVolumeCheck;
-        private static Coroutine volumeFadeCoroutine;
+        // ─────────────────────────────────────────────────────────────────────────
+        // TRACK END WATCHER
+        // ─────────────────────────────────────────────────────────────────────────
 
-        private static IEnumerator FadeVolumeOnChange(AudioSource source, float targetVolume, float duration)
+        private IEnumerator TrackEndWatcher(string contextName, float clipLength, float startPosition)
         {
-            if (source == null)
+            // Poll until the track stops naturally (not looping)
+            Contexts ctx = GetContext(contextName);
+            if (ctx.Loop) yield break; // looping tracks never "end"
+
+            while (CMM_Primary_Channel.isPlaying)
+                yield return new WaitForSeconds(TrackEndPollInterval);
+
+            // Confirm it's the same context still
+            if (currentContext.Context != contextName) yield break;
+
+            Log.Out($"[CMM] Track ended naturally: {contextName}");
+
+            if (ctx.PlayOnce)
+            {
+                // Return to snapshot context
+                string returnTo = _playOnceReturnContext ?? ctx.Fallback;
+                _playOnceReturnContext = null;
+                Log.Out($"[CMM] PlayOnce finished, returning to: {returnTo}");
+                SendContextUpdate(returnTo, 0);
+            }
+            else
+            {
+                // Play next cached clip for this context
+                ContextCache cache = cacheMap[contextName];
+
+                if (cache.nextCachedClip == null)
+                {
+                    Log.Out($"[CMM] Next clip not ready for {contextName}, waiting...");
+                    while (cache.nextCachedClip == null && currentContext.Context == contextName)
+                        yield return new WaitForSeconds(TrackEndPollInterval);
+                    if (currentContext.Context != contextName) yield break;
+                }
+
+                Log.Out($"[CMM] Advancing to next cached clip for {contextName}");
+                Destroy(cache.cachedClip);
+                cache.cachedClip     = cache.nextCachedClip;
+                cache.nextCachedClip = null;
+
+                _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName));
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // SCHEDULE NEXT CACHE LOAD
+        // ─────────────────────────────────────────────────────────────────────────
+
+        private IEnumerator ScheduleNextCacheLoad(string contextName, float trackRemaining)
+        {
+            float waitTime = Mathf.Max(0f, trackRemaining - NextCacheWindow);
+            yield return new WaitForSeconds(waitTime);
+
+            if (currentContext.Context != contextName) yield break;
+
+            ContextCache cache = cacheMap[contextName];
+            if (cache.nextClipLoading || cache.nextCachedClip != null) yield break;
+
+            cache.nextClipLoading = true;
+            yield return StartCoroutine(LoadNextClip(contextName));
+            cache.nextClipLoading = false;
+        }
+
+        private IEnumerator LoadNextClip(string contextName)
+        {
+            ContextCache cache   = cacheMap[contextName];
+            string       avoid   = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat
+                                    ? cache.lastPlayedFile : null;
+            string       filePath = PickNextFile(contextName, avoidFile: avoid);
+
+            if (filePath == null)
+            {
+                Log.Out($"[CMM] LoadNextClip: no files for {contextName}");
                 yield break;
+            }
 
-            float startVolume = source.volume;
+            AudioType audioType = CheckType(filePath);
+            if (audioType == AudioType.UNKNOWN) yield break;
 
-            if (Mathf.Approximately(startVolume, targetVolume))
-                yield break;
+            using (var request = UnityWebRequestMultimedia.GetAudioClip(
+                       "file:///" + filePath.Replace("\\", "/"), audioType))
+            {
+                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = true;
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    Log.Error($"[CMM] LoadNextClip failed for {contextName}: {request.error}");
+                    yield break;
+                }
+                if (cache.nextCachedClip != null)
+                    Destroy(cache.nextCachedClip);
+                cache.nextCachedClip = DownloadHandlerAudioClip.GetContent(request);
+                cache.lastPlayedFile = filePath;
+                Log.Out($"[CMM] Next clip ready for {contextName}: {Path.GetFileName(filePath)}");
+            }
+        }
 
+        // ─────────────────────────────────────────────────────────────────────────
+        // FILE SELECTION
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // Scan directory fresh each time (picks up new files from modders),
+        // then apply the global TrackOrderMode.
+        private static string PickNextFile(string contextName, string avoidFile)
+        {
+            Contexts ctx = GetContext(contextName);
+            if (ctx == null) return null;
+
+            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+            if (!Directory.Exists(dir)) return null;
+
+            string[] files = Directory.GetFiles(dir)
+                .Where(f => CheckType(f) != AudioType.UNKNOWN)
+                .ToArray();
+
+            if (files.Length == 0) return null;
+
+            // Update snapshot
+            cacheMap[contextName].directorySnapshot = files;
+
+            switch (GlobalTrackOrder)
+            {
+                case TrackOrderMode.Sequential:
+                {
+                    ContextCache cache = cacheMap[contextName];
+                    // Reset index if files changed
+                    if (cache.sequentialIndex >= files.Length)
+                        cache.sequentialIndex = 0;
+                    string pick = files[cache.sequentialIndex];
+                    cache.sequentialIndex = (cache.sequentialIndex + 1) % files.Length;
+                    return pick;
+                }
+                case TrackOrderMode.RandomNoRepeat:
+                {
+                    if (files.Length == 1) return files[0];
+                    string[] candidates = avoidFile != null
+                        ? files.Where(f => f != avoidFile).ToArray()
+                        : files;
+                    if (candidates.Length == 0) candidates = files;
+                    return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+                }
+                default: // Random
+                    return files[UnityEngine.Random.Range(0, files.Length)];
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // UTILITIES
+        // ─────────────────────────────────────────────────────────────────────────
+
+        public static Contexts GetContext(string contextIn)
+        {
+            return contexts.Find(c => c.Context == contextIn);
+        }
+
+        public static AudioType CheckType(string inputFile)
+        {
+            switch (Path.GetExtension(inputFile).ToLower())
+            {
+                case ".mp3": return AudioType.MPEG;
+                case ".ogg": return AudioType.OGGVORBIS;
+                case ".wav": return AudioType.WAV;
+                default:     return AudioType.UNKNOWN;
+            }
+        }
+
+        public static void UpdateVolume()
+        {
+            if (CMM_Primary_Channel == null) return;
+            CMM_Primary_Channel.volume = inGame
+                ? GamePrefs.GetFloat(EnumGamePrefs.OptionsMusicVolumeLevel)
+                : GamePrefs.GetFloat(EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+        }
+
+        private static Coroutine _volumeFadeCoroutine = null;
+        public static void FadeToVolume(float targetVolume, float duration = 1.5f)
+        {
+            if (_volumeFadeCoroutine != null)
+                CMM_CoRoutines.StopCoroutine(_volumeFadeCoroutine);
+            _volumeFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.VolumeFade(targetVolume, duration));
+        }
+
+        private IEnumerator VolumeFade(float targetVolume, float duration)
+        {
+            float startVolume = CMM_Primary_Channel.volume;
             float elapsed = 0f;
-
-            Log.Out($"[CMM] Fade start: {startVolume} → {targetVolume}");
-
             while (elapsed < duration)
             {
                 elapsed += Time.deltaTime;
-                float t = elapsed / duration;
-
-                source.volume = Mathf.Lerp(startVolume, targetVolume, t);
-
+                CMM_Primary_Channel.volume = Mathf.Lerp(startVolume, targetVolume, elapsed / duration);
                 yield return null;
             }
-
-            source.volume = targetVolume;
-
-            Log.Out($"[CMM] Fade complete: {targetVolume}");
-        }
-
-        internal static void CheckMusicVolume()
-        {
-            float targetVolume = GamePrefs.GetFloat(
-                inGame
-                    ? EnumGamePrefs.OptionsMusicVolumeLevel
-                    : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-
-            if (Mathf.Approximately(lastVolumeCheck, targetVolume))
-                return;
-
-            lastVolumeCheck = targetVolume;
-
-            if (CMM_Primary_Channel == null)
-                return;
-
-            // If nothing is playing, just set instantly
-            if (!CMM_Primary_Channel.isPlaying)
-            {
-                CMM_Primary_Channel.volume = targetVolume;
-                return;
-            }
-
-            // Stop previous fade (IMPORTANT)
-            if (volumeFadeCoroutine != null)
-            {
-                CoRoutine.StopCoroutine(volumeFadeCoroutine);
-                volumeFadeCoroutine = null;
-            }
-
-            volumeFadeCoroutine = CoRoutine.StartCoroutine(
-                FadeVolumeOnChange(CMM_Primary_Channel, targetVolume, 1.0f)
-            );
+            CMM_Primary_Channel.volume = targetVolume;
         }
     }
-        public static class MusicStates
+
+    // ─── Music states (default game music toggle) ─────────────────────────────────
+    public static class MusicStates
     {
         public static bool DefaultMusicEnabled = false;
         public static void ToggleDefaultMusic()
         {
             DefaultMusicEnabled = !DefaultMusicEnabled;
-            Debug.LogError($"[Context Music Manager] Default music enabled: {DefaultMusicEnabled}");
+            Log.Error($"[CMM] Default music enabled: {DefaultMusicEnabled}");
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // HARMONY PATCHES
+    // ─────────────────────────────────────────────────────────────────────────────
 
     [HarmonyPatch(typeof(DynamicMusic.Conductor), "Update")]
     public class InGameMusicPatch
@@ -567,23 +807,19 @@ namespace CMM
         static bool firstMessageLogged = false;
         static bool Prefix()
         {
-            if (MusicStates.DefaultMusicEnabled == true)
-                return true;
-
-            //if (GameManager.IsDedicatedServer)
-            //    return true;
-
-            //if (SingletonMonoBehaviour<ConnectionManager>.Instance.IsServer)
-            //    return true;
-            //ContextMusicManager.CoRoutine.StartCoroutine(ContextMusicManager.PlayMusic(ContextMusicManager.ModPath + "/Music/stinger/ExitTheVault.mp3"));
-            if (firstMessageLogged == false)
+            if (MusicStates.DefaultMusicEnabled) return true;
+            if (!firstMessageLogged)
             {
-                Log.Out("[Context Music Manager] Dynamic Music System ticks ignored!");
+                Log.Out("[CMM] Dynamic Music System ticks ignored!");
                 firstMessageLogged = true;
             }
             if (!ContextMusicManager.inGame)
             {
+                Log.Out("[CMM] Context registers as being inGame");
                 ContextMusicManager.inGame = true;
+                float gameVolume = GamePrefs.GetFloat(EnumGamePrefs.OptionsMusicVolumeLevel);
+                ContextMusicManager.FadeToVolume(gameVolume, 1.5f);
+                ContextMusicManager.OnEnterGame();
                 ContextMusicManager.SendContextUpdate("Ambient");
             }
             return false;
@@ -595,18 +831,9 @@ namespace CMM
     {
         static bool Prefix()
         {
+            ContextMusicManager.UpdateVolume();
             if (!ContextMusicManager.inGame)
-            {
-                //Log.Out("[Context Music Manager] - Menu Music Patch triggered, sending Menu context update");
                 ContextMusicManager.SendContextUpdate("Menu");
-            }
-            
-            //Log.Out("[Context Music Manager] inGame = " + ContextMusicManager.inGame);
-            //Log.Out("[Context Music Manager] current Context : " + ContextMusicManager.currentContext.Context);
-            //Log.Out($"[CMM] Current runtime volume: {ContextMusicManager.GetVolume()}");
-            ContextMusicManager.CheckMusicVolume();
-            //Log.Error("[Context Music Manager] BackgroundMuiscMono running");
-            //Debug.LogError("[MyMod] This ran!");
             return false;
         }
     }
@@ -616,90 +843,65 @@ namespace CMM
     {
         static void Prefix()
         {
-            Debug.LogError("[Context Music Manager] Logging out");
+            Log.Error("[CMM] Logging out");
             ContextMusicManager.SendContextUpdate("Menu");
+            ContextMusicManager.inInventory = false;
             ContextMusicManager.inGame = false;
             ContextResolver.resetValues();
-            // fires when the world is torn down
         }
     }
 
     [HarmonyPatch(typeof(GameManager), "Awake")]
     public class StartupLogPatch
     {
-        static void Postfix()
-        {
-            Debug.LogError("[Context Music Manager] Game has started up!");
-        }
+        static void Postfix() => Log.Error("[CMM] Game has started up!");
     }
-
-    //[HarmonyPatch(typeof(XUiC_BackpackWindow), "Open")]
-    //public static class Patch_Backpack_OpenSound
-    //{
-    //    public static void Prefix()
-    //    {
-    //        Log.Out("[MusicSuppress] Blocked backpack open sound (XUiC_BackpackWindow.Open)");
-    //    }
-    //}
-
-    //[HarmonyPatch(typeof(XUiC_BackpackWindow), "OnClose")]
-    //public static class Patch_Backpack_CloseSound
-    //{
-    //    public static void Prefix()
-    //    {
-    //        Log.Out("[MusicSuppress] Blocked backpack close sound (XUiC_BackpackWindow.Open)");
-    //    }
-    //}
-
 
     [HarmonyPatch(typeof(EntityPlayer), "Awake")]
     public static class Patch_SpawnStinger
     {
-        public static void Prefix()
+        public static void Prefix() => Log.Error("[CMM] Player spawned into world");
+    }
+
+    public static class AudioStingerHandler
+    {
+        public static bool Handle(string soundGroupName)
         {
-            Debug.LogError("[Context Music Manager] Player spawned into world)");
+            Log.Error($"[CMM Audio Spy] PlayInsidePlayerHead: {soundGroupName}");
+            switch (soundGroupName)
+            {
+                case "player_death_stinger":
+                    ContextMusicManager.SendContextUpdate("Death");
+                    return false;
+                case "spawnInStinger":
+                    ContextMusicManager.SendContextUpdate("Spawn");
+                    return false;
+                case "open_inventory":
+                    ContextMusicManager.inInventory = true;
+                    ContextMusicManager.SendContextUpdate("Inventory");
+                    return true;
+                case "close_inventory":
+                    ContextMusicManager.inInventory = false;
+                    string resolved = ContextResolver.ResolveContext();
+                    ContextMusicManager.SendContextUpdate(resolved, 0);
+                    return true;
+                default:
+                    return true;
+            }
         }
     }
 
-    [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead", new Type[] { typeof(string), typeof(int), typeof(float), typeof(bool), typeof(bool) })]
+    [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
+        new Type[] { typeof(string), typeof(int), typeof(float), typeof(bool), typeof(bool) })]
     public class Patch_LogPlayInsidePlayerHead
     {
-        static bool Prefix(string soundGroupName)
-        {
-            Debug.LogError("[Context Music Manager Audio Spy] PlayInsidePlayerHead: " + soundGroupName);
-            if (soundGroupName == "player_death_stinger")
-            {
-                ContextMusicManager.SendContextUpdate("Death");
-                return false;
-            }
-            if (soundGroupName == "spawnInStinger")
-            {
-                ContextMusicManager.SendContextUpdate("Spawn");
-                return false;
-            }
-            return true;
-        }
+        static bool Prefix(string soundGroupName) => AudioStingerHandler.Handle(soundGroupName);
     }
 
-    [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead", new Type[] { typeof(string), typeof(int) })]
+    [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
+        new Type[] { typeof(string), typeof(int) })]
     public class Patch_LogPlayInsidePlayerHead2
     {
-        static bool Prefix(string soundGroupNameBegin)
-        {
-            Debug.LogError("[Context Music Manager Audio Spy ] PlayInsidePlayerHead2: " + soundGroupNameBegin);
-            if (soundGroupNameBegin == "player_death_stinger")
-            {
-                ContextMusicManager.SendContextUpdate("Death");
-                return false;
-            }
-            if (soundGroupNameBegin == "spawnInStinger")
-            {
-                ContextMusicManager.SendContextUpdate("Spawn");
-                return false;
-            }
-            return true;
-        }
+        static bool Prefix(string soundGroupNameBegin) => AudioStingerHandler.Handle(soundGroupNameBegin);
     }
 }
-
-
