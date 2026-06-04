@@ -1,16 +1,38 @@
-﻿using HarmonyLib;
+﻿using DynamicMusic;
+using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Security.Claims;
 using UnityEngine;
 using UnityEngine.Networking;
 
 namespace CMM
 {
     public enum TrackOrderMode { Random, RandomNoRepeat, Sequential }
+
+    // ─── Feature flags ────────────────────────────────────────────────────────────
+    // All flags default to enabled (matching existing behaviour).
+    // Safe to change at any time — the flags are read per-call, not cached.
+    public static class CMMConfig
+    {
+        // Crossfade between contexts. When false, the outgoing channel stops
+        // immediately and the incoming channel starts at full volume.
+        public static bool CrossfadeEnabled = true;
+
+        // Pre-load a clip for each context on game entry so the first play is
+        // instant. When false, the clip is loaded on demand when the context
+        // first activates (small stall possible on first play).
+        public static bool PreloadCacheEnabled = false;
+
+        // While a track is playing, load the next clip in the background so
+        // there is no gap at track end. When false, the next clip is loaded
+        // inline when the current one finishes (brief silence possible).
+        public static bool NextClipPreloadEnabled = false;
+    }
 
     public class ContextCache
     {
@@ -61,10 +83,11 @@ namespace CMM
 
     public static class ContextResolver
     {
-        static readonly float enemyDetectRange  = 20f;
+        static readonly float enemyDetectRange  = 10f;
         static readonly int   dangerThreshold   = 1;
-        static readonly int   criticalThreshold = 4;
+        static readonly int   criticalThreshold = 3;
         static readonly float TraderDetectRange = 40f;
+        static readonly float  HomeDetectRange = 70f;
         static string combatState = "None";
         public static bool inCombat    = false;
         public static bool wasInCombat = false;
@@ -73,19 +96,22 @@ namespace CMM
         public static bool inTension   = false;
         public static bool wasTension  = false;
         public static bool atTrader    = false;
+        public static bool atHome    = false;
+        public static bool isDay = false;
         static int tickTracker = 0;
         static float combatCoolDown = 10f;
         static float lastAggroTime  = 0f;
 
         public static void resetValues()
         {
-            inCombat = inVehicle = inTension = false;
+            inCombat = inVehicle = inTension = atTrader = false;
             combatState = "None";
         }
 
         public static string ResolveContext()
         {
-            inCombat = inVehicle = inTension = false;
+            inCombat = inVehicle = inTension = atTrader = atHome = false;
+            isDay = false;
             string traderName     = "Trader";
             bool   traderNearby   = false;
             int    enemyAggroCount = 0, enemyAlertCount = 0, enemyCount = 0, enemiesNearby = 0;
@@ -94,7 +120,12 @@ namespace CMM
             tickTracker++;
 
             if (world == null || player == null) return "None";
+
             var entities = world.Entities.list;
+
+            if (GameManager.Instance.World.IsDaytime()) isDay = true;
+
+            if (GameManager.Instance.World.isEventBloodMoon) return "Blood_Moon";
 
             if (player.AttachedToEntity is EntityVehicle vehicle)
             {
@@ -109,6 +140,7 @@ namespace CMM
 
             foreach (var entity in entities)
             {
+ 
                 if (entity is EntityTrader trader)
                 {
                     if (Vector3.Distance(player.position, trader.position) > TraderDetectRange) continue;
@@ -157,9 +189,64 @@ namespace CMM
 
             combatState = "None";
             if (traderNearby)                                                                    return traderName;
-            if (enemiesNearby >= criticalThreshold || enemyAlertCount >= criticalThreshold)      return "Tension_High";
-            if (enemiesNearby >= dangerThreshold   || enemyAlertCount >= dangerThreshold)        return "Tension_Low";
-            return "Ambient";
+            if (enemiesNearby >= criticalThreshold || enemyAlertCount >= criticalThreshold)
+            {
+                inTension = true;
+                return "Tension_High";
+            }
+            if (enemiesNearby >= dangerThreshold || enemyAlertCount >= dangerThreshold)
+            {
+                inTension = true;
+                return "Tension_Low";
+            }
+
+            var localPlayer = player as EntityPlayerLocal;
+
+            if (localPlayer?.persistentPlayerData != null && localPlayer.persistentPlayerData.HasBedrollPos)
+            {
+                Vector3i bedrollPosMine = localPlayer.persistentPlayerData.BedrollPos;
+                if (Vector3.Distance(player.position, bedrollPosMine) < HomeDetectRange)
+                {
+                    atHome = true;
+                    return isDay ? "Home_Day" : "Home_Night";
+                }
+            }
+
+            List<Vector3i> claims = localPlayer.persistentPlayerData.GetLandProtectionBlocks();
+            if (claims.Count > 0)
+            {
+                Vector3i nearest = claims
+                    .OrderBy(c => Vector3.Distance(player.position, c.ToVector3()))
+                    .First();
+                float dist = Vector3.Distance(player.position, nearest.ToVector3());
+                if (dist < HomeDetectRange)
+                {
+                    atHome = true;
+                    return isDay ? "Home_Day" : "Home_Night";
+                }
+            }
+
+            BiomeDefinition biome = world.GetBiome((int)player.position.x, (int)player.position.z);
+
+            string biomeName = biome?.m_sBiomeName;
+            Log.Error($"[CMM] Current Boimeis: {biomeName}");
+            switch (biomeName)
+            {
+                case "pine_forest":
+                    return "Ambient_Forest";
+                case "desert":
+                    return "Ambient_Desert";
+                case "burnt_forest":
+                    return "Ambient_Burnt_Forest";
+                case "snow":
+                    return "Ambient_Snow";
+                case "wasteland":
+                    return "Ambient_Wasteland";
+                default:
+                    return "Ambient";
+            }
+
+            //return "Ambient";
         }
     }
 
@@ -206,6 +293,7 @@ namespace CMM
         private static Coroutine _trackEndCoroutine    = null;
         private static Coroutine _crossFadeCoroutine   = null;
         private static Coroutine _cooldownCoroutine    = null;
+        private static AudioClip _clipToDestroyAfterFade = null; // Particularly when caching is disable to avoid hard cuts
 
         public static bool lastContextOnCoolDown = false;
 
@@ -224,27 +312,36 @@ namespace CMM
         // ── Context definitions ───────────────────────────────────────────────────
         public void InitContexts()
         {
-            contexts.Add(new Contexts("Vehicle",            "vehicle",            "Ambient",     true,  30,  false, 5, 1, true,  true,  100, false));
-            contexts.Add(new Contexts("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
-            contexts.Add(new Contexts("Vehicle_Bicycle",    "vehicle/bicycle",    "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
-            contexts.Add(new Contexts("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
-            contexts.Add(new Contexts("Vehicle_4x4",        "vehicle/4x4",        "Vehicle",     true,  30,  false, 5, 1, true,  true,  100, false));
-            contexts.Add(new Contexts("Combat_High",        "combat_high",        "Combat_Low",  true,  20,  false, 3, 1, true,  true,  97,  false));
-            contexts.Add(new Contexts("Combat_Low",         "combat_low",         "Tension_Low", true,  20,  false, 3, 1, true,  true,  95,  false));
-            contexts.Add(new Contexts("Death",              "death",              "Ambient",     false, 0,   false, 3, 0, true,  true,  91,  true ));
-            contexts.Add(new Contexts("Spawn",              "stinger",            "Ambient",     false, 0,   false, 3, 0, true,  true,  90,  true ));
-            contexts.Add(new Contexts("Inventory",          "inventory",          "Ambient",     true,  15,  false, 0, 0, true,  true,  88,  false));
-            contexts.Add(new Contexts("Tension_High",       "tension_high",       "Tension_Low", true,  30,  false, 5, 5, false, true,  87,  false));
-            contexts.Add(new Contexts("Tension_Low",        "tension_low",        "Ambient",     true,  30,  false, 5, 5, false, true,  85,  false));
-            contexts.Add(new Contexts("Trader_Joel",        "trader/joel",        "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
-            contexts.Add(new Contexts("Trader_Jen",         "trader/jen",         "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
-            contexts.Add(new Contexts("Trader_Rekt",        "trader/rekt",        "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
-            contexts.Add(new Contexts("Trader_Bob",         "trader/bob",         "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
-            contexts.Add(new Contexts("Trader_Hugh",        "trader/hugh",        "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
-            contexts.Add(new Contexts("Trader",             "trader",             "Ambient",     true,  120, false, 5, 3, false, true,  50,  false));
-            contexts.Add(new Contexts("Ambient",            "ambient",            "None",        true,  120, false, 5, 2, true,  true,  50,  false));
-            contexts.Add(new Contexts("None",               "",                   "None",        false, 0,   false, 0, 0, true,  true,  0,   false));
-            contexts.Add(new Contexts("Menu",               "menu",               "Ambient",     false, 0,   true,  5, 3, true,  true,  0,   false));
+            contexts.Add(new Contexts("Blood_Moon",         "blood_moon",             "Combat_High", true,  30,  false, 5, 1, true,  true,  99, false));
+            contexts.Add(new Contexts("Vehicle",            "vehicle",                "Ambient",     true,  30,  false, 5, 1, true,  true,  99, false));
+            contexts.Add(new Contexts("Vehicle_Gyrocopter", "vehicle/gyrocopter",     "Vehicle",     true,  30,  false, 5, 1, true,  true,  99, false));
+            contexts.Add(new Contexts("Vehicle_Bicycle",    "vehicle/bicycle",        "Vehicle",     true,  30,  false, 5, 1, true,  true,  99, false));
+            contexts.Add(new Contexts("Vehicle_Motorcycle", "vehicle/motorcycle",     "Vehicle",     true,  30,  false, 5, 1, true,  true,  99, false));
+            contexts.Add(new Contexts("Vehicle_4x4",        "vehicle/4x4",            "Vehicle",     true,  30,  false, 5, 1, true,  true,  99, false));
+            contexts.Add(new Contexts("Combat_High",        "combat_high",            "Combat_Low",  true,  20,  false, 3, 1, true,  true,  97,  false));
+            contexts.Add(new Contexts("Combat_Low",         "combat_low",             "Tension_Low", true,  20,  false, 3, 1, true,  true,  95,  false));
+            contexts.Add(new Contexts("Death",              "death",                  "Ambient",     false, 0,   false, 3, 0, true,  true,  91,  true ));
+            contexts.Add(new Contexts("Spawn",              "stinger",                "Ambient",     false, 0,   false, 3, 0, true,  true,  90,  true ));
+            contexts.Add(new Contexts("Inventory",          "inventory",              "Ambient",     true,  15,  false, 0, 0, true,  true,  88,  false));
+            contexts.Add(new Contexts("Tension_High",       "tension_high",           "Tension_Low", true,  30,  false, 5, 5, false, true,  87,  false));
+            contexts.Add(new Contexts("Tension_Low",        "tension_low",            "Ambient",     true,  30,  false, 5, 5, false, true,  85,  false));
+            contexts.Add(new Contexts("Trader_Joel",        "trader/joel",            "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Jen",         "trader/jen",             "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Rekt",        "trader/rekt",            "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Bob",         "trader/bob",             "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader_Hugh",        "trader/hugh",            "Trader",      true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Trader",             "trader",                 "Ambient",     true,  120, false, 5, 3, false, true,  81,  false));
+            contexts.Add(new Contexts("Home_Day",           "home/day",               "Home",        true,  120, false, 5, 3, true,  true,  51,  false));
+            contexts.Add(new Contexts("Home_Night",         "home/night",             "Home",        true,  120, false, 5, 3, true,  true,  51,  false));
+            contexts.Add(new Contexts("Home",               "home",                   "Ambient",     true,  120, false, 5, 3, true,  true,  51,  false));
+            contexts.Add(new Contexts("Ambient",            "ambient",                "None",        true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("Ambient_Forest",       "ambient/forest",       "Ambient",     true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient",     true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("Ambient_Desert",       "ambient/desert",       "Ambient",     true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("Ambient_Snow",         "ambient/snow",         "Ambient",     true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("Ambient_Wasteland",    "ambient/wasteland",    "Ambient",     true,  120, false, 5, 2, true,  true,  50,  false));
+            contexts.Add(new Contexts("None",               "",                       "None",        false, 0,   false, 0, 0, true,  true,  0,   false));
+            contexts.Add(new Contexts("Menu",               "menu",                   "Ambient",     false, 0,   true,  5, 3, true,  true,  0,   false));
         }
 
         // ── Initialisation ────────────────────────────────────────────────────────
@@ -289,6 +386,11 @@ namespace CMM
 
         private IEnumerator PreloadAllContexts()
         {
+            if (!CMMConfig.PreloadCacheEnabled)
+            {
+                Log.Out("[CMM] Preload cache disabled — skipping.");
+                yield break;
+            }
             Log.Out("[CMM] Starting sequential preload for all contexts...");
             foreach (var ctx in contexts)
             {
@@ -301,7 +403,15 @@ namespace CMM
         private IEnumerator PreloadContext(string contextName)
         {
             ContextCache cache    = cacheMap[contextName];
-            string       filePath = PickNextFile(contextName, avoidFile: null);
+            string filePath;
+            if (cache.lastPlayedFile != null && File.Exists(cache.lastPlayedFile))
+                filePath = cache.lastPlayedFile;
+            else
+            {
+                cache.resumePosition = 0f;
+                cache.lastPlayedFile = null;
+                filePath = PickNextFile(contextName, avoidFile: null);
+            }
 
             if (filePath == null)
             {
@@ -363,8 +473,12 @@ namespace CMM
                 bool isTensionEnding    = !ContextResolver.inTension  && currentContext.Context.ToLower().Contains("tension");
                 bool isInventoryClosing = !inInventory                && currentContext.Context.ToLower().Contains("inventory");
                 bool isLeavingTrader    = !ContextResolver.atTrader   && currentContext.Context.ToLower().Contains("trader");
+                bool isLeavingHome      = !ContextResolver.atHome     && currentContext.Context.ToLower().Contains("home");
 
-                int bypassPriority = (isCombatEnding || isVehicleEnding || isTensionEnding || isInventoryClosing || isLeavingTrader)
+                if (isLeavingHome)
+                    Log.Error("Player is leaving home");
+
+                int bypassPriority = (isCombatEnding || isVehicleEnding || isTensionEnding || isInventoryClosing || isLeavingTrader || isLeavingHome)
                     ? 0 : -1;
 
                 SendContextUpdate(resolved, bypassPriority);
@@ -381,6 +495,10 @@ namespace CMM
             {
                 yield return new WaitForSeconds(StalenessCheckInterval);
                 if (!inGame) continue;
+                Log.Out($"[CMM] Cache state: {string.Join(", ", cacheMap.Select(kv => $"{kv.Key}={(kv.Value.cachedClip != null ? $"{kv.Value.cachedClip.length:F0}s" : "null")}(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"))}");
+
+                // No preload cache to refresh when caching is disabled.
+                if (!CMMConfig.PreloadCacheEnabled) continue;
 
                 float now = Time.realtimeSinceStartup;
                 foreach (var ctx in contexts)
@@ -437,6 +555,14 @@ namespace CMM
                 leavingCache.resumePosition = ActiveChannel.time;
                 leavingCache.lastLeftTime   = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
+
+                // With preload disabled the clip was loaded on demand and should not
+                // persist in memory after we leave — only the position is kept.
+                if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
+                {
+                    _clipToDestroyAfterFade = leavingCache.cachedClip;
+                    leavingCache.cachedClip = null;
+                }
             }
 
             // Handle PlayOnce return-to snapshot
@@ -461,21 +587,37 @@ namespace CMM
                 Log.Out($"[CMM] PlayOnce {contextIn} returns to: {_playOnceReturnContext}");
             }
 
-            // Walk fallback chain to find a context with an actual cached clip
+            // Walk fallback chain to find a playable context.
+            // With preload on:  look for a loaded cachedClip.
+            // With preload off: look for a context directory that has files on disk —
+            //                   PlayFromCache will handle the actual load on demand.
             string contextToPlay = contextIn;
             for (int i = 0; i < 5; i++)
             {
-                ContextCache cache = cacheMap[contextToPlay];
-                if (cache.cachedClip != null)
-                {
-                    currentContext = GetContext(contextToPlay);
+                ContextCache cache      = cacheMap[contextToPlay];
+                bool         isPlayable = CMMConfig.PreloadCacheEnabled
+                    ? cache.cachedClip != null
+                    : ContextHasFiles(contextToPlay);
 
-                    if (lastContextOnCoolDown && !currentContext.BypassesCooldown)
+                if (isPlayable)
+                {
+                    Contexts candidate = GetContext(contextToPlay);
+
+                    if (lastContextOnCoolDown && !candidate.BypassesCooldown && bypassPriority < 0)
                     {
-                        Log.Out($"[CMM] {currentContext.Context} blocked — cooldown active");
-                        _pendingContext = currentContext.Context; // keep sentinel consistent
+                        Log.Out($"[CMM] {candidate.Context} blocked — cooldown active");
+                        _pendingContext = currentContext?.Context;
+
+                        // Discard any on-demand loaded clip we're not going to play.
+                        if (!CMMConfig.PreloadCacheEnabled)
+                        {
+                            ContextCache blocked = cacheMap[currentContext.Context];
+                            if (blocked.cachedClip != null) { Destroy(blocked.cachedClip); blocked.cachedClip = null; }
+                        }
                         return;
                     }
+
+                    currentContext = candidate;
 
                     TriggerMusic(contextToPlay);
                     return;
@@ -484,7 +626,7 @@ namespace CMM
                 Contexts fallbackCtx = GetContext(GetContext(contextToPlay)?.Fallback ?? "None");
                 if (fallbackCtx == null || fallbackCtx.Context == "None" || fallbackCtx.Context == contextToPlay)
                 {
-                    Log.Out($"[CMM] No cached clip for {contextToPlay} or fallbacks — silence.");
+                    Log.Out($"[CMM] No playable clip for {contextToPlay} or its fallbacks — silence.");
                     currentContext  = GetContext(contextToPlay);
                     _pendingContext = contextToPlay;
                     return;
@@ -522,22 +664,50 @@ namespace CMM
             Contexts     ctx   = GetContext(contextName);
             ContextCache cache = cacheMap[contextName];
 
-            // Wait up to 10s for the clip to arrive (e.g. still loading on first boot)
-            float waited = 0f;
-            while (cache.cachedClip == null && waited < 10f)
+            // At the top of PlayFromCache, before the clip acquisition block:
+            if (_crossFadeCoroutine != null)
             {
-                yield return new WaitForSeconds(0.25f);
-                waited += 0.25f;
+                CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);
+                _crossFadeCoroutine = null;
+                // Snap outgoing channel to silence so the new fade starts clean
+                InactiveChannel.volume = 0f;
+            }
+            // ── Clip acquisition ─────────────────────────────────────────────────
+            if (CMMConfig.PreloadCacheEnabled)
+            {
+                // Normal path: wait for preloaded clip (up to 10s on first boot).
+                float waited = 0f;
+                while (cache.cachedClip == null && waited < 10f)
+                {
+                    yield return new WaitForSeconds(0.25f);
+                    waited += 0.25f;
+                }
+
+                if (cache.cachedClip == null)
+                {
+                    Log.Out($"[CMM] PlayFromCache: no clip for {contextName} after wait. Giving up.");
+                    _activeMusicCoroutine = null;
+                    yield break;
+                }
+            }
+            else
+            {
+                // On-demand path: load right now, skipping the preload cache entirely.
+                if (cache.cachedClip == null)
+                {
+                    Log.Out($"[CMM] On-demand load for {contextName}...");
+                    yield return StartCoroutine(PreloadContext(contextName));
+                }
+
+                if (cache.cachedClip == null)
+                {
+                    Log.Out($"[CMM] On-demand load failed for {contextName}. Giving up.");
+                    _activeMusicCoroutine = null;
+                    yield break;
+                }
             }
 
-            if (cache.cachedClip == null)
-            {
-                Log.Out($"[CMM] PlayFromCache: no clip for {contextName} after wait. Giving up.");
-                _activeMusicCoroutine = null;
-                yield break;
-            }
-
-            // Resolve start position
+            // ── Resume position ──────────────────────────────────────────────────
             float startPosition = 0f;
             if (ctx.CanBeResumed && cache.resumePosition > 0f)
             {
@@ -554,9 +724,10 @@ namespace CMM
                 }
             }
 
-            // Set up the incoming (currently-silent) channel
+            // ── Channel setup ────────────────────────────────────────────────────
             AudioSource incoming = InactiveChannel;
             AudioSource outgoing = ActiveChannel;
+            float outgoingStartVol = outgoing.volume; // capture before any yield
 
             incoming.clip   = cache.cachedClip;
             incoming.loop   = ctx.Loop;
@@ -564,37 +735,62 @@ namespace CMM
             incoming.volume = 0f;
             incoming.Play();
 
-            // Flip the active-channel flag *before* crossfade so TrackEndWatcher
-            // captures the correct AudioSource reference.
             _primaryIsActive = !_primaryIsActive;
-
-            // Capture the now-active channel for the watcher (immune to future flips)
             AudioSource watchTarget = incoming;
 
-            float fadeDuration = ctx.PlayOnce ? 0.25f : CrossFadeDuration;
+            // ── Crossfade or hard cut ────────────────────────────────────────────
+            float targetVolume = GamePrefs.GetFloat(
+                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
 
-            // FIX: start crossfade THEN cooldown (after fade completes), not inside fade.
-            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                CrossFade(outgoing, incoming, fadeDuration, currentContext.Cooldown));
+            if (CMMConfig.CrossfadeEnabled)
+            {
+                float fadeDuration = ctx.PlayOnce ? 0.25f : CrossFadeDuration;
+                _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
+                    CrossFade(outgoing, incoming, fadeDuration, currentContext.Cooldown, outgoingStartVol));
+            }
+            else
+            {
+                // Hard cut: stop outgoing immediately, bring incoming straight to volume.
+                outgoing.Stop();
+                // At the end of CrossFade, after outgoing.Stop() and before the cooldown:
+                outgoing.clip   = null;
+                outgoing.volume = 0f;
+                // Clean up any deferred clip from SendContextUpdate
+                if (_clipToDestroyAfterFade != null)
+                {
+                    Destroy(_clipToDestroyAfterFade);
+                    _clipToDestroyAfterFade = null;
+                }
+                incoming.volume = targetVolume;
+
+                // Cooldown still applies — start it directly since CrossFade won't.
+                int cooldown = currentContext.Cooldown;
+                if (cooldown > 0)
+                {
+                    if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
+                    _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(ContextCooldownTimer(cooldown));
+                }
+            }
 
             Log.Out($"[CMM] Playing: {contextName}");
 
-            // Advance next-cached clip into the ready slot (non-PlayOnce only)
-            if (!ctx.PlayOnce && cache.nextCachedClip != null)
+            // ── Advance next-cached clip into ready slot (preload path only) ─────
+            if (CMMConfig.PreloadCacheEnabled && !ctx.PlayOnce && cache.nextCachedClip != null)
             {
                 Destroy(cache.cachedClip);
                 cache.cachedClip     = cache.nextCachedClip;
                 cache.nextCachedClip = null;
             }
 
-            // FIX: pass watchTarget (captured reference) not ActiveChannel (a property that can flip)
+            // ── Track-end watcher ────────────────────────────────────────────────
             if (!ctx.Loop)
             {
                 _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(
                     TrackEndWatcher(contextName, watchTarget));
             }
 
-            if (!ctx.PlayOnce)
+            // ── Schedule next-clip preload (only when both preload flags are on) ─
+            if (CMMConfig.PreloadCacheEnabled && CMMConfig.NextClipPreloadEnabled && !ctx.PlayOnce)
             {
                 float remaining = cache.cachedClip.length - startPosition;
                 _nextCacheCoroutine = CMM_CoRoutines.StartCoroutine(
@@ -609,12 +805,12 @@ namespace CMM
         // FIX: cooldown starts AFTER the fade, not inside it.
         // ─────────────────────────────────────────────────────────────────────────
 
-        private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming, float duration, int cooldownSeconds)
+        private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming, float duration, int cooldownSeconds, float outgoingStartVol)
         {
             float targetVolume = GamePrefs.GetFloat(
                 inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
 
-            float startOutVol = outgoing.volume;
+            float startOutVol = outgoingStartVol;
             float elapsed     = 0f;
 
             while (elapsed < duration)
@@ -630,6 +826,9 @@ namespace CMM
             outgoing.Stop();
             outgoing.clip   = null;
             outgoing.volume = 0f;
+
+            // Add this:
+            if (_clipToDestroyAfterFade != null) { Destroy(_clipToDestroyAfterFade); _clipToDestroyAfterFade = null; }
 
             // FIX: cooldown begins only after the fade is fully done
             if (cooldownSeconds > 0)
@@ -686,18 +885,35 @@ namespace CMM
             {
                 ContextCache cache = cacheMap[contextName];
 
-                if (cache.nextCachedClip == null)
+                if (CMMConfig.NextClipPreloadEnabled && CMMConfig.PreloadCacheEnabled)
                 {
-                    Log.Out($"[CMM] Next clip not ready for {contextName}, waiting...");
-                    while (cache.nextCachedClip == null && currentContext.Context == contextName)
-                        yield return new WaitForSeconds(TrackEndPollInterval);
-                    if (currentContext.Context != contextName) yield break;
-                }
+                    // Background-preload path: next clip should already be ready.
+                    if (cache.nextCachedClip == null)
+                    {
+                        Log.Out($"[CMM] Next clip not ready for {contextName}, waiting...");
+                        while (cache.nextCachedClip == null && currentContext.Context == contextName)
+                            yield return new WaitForSeconds(TrackEndPollInterval);
+                        if (currentContext.Context != contextName) yield break;
+                    }
 
-                Log.Out($"[CMM] Advancing to next clip for {contextName}");
-                Destroy(cache.cachedClip);
-                cache.cachedClip     = cache.nextCachedClip;
-                cache.nextCachedClip = null;
+                    Log.Out($"[CMM] Advancing to next clip for {contextName}");
+                    Destroy(cache.cachedClip);
+                    cache.cachedClip     = cache.nextCachedClip;
+                    cache.nextCachedClip = null;
+                }
+                else
+                {
+                    // On-demand path: load the next clip inline now.
+                    Log.Out($"[CMM] On-demand next-clip load for {contextName}");
+                    if (cache.cachedClip != null) { Destroy(cache.cachedClip); cache.cachedClip = null; }
+                    yield return StartCoroutine(PreloadContext(contextName));
+
+                    if (cache.cachedClip == null)
+                    {
+                        Log.Out($"[CMM] On-demand next-clip load failed for {contextName}. Giving up.");
+                        yield break;
+                    }
+                }
 
                 _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName));
             }
@@ -802,6 +1018,18 @@ namespace CMM
 
         public static Contexts GetContext(string contextIn) =>
             contexts.Find(c => c.Context == contextIn);
+
+        // Returns true if the context's directory contains at least one playable file.
+        // Used by SendContextUpdate when preload is disabled so the fallback chain
+        // doesn't skip every context just because cachedClip is null.
+        private static bool ContextHasFiles(string contextName)
+        {
+            Contexts ctx = GetContext(contextName);
+            if (ctx == null || string.IsNullOrEmpty(ctx.Path)) return false;
+            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+            if (!Directory.Exists(dir)) return false;
+            return Directory.GetFiles(dir).Any(f => CheckType(f) != AudioType.UNKNOWN);
+        }
 
         public static AudioType CheckType(string inputFile)
         {

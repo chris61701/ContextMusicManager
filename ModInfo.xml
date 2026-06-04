@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <xml>
     <Name value="ContextualMusic"/>
-    <DisplayName value="Contextual Music"/>
+    <DisplayName value="Context Music Manager"/>
     <Author value="Velasha"/>
     <Description value="Plays custom music based on context."/>
     <Website value="https://www.nexusmods.com/7daystodie/mods/notuploadedyet"/>
