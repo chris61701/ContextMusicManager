@@ -116,7 +116,6 @@ namespace CMM
 
             var entities = world.Entities.list;
 
-
             if (GameManager.Instance.World.IsDaytime()) isDay = true;
 
             if (GameManager.Instance.World.isEventBloodMoon) ActiveContexts.Add("Blood_Moon");
@@ -124,33 +123,27 @@ namespace CMM
             if (player.AttachedToEntity is EntityVehicle vehicle)
             {
                 string vn = vehicle.GetType().Name.ToLower();
-                Log.Error($"Vehicle type name: {vn}"); // See actual value
+                ActiveContexts.Add("Vehicle");
                 switch (vn)
                 {
                     case string s when s.Contains("gyrocopter"):
                         ActiveContexts.Add("Vehicle_Gyrocopter");
-                        Log.Error($"Vehicle type name: {vn} actually detected"); // See actual value
                         break;
                     case string s when s.Contains("bicycle"):
                         ActiveContexts.Add("Vehicle_Bicycle");
-                        Log.Error($"Vehicle type name: {vn} actually detected"); // See actual value
                         break;
                     case string s when s.Contains("motorcycle"):
                         ActiveContexts.Add("Vehicle_Motorcycle");
-                        Log.Error($"Vehicle type name: {vn} actually detected"); // See actual value
                         break;
                     case string s when s.Contains("minibike"):
                         ActiveContexts.Add("Vehicle_Minibike");
-                        Log.Error($"Vehicle type name: {vn} actually detected"); // See actual value
                         break;
                     case string s when s.Contains("jeep"):
                         ActiveContexts.Add("Vehicle_4x4");
-                        Log.Error($"Vehicle type name: {vn} actually detected"); // See actual value
                         break;
-                    default:
-                        ActiveContexts.Add("Vehicle");
-                        Log.Error($"Vehicle type name: {vn} default fallback"); // See actual value
-                        break;
+                    //default:
+                    //    ActiveContexts.Add("Vehicle");
+                    //    break;
                 }
             }
 
@@ -323,13 +316,13 @@ namespace CMM
         // ── Context definitions ───────────────────────────────────────────────────
         public void InitContexts()
         {
-            contexts.Add(new Contexts("Blood_Moon", "blood_moon", "Combat_High", true, 30, false, 5, 5, true, true, 99, false));
-            contexts.Add(new Contexts("Vehicle", "vehicle", "Ambient", true, 30, false, 5, 3, true, true, 99, false));
+            contexts.Add(new Contexts("Blood_Moon", "blood_moon", "Combat_High", true, 30, false, 5, 5, true, true, 100, false));
             contexts.Add(new Contexts("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
             contexts.Add(new Contexts("Vehicle_Bicycle", "vehicle/bicycle", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
             contexts.Add(new Contexts("Vehicle_Minibike", "vehicle/minibike", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
             contexts.Add(new Contexts("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
             contexts.Add(new Contexts("Vehicle_4x4", "vehicle/4x4", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
+            contexts.Add(new Contexts("Vehicle", "vehicle", "Ambient", true, 30, false, 5, 3, true, true, 98, false));
             contexts.Add(new Contexts("Combat_High", "combat_high", "Combat_Low", true, 20, false, 3, 3, true, true, 97, false));
             contexts.Add(new Contexts("Combat_Low", "combat_low", "Tension_Low", true, 20, false, 3, 3, true, true, 95, false));
             contexts.Add(new Contexts("Death", "death", "Ambient", false, 0, false, 3, 1, true, true, 91, true));
