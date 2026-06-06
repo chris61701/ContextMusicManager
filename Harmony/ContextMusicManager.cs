@@ -93,6 +93,8 @@ namespace CMM
         static int tickTracker = 0;
         static float combatCoolDown = 10f;
         static float lastAggroTime = 0f;
+        static bool wasInfested = false;
+        static string lastPoI = "None";
 
         public static void resetValues()
         {
@@ -191,6 +193,8 @@ namespace CMM
             }
             else if (combatCooldownState <= combatCoolDown && enemyAlertCount > 0)
                 ActiveContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
+            else if (combatCooldownState > combatCoolDown && enemyAlertCount == 0)
+                combatState = "None";
 
             if (enemiesNearby >= criticalThreshold || enemyAlertCount >= criticalThreshold)
             {
@@ -228,7 +232,72 @@ namespace CMM
                 }
             }
 
-                BiomeDefinition biome = world.GetBiome((int)player.position.x, (int)player.position.z);
+            //Vector3i positionOfPlayer = player.GetBlockPosition();
+
+            PrefabInstance prefab = GameManager.Instance.World.GetPOIAtPosition(player.position);
+
+            if (prefab != null)
+            {
+                int tier = prefab.prefab.DifficultyTier;
+                string currentPoI = prefab.prefab.PrefabName;
+                int enemiesRemainingInPoi = 0;
+
+                foreach (SleeperVolume volume in prefab.sleeperVolumes)
+                {
+
+                    if (!volume.wasCleared)
+                    {
+                        enemiesRemainingInPoi++;
+                    }
+                }
+
+                if (enemiesRemainingInPoi != 0)
+                {
+                    {
+                        ActiveContexts.Add("POI_Infested");
+                        wasInfested = true;
+                    }
+                }
+                else
+                {
+                    if (wasInfested && currentPoI == lastPoI)
+                    {
+                        ActiveContexts.Add("POI_Cleared");
+                    }
+                    wasInfested = false;
+                }
+
+                lastPoI = prefab.prefab.PrefabName;
+
+                //prefab.prefab.Transient_NumSleeperSpawns
+                switch (tier)
+                {
+                    case 1:
+                        ActiveContexts.Add("POI_T1");
+                        break;
+                    case 2:
+                        ActiveContexts.Add("POI_T2");
+                        break;
+                    case 3:
+                        ActiveContexts.Add("POI_T3");
+                        break;
+                    case 4:
+                        ActiveContexts.Add("POI_T4");
+                        break;
+                    case 5:
+                        ActiveContexts.Add("POI_T5");
+                        break;
+                    default:
+                        ActiveContexts.Add("POI");
+                        break;
+                }         
+            }
+            else
+            {
+                wasInfested = false;
+            }
+
+            BiomeDefinition biome = world.GetBiome((int)player.position.x, (int)player.position.z);
 
             string biomeName = biome?.m_sBiomeName;
             //Log.Error($"[CMM] Current Boimeis: {biomeName}");
@@ -276,7 +345,7 @@ namespace CMM
         public static float TrackTransitionPreloadLead = 10f; // start loading this many seconds before end
 
         // ── Static state ─────────────────────────────────────────────────────────
-        public static List<Contexts> contexts = new List<Contexts>();
+        public static Dictionary<string, Contexts> contexts = new Dictionary<string, Contexts>();
         public static List<ActiveContext> _contextStack = new List<ActiveContext>();
         public static Dictionary<string, ContextCache> cacheMap = new Dictionary<string, ContextCache>();
         public static string MusicDirectory = "/Music";
@@ -313,41 +382,70 @@ namespace CMM
         private static AudioSource ActiveChannel => _primaryIsActive ? CMM_Primary_Channel : CMM_Secondary_Channel;
         private static AudioSource InactiveChannel => _primaryIsActive ? CMM_Secondary_Channel : CMM_Primary_Channel;
 
+        private static void AddContext(string name, string path, string fallback,
+            bool canBeResumed, int staleTime, bool loop, int cooldown, int warmUp,
+            bool bypassesCooldown, bool canInterrupt, int priority, bool playOnce)
+        {
+            contexts[name] = new Contexts(name, path, fallback, canBeResumed, staleTime,
+                loop, cooldown, warmUp, bypassesCooldown, canInterrupt, priority, playOnce);
+        }
         // ── Context definitions ───────────────────────────────────────────────────
         public void InitContexts()
         {
-            contexts.Add(new Contexts("Blood_Moon", "blood_moon", "Combat_High", true, 30, false, 5, 5, true, true, 100, false));
-            contexts.Add(new Contexts("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
-            contexts.Add(new Contexts("Vehicle_Bicycle", "vehicle/bicycle", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
-            contexts.Add(new Contexts("Vehicle_Minibike", "vehicle/minibike", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
-            contexts.Add(new Contexts("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
-            contexts.Add(new Contexts("Vehicle_4x4", "vehicle/4x4", "Vehicle", true, 30, false, 5, 3, true, true, 99, false));
-            contexts.Add(new Contexts("Vehicle", "vehicle", "Ambient", true, 30, false, 5, 3, true, true, 98, false));
-            contexts.Add(new Contexts("Combat_High", "combat_high", "Combat_Low", true, 20, false, 3, 3, true, true, 97, false));
-            contexts.Add(new Contexts("Combat_Low", "combat_low", "Tension_Low", true, 20, false, 3, 3, true, true, 95, false));
-            contexts.Add(new Contexts("Death", "death", "Ambient", false, 0, false, 3, 1, true, true, 91, true));
-            contexts.Add(new Contexts("Spawn", "stinger", "Ambient", false, 0, false, 3, 1, true, true, 90, true));
-            contexts.Add(new Contexts("Inventory", "inventory", "Ambient", true, 15, false, 0, 2, true, true, 88, false));
-            contexts.Add(new Contexts("Tension_High", "tension_high", "Tension_Low", true, 30, false, 5, 5, false, true, 87, false));
-            contexts.Add(new Contexts("Tension_Low", "tension_low", "Ambient", true, 30, false, 5, 5, false, true, 85, false));
-            contexts.Add(new Contexts("Trader_Joel", "trader/joel", "Trader", true, 120, false, 5, 5, false, true, 81, false));
-            contexts.Add(new Contexts("Trader_Jen", "trader/jen", "Trader", true, 120, false, 5, 5, false, true, 81, false));
-            contexts.Add(new Contexts("Trader_Rekt", "trader/rekt", "Trader", true, 120, false, 5, 5, false, true, 81, false));
-            contexts.Add(new Contexts("Trader_Bob", "trader/bob", "Trader", true, 120, false, 5, 5, false, true, 81, false));
-            contexts.Add(new Contexts("Trader_Hugh", "trader/hugh", "Trader", true, 120, false, 5, 5, false, true, 81, false));
-            contexts.Add(new Contexts("Trader", "trader", "Ambient", true, 120, false, 5, 5, false, true, 81, false));
-            contexts.Add(new Contexts("Home_Day", "home/day", "Home", true, 120, false, 5, 5, true, true, 51, false));
-            contexts.Add(new Contexts("Home_Night", "home/night", "Home", true, 120, false, 5, 5, true, true, 51, false));
-            contexts.Add(new Contexts("Home", "home", "Ambient", true, 120, false, 5, 5, true, true, 51, false));
-            contexts.Add(new Contexts("Ambient", "ambient", "None", true, 120, false, 5, 4, true, true, 50, false));
-            contexts.Add(new Contexts("Ambient_Forest", "ambient/forest", "Ambient", true, 120, false, 5, 5, true, true, 50, false));
-            contexts.Add(new Contexts("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient", true, 120, false, 5, 5, true, true, 50, false));
-            contexts.Add(new Contexts("Ambient_Desert", "ambient/desert", "Ambient", true, 120, false, 5, 5, true, true, 50, false));
-            contexts.Add(new Contexts("Ambient_Snow", "ambient/snow", "Ambient", true, 120, false, 5, 5, true, true, 50, false));
-            contexts.Add(new Contexts("Ambient_Wasteland", "ambient/wasteland", "Ambient", true, 120, false, 5, 5, true, true, 50, false));
-            contexts.Add(new Contexts("None", "", "None", false, 0, false, 0, 0, true, true, 0, false));
-            contexts.Add(new Contexts("Menu", "menu", "Ambient", false, 0, true, 5, 2, true, true, 0, false));
+            AddContext("Low_Health_Panic",     "events/low_health",    "Ambient",      true,  30,  false, 5, 5, true,  true, 100, false);
+
+            AddContext("Blood_Combat",         "blood_moon/combat",    "Combat_High",  true,  30,  false, 5, 5, true,  true,  95, false);
+            AddContext("Blood_Moon",           "blood_moon",           "Combat_High",  true,  30,  false, 5, 5, true,  true,  90, false);
+            
+            AddContext("Vehicle_Gyrocopter",   "vehicle/gyrocopter",   "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
+            AddContext("Vehicle_Bicycle",      "vehicle/bicycle",      "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
+            AddContext("Vehicle_Minibike",     "vehicle/minibike",     "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
+            AddContext("Vehicle_Motorcycle",   "vehicle/motorcycle",   "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
+            AddContext("Vehicle_4x4",          "vehicle/4x4",          "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
+            AddContext("Vehicle",              "vehicle",              "Ambient",      true,  30,  false, 5, 3, true,  true,  60, false);
+
+            AddContext("POI_Cleared",          "poi/cleared" ,         "Ambient",      true,  60,  false, 5, 5, true,  true,  55, true );
+            AddContext("Combat_High",          "combat_high",          "Combat_Low",   true,  20,  false, 3, 3, true,  true,  51, false);
+            AddContext("Combat_Low",           "combat_low",           "Tension_Low",  true,  20,  false, 3, 3, true,  true,  50, false);
+
+            AddContext("Death",                "death",                "Ambient",      false,  0,  false, 3, 1, true,  true,  42, true );
+            AddContext("Spawn",                "stinger",              "Ambient",      false,  0,  false, 3, 1, true,  true,  41, true );
+
+            AddContext("Inventory",            "inventory",            "Ambient",      true,  15,  false, 0, 2, true,  true,  40, false);
+
+            AddContext("Tension_High",         "tension_high",         "Tension_Low",  true,  30,  false, 5, 5, false, true,  30, false);
+            AddContext("Tension_Low",          "tension_low",          "Ambient",      true,  30,  false, 5, 5, false, true,  30, false);
+
+            AddContext("Trader_Joel",          "trader/joel",          "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
+            AddContext("Trader_Jen",           "trader/jen",           "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
+            AddContext("Trader_Rekt",          "trader/rekt",          "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
+            AddContext("Trader_Bob",           "trader/bob",           "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
+            AddContext("Trader_Hugh",          "trader/hugh",          "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
+            AddContext("Trader",               "trader",               "Ambient",      true, 120,  false, 5, 5, false, true,  25, false);
+
+            AddContext("Home_Day",             "home/day",             "Home",         true, 120,  false, 5, 5, true,  true,  20, false);
+            AddContext("Home_Night",           "home/night",           "Home",         true, 120,  false, 5, 5, true,  true,  20, false);
+            AddContext("Home",                 "home",                 "Ambient",      true, 120,  false, 5, 5, true,  true,  20, false);
+
+            AddContext("POI_Infested",         "poi/infested",         "Tension_High", true,  60,  false, 5, 5, true,  true,  16, false);
+            AddContext("POI_T1",               "poi/t1",               "POI",          true,  60,  false, 5, 5, true,  true,  15, false);
+            AddContext("POI_T2",               "poi/t2",               "POI",          true,  60,  false, 5, 5, true,  true,  15, false);
+            AddContext("POI_T3",               "poi/t3",               "POI",          true,  60,  false, 5, 5, true,  true,  15, false);
+            AddContext("POI_T4",               "poi/t4",               "POI",          true,  60,  false, 5, 5, true,  true,  15, false);
+            AddContext("POI_T5",               "poi/t5",               "POI",          true,  60,  false, 5, 5, true,  true,  15, false);
+            AddContext("POI",                  "poi",                  "Ambient",      true,  60,  false, 5, 5, true,  true,  15, false);
+
+            AddContext("Ambient",              "ambient",              "None",         true, 120,  false, 5, 4, true,  true,  10, false);
+            AddContext("Ambient_Forest",       "ambient/forest",       "Ambient",      true, 120,  false, 5, 5, true,  true,  10, false);
+            AddContext("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient",      true, 120,  false, 5, 5, true,  true,  10, false);
+            AddContext("Ambient_Desert",       "ambient/desert",       "Ambient",      true, 120,  false, 5, 5, true,  true,  10, false);
+            AddContext("Ambient_Snow",         "ambient/snow",         "Ambient",      true, 120,  false, 5, 5, true,  true,  10, false);
+            AddContext("Ambient_Wasteland",    "ambient/wasteland",    "Ambient",      true, 120,  false, 5, 5, true,  true,  10, false);
+
+            AddContext("None",                 "",                     "None",         false,  0,  false, 0, 0, true,  true,   0, false);
+            AddContext("Menu",                 "menu",                 "Ambient",      false,  0,  true,  5, 2, true,  true,   0, false);
         }
+
 
         // ── Initialisation ────────────────────────────────────────────────────────
         public static void Init(string modPath)
@@ -358,7 +456,7 @@ namespace CMM
             Instance = CMM_Audio_Object.AddComponent<ContextMusicManager>();
             Instance.InitContexts();
 
-            foreach (var ctx in contexts)
+            foreach (var ctx in contexts.Values)
                 cacheMap[ctx.Context] = new ContextCache();
 
             currentContext = GetContext("None");
@@ -376,15 +474,32 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.PreloadContext("Menu"));
             CMM_CoRoutines.StartCoroutine(Instance.ContextScanLoop());
             CMM_CoRoutines.StartCoroutine(Instance.StalenessCheckLoop());
+            CMM_CoRoutines.StartCoroutine(Instance.FileWatchLoop());
             Log.Out("[CMM] Initialized!");
+        }
+
+        // Returns the first context in the fallback chain that has playable files.
+        // Returns null if nothing in the chain is playable.
+        private static string ResolvePlayableContext(string contextName)
+        {
+            string current = contextName;
+            for (int i = 0; i < 5; i++)
+            {
+                if (ContextHasFiles(current)) return current;
+                Contexts ctx = GetContext(current);
+                string fallback = ctx?.Fallback ?? "None";
+                if (fallback == "None" || fallback == current) return null;
+                current = fallback;
+            }
+            return null;
         }
 
         private static string GetTopContext()
         {
             foreach (ActiveContext active in _contextStack)
             {
-                if (ContextHasFiles(active.ContextName))
-                    return active.ContextName;
+                string playable = ResolvePlayableContext(active.ContextName);
+                if (playable != null) return playable;
             }
             return "Ambient";
         }
@@ -428,6 +543,54 @@ namespace CMM
         // PRELOADING
         // ─────────────────────────────────────────────────────────────────────────
 
+        private IEnumerator FileWatchLoop()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(2f); // check every 2 seconds
+                if (!inGame) continue;
+                if (currentContext == null || currentContext.Context == "None") continue;
+
+                string contextName = currentContext.Context;
+                ContextCache cache = cacheMap[contextName];
+
+                // Get current files on disk
+                Contexts ctx = GetContext(contextName);
+                if (ctx == null) continue;
+                string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+                string[] currentFiles = Directory.Exists(dir)
+                    ? Directory.GetFiles(dir).Where(f => CheckType(f) != AudioType.UNKNOWN).ToArray()
+                    : new string[0];
+
+                string[] previousFiles = cache.directorySnapshot ?? new string[0];
+
+                // Check if files were added or removed
+                bool changed = currentFiles.Length != previousFiles.Length ||
+                               currentFiles.Except(previousFiles).Any() ||
+                               previousFiles.Except(currentFiles).Any();
+
+                if (!changed) continue;
+
+                Log.Out($"[CMM] File change detected in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
+                cache.directorySnapshot = currentFiles;
+
+                if (currentFiles.Length == 0)
+                {
+                    // No files left — fall through to next best context
+                    Log.Out($"[CMM] {contextName} folder emptied, re-evaluating context.");
+                    string fallback = ResolvePlayableContext(ctx.Fallback) ?? "Ambient";
+                    _pendingContext = null; // force SendContextUpdate to accept it
+                    SendContextUpdate(fallback, currentContext.Priority + 1);
+                }
+                else
+                {
+                    // Files were added — if we're currently in silence or a fallback,
+                    // re-evaluate in case the intended context is now playable
+                    Log.Out($"[CMM] Files added to {contextName}, no action needed (already playing).");
+                }
+            }
+        }
+
         private IEnumerator PreloadAllContexts()
         {
             if (!CMMConfig.PreloadCacheEnabled)
@@ -436,7 +599,7 @@ namespace CMM
                 yield break;
             }
             Log.Out("[CMM] Starting sequential preload for all contexts...");
-            foreach (var ctx in contexts)
+            foreach (var ctx in contexts.Values)
             {
                 if (ctx.Context == "None") continue;
                 yield return StartCoroutine(PreloadContext(ctx.Context));
@@ -547,6 +710,7 @@ namespace CMM
                             continue;
                     }
 
+                    _pendingContext = null;
                     SendContextUpdate(topContext, 0);
                 }
             }
@@ -568,7 +732,7 @@ namespace CMM
                 if (!CMMConfig.PreloadCacheEnabled) continue;
 
                 float now = Time.realtimeSinceStartup;
-                foreach (var ctx in contexts)
+                foreach (var ctx in contexts.Values)
                 {
                     if (ctx.Context == currentContext.Context) continue;
                     if (!ctx.CanBeResumed || ctx.TimeUntilContextStale <= 0) continue;
@@ -596,8 +760,6 @@ namespace CMM
             Contexts incoming = GetContext(contextIn);
             if (incoming == null) return;
 
-            // FIX: check _pendingContext (not just currentContext.Context) so that
-            // a second rapid call sees a change that is already in flight.
             if (_pendingContext == contextIn) return;
 
             bool menuOverride = !inGame;
@@ -611,8 +773,6 @@ namespace CMM
             }
 
             Log.Out($"[CMM] Context accepted: {currentContext?.Context} -> {contextIn}");
-
-            // FIX: claim the pending slot immediately so concurrent calls are gated
             _pendingContext = contextIn;
 
             // Save resume data for the context we're leaving
@@ -623,8 +783,6 @@ namespace CMM
                 leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
-                // With preload disabled the clip was loaded on demand and should not
-                // persist in memory after we leave — only the position is kept.
                 if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
                 {
                     _clipToDestroyAfterFade = leavingCache.cachedClip;
@@ -635,65 +793,46 @@ namespace CMM
             // Handle PlayOnce return-to snapshot
             if (incoming.PlayOnce)
             {
-                _playOnceReturnContext = GetTopContext();
+                _playOnceReturnContext = _contextStack
+                    .Where(c => c.ContextName != contextIn)
+                    .Select(c => ResolvePlayableContext(c.ContextName))
+                    .FirstOrDefault(c => c != null) ?? "Ambient";
                 Log.Out($"[CMM] PlayOnce {contextIn} returns to: {_playOnceReturnContext}");
             }
 
-            // If we're interrupting a PlayOnce, discard its return target so it
-            // doesn't fire after the interrupting context ends
+            // If we're interrupting a PlayOnce, discard its return target
             if (currentContext != null && currentContext.PlayOnce && !incoming.PlayOnce)
             {
                 _playOnceReturnContext = null;
             }
 
-            // Walk fallback chain to find a playable context.
-            // With preload on:  look for a loaded cachedClip.
-            // With preload off: look for a context directory that has files on disk —
-            //                   PlayFromCache will handle the actual load on demand.
-            string contextToPlay = contextIn;
-            for (int i = 0; i < 5; i++)
+            // Walk fallback chain to find something playable
+            string contextToPlay = ResolvePlayableContext(contextIn);
+
+            if (contextToPlay == null)
             {
-                ContextCache cache = cacheMap[contextToPlay];
-                bool isPlayable = CMMConfig.PreloadCacheEnabled
-                    ? cache.cachedClip != null
-                    : ContextHasFiles(contextToPlay);
-
-                if (isPlayable)
-                {
-                    Contexts candidate = GetContext(contextToPlay);
-
-                    if (lastContextOnCoolDown && !candidate.BypassesCooldown && bypassPriority < 0)
-                    {
-                        Log.Out($"[CMM] {candidate.Context} blocked — cooldown active");
-                        _pendingContext = currentContext?.Context;
-
-                        // Discard any on-demand loaded clip we're not going to play.
-                        if (!CMMConfig.PreloadCacheEnabled)
-                        {
-                            ContextCache blocked = cacheMap[currentContext.Context];
-                            if (blocked.cachedClip != null) { Destroy(blocked.cachedClip); blocked.cachedClip = null; }
-                        }
-                        return;
-                    }
-
-                    currentContext = candidate;
-
-                    TriggerMusic(contextToPlay);
-                    return;
-                }
-
-                Contexts fallbackCtx = GetContext(GetContext(contextToPlay)?.Fallback ?? "None");
-                if (fallbackCtx == null || fallbackCtx.Context == "None" || fallbackCtx.Context == contextToPlay)
-                {
-                    Log.Out($"[CMM] No playable clip for {contextToPlay} or its fallbacks — silence.");
-                    currentContext = GetContext(contextToPlay);
-                    _pendingContext = contextToPlay;
-                    return;
-                }
-
-                Log.Out($"[CMM] No clip for {contextToPlay}, falling back to {fallbackCtx.Context}");
-                contextToPlay = fallbackCtx.Context;
+                Log.Out($"[CMM] No playable context in chain for {contextIn} — silence.");
+                _pendingContext = currentContext?.Context ?? "None";
+                return;
             }
+
+            Contexts candidate = GetContext(contextToPlay);
+
+            if (lastContextOnCoolDown && !candidate.BypassesCooldown && bypassPriority < 0)
+            {
+                Log.Out($"[CMM] {candidate.Context} blocked — cooldown active");
+                _pendingContext = currentContext?.Context ?? "None";
+
+                if (!CMMConfig.PreloadCacheEnabled)
+                {
+                    ContextCache blocked = cacheMap[currentContext.Context];
+                    if (blocked.cachedClip != null) { Destroy(blocked.cachedClip); blocked.cachedClip = null; }
+                }
+                return;
+            }
+
+            currentContext = candidate;
+            TriggerMusic(contextToPlay);
         }
 
         // ─────────────────────────────────────────────────────────────────────────
@@ -943,6 +1082,14 @@ namespace CMM
             {
                 yield return new WaitForSeconds(TrackEndPollInterval);
 
+                // If context changed while we were watching, bail immediately
+                if (currentContext.Context != contextName)
+                {
+                    Log.Out($"[CMM] TrackEndWatcher: context changed mid-watch for {contextName}, bailing.");
+                    _trackEndCoroutine = null;
+                    yield break;
+                }
+
                 if (watchTarget.isPlaying)
                 {
                     notPlayingDuration = 0f;
@@ -960,6 +1107,7 @@ namespace CMM
             if (currentContext.Context != contextName)
             {
                 Log.Out($"[CMM] TrackEndWatcher: context changed away from {contextName}, ignoring.");
+                _trackEndCoroutine = null;
                 yield break;
             }
 
@@ -1114,7 +1262,7 @@ namespace CMM
         // ─────────────────────────────────────────────────────────────────────────
 
         public static Contexts GetContext(string contextIn) =>
-            contexts.Find(c => c.Context == contextIn);
+            contexts.TryGetValue(contextIn, out var ctx) ? ctx : null;
 
         // Returns true if the context's directory contains at least one playable file.
         // Used by SendContextUpdate when preload is disabled so the fallback chain

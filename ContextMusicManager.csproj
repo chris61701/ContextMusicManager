@@ -46,14 +46,14 @@
     <Content Include="Config\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="ModInfo.xml">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
     <Content Include="ModSettings.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Compile Include="Harmony\ContextMusicManager.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Content Include="ModInfo.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
   <ItemGroup Condition=" '$(Configuration)' != 'CI' ">
     <Reference Include="0Harmony">
