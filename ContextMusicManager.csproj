@@ -65,9 +65,6 @@
       <Private>False</Private>
     </Reference>
   </ItemGroup>
-  <ItemGroup Condition="'$(Configuration)' == 'CI'">
-    <PackageReference Include="7dtd_nuget" Version="1.0.25" />
-  </ItemGroup>
   <ItemGroup>
     <Reference Include="LogLibrary">
       <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\LogLibrary.dll</HintPath>
@@ -108,6 +105,17 @@
   <ItemGroup>
     <Analyzer Include="..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.InputModule.dll" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio">
+      <Version>2.3.0</Version>
+    </PackageReference>
+    <PackageReference Include="NAudio.Flac">
+      <Version>1.0.5702.29018</Version>
+    </PackageReference>
+    <PackageReference Include="NAudio.Vorbis">
+      <Version>1.5.0</Version>
+    </PackageReference>
+  </ItemGroup>
   <Target Name="BeforeBuild">
     <RemoveDir Directories="$(OutputPath)" />
   </Target>
@@ -121,5 +129,23 @@
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Website/@value" Value="https://www.nexusmods.com/7daystodie/mods/$(ModId)" />
     <Exec Condition=" '$(Configuration)' == 'Release' " Command="npm run generate_readme" WorkingDirectory="$(MSBuildProjectDirectory)\.." />
     <Exec Condition=" '$(Configuration)' == 'Release' " Command="npm run build --prefix -- $(AbsoluteOutputPath) $(ModName) $(ModVersion)" WorkingDirectory="$(MSBuildProjectDirectory)\.." />
+  </Target>
+  <Target Name="CleanUnneededDlls" AfterTargets="Build">
+  <Delete Files="
+    $(OutputPath)NAudio.Asio.dll;
+    $(OutputPath)NAudio.Midi.dll;
+    $(OutputPath)NAudio.Wasapi.dll;
+    $(OutputPath)NAudio.WinForms.dll;
+    $(OutputPath)NAudio.WinMM.dll;
+    $(OutputPath)Microsoft.Win32.Registry.dll;
+    $(OutputPath)System.Buffers.dll;
+    $(OutputPath)System.Memory.dll;
+    $(OutputPath)System.Numerics.Vectors.dll;
+    $(OutputPath)System.Resources.Extensions.dll;
+    $(OutputPath)System.Runtime.CompilerServices.Unsafe.dll;
+    $(OutputPath)System.Security.AccessControl.dll;
+    $(OutputPath)System.Security.Principal.Windows.dll;
+    $(OutputPath)System.ValueTuple.dll
+  " />
   </Target>
 </Project>
