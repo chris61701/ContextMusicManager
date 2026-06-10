@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
@@ -12,12 +12,13 @@
     <TargetFrameworkVersion>v4.8.1</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
-    <ModName>ImmersiveCrosshair</ModName>
-    <ModVersion>1.8.3</ModVersion>
-    <ModDescription>Show crosshair when you need it. Hide it when you do not.</ModDescription>
-    <ModId>5601</ModId>
+    <ModName>ContextMusicManager</ModName>
+    <ModVersion>0.0.1</ModVersion>
+    <ModDescription>Plays custom music based on context</ModDescription>
+    <ModId>99999</ModId>
     <GamePath>..\..\..\..\Steam\steamapps\common\7 Days To Die</GamePath>
     <ModsPath>..\..\..\..\vortex_udf_7_days_to_die\Mods</ModsPath>
+    <TargetFrameworkProfile />
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -28,6 +29,7 @@
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -38,9 +40,11 @@
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>3</WarningLevel>
     <AbsoluteOutputPath>$(MSBuildProjectDirectory)\$(OutputPath)</AbsoluteOutputPath>
+    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'CI|AnyCPU' ">
     <OutputPath>bin\CI\</OutputPath>
+    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="Config\**\*">
@@ -105,17 +109,6 @@
   <ItemGroup>
     <Analyzer Include="..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.InputModule.dll" />
   </ItemGroup>
-  <ItemGroup>
-    <PackageReference Include="NAudio">
-      <Version>2.3.0</Version>
-    </PackageReference>
-    <PackageReference Include="NAudio.Flac">
-      <Version>1.0.5702.29018</Version>
-    </PackageReference>
-    <PackageReference Include="NAudio.Vorbis">
-      <Version>1.5.0</Version>
-    </PackageReference>
-  </ItemGroup>
   <Target Name="BeforeBuild">
     <RemoveDir Directories="$(OutputPath)" />
   </Target>
@@ -123,29 +116,12 @@
   <Target Name="AfterBuild" Condition=" '$(Configuration)' != 'CI' ">
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Name/@value" Value="$(ModName)" />
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/DisplayName/@value" Value="$(ModName)" />
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Author/@value" Value="Rizarttt" />
+    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Author/@value" Value="Velasha" />
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Description/@value" Value="$(ModDescription)" />
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Version/@value" Value="$(ModVersion)" />
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Website/@value" Value="https://www.nexusmods.com/7daystodie/mods/$(ModId)" />
-    <Exec Condition=" '$(Configuration)' == 'Release' " Command="npm run generate_readme" WorkingDirectory="$(MSBuildProjectDirectory)\.." />
-    <Exec Condition=" '$(Configuration)' == 'Release' " Command="npm run build --prefix -- $(AbsoluteOutputPath) $(ModName) $(ModVersion)" WorkingDirectory="$(MSBuildProjectDirectory)\.." />
   </Target>
   <Target Name="CleanUnneededDlls" AfterTargets="Build">
-  <Delete Files="
-    $(OutputPath)NAudio.Asio.dll;
-    $(OutputPath)NAudio.Midi.dll;
-    $(OutputPath)NAudio.Wasapi.dll;
-    $(OutputPath)NAudio.WinForms.dll;
-    $(OutputPath)NAudio.WinMM.dll;
-    $(OutputPath)Microsoft.Win32.Registry.dll;
-    $(OutputPath)System.Buffers.dll;
-    $(OutputPath)System.Memory.dll;
-    $(OutputPath)System.Numerics.Vectors.dll;
-    $(OutputPath)System.Resources.Extensions.dll;
-    $(OutputPath)System.Runtime.CompilerServices.Unsafe.dll;
-    $(OutputPath)System.Security.AccessControl.dll;
-    $(OutputPath)System.Security.Principal.Windows.dll;
-    $(OutputPath)System.ValueTuple.dll
-  " />
+    <Delete Files="&#xD;&#xA;    $(OutputPath)NAudio.Asio.dll;&#xD;&#xA;    $(OutputPath)NAudio.Midi.dll;&#xD;&#xA;    $(OutputPath)NAudio.Wasapi.dll;&#xD;&#xA;    $(OutputPath)NAudio.WinForms.dll;&#xD;&#xA;    $(OutputPath)NAudio.WinMM.dll;&#xD;&#xA;    $(OutputPath)Microsoft.Win32.Registry.dll;&#xD;&#xA;    $(OutputPath)System.Buffers.dll;&#xD;&#xA;    $(OutputPath)System.Memory.dll;&#xD;&#xA;    $(OutputPath)System.Numerics.Vectors.dll;&#xD;&#xA;    $(OutputPath)System.Resources.Extensions.dll;&#xD;&#xA;    $(OutputPath)System.Runtime.CompilerServices.Unsafe.dll;&#xD;&#xA;    $(OutputPath)System.Security.AccessControl.dll;&#xD;&#xA;    $(OutputPath)System.Security.Principal.Windows.dll;&#xD;&#xA;    $(OutputPath)System.ValueTuple.dll&#xD;&#xA;  " />
   </Target>
 </Project>

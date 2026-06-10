@@ -19,6 +19,9 @@ namespace CMM
 
     public static class CMMConfig
     {
+        // Streaming enabled/disabled
+        public static bool StreamingEnabled = true;
+            
         // When false, outgoing channel stops immediately instead of crossfading.
         public static bool CrossfadeEnabled = true;
 
@@ -152,17 +155,27 @@ public static class ContextResolver
         // ── Traders and enemies ──────────────────────────────────────────────
         foreach (var entity in world.Entities.list)
         {
-            if (entity is EntityTrader trader)
-            {
-                if (Vector3.Distance(player.position, trader.position) > TraderDetectRange) continue;
-                string n = trader.EntityName?.ToLower() ?? "";
-                if      (n.Contains("jen"))  activeContexts.Add("Trader_Jen");
-                else if (n.Contains("rekt")) activeContexts.Add("Trader_Rekt");
-                else if (n.Contains("bob"))  activeContexts.Add("Trader_Bob");
-                else if (n.Contains("hugh")) activeContexts.Add("Trader_Hugh");
-                else if (n.Contains("joel")) activeContexts.Add("Trader_Joel");
-            }
-            else if (entity is EntityEnemy enemy && enemy.IsAlive())
+                // ── Traders ──────────────────────────────────────────────────────────
+                if (entity is EntityTrader trader)
+                {
+                    if (Vector3.Distance(player.position, trader.position) > TraderDetectRange) continue;
+                    string n = trader.EntityName?.ToLower() ?? "";
+                    string specific = null;
+                    if (n.Contains("jen")) specific = "Trader_Jen";
+                    else if (n.Contains("rekt")) specific = "Trader_Rekt";
+                    else if (n.Contains("bob")) specific = "Trader_Bob";
+                    else if (n.Contains("hugh")) specific = "Trader_Hugh";
+                    else if (n.Contains("joel")) specific = "Trader_Joel";
+
+                    // Only add the generic Trader context if no specific variant matched,
+                    // or if the specific variant has no playable files. The fallback chain
+                    // in ResolvePlayableContext handles the rest.
+                    if (specific != null)
+                        activeContexts.Add(specific);
+                    else
+                        activeContexts.Add("Trader");
+                }
+                else if (entity is EntityEnemy enemy && enemy.IsAlive())
             {
                 if (Vector3.Distance(player.position, enemy.position) < EnemyDetectRange)
                     enemiesNearby++;
@@ -406,22 +419,84 @@ public static class ContextResolver
         // Walks the fallback chain from contextName until it finds a context
         // whose folder contains at least one playable file. Returns null if
         // the entire chain is empty. Max depth 5 to prevent infinite loops.
+
+        private static readonly HashSet<string> _invalidFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _validatedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private IEnumerator ValidateFile(string filePath, System.Action<bool> callback)
+        {
+            AudioType audioType = CheckType(filePath);
+            if (audioType == AudioType.UNKNOWN) { callback(false); yield break; }
+
+            using (var request = UnityWebRequestMultimedia.GetAudioClip(
+                       "file:///" + filePath.Replace("\\", "/"), audioType))
+            {
+                // Never stream during validation — we need the full clip to measure it
+                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = false;
+
+                float startTime = Time.realtimeSinceStartup;
+                yield return request.SendWebRequest();
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    Log.Warning($"[CMM] Validation failed (network error) for {Path.GetFileName(filePath)}: {request.error}");
+                    callback(false);
+                    yield break;
+                }
+
+                AudioClip clip = DownloadHandlerAudioClip.GetContent(request);
+                bool valid = clip != null
+                          && clip.samples > 0
+                          && clip.channels > 0
+                          && clip.length > 0.5f;   // reject sub-half-second clips as likely corrupt stubs
+
+                if (!valid)
+                    Log.Warning($"[CMM] Validation failed (bad clip data) for {Path.GetFileName(filePath)}: " +
+                                $"samples={clip?.samples ?? 0} channels={clip?.channels ?? 0} length={clip?.length ?? 0f:F2}s");
+
+                if (clip != null) Destroy(clip);
+                callback(valid);
+            }
+        }
+
+        private IEnumerator ValidateContextFiles(string contextName, System.Action<string[]> callback)
+        {
+            Contexts ctx = GetContext(contextName);
+            if (ctx == null) { callback(new string[0]); yield break; }
+
+            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+            if (!Directory.Exists(dir)) { callback(new string[0]); yield break; }
+
+            string[] candidates = Directory.GetFiles(dir)
+                .Where(f => CheckType(f) != AudioType.UNKNOWN && !_invalidFiles.Contains(f))
+                .ToArray();
+
+            var valid = new List<string>();
+            foreach (string file in candidates)
+            {
+                bool isValid = false;
+                yield return StartCoroutine(ValidateFile(file, result => isValid = result));
+                if (isValid)
+                    valid.Add(file);
+                else
+                    _invalidFiles.Add(file);
+            }
+
+            if (_invalidFiles.Count > 0)
+                Log.Warning($"[CMM] {contextName}: {candidates.Length - valid.Count} invalid file(s) excluded: " +
+                            string.Join(", ", candidates.Except(valid).Select(Path.GetFileName)));
+
+            callback(valid.ToArray());
+        }
+
         private static string ResolvePlayableContext(string contextName)
         {
             string current = contextName;
             for (int i = 0; i < 5; i++)
             {
                 if (ContextHasFiles(current)) return current;
-                Contexts ctx     = GetContext(current);
-                string fallback  = ctx?.Fallback ?? "None";
+                Contexts ctx = GetContext(current);
+                string fallback = ctx?.Fallback ?? "None";
                 if (fallback == "None" || fallback == current) return null;
-
-                // If the fallback is itself on the stack, stop here and let
-                // GetTopContext reach it in priority order instead of jumping to it
-                // through this chain. Returning null causes GetTopContext to move
-                // on to the next stack entry.
-                if (_contextStack.Any(c => c.ContextName == fallback)) return null;
-                
                 current = fallback;
             }
             return null;
@@ -433,8 +508,8 @@ public static class ContextResolver
         {
             foreach (ActiveContext active in _contextStack)
             {
-                if (ContextHasFiles(active.ContextName))
-                    return active.ContextName;
+                string playable = ResolvePlayableContext(active.ContextName);
+                if (playable != null) return playable;
             }
             return "Ambient";
         }
@@ -647,27 +722,98 @@ public static class ContextResolver
             _activeMusicCoroutine = null;
         }
 
+        // Returns the total memory used by all cached AudioClips in bytes.
+        // Formula: samples × channels × 4 bytes (Unity stores clips as 32-bit float PCM).
+        public static long GetCacheMemoryBytes()
+        {
+            long total = 0;
+            foreach (var cache in cacheMap.Values)
+            {
+                if (cache.cachedClip != null)
+                    total += (long)cache.cachedClip.samples * cache.cachedClip.channels * 4;
+                if (cache.nextCachedClip != null)
+                    total += (long)cache.nextCachedClip.samples * cache.nextCachedClip.channels * 4;
+            }
+            return total;
+        }
+
+        public static string GetCacheMemorySummary(bool includePerContext = true)
+        {
+            long totalBytes = 0;
+            var lines = new System.Text.StringBuilder();
+
+            foreach (var kv in cacheMap)
+            {
+                long clipBytes = kv.Value.cachedClip != null ? (long)kv.Value.cachedClip.samples * kv.Value.cachedClip.channels * 4 : 0;
+                long nextBytes = kv.Value.nextCachedClip != null ? (long)kv.Value.nextCachedClip.samples * kv.Value.nextCachedClip.channels * 4 : 0;
+                long entryTotal = clipBytes + nextBytes;
+                if (entryTotal == 0) continue;
+
+                totalBytes += entryTotal;
+
+                if (includePerContext)
+                    lines.AppendLine($"  {kv.Key}: {FormatBytes(clipBytes)} current" +
+                                     (nextBytes > 0 ? $" + {FormatBytes(nextBytes)} next" : ""));
+            }
+
+            if (includePerContext)
+                lines.Append($"  TOTAL: {FormatBytes(totalBytes)}");
+            else
+                lines.Append(FormatBytes(totalBytes));
+
+            return lines.ToString();
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes >= 1024 * 1024) return $"{bytes / (1024f * 1024f):F1} MB";
+            if (bytes >= 1024) return $"{bytes / 1024f:F1} KB";
+            return $"{bytes} B";
+        }
+
+        private IEnumerator VolumeSyncLoop()
+        {
+            float previousVolume = -1f;
+            while (true)
+            {
+                yield return new WaitForSeconds(0.1f);
+
+                float currentVolume = GamePrefs.GetFloat(
+                    inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+
+                if (Mathf.Approximately(currentVolume, previousVolume)) continue;
+                previousVolume = currentVolume;
+
+                // Only update the active channel directly if no crossfade is running.
+                // If a crossfade is running it already reads the volume live each frame.
+                if (_crossFadeCoroutine == null && ActiveChannel != null && ActiveChannel.isPlaying)
+                    ActiveChannel.volume = currentVolume;
+            }
+        }
+
         // Fades outgoing down and incoming up over [duration] seconds.
         // Starts the cooldown timer after the fade completes.
         private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming,
             float duration, int cooldownSeconds, float outgoingStartVol)
         {
-            float targetVolume = GamePrefs.GetFloat(
-                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-
             float elapsed = 0f;
             while (elapsed < duration)
             {
+                float targetVolume = GamePrefs.GetFloat(
+                    inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+
                 elapsed += Time.deltaTime;
                 float t = Mathf.Clamp01(elapsed / duration);
-                incoming.volume = Mathf.Lerp(0f,               targetVolume, t);
-                outgoing.volume = Mathf.Lerp(outgoingStartVol, 0f,           t);
+                incoming.volume = Mathf.Lerp(0f, targetVolume, t);
+                outgoing.volume = Mathf.Lerp(outgoingStartVol, 0f, t);
                 yield return null;
             }
 
-            incoming.volume = targetVolume;
+            float finalVolume = GamePrefs.GetFloat(
+                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+            incoming.volume = finalVolume;
             outgoing.Stop();
-            outgoing.clip   = null;
+            outgoing.clip = null;
             outgoing.volume = 0f;
 
             if (_clipToDestroyAfterFade != null) { Destroy(_clipToDestroyAfterFade); _clipToDestroyAfterFade = null; }
@@ -927,7 +1073,7 @@ public static class ContextResolver
             using (var request = UnityWebRequestMultimedia.GetAudioClip(
                        "file:///" + filePath.Replace("\\", "/"), audioType))
             {
-                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = true;
+                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = CMMConfig.StreamingEnabled;
                 yield return request.SendWebRequest();
                 if (request.result != UnityWebRequest.Result.Success)
                 { Log.Error($"[CMM] LoadNextClip failed for {contextName}: {request.error}"); yield break; }
@@ -950,7 +1096,8 @@ public static class ContextResolver
             if (!Directory.Exists(dir)) return null;
 
             string[] files = Directory.GetFiles(dir)
-                .Where(f => CheckType(f) != AudioType.UNKNOWN)
+                .Where(f => CheckType(f) != AudioType.UNKNOWN
+                         && !_invalidFiles.Contains(f))
                 .ToArray();
 
             if (files.Length == 0) return null;
@@ -996,7 +1143,9 @@ public static class ContextResolver
             if (ctx == null || string.IsNullOrEmpty(ctx.Path)) return false;
             string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
             if (!Directory.Exists(dir)) return false;
-            return Directory.GetFiles(dir).Any(f => CheckType(f) != AudioType.UNKNOWN);
+            return Directory.GetFiles(dir)
+                .Any(f => CheckType(f) != AudioType.UNKNOWN
+                       && !_invalidFiles.Contains(f));
         }
 
         // Returns the AudioType for a file based on its extension.
@@ -1082,6 +1231,7 @@ public static class ContextResolver
             CMM_CoRoutines.StartCoroutine(Instance.ContextScanLoop());
             CMM_CoRoutines.StartCoroutine(Instance.StalenessCheckLoop());
             CMM_CoRoutines.StartCoroutine(Instance.FileWatchLoop());
+            CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
             Log.Out("[CMM] Initialized!");
         }
 
@@ -1260,6 +1410,7 @@ public static class ContextResolver
 
                 //Log.Out($"[CMM] Cache state: {string.Join(", ", cacheMap.Select(kv => $"{kv.Key}={(kv.Value.cachedClip != null ? $"{kv.Value.cachedClip.length:F0}s" : "null")}(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"))}");
                 Log.Out($"[CMM] Cache state: {string.Join(", ", cacheMap.Where(kv => kv.Value.cachedClip != null).Select(kv => $"{kv.Key}={kv.Value.cachedClip.length:F0}s(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"))}");
+                Log.Out($"[CMM] Cache memory:\n{GetCacheMemorySummary(false)}");
                 float now = Time.realtimeSinceStartup;
                 foreach (var ctx in contexts.Values)
                 {
@@ -1297,20 +1448,19 @@ public static class ContextResolver
                 if (!inGame) continue;
                 if (currentContext == null || currentContext.Context == "None") continue;
 
-                string       contextName = currentContext.Context;
-                ContextCache cache       = cacheMap[contextName];
-                Contexts     ctx         = GetContext(contextName);
+                string contextName = currentContext.Context;
+                ContextCache cache = cacheMap[contextName];
+                Contexts ctx = GetContext(contextName);
                 if (ctx == null) continue;
 
-                string dir          = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+                string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
                 string[] currentFiles = Directory.Exists(dir)
                     ? Directory.GetFiles(dir).Where(f => CheckType(f) != AudioType.UNKNOWN).ToArray()
                     : new string[0];
                 string[] previousFiles = cache.directorySnapshot ?? new string[0];
 
-                // Normalize to full paths for reliable comparisons
                 Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                var currentNorm  = currentFiles.Select(norm).ToArray();
+                var currentNorm = currentFiles.Select(norm).ToArray();
                 var previousNorm = previousFiles.Select(norm).ToArray();
 
                 bool changed = currentNorm.Length != previousNorm.Length ||
@@ -1318,11 +1468,39 @@ public static class ContextResolver
                                previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).Any();
 
                 if (!changed) continue;
+                // ── Evict removed files from validation sets ─────────────────────────
+                var removedFiles = previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).ToArray();
+                foreach (string removed in removedFiles)
+                {
+                    _validatedFiles.Remove(removed);
+                    _invalidFiles.Remove(removed);
+                }
+
+                // ── Validate any files that weren't in the previous snapshot ─────────
+                var newFiles = currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).ToArray();
+                if (newFiles.Length > 0)
+                {
+                    Log.Out($"[CMM] Validating {newFiles.Length} new file(s) in {contextName}...");
+                    foreach (string newFile in newFiles)
+                    {
+                        bool isValid = false;
+                        yield return StartCoroutine(ValidateFile(newFile, result => isValid = result));
+                        if (!isValid)
+                        {
+                            _invalidFiles.Add(newFile);
+                            Log.Warning($"[CMM] New file failed validation and will be ignored: {Path.GetFileName(newFile)}");
+                        }
+                    }
+
+                    // Recompute after blacklisting so the rest of the loop works on clean data
+                    currentFiles = currentFiles.Where(f => !_invalidFiles.Contains(norm(f))).ToArray();
+                    currentNorm = currentFiles.Select(norm).ToArray();
+                }
 
                 Log.Out($"[CMM] File change detected in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
                 cache.directorySnapshot = currentFiles;
 
-                // If the last-played file was removed from disk, clear it so PreloadContext won't resurrect it later.
+                // ── Detect whether the currently-playing file was removed ────────────
                 bool lastPlayedMissing = false;
                 if (!string.IsNullOrEmpty(cache.lastPlayedFile))
                 {
@@ -1331,8 +1509,6 @@ public static class ContextResolver
                     {
                         Log.Out($"[CMM] Previously-played file missing for {contextName}: {Path.GetFileName(cache.lastPlayedFile)}");
                         cache.lastPlayedFile = null;
-                        // If cachedClip is the clip that came from the removed file, don't destroy it immediately;
-                        // mark it to be destroyed after the next fade so the audio system can finish crossfades.
                         if (cache.cachedClip != null)
                         {
                             _clipToDestroyAfterFade = cache.cachedClip;
@@ -1342,31 +1518,30 @@ public static class ContextResolver
                     }
                 }
 
+                // ── React to the change ──────────────────────────────────────────────
                 if (currentFiles.Length == 0)
                 {
                     Log.Out($"[CMM] {contextName} folder emptied, re-evaluating context.");
                     string fallback = ResolvePlayableContext(ctx.Fallback) ?? "Ambient";
                     _pendingContext = null;
-                    // force the fallback even if cooldown would otherwise block
                     SendContextUpdate(fallback, currentContext.Priority + 1);
+                }
+                else if (lastPlayedMissing)
+                {
+                    _pendingContext = null;
+
+                    if (CMMConfig.PreloadCacheEnabled)
+                        yield return StartCoroutine(PreloadContext(ctx.Context));
+
+                    SendContextUpdate(ctx.Context, currentContext.Priority + 1);
                 }
                 else
                 {
-                    // If the currently playing file was removed, request a reload of the same context
-                    // (this will pick a new file from the folder or fall back as needed).
-                    if (lastPlayedMissing)
+                    string top = GetTopContext();
+                    if (top != currentContext.Context)
                     {
                         _pendingContext = null;
-                        SendContextUpdate(ctx.Context, currentContext.Priority + 1);
-                    }
-                    else
-                    {
-                        string top = GetTopContext();
-                        if (top != currentContext.Context)
-                        {
-                            _pendingContext = null;
-                            SendContextUpdate(top, 0);
-                        }
+                        SendContextUpdate(top, 0);
                     }
                 }
             }
@@ -1394,9 +1569,9 @@ public static class ContextResolver
             ContextCache cache = cacheMap[contextName];
             string filePath;
 
-            // Only resume the last file if we're not being asked to avoid it
             if (cache.lastPlayedFile != null && File.Exists(cache.lastPlayedFile)
-                && cache.lastPlayedFile != avoidFile)
+                && cache.lastPlayedFile != avoidFile
+                && !_invalidFiles.Contains(cache.lastPlayedFile))
                 filePath = cache.lastPlayedFile;
             else
             {
@@ -1407,8 +1582,8 @@ public static class ContextResolver
 
             if (filePath == null)
             {
-                Contexts ctx        = GetContext(contextName);
-                string   fallbackName = ctx?.Fallback ?? "None";
+                Contexts ctx = GetContext(contextName);
+                string fallbackName = ctx?.Fallback ?? "None";
                 if (fallbackName != "None" && fallbackName != contextName)
                 {
                     filePath = PickNextFile(fallbackName, avoidFile: null);
@@ -1419,19 +1594,51 @@ public static class ContextResolver
                 { Log.Out($"[CMM] Preload: no files for {contextName}"); yield break; }
             }
 
+            // ── Validate before loading ───────────────────────────────────────────
+            if (!_validatedFiles.Contains(filePath))
+            {
+                bool isValid = false;
+                yield return StartCoroutine(ValidateFile(filePath, result => isValid = result));
+                if (isValid)
+                {
+                    _validatedFiles.Add(filePath);
+                }
+                else
+                {
+                    _invalidFiles.Add(filePath);
+                    Log.Warning($"[CMM] Preload: {Path.GetFileName(filePath)} failed validation, retrying with next file.");
+
+                    // Try again — PickNextFile will now exclude the blacklisted file
+                    filePath = PickNextFile(contextName, avoidFile: filePath);
+                    if (filePath == null)
+                    { Log.Out($"[CMM] Preload: no valid files remaining for {contextName}"); yield break; }
+
+                    // Validate the replacement too
+                    yield return StartCoroutine(ValidateFile(filePath, result => isValid = result));
+                    if (!isValid)
+                    {
+                        _invalidFiles.Add(filePath);
+                        Log.Warning($"[CMM] Preload: replacement file also invalid for {contextName}, giving up.");
+                        yield break;
+                    }
+                    _validatedFiles.Add(filePath);
+                }
+            }
+
+            // ── Load ──────────────────────────────────────────────────────────────
             AudioType audioType = CheckType(filePath);
             if (audioType == AudioType.UNKNOWN) yield break;
 
             using (var request = UnityWebRequestMultimedia.GetAudioClip(
                        "file:///" + filePath.Replace("\\", "/"), audioType))
             {
-                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = true;
+                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = CMMConfig.StreamingEnabled;
                 yield return request.SendWebRequest();
                 if (request.result != UnityWebRequest.Result.Success)
                 { Log.Error($"[CMM] Preload failed for {contextName}: {request.error}"); yield break; }
 
                 if (cache.cachedClip != null) Destroy(cache.cachedClip);
-                cache.cachedClip     = DownloadHandlerAudioClip.GetContent(request);
+                cache.cachedClip = DownloadHandlerAudioClip.GetContent(request);
                 cache.lastPlayedFile = filePath;
                 Log.Out($"[CMM] Preloaded: {contextName}");
             }
