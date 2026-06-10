@@ -1,161 +1,551 @@
-﻿using HarmonyLib;
+﻿// REQUIRED DLLs (drop into Mods/<YourMod>/Harmony/ alongside this assembly):
+//   NAudio.dll            ≥ 2.3.0   (NuGet: NAudio)
+//   NAudio.Core.dll       ≥ 2.3.0   (NuGet: NAudio.Core)
+//   NAudio.WinMM.dll      ≥ 2.3.0   (NuGet: NAudio.WinMM)
+//   NAudio.Vorbis.dll     ≥ 1.5.0   (NuGet: NAudio.Vorbis)   → Vorbis .ogg / .oga
+//   NVorbis.dll           ≥ 0.10.4  (NuGet: NVorbis)         → pulled in by NAudio.Vorbis
+//   NAudio.Flac.dll       ≥ 2.0.0   (NuGet: NAudio.Flac)     → .flac
+//   Concentus.dll         ≥ 1.1.7   (NuGet: Concentus)       → Opus .opus / .ogg / .oga
+//   Concentus.OggFile.dll ≥ 1.1.7   (NuGet: Concentus.OggFile)
+//   System.Memory.dll              → keep, required by NVorbis
+//
+// Supported formats when UseNAudioDecoder = true:
+//   .mp3  .wav  .wave  .aiff  .aif  .ogg (Vorbis or Opus)  .oga  .opus  .flac
+
+#define NAUDIO
+
+using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using UnityEngine;
-using UnityEngine.Networking;
+
+#if NAUDIO
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using NAudio.Vorbis;
+using NAudio.Flac;
+using Concentus.Structs;
+using Concentus.Oggfile;
+#endif
 
 namespace CMM
 {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Enums & small helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
     public enum TrackOrderMode { Random, RandomNoRepeat, Sequential }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // Result of an NAudio decode operation, carried back to the main thread.
+    public class DecodedAudio
+    {
+        public float[] Samples;   // interleaved PCM, range -1..+1
+        public int Channels;
+        public int Frequency;
+        public float LengthSeconds => Channels > 0 && Frequency > 0
+            ? (float)Samples.Length / Channels / Frequency : 0f;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // SECTION 1 — CONFIGURATION
-    // Feature flags read per-call, never cached. Safe to change at runtime.
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
 
     public static class CMMConfig
     {
-        // Streaming enabled/disabled
-        public static bool StreamingEnabled = true;
-            
-        // When false, outgoing channel stops immediately instead of crossfading.
+        /// <summary>
+        /// When true NAudio decodes audio files — supports mp3, wav,
+        /// aiff, ogg, flac.  Set to false to fall back to Unity's
+        /// UnityWebRequest pipeline (mp3, ogg, wav only).
+        /// Default: false to allow building without NAudio assemblies.
+        /// </summary>
+#if NAUDIO
+        public static bool UseNAudioDecoder = true;
+#else
+        public static bool UseNAudioDecoder = false;
+#endif
+
+        /// <summary>
+        /// When false, outgoing channel stops immediately instead of crossfading.
+        /// </summary>
         public static bool CrossfadeEnabled = true;
 
-        // When false, clips load on demand instead of being preloaded on game entry.
+        /// <summary>
+        /// When true all context clips are decoded and cached on game entry.
+        /// When false clips are decoded on demand and the float[] buffer is
+        /// kept alive for the duration of playback then freed.
+        /// </summary>
         public static bool PreloadCacheEnabled = false;
+
+        // Unity fallback only — ignored when UseNAudioDecoder = true.
+        public static bool UnityStreamingEnabled = true;
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
     // SECTION 2 — DATA STRUCTURES
-    // Plain data containers. No logic lives here.
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // Holds per-context audio state: cached clips, resume position, file list.
     public class ContextCache
     {
-        public AudioClip cachedClip           = null;
-        public AudioClip nextCachedClip       = null;
-        public float     resumePosition       = 0f;
-        public float     lastLeftTime         = -1f;
-        public string    lastPlayedFile       = null;
-        public int       sequentialIndex      = 0;
-        public string[]  directorySnapshot    = null;
-        public bool      nextClipLoading      = false;
+        // ── NAudio path ───────────────────────────────────────────────────────
+        public DecodedAudio decodedAudio = null;  // current clip's PCM
+        public DecodedAudio nextDecodedAudio = null;  // pre-decoded next clip
+        public AudioClip cachedClip = null;  // AudioClip wrapping current PCM
+        public AudioClip nextCachedClip = null;  // AudioClip wrapping next PCM
+
+        // ── Shared ────────────────────────────────────────────────────────────
+        public float resumePosition = 0f;
+        public float lastLeftTime = -1f;
+        public string lastPlayedFile = null;
+        public int sequentialIndex = 0;
+        public string[] directorySnapshot = null;
+        public bool nextClipLoading = false;
     }
 
-    // A context that is currently active in the stack, with runtime metadata.
     public class ActiveContext
     {
         public string ContextName;
-        public int    Priority;
-        public float  ActivatedAt;
-        public bool   Manual;
+        public int Priority;
+        public float ActivatedAt;
+        public bool Manual;
     }
 
-    // Immutable definition of a music context loaded at startup.
     public class Contexts
     {
-        public string Context               { get; private set; }
-        public string Path                  { get; private set; }
-        public string Fallback              { get; private set; }
-        public bool   CanBeResumed          { get; private set; }
-        public int    TimeUntilContextStale { get; private set; }
-        public bool   Loop                  { get; private set; }
-        public int    Cooldown              { get; private set; }
-        public int    WarmUp                { get; private set; }
-        public bool   BypassesCooldown      { get; private set; }
-        public bool   CanInterrupt          { get; private set; }
-        public int    Priority              { get; private set; }
-        public bool   PlayOnce              { get; private set; }
+        public string Context { get; private set; }
+        public string Path { get; private set; }
+        public string Fallback { get; private set; }
+        public bool CanBeResumed { get; private set; }
+        public int TimeUntilContextStale { get; private set; }
+        public bool Loop { get; private set; }
+        public int Cooldown { get; private set; }
+        public int WarmUp { get; private set; }
+        public bool BypassesCooldown { get; private set; }
+        public bool CanInterrupt { get; private set; }
+        public int Priority { get; private set; }
+        public bool PlayOnce { get; private set; }
 
         public Contexts(string context = "None", string path = "", string fallback = "None",
-                        bool canberesumed = false, int timeuntilcontextstale = 120,
-                        bool loop = false, int cooldown = 5, int warmup = 3,
-                        bool bypassescooldown = false, bool caninterrupt = false,
-                        int priority = 0, bool playOnce = false)
+            bool canberesumed = false, int timeuntilcontextstale = 120,
+            bool loop = false, int cooldown = 5, int warmup = 3,
+            bool bypassescooldown = false, bool caninterrupt = false,
+            int priority = 0, bool playOnce = false)
         {
-            Context               = context;
-            Path                  = path;
-            Fallback              = fallback;
-            CanBeResumed          = canberesumed;
+            Context = context;
+            Path = path;
+            Fallback = fallback;
+            CanBeResumed = canberesumed;
             TimeUntilContextStale = timeuntilcontextstale;
-            Loop                  = loop;
-            Cooldown              = cooldown;
-            WarmUp                = warmup;
-            BypassesCooldown      = bypassescooldown;
-            CanInterrupt          = caninterrupt;
-            Priority              = priority;
-            PlayOnce              = playOnce;
+            Loop = loop;
+            Cooldown = cooldown;
+            WarmUp = warmup;
+            BypassesCooldown = bypassescooldown;
+            CanInterrupt = caninterrupt;
+            Priority = priority;
+            PlayOnce = playOnce;
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECTION 3 — CONTEXT RESOLVER
-    // Reads game world state each tick and returns the list of contexts that
-    // are currently active (combat, biome, POI, vehicle, etc).
-    // Called by ContextScanLoop every 0.5s.
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 3 — NAudio DECODER
+    // All file I/O and format detection lives here.
+    // ─────────────────────────────────────────────────────────────────────────
 
-public static class ContextResolver
-{
-    static readonly float EnemyDetectRange                   = 20f;
-    static readonly float TraderDetectRange                  = 40f;
-    static readonly float HomeDetectRange                    = 70f;
-    static readonly float PlayerHealthDangerThresholdPercent = 0.25f;
-    static readonly int   DangerThreshold                    = 1;
-    static readonly int   CriticalThreshold                  = 4;
-    static readonly float CombatCooldown                     = 10f;
-
-    static string combatState   = "None";
-    static float  lastAggroTime = 0f;
-    static bool   wasInfested   = false;
-    static string lastPoI       = "None";
-
-    public static void resetValues()
+#if NAUDIO
+    public static class NAudioDecoder
     {
-        combatState = "None";
-    }
-
-    public static List<string> ResolveContext()
-    {
-        var world  = GameManager.Instance?.World;
-        var player = world?.GetPrimaryPlayer();
-
-        if (world == null || player == null)
-            return new List<string> { "None" };
-
-        var activeContexts = new List<string>();
-
-        bool  isDay       = world.IsDaytime();
-        bool  isBloodmoon = world.isEventBloodMoon;
-        float healthPct   = player.Health / (float)player.GetMaxHealth();
-
-        int enemyAggroCount = 0, enemyAlertCount = 0, enemiesNearby = 0;
-
-        // ── Blood moon ───────────────────────────────────────────────────────
-        if (isBloodmoon)
-            activeContexts.Add("Blood_Moon");
-
-        // ── Vehicle ──────────────────────────────────────────────────────────
-        if (player.AttachedToEntity is EntityVehicle vehicle)
+        private static readonly HashSet<string> _naudioExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            string vn = vehicle.GetType().Name.ToLower();
-            activeContexts.Add("Vehicle");
-            if      (vn.Contains("gyrocopter")) activeContexts.Add("Vehicle_Gyrocopter");
-            else if (vn.Contains("bicycle"))    activeContexts.Add("Vehicle_Bicycle");
-            else if (vn.Contains("motorcycle")) activeContexts.Add("Vehicle_Motorcycle");
-            else if (vn.Contains("minibike"))   activeContexts.Add("Vehicle_Minibike");
-            else if (vn.Contains("jeep"))       activeContexts.Add("Vehicle_4x4");
+            ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac"
+        };
+
+        private static readonly HashSet<string> _unityExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp3", ".ogg", ".wav"
+        };
+
+        public static bool IsSupported(string filePath)
+        {
+            string ext = System.IO.Path.GetExtension(filePath);
+            return CMMConfig.UseNAudioDecoder
+                ? _naudioExts.Contains(ext)
+                : _unityExts.Contains(ext);
         }
 
-        // ── Traders and enemies ──────────────────────────────────────────────
-        foreach (var entity in world.Entities.list)
+        public static AudioType GetUnityAudioType(string filePath)
         {
-                // ── Traders ──────────────────────────────────────────────────────────
+            switch (System.IO.Path.GetExtension(filePath).ToLower())
+            {
+                case ".mp3": return AudioType.MPEG;
+                case ".ogg": return AudioType.OGGVORBIS;
+                case ".wav": return AudioType.WAV;
+                default: return AudioType.UNKNOWN;
+            }
+        }
+
+        // ── OGG codec detection ───────────────────────────────────────────────
+        // Peeks at the first OGG page to check whether the codec is Opus or Vorbis.
+        // Opus pages begin with the magic bytes "OpusHead".
+        // Vorbis pages begin with 0x01 followed by "vorbis".
+        // Returns true if Opus, false if Vorbis or unrecognised.
+        private static bool IsOpusOgg(string filePath)
+        {
+            try
+            {
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    // OGG page header is at least 27 bytes; the codec magic starts
+                    // after the capture pattern (4), version (1), header type (1),
+                    // granule (8), serial (4), sequence (4), checksum (4), segments (1) = 27 bytes,
+                    // then the segment table, then the packet data.
+                    // For a first-page identification packet the segment table is
+                    // almost always a single entry, so the packet starts at byte 28.
+                    // We read enough to safely find "OpusHead" or "\x01vorbis".
+                    var header = new byte[64];
+                    int read = fs.Read(header, 0, header.Length);
+                    if (read < 36) return false;
+
+                    // Scan for OpusHead magic within the first 64 bytes
+                    for (int i = 0; i <= read - 8; i++)
+                    {
+                        if (header[i] == 'O' && header[i + 1] == 'p' &&
+                            header[i + 2] == 'u' && header[i + 3] == 's' &&
+                            header[i + 4] == 'H' && header[i + 5] == 'e' &&
+                            header[i + 6] == 'a' && header[i + 7] == 'd')
+                            return true;
+                    }
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // ── Off-thread decode ─────────────────────────────────────────────────
+        public static DecodedAudio DecodeFile(string filePath)
+        {
+            try
+            {
+                string ext = System.IO.Path.GetExtension(filePath).ToLower();
+
+                // Route Opus-in-OGG through Concentus before touching NAudio
+                if (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath)))
+                    return DecodeOpus(filePath);
+
+                using (WaveStream reader = OpenReader(filePath))
+                {
+                    if (reader == null) return null;
+
+                    ISampleProvider samples = reader.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat
+                        ? reader.ToSampleProvider()
+                        : new SampleChannel(reader, forceStereo: false);
+
+                    int channels = samples.WaveFormat.Channels;
+                    int frequency = samples.WaveFormat.SampleRate;
+
+                    var chunks = new List<float[]>();
+                    var buf = new float[65536];
+                    long totalFloats = 0;
+                    int read;
+
+                    while ((read = samples.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        var chunk = new float[read];
+                        Array.Copy(buf, chunk, read);
+                        chunks.Add(chunk);
+                        totalFloats += read;
+                    }
+
+                    if (totalFloats == 0 || channels == 0 || frequency == 0) return null;
+
+                    float[] result = new float[totalFloats];
+                    int offset = 0;
+                    foreach (var chunk in chunks)
+                    {
+                        Array.Copy(chunk, 0, result, offset, chunk.Length);
+                        offset += chunk.Length;
+                    }
+
+                    return new DecodedAudio { Samples = result, Channels = channels, Frequency = frequency };
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[CMM NAudio] Decode failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                return null;
+            }
+        }
+
+        // ── Concentus Opus decoder ────────────────────────────────────────────
+        private static DecodedAudio DecodeOpus(string filePath)
+        {
+            try
+            {
+                var decoder = new OpusDecoder(48000, 2); // Opus always decodes to 48kHz
+                var chunks = new List<float[]>();
+                long totalFloats = 0;
+
+                using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    var oggReader = new OpusOggReadStream(decoder, fileStream);
+                    while (oggReader.HasNextPacket)
+                    {
+                        short[] packet = oggReader.DecodeNextPacket();
+                        if (packet == null) continue;
+
+                        // Convert short PCM (-32768..32767) to float (-1..+1)
+                        var floats = new float[packet.Length];
+                        for (int i = 0; i < packet.Length; i++)
+                            floats[i] = packet[i] / 32768f;
+
+                        chunks.Add(floats);
+                        totalFloats += floats.Length;
+                    }
+                }
+
+                if (totalFloats == 0) return null;
+
+                float[] result = new float[totalFloats];
+                int offset = 0;
+                foreach (var chunk in chunks)
+                {
+                    Array.Copy(chunk, 0, result, offset, chunk.Length);
+                    offset += chunk.Length;
+                }
+
+                // Opus always outputs stereo at 48kHz when decoded with channels=2
+                return new DecodedAudio { Samples = result, Channels = 2, Frequency = 48000 };
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[CMM Concentus] Opus decode failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Opens the appropriate NAudio WaveStream for non-Opus formats.
+        private static WaveStream OpenReader(string filePath)
+        {
+            string ext = System.IO.Path.GetExtension(filePath).ToLower();
+            switch (ext)
+            {
+                case ".mp3": return new Mp3FileReader(filePath);
+                case ".wav":
+                case ".wave": return new WaveFileReader(filePath);
+                case ".aiff":
+                case ".aif": return new AiffFileReader(filePath);
+                case ".ogg":
+                case ".oga": return new VorbisWaveReader(filePath); // only reached for Vorbis
+                case ".flac": return new FlacReader(filePath);
+                default:
+                    Log.Warning($"[CMM NAudio] No reader for extension '{ext}'");
+                    return null;
+            }
+        }
+
+        // ── AudioClip factory ─────────────────────────────────────────────────
+        public static AudioClip CreateStreamingClip(DecodedAudio audio, string name)
+        {
+            if (audio == null || audio.Samples == null || audio.Samples.Length == 0)
+                return null;
+
+            float[] samples = audio.Samples;
+            int channels = audio.Channels;
+            int frequency = audio.Frequency;
+            int totalSamples = samples.Length / channels;
+            int[] cursorHolder = { 0 };
+
+            AudioClip clip = AudioClip.Create(
+                name, totalSamples, channels, frequency, true,
+                (float[] data) =>
+                {
+                    int pos = Interlocked.CompareExchange(ref cursorHolder[0], 0, 0);
+                    int srcStart = pos * channels;
+                    int toCopy = Mathf.Min(data.Length, samples.Length - srcStart);
+
+                    if (toCopy > 0)
+                        Array.Copy(samples, srcStart, data, 0, toCopy);
+                    if (toCopy < data.Length)
+                        Array.Clear(data, toCopy, data.Length - toCopy);
+
+                    Interlocked.Exchange(ref cursorHolder[0], pos + (data.Length / channels));
+                },
+                (int newPosition) =>
+                {
+                    Interlocked.Exchange(ref cursorHolder[0],
+                        Mathf.Clamp(newPosition, 0, totalSamples - 1));
+                }
+            );
+
+            return clip;
+        }
+
+        // ── Quick validate ────────────────────────────────────────────────────
+        public static bool QuickValidate(string filePath)
+        {
+            try
+            {
+                string ext = System.IO.Path.GetExtension(filePath).ToLower();
+
+                if (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath)))
+                {
+                    // For Opus just confirm the header decoded successfully
+                    var decoder = new OpusDecoder(48000, 2);
+                    using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        var oggReader = new OpusOggReadStream(decoder, fs);
+                        int totalRead = 0;
+                        int minSamples = 48000; // 0.5s at 48kHz mono-equivalent
+
+                        while (oggReader.HasNextPacket && totalRead < minSamples)
+                        {
+                            short[] packet = oggReader.DecodeNextPacket();
+                            if (packet != null) totalRead += packet.Length;
+                        }
+                        return totalRead >= minSamples;
+                    }
+                }
+
+                using (WaveStream reader = OpenReader(filePath))
+                {
+                    if (reader == null) return false;
+
+                    ISampleProvider samples = new SampleChannel(reader, forceStereo: false);
+                    int minSamples = (int)(samples.WaveFormat.SampleRate
+                                                     * samples.WaveFormat.Channels * 0.5f);
+                    var buf = new float[4096];
+                    int totalRead = 0, read;
+
+                    while ((read = samples.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        totalRead += read;
+                        if (totalRead >= minSamples) break;
+                    }
+                    return totalRead >= minSamples;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"[CMM] QuickValidate EXCEPTION for {Path.GetFileName(filePath)}: {ex.GetType().Name} – {ex.Message}");
+                return false;
+            }
+        }
+    }
+#else
+    // Fallback stub implementation when NAudio assemblies are not present.
+    // This allows the project to compile and uses the Unity-based paths at runtime.
+    public static class NAudioDecoder
+    {
+        private static readonly HashSet<string> _naudioExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac"
+        };
+
+        private static readonly HashSet<string> _unityExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp3", ".ogg", ".wav"
+        };
+
+        public static bool IsSupported(string filePath)
+        {
+            string ext = System.IO.Path.GetExtension(filePath);
+            return CMMConfig.UseNAudioDecoder
+                ? _naudioExts.Contains(ext)
+                : _unityExts.Contains(ext);
+        }
+
+        // Returns Unity AudioType for the Unity fallback path. UNKNOWN = skip.
+        public static AudioType GetUnityAudioType(string filePath)
+        {
+            switch (System.IO.Path.GetExtension(filePath).ToLower())
+            {
+                case ".mp3": return AudioType.MPEG;
+                case ".ogg": return AudioType.OGGVORBIS;
+                case ".wav": return AudioType.WAV;
+                default: return AudioType.UNKNOWN;
+            }
+        }
+
+        // No-op implementations: these are only used when UseNAudioDecoder == true.
+        // With NAUDIO undefined we expect UseNAudioDecoder to be false, so these
+        // implementations are safe placeholders.
+        public static DecodedAudio DecodeFile(string filePath)
+        {
+            Log.Warning($"[CMM] NAudio not available in this build. DecodeFile unsupported for {Path.GetFileName(filePath)}");
+            return null;
+        }
+
+        public static AudioClip CreateStreamingClip(DecodedAudio audio, string name)
+        {
+            Log.Warning("[CMM] NAudio not available. CreateStreamingClip unsupported.");
+            return null;
+        }
+
+        public static bool QuickValidate(string filePath)
+        {
+            Log.Warning($"[CMM] NAudio not available in this build. QuickValidate returning false for {Path.GetFileName(filePath)}");
+            return false;
+        }
+    }
+#endif
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 4 — CONTEXT RESOLVER  (unchanged from original)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public static class ContextResolver
+    {
+        static readonly float EnemyDetectRange = 20f;
+        static readonly float TraderDetectRange = 40f;
+        static readonly float HomeDetectRange = 70f;
+        static readonly float PlayerHealthDangerThresholdPercent = 0.25f;
+        static readonly int DangerThreshold = 1;
+        static readonly int CriticalThreshold = 4;
+        static readonly float CombatCooldown = 10f;
+
+        static string combatState = "None";
+        static float lastAggroTime = 0f;
+        static bool wasInfested = false;
+        static string lastPoI = "None";
+
+        public static void resetValues() { combatState = "None"; }
+
+        public static List<string> ResolveContext()
+        {
+            var world = GameManager.Instance?.World;
+            var player = world?.GetPrimaryPlayer();
+            if (world == null || player == null)
+                return new List<string> { "None" };
+
+            var activeContexts = new List<string>();
+            bool isDay = world.IsDaytime();
+            bool isBloodmoon = world.isEventBloodMoon;
+            float healthPct = player.Health / (float)player.GetMaxHealth();
+
+
+            int enemyAggroCount = 0, enemyAlertCount = 0, enemiesNearby = 0;
+
+            if (isBloodmoon) activeContexts.Add("Blood_Moon");
+
+            if (player.AttachedToEntity is EntityVehicle vehicle)
+            {
+                string vn = vehicle.GetType().Name.ToLower();
+                activeContexts.Add("Vehicle");
+                if (vn.Contains("gyrocopter")) activeContexts.Add("Vehicle_Gyrocopter");
+                else if (vn.Contains("bicycle")) activeContexts.Add("Vehicle_Bicycle");
+                else if (vn.Contains("motorcycle")) activeContexts.Add("Vehicle_Motorcycle");
+                else if (vn.Contains("minibike")) activeContexts.Add("Vehicle_Minibike");
+                else if (vn.Contains("jeep")) activeContexts.Add("Vehicle_4x4");
+            }
+
+            foreach (var entity in world.Entities.list)
+            {
                 if (entity is EntityTrader trader)
                 {
                     if (Vector3.Distance(player.position, trader.position) > TraderDetectRange) continue;
@@ -166,145 +556,120 @@ public static class ContextResolver
                     else if (n.Contains("bob")) specific = "Trader_Bob";
                     else if (n.Contains("hugh")) specific = "Trader_Hugh";
                     else if (n.Contains("joel")) specific = "Trader_Joel";
-
-                    // Only add the generic Trader context if no specific variant matched,
-                    // or if the specific variant has no playable files. The fallback chain
-                    // in ResolvePlayableContext handles the rest.
-                    if (specific != null)
-                        activeContexts.Add(specific);
-                    else
-                        activeContexts.Add("Trader");
+                    activeContexts.Add(specific ?? "Trader");
                 }
                 else if (entity is EntityEnemy enemy && enemy.IsAlive())
-            {
-                if (Vector3.Distance(player.position, enemy.position) < EnemyDetectRange)
-                    enemiesNearby++;
-                if (enemy.isAlert)
                 {
-                    if (enemy.GetAttackTarget() == player)
-                    { lastAggroTime = Time.realtimeSinceStartup; enemyAggroCount++; }
-                    enemyAlertCount++;
-                }
-            }
-        }
-
-        // ── Combat ───────────────────────────────────────────────────────────
-        float timeSinceAggro = Time.realtimeSinceStartup - lastAggroTime;
-        bool  inCombat       = false;
-
-        if (enemyAggroCount >= CriticalThreshold)
-        {
-            combatState = "High";
-            activeContexts.Add("Combat_High");
-            if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
-            inCombat = true;
-        }
-        else if (enemyAggroCount >= DangerThreshold)
-        {
-            if (combatState != "High") combatState = "Low";
-            activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
-            if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
-            inCombat = true;
-        }
-        else if (timeSinceAggro <= CombatCooldown && enemyAlertCount > 0)
-        {
-            activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
-            inCombat = true;
-        }
-        else if (timeSinceAggro > CombatCooldown && enemyAlertCount == 0)
-        {
-            combatState = "None";
-        }
-
-        // Low health panic only meaningful during active combat
-        if (inCombat && healthPct < PlayerHealthDangerThresholdPercent)
-            activeContexts.Add("Low_Health_Panic");
-
-        // ── Tension ──────────────────────────────────────────────────────────
-        if      (enemiesNearby >= CriticalThreshold && enemyAlertCount >= CriticalThreshold)
-            activeContexts.Add("Tension_High");
-        else if (enemiesNearby >= DangerThreshold   && enemyAlertCount >= DangerThreshold)
-            activeContexts.Add("Tension_Low");
-
-        // ── Home ─────────────────────────────────────────────────────────────
-        if (player is EntityPlayerLocal localPlayer && localPlayer.persistentPlayerData != null)
-        {
-            bool nearHome = false;
-
-            if (localPlayer.persistentPlayerData.HasBedrollPos)
-            {
-                Vector3i bed = localPlayer.persistentPlayerData.BedrollPos;
-                nearHome = Vector3.Distance(player.position, bed) < HomeDetectRange;
-            }
-
-            if (!nearHome)
-            {
-                var claims = localPlayer.persistentPlayerData.GetLandProtectionBlocks();
-                if (claims.Count > 0)
-                {
-                    Vector3i nearest = claims.OrderBy(c => Vector3.Distance(player.position, c.ToVector3())).First();
-                    nearHome = Vector3.Distance(player.position, nearest.ToVector3()) < HomeDetectRange;
+                    if (Vector3.Distance(player.position, enemy.position) < EnemyDetectRange) enemiesNearby++;
+                    if (enemy.isAlert)
+                    {
+                        if (enemy.GetAttackTarget() == player) { lastAggroTime = Time.realtimeSinceStartup; enemyAggroCount++; }
+                        enemyAlertCount++;
+                    }
                 }
             }
 
-            if (nearHome)
-                activeContexts.Add(isDay ? "Home_Day" : "Home_Night");
-        }
+            float timeSinceAggro = Time.realtimeSinceStartup - lastAggroTime;
+            bool inCombat = false;
 
-        // ── POI ──────────────────────────────────────────────────────────────
-        PrefabInstance prefab = world.GetPOIAtPosition(player.position);
-        if (prefab != null)
-        {
-            string currentPoI           = prefab.prefab.PrefabName;
-            int    enemiesRemainingInPoi = prefab.sleeperVolumes.Count(v => !v.wasCleared);
-
-            if (enemiesRemainingInPoi > 0)
+            if (enemyAggroCount >= CriticalThreshold)
             {
-                wasInfested = true;
-                switch (prefab.prefab.DifficultyTier)
+                combatState = "High";
+                activeContexts.Add("Combat_High");
+                if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
+                inCombat = true;
+            }
+            else if (enemyAggroCount >= DangerThreshold)
+            {
+                if (combatState != "High") combatState = "Low";
+                activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
+                if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
+                inCombat = true;
+            }
+            else if (timeSinceAggro <= CombatCooldown && enemyAlertCount > 0)
+            {
+                activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
+                inCombat = true;
+            }
+            else if (timeSinceAggro > CombatCooldown && enemyAlertCount == 0)
+            {
+                combatState = "None";
+            }
+
+            if (inCombat && healthPct < PlayerHealthDangerThresholdPercent) activeContexts.Add("Low_Health_Panic");
+
+            if (enemiesNearby >= CriticalThreshold && enemyAlertCount >= CriticalThreshold) activeContexts.Add("Tension_High");
+            else if (enemiesNearby >= DangerThreshold && enemyAlertCount >= DangerThreshold) activeContexts.Add("Tension_Low");
+
+            if (player is EntityPlayerLocal localPlayer && localPlayer.persistentPlayerData != null)
+            {
+                bool nearHome = false;
+                if (localPlayer.persistentPlayerData.HasBedrollPos)
                 {
-                    case 0:  activeContexts.Add("POI_T0"); break;
-                    case 1:  activeContexts.Add("POI_T1"); break;
-                    case 2:  activeContexts.Add("POI_T2"); break;
-                    case 3:  activeContexts.Add("POI_T3"); break;
-                    case 4:  activeContexts.Add("POI_T4"); break;
-                    case 5:  activeContexts.Add("POI_T5"); break;
-                    default: activeContexts.Add("POI");    break;
+                    Vector3i bed = localPlayer.persistentPlayerData.BedrollPos;
+                    nearHome = Vector3.Distance(player.position, bed) < HomeDetectRange;
                 }
+                if (!nearHome)
+                {
+                    var claims = localPlayer.persistentPlayerData.GetLandProtectionBlocks();
+                    if (claims.Count > 0)
+                    {
+                        Vector3i nearest = claims.OrderBy(c => Vector3.Distance(player.position, c.ToVector3())).First();
+                        nearHome = Vector3.Distance(player.position, nearest.ToVector3()) < HomeDetectRange;
+                    }
+                }
+                if (nearHome) activeContexts.Add(isDay ? "Home_Day" : "Home_Night");
+            }
+
+            PrefabInstance prefab = world.GetPOIAtPosition(player.position);
+            if (prefab != null)
+            {
+                string currentPoI = prefab.prefab.PrefabName;
+                int enemiesRemainingInPoi = prefab.sleeperVolumes.Count(v => !v.wasCleared);
+                if (enemiesRemainingInPoi > 0)
+                {
+                    wasInfested = true;
+                    switch (prefab.prefab.DifficultyTier)
+                    {
+                        case 0: activeContexts.Add("POI_T0"); break;
+                        case 1: activeContexts.Add("POI_T1"); break;
+                        case 2: activeContexts.Add("POI_T2"); break;
+                        case 3: activeContexts.Add("POI_T3"); break;
+                        case 4: activeContexts.Add("POI_T4"); break;
+                        case 5: activeContexts.Add("POI_T5"); break;
+                        default: activeContexts.Add("POI"); break;
+                    }
+                }
+                else
+                {
+                    if (wasInfested && currentPoI == lastPoI) activeContexts.Add("POI_Cleared");
+                    wasInfested = false;
+                }
+                lastPoI = currentPoI;
             }
             else
             {
-                if (wasInfested && currentPoI == lastPoI)
-                    activeContexts.Add("POI_Cleared");
                 wasInfested = false;
             }
 
-            lastPoI = currentPoI;
-        }
-        else
-        {
-            wasInfested = false;
-        }
+            string biomeName = world.GetBiome((int)player.position.x, (int)player.position.z)?.m_sBiomeName;
+            switch (biomeName)
+            {
+                case "pine_forest": activeContexts.Add("Ambient_Forest"); break;
+                case "desert": activeContexts.Add("Ambient_Desert"); break;
+                case "burnt_forest": activeContexts.Add("Ambient_Burnt_Forest"); break;
+                case "snow": activeContexts.Add("Ambient_Snow"); break;
+                case "wasteland": activeContexts.Add("Ambient_Wasteland"); break;
+                default: activeContexts.Add("Ambient"); break;
+            }
 
-        // ── Biome ─────────────────────────────────────────────────────────────
-        string biomeName = world.GetBiome((int)player.position.x, (int)player.position.z)?.m_sBiomeName;
-        switch (biomeName)
-        {
-            case "pine_forest":  activeContexts.Add("Ambient_Forest");       break;
-            case "desert":       activeContexts.Add("Ambient_Desert");       break;
-            case "burnt_forest": activeContexts.Add("Ambient_Burnt_Forest"); break;
-            case "snow":         activeContexts.Add("Ambient_Snow");         break;
-            case "wasteland":    activeContexts.Add("Ambient_Wasteland");    break;
-            default:             activeContexts.Add("Ambient");              break;
+            return activeContexts;
         }
-
-        return activeContexts;
     }
-}
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
     // MOD ENTRY POINT
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
 
     public class Initialize : IModApi
     {
@@ -318,34 +683,21 @@ public static class ContextResolver
 
     public class CoRoutine : MonoBehaviour { }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECTION 4 — CONTEXT STACK
-    // Maintains the ordered list of currently active contexts.
-    // Answers the question: "what should be playing right now?"
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 5 — CONTEXT STACK
+    // ─────────────────────────────────────────────────────────────────────────
 
     public partial class ContextMusicManager : MonoBehaviour
     {
-        // ── Context stack state ───────────────────────────────────────────────
-        public static Dictionary<string, Contexts>     contexts      = new Dictionary<string, Contexts>();
-        public static Dictionary<string, ContextCache> cacheMap      = new Dictionary<string, ContextCache>();
-        public static List<ActiveContext>              _contextStack  = new List<ActiveContext>();
-        public static Contexts                         currentContext;
+        public static Dictionary<string, Contexts> contexts = new Dictionary<string, Contexts>();
+        public static Dictionary<string, ContextCache> cacheMap = new Dictionary<string, ContextCache>();
+        public static List<ActiveContext> _contextStack = new List<ActiveContext>();
+        public static Contexts currentContext;
 
-        // FIX (Bug 1): Replace the _pendingContext string guard with an integer
-        // transaction ID. Each call to SendContextUpdate increments this counter
-        // and gives the new value to every coroutine it spawns. A coroutine
-        // checks its captured ID against the current value before doing any
-        // meaningful work; if they differ, a newer transition has taken over and
-        // the coroutine exits. This eliminates the window where _pendingContext
-        // is set before currentContext is updated, which previously allowed
-        // re-entrant calls to see stale state and dispatch conflicting transitions.
-        private static int    _transitionId        = 0;
-        public  static string _pendingContext       = null;   // kept for cheap early-rejection only
-        public  static string _playOnceReturnContext = null;
+        private static int _transitionId = 0;
+        public static string _pendingContext = null;
+        public static string _playOnceReturnContext = null;
 
-        // ── Context definitions ───────────────────────────────────────────────
-        // Helper so InitContexts stays readable — wraps the dictionary assignment.
         private static void AddContext(string name, string path, string fallback,
             bool canBeResumed, int staleTime, bool loop, int cooldown, int warmUp,
             bool bypassesCooldown, bool canInterrupt, int priority, bool playOnce)
@@ -354,140 +706,58 @@ public static class ContextResolver
                 loop, cooldown, warmUp, bypassesCooldown, canInterrupt, priority, playOnce);
         }
 
-        // Registers all known contexts. Add new contexts here.
         public void InitContexts()
         {
-            AddContext("Death",                "events/death",         "Ambient",      false,  0,  false, 3, 1, true,  true, 100, true );
-
-            AddContext("Low_Health_Panic",     "events/low_health",    "Ambient",      true,  30,  false, 5, 0, true,  true,  90, false);
-
-            AddContext("Blood_Moon_Combat",    "blood_moon/combat",    "Combat_High",  true,  20,  false, 3, 3, true,  true,  71, false);
-            AddContext("Blood_Moon",           "blood_moon",           "Ambient",      true,  30,  false, 5, 5, true,  true,  70, false);
-
-            AddContext("Vehicle_Gyrocopter",   "vehicle/gyrocopter",   "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
-            AddContext("Vehicle_Bicycle",      "vehicle/bicycle",      "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
-            AddContext("Vehicle_Minibike",     "vehicle/minibike",     "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
-            AddContext("Vehicle_Motorcycle",   "vehicle/motorcycle",   "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
-            AddContext("Vehicle_4x4",          "vehicle/4x4",          "Vehicle",      true,  30,  false, 5, 3, true,  true,  61, false);
-            AddContext("Vehicle",              "vehicle",              "Ambient",      true,  30,  false, 5, 3, true,  true,  60, false);
-
-            AddContext("POI_Cleared",          "poi/cleared",          "Ambient",      true,  60,  false, 5, 5, true,  true,  55, true );
-            AddContext("Combat_High",          "combat_high",          "Combat_Low",   true,  20,  false, 3, 3, true,  true,  51, false);
-            AddContext("Combat_Low",           "combat_low",           "Tension_Low",  true,  20,  false, 3, 3, true,  true,  50, false);
-
-            AddContext("Spawn",                "events/spawn",         "Ambient",      false,  0,  false, 3, 1, true,  true,  45, true );
-            AddContext("Inventory",            "inventory",            "Ambient",      true,  15,  false, 0, 2, true,  true,  40, false);
-
-            AddContext("Tension_High",         "tension_high",         "Tension_Low",  true,  30,  false, 5, 5, false, true,  30, false);
-            AddContext("Tension_Low",          "tension_low",          "Ambient",      true,  30,  false, 5, 5, false, true,  30, false);
-
-            AddContext("Trader_Joel",          "trader/joel",          "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
-            AddContext("Trader_Jen",           "trader/jen",           "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
-            AddContext("Trader_Rekt",          "trader/rekt",          "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
-            AddContext("Trader_Bob",           "trader/bob",           "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
-            AddContext("Trader_Hugh",          "trader/hugh",          "Trader",       true, 120,  false, 5, 5, false, true,  26, false);
-            AddContext("Trader",               "trader",               "Ambient",      true, 120,  false, 5, 5, false, true,  25, false);
-
-            AddContext("Home_Day",             "home/day",             "Home",         true, 120,  false, 5, 5, false, true,  20, false);
-            AddContext("Home_Night",           "home/night",           "Home",         true, 120,  false, 5, 5, false, true,  20, false);
-            AddContext("Home",                 "home",                 "Ambient",      true, 120,  false, 5, 5, false, true,  20, false);
-
-            //AddContext("POI_Infested",         "poi/infested",         "POI",          true,  60,  false, 5, 5, false, true,  21, false);
-            AddContext("POI_T5",               "poi/t5",               "POI",          true,  60,  false, 5, 5, false, true,  15, false);
-            AddContext("POI_T4",               "poi/t4",               "POI",          true,  60,  false, 5, 5, false, true,  15, false);
-            AddContext("POI_T3",               "poi/t3",               "POI",          true,  60,  false, 5, 5, false, true,  15, false);
-            AddContext("POI_T2",               "poi/t2",               "POI",          true,  60,  false, 5, 5, false, true,  15, false);
-            AddContext("POI_T1",               "poi/t1",               "POI",          true,  60,  false, 5, 5, false, true,  15, false);
-            AddContext("POI_T0",               "poi/t0",               "Ambient",      true,  60,  false, 5, 5, false, true,  14, false);
-            AddContext("POI",                  "poi",                  "Ambient",      true,  60,  false, 5, 5, false, true,  13, false);
-
-            AddContext("Ambient",              "ambient",              "None",         true, 120,  false, 5, 4, false, true,  10, false);
-            AddContext("Ambient_Forest",       "ambient/forest",       "Ambient",      true, 120,  false, 5, 5, false, true,  10, false);
-            AddContext("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient",      true, 120,  false, 5, 5, false, true,  10, false);
-            AddContext("Ambient_Desert",       "ambient/desert",       "Ambient",      true, 120,  false, 5, 5, false, true,  10, false);
-            AddContext("Ambient_Snow",         "ambient/snow",         "Ambient",      true, 120,  false, 5, 5, false, true,  10, false);
-            AddContext("Ambient_Wasteland",    "ambient/wasteland",    "Ambient",      true, 120,  false, 5, 5, false, true,  10, false);
-
-            AddContext("None",                 "",                     "None",         false,  0,  false, 0, 0, true,  true,   0, false);
-            AddContext("Menu",                 "menu",                 "Ambient",      false,  0,  true,  5, 2, true,  true,   0, false);
+            AddContext("Death", "events/death", "Ambient", false, 0, false, 3, 1, true, true, 100, true);
+            AddContext("Low_Health_Panic", "events/low_health", "Ambient", true, 30, false, 5, 0, true, true, 90, false);
+            AddContext("Blood_Moon_Combat", "blood_moon/combat", "Combat_High", true, 20, false, 3, 3, true, true, 71, false);
+            AddContext("Blood_Moon", "blood_moon", "Ambient", true, 30, false, 5, 5, true, true, 70, false);
+            AddContext("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
+            AddContext("Vehicle_Bicycle", "vehicle/bicycle", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
+            AddContext("Vehicle_Minibike", "vehicle/minibike", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
+            AddContext("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
+            AddContext("Vehicle_4x4", "vehicle/4x4", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
+            AddContext("Vehicle", "vehicle", "Ambient", true, 30, false, 5, 3, true, true, 60, false);
+            AddContext("POI_Cleared", "poi/cleared", "Ambient", true, 60, false, 5, 5, true, true, 55, true);
+            AddContext("Combat_High", "combat_high", "Combat_Low", true, 20, false, 3, 3, true, true, 51, false);
+            AddContext("Combat_Low", "combat_low", "Tension_Low", true, 20, false, 3, 3, true, true, 50, false);
+            AddContext("Spawn", "events/spawn", "Ambient", false, 0, false, 3, 1, true, true, 45, true);
+            AddContext("Inventory", "inventory", "Ambient", true, 15, false, 0, 2, true, true, 40, false);
+            AddContext("Tension_High", "tension_high", "Tension_Low", true, 30, false, 5, 5, false, true, 30, false);
+            AddContext("Tension_Low", "tension_low", "Ambient", true, 30, false, 5, 5, false, true, 30, false);
+            AddContext("Trader_Joel", "trader/joel", "Trader", true, 120, false, 5, 5, false, true, 26, false);
+            AddContext("Trader_Jen", "trader/jen", "Trader", true, 120, false, 5, 5, false, true, 26, false);
+            AddContext("Trader_Rekt", "trader/rekt", "Trader", true, 120, false, 5, 5, false, true, 26, false);
+            AddContext("Trader_Bob", "trader/bob", "Trader", true, 120, false, 5, 5, false, true, 26, false);
+            AddContext("Trader_Hugh", "trader/hugh", "Trader", true, 120, false, 5, 5, false, true, 26, false);
+            AddContext("Trader", "trader", "Ambient", true, 120, false, 5, 5, false, true, 25, false);
+            AddContext("Home_Day", "home/day", "Home", true, 120, false, 5, 5, false, true, 20, false);
+            AddContext("Home_Night", "home/night", "Home", true, 120, false, 5, 5, false, true, 20, false);
+            AddContext("Home", "home", "Ambient", true, 120, false, 5, 5, false, true, 20, false);
+            AddContext("POI_T5", "poi/t5", "POI", true, 60, false, 5, 5, false, true, 15, false);
+            AddContext("POI_T4", "poi/t4", "POI", true, 60, false, 5, 5, false, true, 15, false);
+            AddContext("POI_T3", "poi/t3", "POI", true, 60, false, 5, 5, false, true, 15, false);
+            AddContext("POI_T2", "poi/t2", "POI", true, 60, false, 5, 5, false, true, 15, false);
+            AddContext("POI_T1", "poi/t1", "POI", true, 60, false, 5, 5, false, true, 15, false);
+            AddContext("POI_T0", "poi/t0", "Ambient", true, 60, false, 5, 5, false, true, 14, false);
+            AddContext("POI", "poi", "Ambient", true, 60, false, 5, 5, false, true, 13, false);
+            AddContext("Ambient", "ambient", "None", true, 120, false, 5, 4, false, true, 10, false);
+            AddContext("Ambient_Forest", "ambient/forest", "Ambient", true, 120, false, 5, 5, false, true, 10, false);
+            AddContext("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient", true, 120, false, 5, 5, false, true, 10, false);
+            AddContext("Ambient_Desert", "ambient/desert", "Ambient", true, 120, false, 5, 5, false, true, 10, false);
+            AddContext("Ambient_Snow", "ambient/snow", "Ambient", true, 120, false, 5, 5, false, true, 10, false);
+            AddContext("Ambient_Wasteland", "ambient/wasteland", "Ambient", true, 120, false, 5, 5, false, true, 10, false);
+            AddContext("None", "", "None", false, 0, false, 0, 0, true, true, 0, false);
+            AddContext("Menu", "menu", "Ambient", false, 0, true, 5, 2, true, true, 0, false);
         }
 
-        // Looks up a context definition by name. Returns null if not found.
         public static Contexts GetContext(string contextIn) =>
             contexts.TryGetValue(contextIn, out var ctx) ? ctx : null;
 
-        // Walks the fallback chain from contextName until it finds a context
-        // whose folder contains at least one playable file. Returns null if
-        // the entire chain is empty. Max depth 5 to prevent infinite loops.
-
         private static readonly HashSet<string> _invalidFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _validatedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private IEnumerator ValidateFile(string filePath, System.Action<bool> callback)
-        {
-            AudioType audioType = CheckType(filePath);
-            if (audioType == AudioType.UNKNOWN) { callback(false); yield break; }
 
-            using (var request = UnityWebRequestMultimedia.GetAudioClip(
-                       "file:///" + filePath.Replace("\\", "/"), audioType))
-            {
-                // Never stream during validation — we need the full clip to measure it
-                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = false;
-
-                float startTime = Time.realtimeSinceStartup;
-                yield return request.SendWebRequest();
-
-                if (request.result != UnityWebRequest.Result.Success)
-                {
-                    Log.Warning($"[CMM] Validation failed (network error) for {Path.GetFileName(filePath)}: {request.error}");
-                    callback(false);
-                    yield break;
-                }
-
-                AudioClip clip = DownloadHandlerAudioClip.GetContent(request);
-                bool valid = clip != null
-                          && clip.samples > 0
-                          && clip.channels > 0
-                          && clip.length > 0.5f;   // reject sub-half-second clips as likely corrupt stubs
-
-                if (!valid)
-                    Log.Warning($"[CMM] Validation failed (bad clip data) for {Path.GetFileName(filePath)}: " +
-                                $"samples={clip?.samples ?? 0} channels={clip?.channels ?? 0} length={clip?.length ?? 0f:F2}s");
-
-                if (clip != null) Destroy(clip);
-                callback(valid);
-            }
-        }
-
-        private IEnumerator ValidateContextFiles(string contextName, System.Action<string[]> callback)
-        {
-            Contexts ctx = GetContext(contextName);
-            if (ctx == null) { callback(new string[0]); yield break; }
-
-            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
-            if (!Directory.Exists(dir)) { callback(new string[0]); yield break; }
-
-            string[] candidates = Directory.GetFiles(dir)
-                .Where(f => CheckType(f) != AudioType.UNKNOWN && !_invalidFiles.Contains(f))
-                .ToArray();
-
-            var valid = new List<string>();
-            foreach (string file in candidates)
-            {
-                bool isValid = false;
-                yield return StartCoroutine(ValidateFile(file, result => isValid = result));
-                if (isValid)
-                    valid.Add(file);
-                else
-                    _invalidFiles.Add(file);
-            }
-
-            if (_invalidFiles.Count > 0)
-                Log.Warning($"[CMM] {contextName}: {candidates.Length - valid.Count} invalid file(s) excluded: " +
-                            string.Join(", ", candidates.Except(valid).Select(Path.GetFileName)));
-
-            callback(valid.ToArray());
-        }
-
+        // Walks the fallback chain to find the nearest playable context.
         private static string ResolvePlayableContext(string contextName)
         {
             string current = contextName;
@@ -502,8 +772,6 @@ public static class ContextResolver
             return null;
         }
 
-        // Returns the highest-priority context on the stack that has playable
-        // files (directly or via fallback). Falls back to "Ambient" if empty.
         private static string GetTopContext()
         {
             foreach (ActiveContext active in _contextStack)
@@ -514,8 +782,6 @@ public static class ContextResolver
             return "Ambient";
         }
 
-        // Manually adds a context to the stack (e.g. Inventory open).
-        // No-ops if already present. Triggers a context update after pushing.
         public static void PushContext(string contextName)
         {
             if (_contextStack.All(c => c.ContextName != contextName))
@@ -523,21 +789,18 @@ public static class ContextResolver
                 Contexts ctx = GetContext(contextName);
                 if (ctx == null) return;
                 if (ResolvePlayableContext(contextName) == null) return;
-
                 _contextStack.Add(new ActiveContext
                 {
                     ContextName = contextName,
-                    Priority    = ctx.Priority,
+                    Priority = ctx.Priority,
                     ActivatedAt = Time.realtimeSinceStartup,
-                    Manual      = true
+                    Manual = true
                 });
                 _contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));
             }
             SendContextUpdate(GetTopContext(), 0);
         }
 
-        // Manually removes a context from the stack (e.g. Inventory closed).
-        // Triggers a context update after popping.
         public static void PopContext(string contextName)
         {
             _contextStack.RemoveAll(c => c.ContextName == contextName);
@@ -546,61 +809,114 @@ public static class ContextResolver
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECTION 5 — AUDIO PLAYER
-    // Owns the two AudioSource channels and all playback logic.
-    // Answers the question: "how do I play this context?"
-    // ═════════════════════════════════════════════════════════════════════════
+    // The rest of the file is unchanged...
+    // (omitted here for brevity in this message — original code continues)
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 6 — AUDIO PLAYER
+    // ─────────────────────────────────────────────────────────────────────────
 
     public partial class ContextMusicManager
     {
-        // ── Audio state ───────────────────────────────────────────────────────
         private static AudioSource CMM_Primary_Channel;
         private static AudioSource CMM_Secondary_Channel;
-
-        // Tracks which channel is currently the live (audible) one.
         private static bool        _primaryIsActive = true;
         private static AudioSource ActiveChannel   => _primaryIsActive ? CMM_Primary_Channel : CMM_Secondary_Channel;
         private static AudioSource InactiveChannel => _primaryIsActive ? CMM_Secondary_Channel : CMM_Primary_Channel;
 
-        // Clip queued for destruction after the crossfade finishes.
-        // Used when preload is disabled to avoid destroying a clip mid-fade.
-        private static AudioClip _clipToDestroyAfterFade = null;
-        
-        // FIX (Bug 3): Flag set by ScheduleNextCacheLoad immediately before it
-        // fires PlayFromCache. TrackEndWatcher checks this and exits without
-        // acting if true, preventing both coroutines from calling PlayFromCache
-        // for the same track end. Cleared by TrackEndWatcher on read.
-        private static bool _scheduleHandledTransition = false;
-        
-        // ── Playback ──────────────────────────────────────────────────────────
+        private static AudioClip _clipToDestroyAfterFade       = null;
+        private static DecodedAudio _decodedToReleaseAfterFade = null;
+        private static bool      _scheduleHandledTransition    = false;
 
-        // Entry point for playing a context. Loads the clip on demand if needed,
-        // sets up the incoming channel, and starts a crossfade from the outgoing one.
-        // isSameContextSwitchingToNextTrack: true when a track ends naturally and
-        // the next track in the same context starts — uses a longer fade.
+        // ── NAudio async decode helper ────────────────────────────────────────
+        // Spawns a ThreadPool work item to decode the file off the main thread,
+        // then polls (on a coroutine) until it finishes. Yields DecodedAudio
+        // back to the main thread via the ref-box pattern.
+        private IEnumerator DecodeAsync(string filePath, Action<DecodedAudio> onComplete)
+        {
+            DecodedAudio result   = null;
+            bool         finished = false;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                result   = NAudioDecoder.DecodeFile(filePath);
+                finished = true;
+            });
+
+            // Poll every frame until the background thread finishes.
+            // No busy-wait — yield return null surrenders the frame.
+            while (!finished)
+                yield return null;
+
+            onComplete(result);
+        }
+
+        // ── Validation ────────────────────────────────────────────────────────
+        // For NAudio path: does a quick synchronous probe on a background thread.
+        // For Unity path: uses the original UnityWebRequest approach.
+        private IEnumerator ValidateFile(string filePath, Action<bool> callback)
+        {
+            if (!NAudioDecoder.IsSupported(filePath)) { callback(false); yield break; }
+
+            if (CMMConfig.UseNAudioDecoder)
+            {
+                bool valid    = false;
+                bool finished = false;
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    valid    = NAudioDecoder.QuickValidate(filePath);
+                    finished = true;
+                });
+                while (!finished) yield return null;
+                if (!valid)
+                    Log.Warning($"[CMM] Validation failed (NAudio) for {filePath} {Path.GetFileName(filePath)}");
+                callback(valid);
+            }
+            else
+            {
+                // Unity fallback path — original UnityWebRequest validation
+                AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
+                if (audioType == AudioType.UNKNOWN) { callback(false); yield break; }
+
+                using (var req = UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(
+                           "file:///" + filePath.Replace("\\", "/"), audioType))
+                {
+                    ((UnityEngine.Networking.DownloadHandlerAudioClip)req.downloadHandler).streamAudio = false;
+                    yield return req.SendWebRequest();
+
+                    if (req.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
+                    {
+                        Log.Warning($"[CMM] Validation failed (Unity) for {Path.GetFileName(filePath)}: {req.error}");
+                        callback(false);
+                        yield break;
+                    }
+                    AudioClip clip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(req);
+                    bool valid = clip != null && clip.samples > 0 && clip.channels > 0 && clip.length > 0.5f;
+                    if (clip != null) Destroy(clip);
+                    callback(valid);
+                }
+            }
+        }
+
+        // ── PlayFromCache ─────────────────────────────────────────────────────
+
         private IEnumerator PlayFromCache(string contextName, bool isSameContextSwitchingToNextTrack, int transitionId)
         {
-            // FIX (Bug 1): Bail immediately if a newer transition has been issued
-            // since this coroutine was spawned.
             if (transitionId != _transitionId) yield break;
 
             Contexts     ctx   = GetContext(contextName);
             ContextCache cache = cacheMap[contextName];
 
-            // If a crossfade is already running, stop it and snap the outgoing
-            // channel to silence so the new fade starts from a clean state.
             if (_crossFadeCoroutine != null)
             {
                 CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);
                 _crossFadeCoroutine = null;
-                //InactiveChannel.volume = 0f;
             }
 
-            // ── Clip acquisition ─────────────────────────────────────────────
+            // ── Ensure clip is available ─────────────────────────────────────
             if (CMMConfig.PreloadCacheEnabled)
             {
-                // Wait up to 10s for a preloaded clip (slow on first boot).
                 float waited = 0f;
                 while (cache.cachedClip == null && waited < 10f)
                 {
@@ -608,7 +924,6 @@ public static class ContextResolver
                     yield return new WaitForSeconds(0.25f);
                     waited += 0.25f;
                 }
-
                 if (cache.cachedClip == null)
                 {
                     Log.Out($"[CMM] PlayFromCache: no clip for {contextName} after wait.");
@@ -618,7 +933,6 @@ public static class ContextResolver
             }
             else
             {
-                // On-demand: load now if not already cached.
                 if (cache.cachedClip == null)
                 {
                     Log.Out($"[CMM] On-demand load for {contextName}...");
@@ -632,8 +946,6 @@ public static class ContextResolver
                 }
             }
 
-            // FIX (Bug 1): Check again after any yields — another transition
-            // may have arrived while we were waiting for the clip to load.
             if (transitionId != _transitionId) yield break;
 
             // ── Resume position ──────────────────────────────────────────────
@@ -654,8 +966,8 @@ public static class ContextResolver
             }
 
             // ── Channel setup ────────────────────────────────────────────────
-            AudioSource incoming        = InactiveChannel;
-            AudioSource outgoing        = ActiveChannel;
+            AudioSource incoming         = InactiveChannel;
+            AudioSource outgoing         = ActiveChannel;
             float       outgoingStartVol = outgoing.volume;
 
             incoming.clip   = cache.cachedClip;
@@ -667,7 +979,7 @@ public static class ContextResolver
             _primaryIsActive = !_primaryIsActive;
             AudioSource watchTarget = incoming;
 
-            // ── Crossfade or hard cut ────────────────────────────────────────
+            // ── Crossfade ────────────────────────────────────────────────────
             float targetVolume = GamePrefs.GetFloat(
                 inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
 
@@ -692,9 +1004,8 @@ public static class ContextResolver
                 outgoing.Stop();
                 outgoing.clip   = null;
                 outgoing.volume = 0f;
-                if (_clipToDestroyAfterFade != null) { Destroy(_clipToDestroyAfterFade); _clipToDestroyAfterFade = null; }
+                DestroyPendingClipAndAudio();
                 incoming.volume = targetVolume;
-
                 int cooldown = currentContext.Cooldown;
                 if (cooldown > 0)
                 {
@@ -705,11 +1016,9 @@ public static class ContextResolver
 
             Log.Out($"[CMM] Playing: {contextName}");
 
-            // ── Track-end watcher ────────────────────────────────────────────
             if (!ctx.Loop)
                 _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(TrackEndWatcher(contextName, watchTarget, transitionId));
 
-            // ── Schedule next-clip preload ───────────────────────────────────
             if (!ctx.Loop && !ctx.PlayOnce)
             {
                 float clipLength = cache.cachedClip.length > 0f
@@ -722,77 +1031,49 @@ public static class ContextResolver
             _activeMusicCoroutine = null;
         }
 
-        // Returns the total memory used by all cached AudioClips in bytes.
-        // Formula: samples × channels × 4 bytes (Unity stores clips as 32-bit float PCM).
-        public static long GetCacheMemoryBytes()
+        // Destroys pending clip and, in NAudio mode, releases the PCM buffer
+        // of the leaving context so the GC can reclaim the memory.
+        private static void DestroyPendingClipAndAudio()
         {
-            long total = 0;
-            foreach (var cache in cacheMap.Values)
+            if (_clipToDestroyAfterFade != null)
             {
-                if (cache.cachedClip != null)
-                    total += (long)cache.cachedClip.samples * cache.cachedClip.channels * 4;
-                if (cache.nextCachedClip != null)
-                    total += (long)cache.nextCachedClip.samples * cache.nextCachedClip.channels * 4;
+                Destroy(_clipToDestroyAfterFade);
+                _clipToDestroyAfterFade = null;
             }
-            return total;
-        }
-
-        public static string GetCacheMemorySummary(bool includePerContext = true)
-        {
-            long totalBytes = 0;
-            var lines = new System.Text.StringBuilder();
-
-            foreach (var kv in cacheMap)
+            // Release PCM buffer only when preload is off (on-demand mode).
+            // In preload mode the buffer must stay alive so the AudioClip can
+            // continue serving the PCMReaderCallback.
+            if (!CMMConfig.PreloadCacheEnabled && _decodedToReleaseAfterFade != null)
             {
-                long clipBytes = kv.Value.cachedClip != null ? (long)kv.Value.cachedClip.samples * kv.Value.cachedClip.channels * 4 : 0;
-                long nextBytes = kv.Value.nextCachedClip != null ? (long)kv.Value.nextCachedClip.samples * kv.Value.nextCachedClip.channels * 4 : 0;
-                long entryTotal = clipBytes + nextBytes;
-                if (entryTotal == 0) continue;
-
-                totalBytes += entryTotal;
-
-                if (includePerContext)
-                    lines.AppendLine($"  {kv.Key}: {FormatBytes(clipBytes)} current" +
-                                     (nextBytes > 0 ? $" + {FormatBytes(nextBytes)} next" : ""));
+                _decodedToReleaseAfterFade.Samples = null;
+                _decodedToReleaseAfterFade = null;
             }
-
-            if (includePerContext)
-                lines.Append($"  TOTAL: {FormatBytes(totalBytes)}");
-            else
-                lines.Append(FormatBytes(totalBytes));
-
-            return lines.ToString();
         }
 
-        private static string FormatBytes(long bytes)
-        {
-            if (bytes >= 1024 * 1024) return $"{bytes / (1024f * 1024f):F1} MB";
-            if (bytes >= 1024) return $"{bytes / 1024f:F1} KB";
-            return $"{bytes} B";
-        }
-
+        // ── Volume ────────────────────────────────────────────────────────────
         private IEnumerator VolumeSyncLoop()
         {
             float previousVolume = -1f;
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
-
                 float currentVolume = GamePrefs.GetFloat(
                     inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-
                 if (Mathf.Approximately(currentVolume, previousVolume)) continue;
                 previousVolume = currentVolume;
-
-                // Only update the active channel directly if no crossfade is running.
-                // If a crossfade is running it already reads the volume live each frame.
                 if (_crossFadeCoroutine == null && ActiveChannel != null && ActiveChannel.isPlaying)
                     ActiveChannel.volume = currentVolume;
             }
         }
 
-        // Fades outgoing down and incoming up over [duration] seconds.
-        // Starts the cooldown timer after the fade completes.
+        public static void UpdateVolume()
+        {
+            if (ActiveChannel == null) return;
+            ActiveChannel.volume = GamePrefs.GetFloat(
+                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+        }
+
+        // ── Crossfade ─────────────────────────────────────────────────────────
         private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming,
             float duration, int cooldownSeconds, float outgoingStartVol)
         {
@@ -801,11 +1082,10 @@ public static class ContextResolver
             {
                 float targetVolume = GamePrefs.GetFloat(
                     inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-
-                elapsed += Time.deltaTime;
-                float t = Mathf.Clamp01(elapsed / duration);
-                incoming.volume = Mathf.Lerp(0f, targetVolume, t);
-                outgoing.volume = Mathf.Lerp(outgoingStartVol, 0f, t);
+                elapsed         += Time.deltaTime;
+                float t          = Mathf.Clamp01(elapsed / duration);
+                incoming.volume  = Mathf.Lerp(0f, targetVolume, t);
+                outgoing.volume  = Mathf.Lerp(outgoingStartVol, 0f, t);
                 yield return null;
             }
 
@@ -813,22 +1093,19 @@ public static class ContextResolver
                 inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
             incoming.volume = finalVolume;
             outgoing.Stop();
-            outgoing.clip = null;
+            outgoing.clip   = null;
             outgoing.volume = 0f;
 
-            if (_clipToDestroyAfterFade != null) { Destroy(_clipToDestroyAfterFade); _clipToDestroyAfterFade = null; }
+            DestroyPendingClipAndAudio();
 
             if (cooldownSeconds > 0)
             {
                 if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
                 _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(ContextCooldownTimer(cooldownSeconds));
             }
-
             _crossFadeCoroutine = null;
         }
 
-        // Fades the active channel to silence with no incoming track.
-        // Called when the context resolves to nothing playable.
         public static void FadeToSilence()
         {
             Log.Out("[CMM] Fading to silence.");
@@ -836,82 +1113,54 @@ public static class ContextResolver
             if (_nextCacheCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);   _nextCacheCoroutine   = null; }
             if (_trackEndCoroutine    != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);    _trackEndCoroutine    = null; }
             if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
-
             _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine());
         }
 
-        // Smoothly reduces the active channel to zero volume then stops it.
-        // ── Fade out coroutine (updated to destroy pending clip) ─────────────────
         private IEnumerator FadeOutCoroutine()
         {
             AudioSource outgoing = ActiveChannel;
-            float startVol  = outgoing.volume;
-            float elapsed   = 0f;
-
+            float startVol = outgoing.volume;
+            float elapsed  = 0f;
             while (elapsed < CrossFadeDuration)
             {
-                elapsed += Time.deltaTime;
+                elapsed        += Time.deltaTime;
                 outgoing.volume = Mathf.Lerp(startVol, 0f, Mathf.Clamp01(elapsed / CrossFadeDuration));
                 yield return null;
             }
-
             outgoing.Stop();
             outgoing.clip   = null;
             outgoing.volume = 0f;
-
-            if (_clipToDestroyAfterFade != null) { Destroy(_clipToDestroyAfterFade); _clipToDestroyAfterFade = null; }
-
+            DestroyPendingClipAndAudio();
             _crossFadeCoroutine = null;
         }
 
-        // FIX (Bug 3 + Bug 1): TrackEndWatcher now receives the transitionId it
-        // was spawned under. It exits immediately if a newer transition has taken
-        // over. It also checks _scheduleHandledTransition before firing its
-        // safety-net PlayFromCache, so ScheduleNextCacheLoad and TrackEndWatcher
-        // can never both call PlayFromCache for the same track end.
-        //
-        // FIX (Bug 2): The PlayOnce return context is now resolved here, at the
-        // moment the track actually ends, rather than at the moment the context
-        // was requested. This means the stack snapshot is taken as late as
-        // possible, eliminating the window where ContextScanLoop could mutate
-        // _contextStack between the snapshot and the return.
+        // ── Track-end watcher ─────────────────────────────────────────────────
         private IEnumerator TrackEndWatcher(string contextName, AudioSource watchTarget, int transitionId)
         {
             float startTime          = Time.realtimeSinceStartup;
             float minimumPlaySeconds = 2f;
 
             yield return new WaitForSeconds(1f);
-
-            // FIX (Bug 1): Exit if a newer transition took over during the initial wait.
-            if (transitionId != _transitionId)
-            {
-                _trackEndCoroutine = null;
-                yield break;
-            }
+            if (transitionId != _transitionId) { _trackEndCoroutine = null; yield break; }
 
             float notPlayingDuration = 0f;
             while (true)
             {
                 yield return new WaitForSeconds(TrackEndPollInterval);
-
-                // FIX (Bug 1): A newer transition means we should not act.
                 if (transitionId != _transitionId)
                 {
                     Log.Out($"[CMM] TrackEndWatcher: transition superseded for {contextName}, exiting.");
                     _trackEndCoroutine = null;
                     yield break;
                 }
-
                 if (currentContext.Context != contextName)
                 {
                     Log.Out($"[CMM] TrackEndWatcher: context changed mid-watch for {contextName}, bailing.");
                     _trackEndCoroutine = null;
                     yield break;
                 }
-
                 if (watchTarget.isPlaying) { notPlayingDuration = 0f; continue; }
                 if (Time.realtimeSinceStartup - startTime < minimumPlaySeconds) continue;
-
                 notPlayingDuration += TrackEndPollInterval;
                 if (notPlayingDuration >= 0.5f) break;
             }
@@ -932,26 +1181,20 @@ public static class ContextResolver
                 {
                     Log.Out($"[CMM] PlayOnce {contextName} finished but player is dead — fading to silence.");
                     _pendingContext = "None";
-                    currentContext = GetContext("None");
+                    currentContext  = GetContext("None");
                     FadeToSilence();
                     yield break;
                 }
-                // FIX (Bug 2): Resolve the return context now (late), not when the
-                // PlayOnce was first requested. The stack reflects where the player
-                // actually is right now, not where they were when the stinger fired.
                 string returnTo = _contextStack
-                     .Where(c => c.ContextName != contextName)
-                     .Select(c => ResolvePlayableContext(c.ContextName))
-                     .FirstOrDefault(c => c != null) ?? "Ambient";
+                    .Where(c => c.ContextName != contextName)
+                    .Select(c => ResolvePlayableContext(c.ContextName))
+                    .FirstOrDefault(c => c != null) ?? "Ambient";
                 _playOnceReturnContext = null;
                 Log.Out($"[CMM] PlayOnce finished, returning to: {returnTo}");
                 SendContextUpdate(returnTo, 0);
                 yield break;
             }
 
-            // FIX (Bug 3): Only fire the safety net if ScheduleNextCacheLoad did
-            // not already handle this transition. If it did, the flag is set and
-            // we exit cleanly without double-firing PlayFromCache.
             if (_scheduleHandledTransition)
             {
                 Log.Out($"[CMM] TrackEndWatcher: ScheduleNextCacheLoad already handled transition for {contextName}, skipping safety net.");
@@ -967,26 +1210,27 @@ public static class ContextResolver
                 cache.lastLeftTime   = -1f;
 
                 if (cache.cachedClip != null) { Destroy(cache.cachedClip); cache.cachedClip = null; }
-                yield return StartCoroutine(PreloadContext(contextName));
 
+                // NAudio: also free the PCM buffer in on-demand mode
+                if (!CMMConfig.PreloadCacheEnabled && cache.decodedAudio != null)
+                {
+                    cache.decodedAudio.Samples = null;
+                    cache.decodedAudio = null;
+                }
+
+                yield return StartCoroutine(PreloadContext(contextName));
                 if (cache.cachedClip == null)
                 {
                     Log.Out($"[CMM] Safety net load failed for {contextName}. Giving up.");
                     yield break;
                 }
 
-                // Use current _transitionId here — we are the one driving the next transition.
                 int newId = ++_transitionId;
                 _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName, true, newId));
             }
         }
 
-
-        // FIX (Bug 3): ScheduleNextCacheLoad now accepts the transitionId it was
-        // spawned under, and exits early on any yield point if a newer transition
-        // has taken over. It sets _scheduleHandledTransition = true immediately
-        // before firing PlayFromCache so that TrackEndWatcher's safety net can
-        // detect that the transition has already been handled.
+        // ── ScheduleNextCacheLoad ─────────────────────────────────────────────
         private IEnumerator ScheduleNextCacheLoad(string contextName, float clipLength, int transitionId)
         {
             float effectiveFade  = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, clipLength * 0.5f);
@@ -995,7 +1239,6 @@ public static class ContextResolver
 
             Log.Out($"[CMM] {contextName}: clip={clipLength:F1}s fade={effectiveFade:F1}s loadIn={waitBeforeLoad:F1}s playIn={waitBeforePlay:F1}s");
 
-            // ── Phase 1: load the next clip ahead of time ────────────────────
             yield return new WaitForSeconds(waitBeforeLoad);
             if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
 
@@ -1008,35 +1251,35 @@ public static class ContextResolver
                 cache.nextClipLoading = false;
             }
 
-            // ── Phase 2: wait until it's time to start the crossfade ─────────
             float remaining = waitBeforePlay - waitBeforeLoad;
             if (remaining > 0f)
                 yield return new WaitForSeconds(remaining);
 
             if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
 
-            // ── Phase 3: promote and play with crossfade ─────────────────────
             if (cache.nextCachedClip == null)
             {
-                // Load didn't finish in time — load inline now as fallback
                 Log.Out($"[CMM] Next clip not ready in time for {contextName}, loading inline.");
-                // Don't destroy the currently-playing clip — mark it to be destroyed after the fade
                 if (cache.cachedClip != null)
                 {
                     _clipToDestroyAfterFade = cache.cachedClip;
                     cache.cachedClip = null;
+                    if (!CMMConfig.PreloadCacheEnabled) _decodedToReleaseAfterFade = cache.decodedAudio;
+                    cache.decodedAudio = null;
                 }
                 yield return StartCoroutine(PreloadContext(contextName));
             }
             else
             {
-                // Mark the currently-playing clip for destruction after the fade instead of destroying it immediately
                 if (cache.cachedClip != null)
                 {
                     _clipToDestroyAfterFade = cache.cachedClip;
+                    if (!CMMConfig.PreloadCacheEnabled) _decodedToReleaseAfterFade = cache.decodedAudio;
                 }
-                cache.cachedClip     = cache.nextCachedClip;
-                cache.nextCachedClip = null;
+                cache.cachedClip        = cache.nextCachedClip;
+                cache.decodedAudio      = cache.nextDecodedAudio;
+                cache.nextCachedClip    = null;
+                cache.nextDecodedAudio  = null;
             }
 
             cache.resumePosition = 0f;
@@ -1048,17 +1291,14 @@ public static class ContextResolver
                 yield break;
             }
 
-            // FIX (Bug 3): Signal to TrackEndWatcher that we are handling this
-            // transition so its safety net does not also fire PlayFromCache.
             _scheduleHandledTransition = true;
-
             Log.Out($"[CMM] Starting crossfade to next track in {contextName}");
             int newId = ++_transitionId;
             _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName, true, newId));
             _nextCacheCoroutine   = null;
         }
 
-        // Picks the next file for a context and loads it into nextCachedClip.
+        // ── LoadNextClip ──────────────────────────────────────────────────────
         private IEnumerator LoadNextClip(string contextName)
         {
             ContextCache cache    = cacheMap[contextName];
@@ -1067,109 +1307,176 @@ public static class ContextResolver
 
             if (filePath == null) { Log.Out($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
 
-            AudioType audioType = CheckType(filePath);
-            if (audioType == AudioType.UNKNOWN) yield break;
-
-            using (var request = UnityWebRequestMultimedia.GetAudioClip(
-                       "file:///" + filePath.Replace("\\", "/"), audioType))
+            if (CMMConfig.UseNAudioDecoder)
             {
-                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = CMMConfig.StreamingEnabled;
-                yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success)
-                { Log.Error($"[CMM] LoadNextClip failed for {contextName}: {request.error}"); yield break; }
+                DecodedAudio decoded = null;
+                yield return StartCoroutine(DecodeAsync(filePath, d => decoded = d));
+
+                if (decoded == null)
+                {
+                    Log.Error($"[CMM] LoadNextClip NAudio decode failed for {contextName}: {Path.GetFileName(filePath)}");
+                    yield break;
+                }
+                AudioClip clip = NAudioDecoder.CreateStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath));
+                if (clip == null) yield break;
 
                 if (cache.nextCachedClip != null) Destroy(cache.nextCachedClip);
-                cache.nextCachedClip = DownloadHandlerAudioClip.GetContent(request);
-                cache.lastPlayedFile = filePath;
+                if (!CMMConfig.PreloadCacheEnabled && cache.nextDecodedAudio != null)
+                    cache.nextDecodedAudio.Samples = null;
+
+                cache.nextDecodedAudio = decoded;
+                cache.nextCachedClip   = clip;
+                cache.lastPlayedFile   = filePath;
                 Log.Out($"[CMM] Next clip ready for {contextName}: {Path.GetFileName(filePath)}");
+            }
+            else
+            {
+                // Unity fallback
+                AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
+                if (audioType == AudioType.UNKNOWN) yield break;
+
+                using (var request = UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(
+                           "file:///" + filePath.Replace("\\", "/"), audioType))
+                {
+                    ((UnityEngine.Networking.DownloadHandlerAudioClip)request.downloadHandler).streamAudio = CMMConfig.UnityStreamingEnabled;
+                    yield return request.SendWebRequest();
+                    if (request.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
+                    { Log.Error($"[CMM] LoadNextClip Unity failed for {contextName}: {request.error}"); yield break; }
+
+                    if (cache.nextCachedClip != null) Destroy(cache.nextCachedClip);
+                    cache.nextCachedClip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
+                    cache.lastPlayedFile = filePath;
+                    Log.Out($"[CMM] Next clip ready (Unity) for {contextName}: {Path.GetFileName(filePath)}");
+                }
             }
         }
 
-        // Selects the next file from the context's folder according to
-        // GlobalTrackOrder (Random, RandomNoRepeat, Sequential).
+        // ── PickNextFile ──────────────────────────────────────────────────────
         private static string PickNextFile(string contextName, string avoidFile)
         {
             Contexts ctx = GetContext(contextName);
             if (ctx == null) return null;
 
-            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
-            if (!Directory.Exists(dir)) return null;
+            ContextCache cache = cacheMap[contextName];
 
-            string[] files = Directory.GetFiles(dir)
-                .Where(f => CheckType(f) != AudioType.UNKNOWN
-                         && !_invalidFiles.Contains(f))
-                .ToArray();
+            // Use cached snapshot if available, otherwise build it
+            string[] files = cache.directorySnapshot;
+            if (files == null)
+            {
+                string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+                if (!Directory.Exists(dir)) return null;
+                files = Directory.GetFiles(dir)
+                    .Where(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f))
+                    .ToArray();
+                cache.directorySnapshot = files;
+            }
+            else
+            {
+                // Filter out any newly invalidated files without hitting disk
+                files = files.Where(f => !_invalidFiles.Contains(f)).ToArray();
+            }
 
             if (files.Length == 0) return null;
-            cacheMap[contextName].directorySnapshot = files;
 
             switch (GlobalTrackOrder)
             {
                 case TrackOrderMode.Sequential:
-                {
-                    ContextCache cache = cacheMap[contextName];
-                    if (cache.sequentialIndex >= files.Length) cache.sequentialIndex = 0;
-                    string pick = files[cache.sequentialIndex];
-                    cache.sequentialIndex = (cache.sequentialIndex + 1) % files.Length;
-                    return pick;
-                }
+                    {
+                        if (cache.sequentialIndex >= files.Length) cache.sequentialIndex = 0;
+                        string pick = files[cache.sequentialIndex];
+                        cache.sequentialIndex = (cache.sequentialIndex + 1) % files.Length;
+                        return pick;
+                    }
                 case TrackOrderMode.RandomNoRepeat:
-                {
-                    if (files.Length == 1) return files[0];
-                    string[] candidates = avoidFile != null
-                        ? files.Where(f => f != avoidFile).ToArray()
-                        : files;
-                    if (candidates.Length == 0) candidates = files;
-                    return candidates[UnityEngine.Random.Range(0, candidates.Length)];
-                }
+                    {
+                        if (files.Length == 1) return files[0];
+                        string[] candidates = avoidFile != null
+                            ? files.Where(f => f != avoidFile).ToArray()
+                            : files;
+                        if (candidates.Length == 0) candidates = files;
+                        return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+                    }
                 default:
                     return files[UnityEngine.Random.Range(0, files.Length)];
             }
         }
 
-        // Applies the current music volume setting to the active channel.
-        // Called when the player changes volume in settings.
-        public static void UpdateVolume()
-        {
-            if (ActiveChannel == null) return;
-            ActiveChannel.volume = GamePrefs.GetFloat(
-                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-        }
-
-        // Returns true if the context folder contains at least one supported audio file.
+        // ── File presence check ───────────────────────────────────────────────
         private static bool ContextHasFiles(string contextName)
         {
-            Contexts ctx = GetContext(contextName);
-            if (ctx == null || string.IsNullOrEmpty(ctx.Path)) return false;
-            string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
-            if (!Directory.Exists(dir)) return false;
-            return Directory.GetFiles(dir)
-                .Any(f => CheckType(f) != AudioType.UNKNOWN
-                       && !_invalidFiles.Contains(f));
+            if (_contextsWithFilesDirty)
+            {
+                _contextsWithFiles.Clear();
+                foreach (var ctx in contexts.Values)
+                {
+                    if (string.IsNullOrEmpty(ctx.Path)) continue;
+                    string d = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+                    if (!Directory.Exists(d)) continue;
+                    if (Directory.GetFiles(d).Any(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
+                        _contextsWithFiles.Add(ctx.Context);
+                }
+                _contextsWithFilesDirty = false;
+            }
+            return _contextsWithFiles.Contains(contextName);
         }
 
-        // Returns the AudioType for a file based on its extension.
-        public static AudioType CheckType(string inputFile)
+        // ── Memory summary ────────────────────────────────────────────────────
+        public static long GetCacheMemoryBytes()
         {
-            switch (Path.GetExtension(inputFile).ToLower())
+            long total = 0;
+            foreach (var cache in cacheMap.Values)
             {
-                case ".mp3": return AudioType.MPEG;
-                case ".ogg": return AudioType.OGGVORBIS;
-                case ".wav": return AudioType.WAV;
-                default:     return AudioType.UNKNOWN;
+                if (cache.decodedAudio?.Samples != null)
+                    total += (long)cache.decodedAudio.Samples.Length * 4;
+                if (cache.nextDecodedAudio?.Samples != null)
+                    total += (long)cache.nextDecodedAudio.Samples.Length * 4;
+                // Unity-path clips (fallback)
+                if (cache.cachedClip != null && cache.decodedAudio == null)
+                    total += (long)cache.cachedClip.samples * cache.cachedClip.channels * 4;
+                if (cache.nextCachedClip != null && cache.nextDecodedAudio == null)
+                    total += (long)cache.nextCachedClip.samples * cache.nextCachedClip.channels * 4;
             }
+            return total;
+        }
+
+        public static string GetCacheMemorySummary(bool includePerContext = true)
+        {
+            long totalBytes = 0;
+            var lines = new System.Text.StringBuilder();
+            foreach (var kv in cacheMap)
+            {
+                long cur  = kv.Value.decodedAudio?.Samples != null ? (long)kv.Value.decodedAudio.Samples.Length * 4 : 0;
+                long next = kv.Value.nextDecodedAudio?.Samples != null ? (long)kv.Value.nextDecodedAudio.Samples.Length * 4 : 0;
+                // Unity-path fallback
+                if (cur == 0 && kv.Value.cachedClip != null)
+                    cur = (long)kv.Value.cachedClip.samples * kv.Value.cachedClip.channels * 4;
+                if (next == 0 && kv.Value.nextCachedClip != null)
+                    next = (long)kv.Value.nextCachedClip.samples * kv.Value.nextCachedClip.channels * 4;
+                if (cur + next == 0) continue;
+                totalBytes += cur + next;
+                if (includePerContext)
+                    lines.AppendLine($"  {kv.Key}: {FormatBytes(cur)} current" +
+                                     (next > 0 ? $" + {FormatBytes(next)} next" : ""));
+            }
+            if (includePerContext) lines.Append($"  TOTAL: {FormatBytes(totalBytes)}");
+            else                   lines.Append(FormatBytes(totalBytes));
+            return lines.ToString();
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes >= 1024 * 1024) return $"{bytes / (1024f * 1024f):F1} MB";
+            if (bytes >= 1024)        return $"{bytes / 1024f:F1} KB";
+            return $"{bytes} B";
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECTION 6 — COORDINATOR
-    // Owns the coroutine handles, scan loops, and the central
-    // SendContextUpdate decision. Calls into the Stack and AudioPlayer.
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 7 — COORDINATOR
+    // ─────────────────────────────────────────────────────────────────────────
 
     public partial class ContextMusicManager
     {
-        // ── Coordinator state ─────────────────────────────────────────────────
         public static string MusicDirectory = "/Music";
         public static bool   inGame         = false;
         public static bool   inInventory    = false;
@@ -1182,27 +1489,24 @@ public static class ContextResolver
         public static  CoRoutine           CMM_CoRoutines;
         public static  ContextMusicManager Instance;
 
-        // Coroutine handles — all owned here so TriggerMusic can cancel them cleanly.
         private static Coroutine _activeMusicCoroutine = null;
         private static Coroutine _nextCacheCoroutine   = null;
         private static Coroutine _trackEndCoroutine    = null;
         private static Coroutine _crossFadeCoroutine   = null;
         private static Coroutine _cooldownCoroutine    = null;
 
-        // ── Timing configuration ──────────────────────────────────────────────
-        public static TrackOrderMode GlobalTrackOrder           = TrackOrderMode.RandomNoRepeat;
-        public static float          ContextScanCooldown        = 0.5f;
-        public static float          StalenessCheckInterval     = 5f;
-        public static float          NextCacheWindow            = 5f;
-        public static float          TrackEndPollInterval       = 0.25f;
-        public static float          CrossFadeDuration          = 2f;
+        public static TrackOrderMode GlobalTrackOrder            = TrackOrderMode.RandomNoRepeat;
+        public static float          ContextScanCooldown         = 0.5f;
+        public static float          StalenessCheckInterval      = 5f;
+        public static float          NextCacheWindow             = 5f;
+        public static float          TrackEndPollInterval        = 0.25f;
+        public static float          CrossFadeDuration           = 2f;
         public static float          TrackTransitionFadeDuration = 6f;
         public static float          TrackTransitionPreloadLead  = 10f;
+        private static readonly HashSet<string> _contextsWithFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static bool _contextsWithFilesDirty = true;
 
-        // ── Initialisation ────────────────────────────────────────────────────
-
-        // Called once by the mod entry point. Sets up audio sources, registers
-        // all contexts, and starts the background coroutines.
+        // ── Init ──────────────────────────────────────────────────────────────
         public static void Init(string modPath)
         {
             ModPath          = modPath;
@@ -1218,9 +1522,9 @@ public static class ContextResolver
             _pendingContext = "None";
             _transitionId   = 0;
 
-            CMM_Primary_Channel         = CMM_Audio_Object.AddComponent<AudioSource>();
-            CMM_Primary_Channel.volume  = 0f;
-            CMM_Primary_Channel.loop    = false;
+            CMM_Primary_Channel        = CMM_Audio_Object.AddComponent<AudioSource>();
+            CMM_Primary_Channel.volume = 0f;
+            CMM_Primary_Channel.loop   = false;
 
             CMM_Secondary_Channel        = CMM_Audio_Object.AddComponent<AudioSource>();
             CMM_Secondary_Channel.volume = 0f;
@@ -1232,7 +1536,8 @@ public static class ContextResolver
             CMM_CoRoutines.StartCoroutine(Instance.StalenessCheckLoop());
             CMM_CoRoutines.StartCoroutine(Instance.FileWatchLoop());
             CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
-            Log.Out("[CMM] Initialized!");
+
+            Log.Out($"[CMM] Initialized! Decoder: {(CMMConfig.UseNAudioDecoder ? "NAudio" : "Unity")} | Preload: {CMMConfig.PreloadCacheEnabled}");
         }
 
         public static void OnEnterGame()
@@ -1241,31 +1546,16 @@ public static class ContextResolver
             CMM_CoRoutines.StartCoroutine(Instance.PreloadAllContexts());
         }
 
-        // ── Central decision point ────────────────────────────────────────────
-
-        // FIX (Bug 1 + Bug 2): SendContextUpdate increments _transitionId as its
-        // first meaningful act after accepting a transition. All coroutines
-        // spawned from here or from TriggerMusic capture the new ID. The
-        // _pendingContext string is still used as a cheap early-exit guard, but
-        // is no longer the sole protection against re-entrant calls.
-        //
-        // FIX (Bug 2): The PlayOnce return context snapshot has been removed from
-        // here entirely. It is now resolved inside TrackEndWatcher at the moment
-        // the clip actually ends, where the stack reflects the player's real
-        // current situation rather than where they were when the stinger fired.
+        // ── SendContextUpdate ─────────────────────────────────────────────────
         public static void SendContextUpdate(string contextIn, int bypassPriority = -1)
         {
-            Log.Error("Player is " + (playerIsDead ? "dead" : "alive") + ".");
+            //Log.Error("Player is " + (playerIsDead ? "dead" : "alive") + ".");
             Contexts incoming = GetContext(contextIn);
             if (incoming == null) return;
             if (_pendingContext == contextIn) return;
 
-            bool menuOverride = !inGame;
-            int comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
-
-            // Allow a reload of the currently-playing context (for example when files change)
-            // even if the incoming priority isn't strictly higher. This fixes the case where
-            // the same context was being re-requested but was rejected by the priority check.
+            bool menuOverride    = !inGame;
+            int  comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
             bool isReloadOfCurrent = currentContext != null && contextIn == currentContext.Context;
             bool priorityOk        = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
 
@@ -1275,46 +1565,41 @@ public static class ContextResolver
                 return;
             }
 
-
-
             Log.Out($"[CMM] Context accepted: {currentContext?.Context} -> {contextIn}");
             _pendingContext = contextIn;
 
-            // Save resume position for the context we're leaving.
             if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
-                ContextCache leavingCache         = cacheMap[currentContext.Context];
-                leavingCache.resumePosition       = ActiveChannel.time;
-                leavingCache.lastLeftTime         = Time.realtimeSinceStartup;
+                ContextCache leavingCache   = cacheMap[currentContext.Context];
+                leavingCache.resumePosition = ActiveChannel.time;
+                leavingCache.lastLeftTime   = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
                 if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
                 {
-                    _clipToDestroyAfterFade = leavingCache.cachedClip;
-                    leavingCache.cachedClip = null;
+                    _clipToDestroyAfterFade       = leavingCache.cachedClip;
+                    _decodedToReleaseAfterFade     = leavingCache.decodedAudio;
+                    leavingCache.cachedClip        = null;
+                    leavingCache.decodedAudio      = null;
                 }
             }
 
-            // If something interrupts a PlayOnce, discard any stale return snapshot.
             if (currentContext != null && currentContext.PlayOnce && !incoming.PlayOnce)
                 _playOnceReturnContext = null;
 
-            // Find the best playable context in the fallback chain.
             string contextToPlay = ResolvePlayableContext(contextIn);
-
             if (contextToPlay == null)
             {
                 Log.Out($"[CMM] No playable context in chain for {contextIn} — fading to silence.");
                 _pendingContext = "None";
                 currentContext  = GetContext("None");
-                // FIX (Bug 1): Increment here too so in-flight coroutines know to stop.
                 ++_transitionId;
                 FadeToSilence();
                 return;
             }
 
-            Contexts candidate = GetContext(contextToPlay);
-            bool bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
+            Contexts candidate    = GetContext(contextToPlay);
+            bool     bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
 
             if (lastContextOnCoolDown && !bypassCooldown && bypassPriority < 0)
             {
@@ -1324,6 +1609,7 @@ public static class ContextResolver
                 {
                     ContextCache blocked = cacheMap[currentContext.Context];
                     if (blocked.cachedClip != null) { Destroy(blocked.cachedClip); blocked.cachedClip = null; }
+                    if (blocked.decodedAudio != null) { blocked.decodedAudio.Samples = null; blocked.decodedAudio = null; }
                 }
                 return;
             }
@@ -1332,9 +1618,6 @@ public static class ContextResolver
             TriggerMusic(contextToPlay);
         }
 
-        // FIX (Bug 1): TriggerMusic increments _transitionId and passes the new
-        // value into PlayFromCache. This is the single authoritative place where
-        // the counter advances for a user-initiated or scan-initiated transition.
         public static void TriggerMusic(string contextName)
         {
             Log.Out($"[CMM] TriggerMusic: {contextName}");
@@ -1343,17 +1626,12 @@ public static class ContextResolver
             if (_trackEndCoroutine    != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);    _trackEndCoroutine    = null; }
             if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
 
-            // Advancing the ID here means any coroutine still running from the
-            // previous transition will see the mismatch and exit cleanly.
             int newId = ++_transitionId;
             _scheduleHandledTransition = false;
             _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(Instance.PlayFromCache(contextName, false, newId));
         }
 
         // ── Scan loops ────────────────────────────────────────────────────────
-
-        // Runs every 0.5s. Resolves the current world state into a context list,
-        // updates the stack, and triggers a context change if the top has changed.
         private IEnumerator ContextScanLoop()
         {
             while (true)
@@ -1370,7 +1648,6 @@ public static class ContextResolver
                         Contexts ctx = GetContext(ctxName);
                         if (ctx == null) continue;
                         if (ResolvePlayableContext(ctxName) == null) continue;
-
                         _contextStack.Add(new ActiveContext
                         {
                             ContextName = ctxName,
@@ -1392,15 +1669,12 @@ public static class ContextResolver
                         Contexts top = GetContext(topContext);
                         if (top == null || top.Priority <= currentContext.Priority) continue;
                     }
-                    // FIX (Bug 1): Clear _pendingContext before calling SendContextUpdate
-                    // so the early-rejection guard does not suppress a legitimate scan update.
                     _pendingContext = null;
                     SendContextUpdate(topContext, 0);
                 }
             }
         }
 
-        // Runs every 30s. Logs cache state and refreshes stale preloaded clips.
         private IEnumerator StalenessCheckLoop()
         {
             while (true)
@@ -1408,9 +1682,9 @@ public static class ContextResolver
                 yield return new WaitForSeconds(StalenessCheckInterval);
                 if (!inGame) continue;
 
-                //Log.Out($"[CMM] Cache state: {string.Join(", ", cacheMap.Select(kv => $"{kv.Key}={(kv.Value.cachedClip != null ? $"{kv.Value.cachedClip.length:F0}s" : "null")}(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"))}");
                 Log.Out($"[CMM] Cache state: {string.Join(", ", cacheMap.Where(kv => kv.Value.cachedClip != null).Select(kv => $"{kv.Key}={kv.Value.cachedClip.length:F0}s(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"))}");
                 Log.Out($"[CMM] Cache memory:\n{GetCacheMemorySummary(false)}");
+
                 float now = Time.realtimeSinceStartup;
                 foreach (var ctx in contexts.Values)
                 {
@@ -1429,8 +1703,6 @@ public static class ContextResolver
                         string avoid         = cache.lastPlayedFile;
                         cache.lastPlayedFile = null;
 
-                        // Only re-cache now if preload is enabled — otherwise the fresh
-                        // pick happens on-demand when the context next activates.
                         if (CMMConfig.PreloadCacheEnabled)
                             yield return StartCoroutine(PreloadContext(ctx.Context, avoidFile: avoid));
                     }
@@ -1438,8 +1710,6 @@ public static class ContextResolver
             }
         }
 
-        // Runs every 2s. Detects files added or removed from the current context's
-        // folder and triggers a context re-evaluation if something changed.
         private IEnumerator FileWatchLoop()
         {
             while (true)
@@ -1454,21 +1724,32 @@ public static class ContextResolver
                 if (ctx == null) continue;
 
                 string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
-                string[] currentFiles = Directory.Exists(dir)
-                    ? Directory.GetFiles(dir).Where(f => CheckType(f) != AudioType.UNKNOWN).ToArray()
-                    : new string[0];
+
+                // ── Scan on background thread ─────────────────────────────────────
+                string[] currentFiles = null;
+                bool scanDone = false;
                 string[] previousFiles = cache.directorySnapshot ?? new string[0];
 
-                Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    currentFiles = Directory.Exists(dir)
+                        ? Directory.GetFiles(dir).Where(f => NAudioDecoder.IsSupported(f)).ToArray()
+                        : new string[0];
+                    scanDone = true;
+                });
+                while (!scanDone) yield return null;
+
+                Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p
+                    : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
                 var currentNorm = currentFiles.Select(norm).ToArray();
                 var previousNorm = previousFiles.Select(norm).ToArray();
 
                 bool changed = currentNorm.Length != previousNorm.Length ||
                                currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).Any() ||
                                previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).Any();
-
                 if (!changed) continue;
-                // ── Evict removed files from validation sets ─────────────────────────
+
                 var removedFiles = previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).ToArray();
                 foreach (string removed in removedFiles)
                 {
@@ -1476,7 +1757,6 @@ public static class ContextResolver
                     _invalidFiles.Remove(removed);
                 }
 
-                // ── Validate any files that weren't in the previous snapshot ─────────
                 var newFiles = currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).ToArray();
                 if (newFiles.Length > 0)
                 {
@@ -1491,8 +1771,6 @@ public static class ContextResolver
                             Log.Warning($"[CMM] New file failed validation and will be ignored: {Path.GetFileName(newFile)}");
                         }
                     }
-
-                    // Recompute after blacklisting so the rest of the loop works on clean data
                     currentFiles = currentFiles.Where(f => !_invalidFiles.Contains(norm(f))).ToArray();
                     currentNorm = currentFiles.Select(norm).ToArray();
                 }
@@ -1500,7 +1778,9 @@ public static class ContextResolver
                 Log.Out($"[CMM] File change detected in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
                 cache.directorySnapshot = currentFiles;
 
-                // ── Detect whether the currently-playing file was removed ────────────
+                // Invalidate both caches on any file change
+                _contextsWithFilesDirty = true;
+
                 bool lastPlayedMissing = false;
                 if (!string.IsNullOrEmpty(cache.lastPlayedFile))
                 {
@@ -1512,13 +1792,14 @@ public static class ContextResolver
                         if (cache.cachedClip != null)
                         {
                             _clipToDestroyAfterFade = cache.cachedClip;
+                            _decodedToReleaseAfterFade = cache.decodedAudio;
                             cache.cachedClip = null;
+                            cache.decodedAudio = null;
                         }
                         lastPlayedMissing = true;
                     }
                 }
 
-                // ── React to the change ──────────────────────────────────────────────
                 if (currentFiles.Length == 0)
                 {
                     Log.Out($"[CMM] {contextName} folder emptied, re-evaluating context.");
@@ -1529,10 +1810,8 @@ public static class ContextResolver
                 else if (lastPlayedMissing)
                 {
                     _pendingContext = null;
-
                     if (CMMConfig.PreloadCacheEnabled)
                         yield return StartCoroutine(PreloadContext(ctx.Context));
-
                     SendContextUpdate(ctx.Context, currentContext.Priority + 1);
                 }
                 else
@@ -1547,9 +1826,7 @@ public static class ContextResolver
             }
         }
 
-        // ── Preloading ────────────────────────────────────────────────────────
-
-        // Preloads all contexts sequentially on game entry (only when PreloadCacheEnabled).
+        // ── Preload ───────────────────────────────────────────────────────────
         private IEnumerator PreloadAllContexts()
         {
             if (!CMMConfig.PreloadCacheEnabled) { Log.Out("[CMM] Preload cache disabled — skipping."); yield break; }
@@ -1562,8 +1839,7 @@ public static class ContextResolver
             Log.Out("[CMM] Preload complete.");
         }
 
-        // Loads a single clip for a context into cachedClip.
-        // Falls back one level if the context's own folder is empty.
+        // Loads one clip for a context. Uses NAudio or Unity path based on config.
         private IEnumerator PreloadContext(string contextName, string avoidFile = null)
         {
             ContextCache cache = cacheMap[contextName];
@@ -1582,19 +1858,15 @@ public static class ContextResolver
 
             if (filePath == null)
             {
-                Contexts ctx = GetContext(contextName);
-                string fallbackName = ctx?.Fallback ?? "None";
-                if (fallbackName != "None" && fallbackName != contextName)
-                {
-                    filePath = PickNextFile(fallbackName, avoidFile: null);
-                    if (filePath == null)
-                    { Log.Out($"[CMM] Preload: no files for {contextName} or fallback {fallbackName}"); yield break; }
-                }
-                else
+                Contexts ctx       = GetContext(contextName);
+                string   fallback  = ctx?.Fallback ?? "None";
+                if (fallback != "None" && fallback != contextName)
+                    filePath = PickNextFile(fallback, avoidFile: null);
+                if (filePath == null)
                 { Log.Out($"[CMM] Preload: no files for {contextName}"); yield break; }
             }
 
-            // ── Validate before loading ───────────────────────────────────────────
+            // Validate
             if (!_validatedFiles.Contains(filePath))
             {
                 bool isValid = false;
@@ -1606,45 +1878,67 @@ public static class ContextResolver
                 else
                 {
                     _invalidFiles.Add(filePath);
-                    Log.Warning($"[CMM] Preload: {Path.GetFileName(filePath)} failed validation, retrying with next file.");
-
-                    // Try again — PickNextFile will now exclude the blacklisted file
+                    Log.Warning($"[CMM] Preload: {Path.GetFileName(filePath)} failed validation, retrying.");
                     filePath = PickNextFile(contextName, avoidFile: filePath);
-                    if (filePath == null)
-                    { Log.Out($"[CMM] Preload: no valid files remaining for {contextName}"); yield break; }
-
-                    // Validate the replacement too
+                    if (filePath == null) { Log.Out($"[CMM] Preload: no valid files for {contextName}"); yield break; }
                     yield return StartCoroutine(ValidateFile(filePath, result => isValid = result));
-                    if (!isValid)
-                    {
-                        _invalidFiles.Add(filePath);
-                        Log.Warning($"[CMM] Preload: replacement file also invalid for {contextName}, giving up.");
-                        yield break;
-                    }
+                    if (!isValid) { _invalidFiles.Add(filePath); Log.Warning($"[CMM] Preload: replacement invalid for {contextName}."); yield break; }
                     _validatedFiles.Add(filePath);
                 }
             }
 
-            // ── Load ──────────────────────────────────────────────────────────────
-            AudioType audioType = CheckType(filePath);
-            if (audioType == AudioType.UNKNOWN) yield break;
-
-            using (var request = UnityWebRequestMultimedia.GetAudioClip(
-                       "file:///" + filePath.Replace("\\", "/"), audioType))
+            // ── NAudio path ───────────────────────────────────────────────────
+            if (CMMConfig.UseNAudioDecoder)
             {
-                ((DownloadHandlerAudioClip)request.downloadHandler).streamAudio = CMMConfig.StreamingEnabled;
-                yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success)
-                { Log.Error($"[CMM] Preload failed for {contextName}: {request.error}"); yield break; }
+                DecodedAudio decoded = null;
+                yield return StartCoroutine(DecodeAsync(filePath, d => decoded = d));
 
+                if (decoded == null)
+                {
+                    Log.Error($"[CMM] Preload NAudio decode failed for {contextName}: {Path.GetFileName(filePath)}");
+                    _invalidFiles.Add(filePath);
+                    yield break;
+                }
+
+                AudioClip clip = NAudioDecoder.CreateStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath));
+                if (clip == null)
+                {
+                    Log.Error($"[CMM] Preload: CreateStreamingClip returned null for {contextName}");
+                    yield break;
+                }
+
+                // Destroy previous clip/buffer
                 if (cache.cachedClip != null) Destroy(cache.cachedClip);
-                cache.cachedClip = DownloadHandlerAudioClip.GetContent(request);
+                if (!CMMConfig.PreloadCacheEnabled && cache.decodedAudio != null)
+                    cache.decodedAudio.Samples = null;
+
+                cache.cachedClip    = clip;
+                cache.decodedAudio  = decoded;
                 cache.lastPlayedFile = filePath;
-                Log.Out($"[CMM] Preloaded: {contextName}");
+                Log.Out($"[CMM] Preloaded (NAudio): {contextName} — {Path.GetFileName(filePath)} ({decoded.LengthSeconds:F1}s)");
+            }
+            else
+            {
+                // ── Unity fallback path ───────────────────────────────────────
+                AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
+                if (audioType == AudioType.UNKNOWN) yield break;
+
+                using (var request = UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(
+                           "file:///" + filePath.Replace("\\", "/"), audioType))
+                {
+                    ((UnityEngine.Networking.DownloadHandlerAudioClip)request.downloadHandler).streamAudio = CMMConfig.UnityStreamingEnabled;
+                    yield return request.SendWebRequest();
+                    if (request.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
+                    { Log.Error($"[CMM] Preload Unity failed for {contextName}: {request.error}"); yield break; }
+
+                    if (cache.cachedClip != null) Destroy(cache.cachedClip);
+                    cache.cachedClip    = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
+                    cache.lastPlayedFile = filePath;
+                    Log.Out($"[CMM] Preloaded (Unity): {contextName}");
+                }
             }
         }
 
-        // Prevents context switches during the cooldown window after a transition.
         private IEnumerator ContextCooldownTimer(int seconds)
         {
             lastContextOnCoolDown = true;
@@ -1656,9 +1950,9 @@ public static class ContextResolver
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECTION 7 — MUSIC STATES
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 8 — MUSIC STATES
+    // ─────────────────────────────────────────────────────────────────────────
 
     public static class MusicStates
     {
@@ -1670,12 +1964,10 @@ public static class ContextResolver
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // SECTION 8 — HARMONY PATCHES
-    // Intercepts game events and translates them into CMM context changes.
-    // ═════════════════════════════════════════════════════════════════════════
+    // ─────────────────────────────────────────────────────────────────────────
+    // SECTION 9 — HARMONY PATCHES  (unchanged from original)
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // Suppresses the game's own dynamic music system and detects game entry.
     [HarmonyPatch(typeof(DynamicMusic.Conductor), "Update")]
     public class InGameMusicPatch
     {
@@ -1689,7 +1981,6 @@ public static class ContextResolver
             {
                 Log.Out("[CMM] Entering game world");
                 ContextMusicManager.inGame = true;
-                // Fade out any existing music coming from the game's dynamic system
                 ContextMusicManager.FadeToSilence();
                 ContextMusicManager.OnEnterGame();
             }
@@ -1697,7 +1988,6 @@ public static class ContextResolver
         }
     }
 
-    // Intercepts the main menu music and routes it through CMM.
     [HarmonyPatch(typeof(BackgroundMusicMono), "Play")]
     public class MenuMusicPatch
     {
@@ -1709,7 +1999,6 @@ public static class ContextResolver
         }
     }
 
-    // Cleans up CMM state when the player exits to the main menu.
     [HarmonyPatch(typeof(GameManager), "SaveAndCleanupWorld")]
     public class Patch_GameEnded
     {
@@ -1723,30 +2012,6 @@ public static class ContextResolver
             ContextMusicManager.SendContextUpdate("Menu");
         }
     }
-
-    // FIX (Bug 4 — Harmony signature): Postfix must return void. The original
-    // returned bool, which Harmony silently ignores, meaning the backpack context
-    // push/pop never fired. Renamed PostFix -> Postfix (correct casing) and
-    // removed the return value.
-    //[HarmonyPatch(typeof(XUiC_BackpackWindow), "OnOpen")]
-    //public class PushBackpackOpen
-    //{
-    //    static void Postfix()
-    //    {
-    //        Log.Out("[CMM] Backpack opened");
-    //        ContextMusicManager.PushContext("Inventory");
-    //    }
-    //}
-
-    //[HarmonyPatch(typeof(XUiC_BackpackWindow), "OnClose")]
-    //public class PushBackpackClose
-    //{
-    //    static void Postfix()
-    //    {
-    //        Log.Out("[CMM] Backpack closed");
-    //        ContextMusicManager.PopContext("Inventory");
-    //    }
-    //}
 
     [HarmonyPatch(typeof(EntityPlayerLocal), "AfterPlayerRespawn")]
     public class PlayerRespawn
@@ -1788,7 +2053,6 @@ public static class ContextResolver
         }
     }
 
-
     [HarmonyPatch(typeof(GameManager), "Awake")]
     public class StartupLogPatch
     {
@@ -1801,17 +2065,6 @@ public static class ContextResolver
         public static void Prefix() => Log.Error("[CMM] Player spawned into world");
     }
 
-    // FIX (Bug 4 — removed Patch_SpawnStinger): The original patch targeted
-    // EntityPlayer.Awake, which fires for every entity that spawns in the world,
-    // not just the local player. This produced spurious log spam and could have
-    // interfered with context state. PlayerRespawn (AfterPlayerRespawn) is the
-    // correct and sufficient hook for the player spawn stinger.
-
-    // Routes sound group names to CMM context changes.
-    // FIX (Bug 4 — inventory routing): The backpack patches (OnOpen/OnClose) are
-    // now the sole path for inventory context changes; the open_inventory and
-    // close_inventory cases here are removed to eliminate the dead-code ambiguity.
-    // Any sound group not explicitly handled passes through to the game unchanged.
     public static class AudioStingerHandler
     {
         public static bool Handle(string soundGroupName)
@@ -1819,19 +2072,14 @@ public static class ContextResolver
             Log.Out($"[CMM Audio Spy] PlayInsidePlayerHead: {soundGroupName}");
             switch (soundGroupName)
             {
-                case "player_death_stinger":
-                    return false;
-
-                case "spawnInStinger":
-                    return false;
-
-                default:
-                    return true;
+                case "player_death_stinger": return false;
+                case "spawnInStinger":       return false;
+                default:                     return true;
             }
         }
     }
 
-[HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
+    [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
         new Type[] { typeof(string), typeof(int), typeof(float), typeof(bool), typeof(bool) })]
     public class Patch_LogPlayInsidePlayerHead
     {
