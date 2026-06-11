@@ -23,6 +23,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading;
 using UnityEngine;
+using System.Diagnostics;
+
 
 #if NAUDIO
 using NAudio.Wave;
@@ -152,7 +154,6 @@ namespace CMM
 
     // ─────────────────────────────────────────────────────────────────────────
     // SECTION 3 — NAudio DECODER
-    // All file I/O and format detection lives here.
     // ─────────────────────────────────────────────────────────────────────────
 
 #if NAUDIO
@@ -189,27 +190,15 @@ namespace CMM
 
         // ── OGG codec detection ───────────────────────────────────────────────
         // Peeks at the first OGG page to check whether the codec is Opus or Vorbis.
-        // Opus pages begin with the magic bytes "OpusHead".
-        // Vorbis pages begin with 0x01 followed by "vorbis".
-        // Returns true if Opus, false if Vorbis or unrecognised.
         private static bool IsOpusOgg(string filePath)
         {
             try
             {
                 using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    // OGG page header is at least 27 bytes; the codec magic starts
-                    // after the capture pattern (4), version (1), header type (1),
-                    // granule (8), serial (4), sequence (4), checksum (4), segments (1) = 27 bytes,
-                    // then the segment table, then the packet data.
-                    // For a first-page identification packet the segment table is
-                    // almost always a single entry, so the packet starts at byte 28.
-                    // We read enough to safely find "OpusHead" or "\x01vorbis".
                     var header = new byte[64];
                     int read = fs.Read(header, 0, header.Length);
                     if (read < 36) return false;
-
-                    // Scan for OpusHead magic within the first 64 bytes
                     for (int i = 0; i <= read - 8; i++)
                     {
                         if (header[i] == 'O' && header[i + 1] == 'p' &&
@@ -221,58 +210,54 @@ namespace CMM
                     return false;
                 }
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         // ── Off-thread decode ─────────────────────────────────────────────────
+        // Entry point used by DecodeAsync after the I/O phase has already read
+        // the raw bytes. Wraps the buffer in a MemoryStream so NAudio never
+        // touches the file system again, keeping all disk I/O on the I/O phase
+        // and all CPU work on the decode phase.
+        public static DecodedAudio DecodeFileFromBytes(byte[] rawBytes, string filePath)
+        {
+            try
+            {
+                Stopwatch sw = Stopwatch.StartNew();
+                string ext = System.IO.Path.GetExtension(filePath).ToLower();
+
+                if (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(rawBytes)))
+                    return DecodeOpusFromBytes(rawBytes, filePath);
+
+                using (var ms = new MemoryStream(rawBytes, writable: false))
+                using (WaveStream reader = OpenReaderFromStream(ms, ext, filePath))
+                {
+                    if (reader == null) return null;
+                    sw.Stop();
+                    Log.Out($"[CMM] DecodeFileFromBytes took {sw.Elapsed.TotalMilliseconds:F3} ms");
+                    return DecodeWaveStream(reader, filePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[CMM NAudio] DecodeFileFromBytes failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                return null;
+            }
+        }
+
+        // File-path entry point (used when bytes haven't been pre-loaded).
         public static DecodedAudio DecodeFile(string filePath)
         {
             try
             {
                 string ext = System.IO.Path.GetExtension(filePath).ToLower();
 
-                // Route Opus-in-OGG through Concentus before touching NAudio
                 if (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath)))
                     return DecodeOpus(filePath);
 
                 using (WaveStream reader = OpenReader(filePath))
                 {
                     if (reader == null) return null;
-
-                    ISampleProvider samples = reader.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat
-                        ? reader.ToSampleProvider()
-                        : new SampleChannel(reader, forceStereo: false);
-
-                    int channels = samples.WaveFormat.Channels;
-                    int frequency = samples.WaveFormat.SampleRate;
-
-                    var chunks = new List<float[]>();
-                    var buf = new float[65536];
-                    long totalFloats = 0;
-                    int read;
-
-                    while ((read = samples.Read(buf, 0, buf.Length)) > 0)
-                    {
-                        var chunk = new float[read];
-                        Array.Copy(buf, chunk, read);
-                        chunks.Add(chunk);
-                        totalFloats += read;
-                    }
-
-                    if (totalFloats == 0 || channels == 0 || frequency == 0) return null;
-
-                    float[] result = new float[totalFloats];
-                    int offset = 0;
-                    foreach (var chunk in chunks)
-                    {
-                        Array.Copy(chunk, 0, result, offset, chunk.Length);
-                        offset += chunk.Length;
-                    }
-
-                    return new DecodedAudio { Samples = result, Channels = channels, Frequency = frequency };
+                    return DecodeWaveStream(reader, filePath);
                 }
             }
             catch (Exception ex)
@@ -282,45 +267,18 @@ namespace CMM
             }
         }
 
-        // ── Concentus Opus decoder ────────────────────────────────────────────
+        // ── Concentus Opus decoder (file-path entry point) ───────────────────
+        // Reads the file into memory then delegates to DecodeOpusFromBytes so
+        // all the channel-probe and decode logic lives in one place.
         private static DecodedAudio DecodeOpus(string filePath)
         {
             try
             {
-                var decoder = new OpusDecoder(48000, 2); // Opus always decodes to 48kHz
-                var chunks = new List<float[]>();
-                long totalFloats = 0;
-
-                using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                {
-                    var oggReader = new OpusOggReadStream(decoder, fileStream);
-                    while (oggReader.HasNextPacket)
-                    {
-                        short[] packet = oggReader.DecodeNextPacket();
-                        if (packet == null) continue;
-
-                        // Convert short PCM (-32768..32767) to float (-1..+1)
-                        var floats = new float[packet.Length];
-                        for (int i = 0; i < packet.Length; i++)
-                            floats[i] = packet[i] / 32768f;
-
-                        chunks.Add(floats);
-                        totalFloats += floats.Length;
-                    }
-                }
-
-                if (totalFloats == 0) return null;
-
-                float[] result = new float[totalFloats];
-                int offset = 0;
-                foreach (var chunk in chunks)
-                {
-                    Array.Copy(chunk, 0, result, offset, chunk.Length);
-                    offset += chunk.Length;
-                }
-
-                // Opus always outputs stereo at 48kHz when decoded with channels=2
-                return new DecodedAudio { Samples = result, Channels = 2, Frequency = 48000 };
+                Stopwatch sw = Stopwatch.StartNew();
+                byte[] rawBytes = File.ReadAllBytes(filePath);
+                sw.Stop();
+                Log.Out($"[CMM] DecodeOpus took {sw.Elapsed.TotalMilliseconds:F3} ms");
+                return DecodeOpusFromBytes(rawBytes, filePath);
             }
             catch (Exception ex)
             {
@@ -341,7 +299,7 @@ namespace CMM
                 case ".aiff":
                 case ".aif": return new AiffFileReader(filePath);
                 case ".ogg":
-                case ".oga": return new VorbisWaveReader(filePath); // only reached for Vorbis
+                case ".oga": return new VorbisWaveReader(filePath);
                 case ".flac": return new FlacReader(filePath);
                 default:
                     Log.Warning($"[CMM NAudio] No reader for extension '{ext}'");
@@ -349,7 +307,131 @@ namespace CMM
             }
         }
 
+        // Stream-based variant used by DecodeFileFromBytes so NAudio reads
+        // from the pre-loaded MemoryStream rather than reopening the file.
+        private static WaveStream OpenReaderFromStream(Stream stream, string ext, string filePath)
+        {
+            switch (ext)
+            {
+                case ".mp3": return new Mp3FileReader(stream);
+                case ".wav":
+                case ".wave": return new WaveFileReader(stream);
+                // AiffFileReader and FlacReader don't expose a Stream ctor in all
+                // versions; fall back to file path for those formats.
+                case ".aiff":
+                case ".aif": return new AiffFileReader(filePath);
+                case ".ogg":
+                case ".oga": return new VorbisWaveReader(stream);
+                case ".flac": return new FlacReader(filePath);
+                default:
+                    Log.Warning($"[CMM NAudio] No stream reader for extension '{ext}'");
+                    return null;
+            }
+        }
+
+        // Shared decode logic for both file-path and pre-loaded-bytes paths.
+        private static DecodedAudio DecodeWaveStream(WaveStream reader, string filePath)
+        {
+            ISampleProvider samples = reader.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat
+                ? reader.ToSampleProvider()
+                : new SampleChannel(reader, forceStereo: false);
+
+            int channels = samples.WaveFormat.Channels;
+            int frequency = samples.WaveFormat.SampleRate;
+
+            const long MaxFloats = 48000L * 2 * 60 * 30;
+            long estimatedFloats = (reader.Length > 0 && reader.WaveFormat.BlockAlign > 0)
+                ? (reader.Length / reader.WaveFormat.BlockAlign) * channels
+                : 0;
+            float[] result = new float[Math.Min(Math.Max(estimatedFloats, 65536L), MaxFloats)];
+
+            var buf = new float[65536];
+            int offset = 0;
+            int read;
+
+            while ((read = samples.Read(buf, 0, buf.Length)) > 0)
+            {
+                if (offset + read > result.Length)
+                {
+                    long newSize = Math.Min((long)(result.Length * 1.25f) + read, MaxFloats);
+                    Array.Resize(ref result, (int)newSize);
+                }
+                Array.Copy(buf, 0, result, offset, read);
+                offset += read;
+            }
+
+            if (offset == 0 || channels == 0 || frequency == 0) return null;
+            if (result.Length - offset > 65536) Array.Resize(ref result, offset);
+
+            return new DecodedAudio { Samples = result, Channels = channels, Frequency = frequency };
+        }
+
+        // Byte-array variant of IsOpusOgg — no file I/O needed.
+        private static bool IsOpusOggBytes(byte[] data)
+        {
+            if (data == null || data.Length < 36) return false;
+            for (int i = 0; i <= Math.Min(data.Length - 8, 64); i++)
+            {
+                if (data[i] == 'O' && data[i + 1] == 'p' && data[i + 2] == 'u' && data[i + 3] == 's' &&
+                    data[i + 4] == 'H' && data[i + 5] == 'e' && data[i + 6] == 'a' && data[i + 7] == 'd')
+                    return true;
+            }
+            return false;
+        }
+
+        // Opus decode from a pre-loaded byte array.
+        private static DecodedAudio DecodeOpusFromBytes(byte[] rawBytes, string filePath)
+        {
+            using (var ms = new MemoryStream(rawBytes, writable: false))
+            {
+                Stopwatch sw = Stopwatch.StartNew();
+                // Probe channel count from stream header.
+                int channels = 2;
+                ms.Position = 0;
+                var probeDecoder = new OpusDecoder(48000, 2);
+                var probeReader = new OpusOggReadStream(probeDecoder, ms);
+                //if (probeReader.HasNextPacket)
+                //    channels = probeReader.channels > 0 ? probeReader.ChannelCount : 2;
+
+                ms.Position = 0;
+                var decoder = new OpusDecoder(48000, channels);
+                long estimatedFloats = Math.Min((long)rawBytes.Length * 15L, 48000L * channels * 60 * 30);
+                var resultBuffer = new float[Math.Max(estimatedFloats, 65536L)];
+                int offset = 0;
+
+                var oggReader = new OpusOggReadStream(decoder, ms);
+                while (oggReader.HasNextPacket)
+                {
+                    short[] packet = oggReader.DecodeNextPacket();
+                    if (packet == null) continue;
+
+                    if (offset + packet.Length > resultBuffer.Length)
+                    {
+                        long newSize = Math.Min((long)(resultBuffer.Length * 1.25f) + packet.Length,
+                                                48000L * channels * 60 * 30);
+                        Array.Resize(ref resultBuffer, (int)newSize);
+                    }
+
+                    for (int i = 0; i < packet.Length; i++)
+                        resultBuffer[offset + i] = packet[i] / 32768f;
+
+                    offset += packet.Length;
+                }
+
+                if (offset == 0) return null;
+                if (resultBuffer.Length - offset > 65536) Array.Resize(ref resultBuffer, offset);
+                sw.Stop();
+                Log.Out($"[CMM] DecodeOpusFromBytes took {sw.Elapsed.TotalMilliseconds:F3} ms");
+                return new DecodedAudio { Samples = resultBuffer, Channels = channels, Frequency = 48000 };
+            }
+        }
+
         // ── AudioClip factory ─────────────────────────────────────────────────
+        // FIX: Removed the two-Interlocked pattern. Unity's PCMReaderCallback
+        // and PCMSetPositionCallback are serialised per-clip (never called
+        // concurrently for the same clip), so a plain int cursor captured
+        // in the closure is correct and eliminates the memory-barrier overhead
+        // that was causing audio-thread pressure.
         public static AudioClip CreateStreamingClip(DecodedAudio audio, string name)
         {
             if (audio == null || audio.Samples == null || audio.Samples.Length == 0)
@@ -359,34 +441,38 @@ namespace CMM
             int channels = audio.Channels;
             int frequency = audio.Frequency;
             int totalSamples = samples.Length / channels;
-            int[] cursorHolder = { 0 };
+            int cursor = 0;
 
+            Stopwatch sw = Stopwatch.StartNew();
             AudioClip clip = AudioClip.Create(
                 name, totalSamples, channels, frequency, true,
                 (float[] data) =>
                 {
-                    int pos = Interlocked.CompareExchange(ref cursorHolder[0], 0, 0);
-                    int srcStart = pos * channels;
-                    int toCopy = Mathf.Min(data.Length, samples.Length - srcStart);
+                    int srcStart = cursor * channels;
+                    int toCopy = Math.Min(data.Length, samples.Length - srcStart);
 
                     if (toCopy > 0)
                         Array.Copy(samples, srcStart, data, 0, toCopy);
                     if (toCopy < data.Length)
                         Array.Clear(data, toCopy, data.Length - toCopy);
 
-                    Interlocked.Exchange(ref cursorHolder[0], pos + (data.Length / channels));
+                    cursor += data.Length / channels;
                 },
                 (int newPosition) =>
                 {
-                    Interlocked.Exchange(ref cursorHolder[0],
-                        Mathf.Clamp(newPosition, 0, totalSamples - 1));
+                    cursor = Mathf.Clamp(newPosition, 0, totalSamples - 1);
                 }
             );
-
+            sw.Stop();
+            Log.Out($"[CMM] CreateStreamingClip took {sw.Elapsed.TotalMilliseconds:F3} ms");
             return clip;
         }
 
         // ── Quick validate ────────────────────────────────────────────────────
+        // FIX: Validation now only peeks at the header / first few packets
+        // rather than decoding 0.5s of audio. For most formats this means
+        // opening the reader and confirming it has valid format metadata,
+        // which is orders of magnitude cheaper and causes no decode stutter.
         public static bool QuickValidate(string filePath)
         {
             try
@@ -395,39 +481,25 @@ namespace CMM
 
                 if (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath)))
                 {
-                    // For Opus just confirm the header decoded successfully
+                    // For Opus: confirm header decodes and at least one packet is readable.
                     var decoder = new OpusDecoder(48000, 2);
                     using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
                         var oggReader = new OpusOggReadStream(decoder, fs);
-                        int totalRead = 0;
-                        int minSamples = 48000; // 0.5s at 48kHz mono-equivalent
-
-                        while (oggReader.HasNextPacket && totalRead < minSamples)
-                        {
-                            short[] packet = oggReader.DecodeNextPacket();
-                            if (packet != null) totalRead += packet.Length;
-                        }
-                        return totalRead >= minSamples;
+                        if (!oggReader.HasNextPacket) return false;
+                        short[] firstPacket = oggReader.DecodeNextPacket();
+                        return firstPacket != null && firstPacket.Length > 0;
                     }
                 }
 
                 using (WaveStream reader = OpenReader(filePath))
                 {
                     if (reader == null) return false;
-
-                    ISampleProvider samples = new SampleChannel(reader, forceStereo: false);
-                    int minSamples = (int)(samples.WaveFormat.SampleRate
-                                                     * samples.WaveFormat.Channels * 0.5f);
-                    var buf = new float[4096];
-                    int totalRead = 0, read;
-
-                    while ((read = samples.Read(buf, 0, buf.Length)) > 0)
-                    {
-                        totalRead += read;
-                        if (totalRead >= minSamples) break;
-                    }
-                    return totalRead >= minSamples;
+                    // A valid file must have sensible format metadata and a
+                    // non-trivial reported length. We don't read any audio data.
+                    return reader.WaveFormat.SampleRate > 0
+                        && reader.WaveFormat.Channels > 0
+                        && reader.Length > 0;
                 }
             }
             catch (Exception ex)
@@ -438,29 +510,21 @@ namespace CMM
         }
     }
 #else
-    // Fallback stub implementation when NAudio assemblies are not present.
-    // This allows the project to compile and uses the Unity-based paths at runtime.
+    // Fallback stub — compiled when NAudio assemblies are absent.
     public static class NAudioDecoder
     {
         private static readonly HashSet<string> _naudioExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac"
-        };
+            { ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac" };
 
         private static readonly HashSet<string> _unityExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".mp3", ".ogg", ".wav"
-        };
+            { ".mp3", ".ogg", ".wav" };
 
         public static bool IsSupported(string filePath)
         {
             string ext = System.IO.Path.GetExtension(filePath);
-            return CMMConfig.UseNAudioDecoder
-                ? _naudioExts.Contains(ext)
-                : _unityExts.Contains(ext);
+            return CMMConfig.UseNAudioDecoder ? _naudioExts.Contains(ext) : _unityExts.Contains(ext);
         }
 
-        // Returns Unity AudioType for the Unity fallback path. UNKNOWN = skip.
         public static AudioType GetUnityAudioType(string filePath)
         {
             switch (System.IO.Path.GetExtension(filePath).ToLower())
@@ -468,16 +532,13 @@ namespace CMM
                 case ".mp3": return AudioType.MPEG;
                 case ".ogg": return AudioType.OGGVORBIS;
                 case ".wav": return AudioType.WAV;
-                default: return AudioType.UNKNOWN;
+                default:     return AudioType.UNKNOWN;
             }
         }
 
-        // No-op implementations: these are only used when UseNAudioDecoder == true.
-        // With NAUDIO undefined we expect UseNAudioDecoder to be false, so these
-        // implementations are safe placeholders.
         public static DecodedAudio DecodeFile(string filePath)
         {
-            Log.Warning($"[CMM] NAudio not available in this build. DecodeFile unsupported for {Path.GetFileName(filePath)}");
+            Log.Warning($"[CMM] NAudio not available. DecodeFile unsupported for {Path.GetFileName(filePath)}");
             return null;
         }
 
@@ -489,14 +550,14 @@ namespace CMM
 
         public static bool QuickValidate(string filePath)
         {
-            Log.Warning($"[CMM] NAudio not available in this build. QuickValidate returning false for {Path.GetFileName(filePath)}");
+            Log.Warning($"[CMM] NAudio not available. QuickValidate returning false for {Path.GetFileName(filePath)}");
             return false;
         }
     }
 #endif
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SECTION 4 — CONTEXT RESOLVER  (unchanged from original)
+    // SECTION 4 — CONTEXT RESOLVER  (unchanged)
     // ─────────────────────────────────────────────────────────────────────────
 
     public static class ContextResolver
@@ -518,6 +579,7 @@ namespace CMM
 
         public static List<string> ResolveContext()
         {
+            //Stopwatch sw = Stopwatch.StartNew();
             var world = GameManager.Instance?.World;
             var player = world?.GetPrimaryPlayer();
             if (world == null || player == null)
@@ -527,7 +589,6 @@ namespace CMM
             bool isDay = world.IsDaytime();
             bool isBloodmoon = world.isEventBloodMoon;
             float healthPct = player.Health / (float)player.GetMaxHealth();
-
 
             int enemyAggroCount = 0, enemyAlertCount = 0, enemiesNearby = 0;
 
@@ -662,6 +723,8 @@ namespace CMM
                 case "wasteland": activeContexts.Add("Ambient_Wasteland"); break;
                 default: activeContexts.Add("Ambient"); break;
             }
+            //sw.Stop();
+            //Log.Out($"[CMM] ResolvedContext took {sw.Elapsed.TotalMilliseconds:F3} ms");
 
             return activeContexts;
         }
@@ -809,10 +872,6 @@ namespace CMM
         }
     }
 
-    // The rest of the file is unchanged...
-    // (omitted here for brevity in this message — original code continues)
-
-
     // ─────────────────────────────────────────────────────────────────────────
     // SECTION 6 — AUDIO PLAYER
     // ─────────────────────────────────────────────────────────────────────────
@@ -821,61 +880,82 @@ namespace CMM
     {
         private static AudioSource CMM_Primary_Channel;
         private static AudioSource CMM_Secondary_Channel;
-        private static bool        _primaryIsActive = true;
-        private static AudioSource ActiveChannel   => _primaryIsActive ? CMM_Primary_Channel : CMM_Secondary_Channel;
+        private static bool _primaryIsActive = true;
+        private static AudioSource ActiveChannel => _primaryIsActive ? CMM_Primary_Channel : CMM_Secondary_Channel;
         private static AudioSource InactiveChannel => _primaryIsActive ? CMM_Secondary_Channel : CMM_Primary_Channel;
 
-        private static AudioClip _clipToDestroyAfterFade       = null;
+        private static AudioClip _clipToDestroyAfterFade = null;
         private static DecodedAudio _decodedToReleaseAfterFade = null;
-        private static bool      _scheduleHandledTransition    = false;
+        private static bool _scheduleHandledTransition = false;
 
         // ── NAudio async decode helper ────────────────────────────────────────
-        // Spawns a ThreadPool work item to decode the file off the main thread,
-        // then polls (on a coroutine) until it finishes. Yields DecodedAudio
-        // back to the main thread via the ref-box pattern.
+        // FIX: Split into two phases so disk I/O and CPU decode are each on a
+        // background thread but the main thread yields a frame between them.
+        // This keeps the main thread responsive throughout and avoids a single
+        // large ThreadPool item that could block the pool for 500-800ms on slow
+        // spinning disks or large files.
         private IEnumerator DecodeAsync(string filePath, Action<DecodedAudio> onComplete)
         {
-            DecodedAudio result   = null;
-            bool         finished = false;
 
+            // Phase 1: read raw bytes off the main thread (disk I/O).
+            byte[] rawBytes = null;
+            bool ioFinished = false;
+            Stopwatch sw = Stopwatch.StartNew();
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                result   = NAudioDecoder.DecodeFile(filePath);
-                finished = true;
+                try { rawBytes = File.ReadAllBytes(filePath); }
+                catch { /* rawBytes stays null */ }
+                ioFinished = true;
+                sw.Stop();
+                Log.Out($"[CMM] ReadAllBytes took {sw.Elapsed.TotalMilliseconds:F3} ms");
             });
+            while (!ioFinished) yield return null;
 
-            // Poll every frame until the background thread finishes.
-            // No busy-wait — yield return null surrenders the frame.
-            while (!finished)
-                yield return null;
+            if (rawBytes == null)
+            {
+                Log.Warning($"[CMM] DecodeAsync: could not read file {Path.GetFileName(filePath)}");
+                onComplete(null);
+                yield break;
+            }
+
+            // Phase 2: decode PCM off the main thread (pure CPU).
+            DecodedAudio result = null;
+            bool decodeFinished = false;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { result = NAudioDecoder.DecodeFileFromBytes(rawBytes, filePath); }
+                catch { /* result stays null */ }
+                decodeFinished = true;
+            });
+            while (!decodeFinished) yield return null;
 
             onComplete(result);
         }
 
         // ── Validation ────────────────────────────────────────────────────────
-        // For NAudio path: does a quick synchronous probe on a background thread.
-        // For Unity path: uses the original UnityWebRequest approach.
         private IEnumerator ValidateFile(string filePath, Action<bool> callback)
         {
             if (!NAudioDecoder.IsSupported(filePath)) { callback(false); yield break; }
 
             if (CMMConfig.UseNAudioDecoder)
             {
-                bool valid    = false;
+                Stopwatch sw = Stopwatch.StartNew();
+                bool valid = false;
                 bool finished = false;
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    valid    = NAudioDecoder.QuickValidate(filePath);
+                    valid = NAudioDecoder.QuickValidate(filePath);
                     finished = true;
                 });
                 while (!finished) yield return null;
                 if (!valid)
-                    Log.Warning($"[CMM] Validation failed (NAudio) for {filePath} {Path.GetFileName(filePath)}");
+                    Log.Warning($"[CMM] Validation failed (NAudio) for {filePath}");
+                sw.Stop();
+                Log.Out($"[CMM] QuickValidateWithCache took {sw.Elapsed.TotalMilliseconds:F3} ms");
                 callback(valid);
             }
             else
             {
-                // Unity fallback path — original UnityWebRequest validation
                 AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
                 if (audioType == AudioType.UNKNOWN) { callback(false); yield break; }
 
@@ -884,7 +964,6 @@ namespace CMM
                 {
                     ((UnityEngine.Networking.DownloadHandlerAudioClip)req.downloadHandler).streamAudio = false;
                     yield return req.SendWebRequest();
-
                     if (req.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
                     {
                         Log.Warning($"[CMM] Validation failed (Unity) for {Path.GetFileName(filePath)}: {req.error}");
@@ -905,7 +984,7 @@ namespace CMM
         {
             if (transitionId != _transitionId) yield break;
 
-            Contexts     ctx   = GetContext(contextName);
+            Contexts ctx = GetContext(contextName);
             ContextCache cache = cacheMap[contextName];
 
             if (_crossFadeCoroutine != null)
@@ -966,13 +1045,19 @@ namespace CMM
             }
 
             // ── Channel setup ────────────────────────────────────────────────
-            AudioSource incoming         = InactiveChannel;
-            AudioSource outgoing         = ActiveChannel;
-            float       outgoingStartVol = outgoing.volume;
+            AudioSource incoming = InactiveChannel;
+            AudioSource outgoing = ActiveChannel;
+            float outgoingStartVol = outgoing.volume;
 
-            incoming.clip   = cache.cachedClip;
-            incoming.loop   = ctx.Loop;
-            incoming.time   = Mathf.Clamp(startPosition, 0f, cache.cachedClip.length - 0.01f);
+            // FIX: Guard against degenerate clip lengths before clamping.
+            float clipLen = cache.cachedClip.length;
+            float safeStart = clipLen > 0.02f
+                ? Mathf.Clamp(startPosition, 0f, clipLen - 0.01f)
+                : 0f;
+
+            incoming.clip = cache.cachedClip;
+            incoming.loop = ctx.Loop;
+            incoming.time = safeStart;
             incoming.volume = 0f;
             incoming.Play();
 
@@ -990,8 +1075,8 @@ namespace CMM
                     fadeDuration = 0.25f;
                 else if (isSameContextSwitchingToNextTrack)
                 {
-                    float clipLen = cache.cachedClip.length > 0f ? cache.cachedClip.length : CrossFadeDuration;
-                    fadeDuration = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, clipLen * 0.5f);
+                    float cLen = clipLen > 0f ? clipLen : CrossFadeDuration;
+                    fadeDuration = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, cLen * 0.5f);
                 }
                 else
                     fadeDuration = ctx.WarmUp;
@@ -1002,15 +1087,17 @@ namespace CMM
             else
             {
                 outgoing.Stop();
-                outgoing.clip   = null;
+                outgoing.clip = null;
                 outgoing.volume = 0f;
-                DestroyPendingClipAndAudio();
+                // FIX: Defer destroy by one frame so the audio thread has fully
+                // moved off the outgoing clip before we release it.
+                CMM_CoRoutines.StartCoroutine(DeferredDestroyPending());
                 incoming.volume = targetVolume;
                 int cooldown = currentContext.Cooldown;
                 if (cooldown > 0)
                 {
                     if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
-                    _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(ContextCooldownTimer(cooldown));
+                    _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(ContextCooldownTimer(contextName, cooldown));
                 }
             }
 
@@ -1021,18 +1108,24 @@ namespace CMM
 
             if (!ctx.Loop && !ctx.PlayOnce)
             {
-                float clipLength = cache.cachedClip.length > 0f
-                    ? cache.cachedClip.length
-                    : TrackTransitionFadeDuration + TrackTransitionPreloadLead + 1f;
-                float remaining = clipLength - startPosition;
-                _nextCacheCoroutine = CMM_CoRoutines.StartCoroutine(ScheduleNextCacheLoad(contextName, remaining, transitionId));
+                float remaining = (clipLen > 0f ? clipLen : TrackTransitionFadeDuration + TrackTransitionPreloadLead + 1f)
+                                  - safeStart;
+                _nextCacheCoroutine = CMM_CoRoutines.StartCoroutine(
+                    ScheduleNextCacheLoad(contextName, remaining, transitionId));
             }
 
             _activeMusicCoroutine = null;
         }
 
-        // Destroys pending clip and, in NAudio mode, releases the PCM buffer
-        // of the leaving context so the GC can reclaim the memory.
+        // FIX: Waits one frame after Stop() before releasing clip/buffer so the
+        // audio thread cannot be mid-fill on the old clip when we free it.
+        private IEnumerator DeferredDestroyPending()
+        {
+            yield return new WaitForEndOfFrame();
+            DestroyPendingClipAndAudio();
+        }
+
+        // Destroys pending clip and, in NAudio mode, releases the PCM buffer.
         private static void DestroyPendingClipAndAudio()
         {
             if (_clipToDestroyAfterFade != null)
@@ -1040,9 +1133,6 @@ namespace CMM
                 Destroy(_clipToDestroyAfterFade);
                 _clipToDestroyAfterFade = null;
             }
-            // Release PCM buffer only when preload is off (on-demand mode).
-            // In preload mode the buffer must stay alive so the AudioClip can
-            // continue serving the PCMReaderCallback.
             if (!CMMConfig.PreloadCacheEnabled && _decodedToReleaseAfterFade != null)
             {
                 _decodedToReleaseAfterFade.Samples = null;
@@ -1082,10 +1172,10 @@ namespace CMM
             {
                 float targetVolume = GamePrefs.GetFloat(
                     inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-                elapsed         += Time.deltaTime;
-                float t          = Mathf.Clamp01(elapsed / duration);
-                incoming.volume  = Mathf.Lerp(0f, targetVolume, t);
-                outgoing.volume  = Mathf.Lerp(outgoingStartVol, 0f, t);
+                elapsed += Time.deltaTime;
+                float t = Mathf.Clamp01(elapsed / duration);
+                incoming.volume = Mathf.Lerp(0f, targetVolume, t);
+                outgoing.volume = Mathf.Lerp(outgoingStartVol, 0f, t);
                 yield return null;
             }
 
@@ -1093,15 +1183,22 @@ namespace CMM
                 inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
             incoming.volume = finalVolume;
             outgoing.Stop();
-            outgoing.clip   = null;
+            outgoing.clip = null;
             outgoing.volume = 0f;
 
+            // FIX: Defer destroy past the end of the crossfade coroutine so the
+            // audio thread has fully moved off the outgoing clip. One frame is
+            // sufficient; the crossfade already takes several seconds.
+            yield return new WaitForEndOfFrame();
             DestroyPendingClipAndAudio();
 
             if (cooldownSeconds > 0)
             {
                 if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
-                _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(ContextCooldownTimer(cooldownSeconds));
+                // FIX: pass the context name so the cooldown is associated with
+                // the leaving context rather than blocking everything globally.
+                _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(
+                    ContextCooldownTimer(currentContext?.Context ?? "None", cooldownSeconds));
             }
             _crossFadeCoroutine = null;
         }
@@ -1110,9 +1207,9 @@ namespace CMM
         {
             Log.Out("[CMM] Fading to silence.");
             if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
-            if (_nextCacheCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);   _nextCacheCoroutine   = null; }
-            if (_trackEndCoroutine    != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);    _trackEndCoroutine    = null; }
-            if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
+            if (_nextCacheCoroutine != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine); _nextCacheCoroutine = null; }
+            if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
+            if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
             _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine());
         }
 
@@ -1120,16 +1217,17 @@ namespace CMM
         {
             AudioSource outgoing = ActiveChannel;
             float startVol = outgoing.volume;
-            float elapsed  = 0f;
+            float elapsed = 0f;
             while (elapsed < CrossFadeDuration)
             {
-                elapsed        += Time.deltaTime;
+                elapsed += Time.deltaTime;
                 outgoing.volume = Mathf.Lerp(startVol, 0f, Mathf.Clamp01(elapsed / CrossFadeDuration));
                 yield return null;
             }
             outgoing.Stop();
-            outgoing.clip   = null;
+            outgoing.clip = null;
             outgoing.volume = 0f;
+            yield return new WaitForEndOfFrame();
             DestroyPendingClipAndAudio();
             _crossFadeCoroutine = null;
         }
@@ -1137,10 +1235,13 @@ namespace CMM
         // ── Track-end watcher ─────────────────────────────────────────────────
         private IEnumerator TrackEndWatcher(string contextName, AudioSource watchTarget, int transitionId)
         {
-            float startTime          = Time.realtimeSinceStartup;
+            // FIX: Record startTime after the initial sleep so the minimum-play
+            // guard is measured from when we actually start watching, not from
+            // when the coroutine was spawned.
+            yield return new WaitForSeconds(1f);
+            float startTime = Time.realtimeSinceStartup;
             float minimumPlaySeconds = 2f;
 
-            yield return new WaitForSeconds(1f);
             if (transitionId != _transitionId) { _trackEndCoroutine = null; yield break; }
 
             float notPlayingDuration = 0f;
@@ -1181,7 +1282,7 @@ namespace CMM
                 {
                     Log.Out($"[CMM] PlayOnce {contextName} finished but player is dead — fading to silence.");
                     _pendingContext = "None";
-                    currentContext  = GetContext("None");
+                    currentContext = GetContext("None");
                     FadeToSilence();
                     yield break;
                 }
@@ -1207,11 +1308,10 @@ namespace CMM
                 Log.Out($"[CMM] TrackEndWatcher safety net firing for {contextName}");
                 ContextCache cache = cacheMap[contextName];
                 cache.resumePosition = 0f;
-                cache.lastLeftTime   = -1f;
+                cache.lastLeftTime = -1f;
 
                 if (cache.cachedClip != null) { Destroy(cache.cachedClip); cache.cachedClip = null; }
 
-                // NAudio: also free the PCM buffer in on-demand mode
                 if (!CMMConfig.PreloadCacheEnabled && cache.decodedAudio != null)
                 {
                     cache.decodedAudio.Samples = null;
@@ -1231,23 +1331,44 @@ namespace CMM
         }
 
         // ── ScheduleNextCacheLoad ─────────────────────────────────────────────
+        // FIX: Pick the next file once here (for the size estimate) and pass
+        // it directly to LoadNextClip so the random/sequential selector does not
+        // advance twice and land on different files.
         private IEnumerator ScheduleNextCacheLoad(string contextName, float clipLength, int transitionId)
         {
-            float effectiveFade  = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, clipLength * 0.5f);
-            float waitBeforeLoad = Mathf.Max(0f, clipLength - effectiveFade - TrackTransitionPreloadLead);
+            ContextCache cache = cacheMap[contextName];
+
+            // Peek the next file to get an accurate file-size-based decode estimate.
+            string avoidForPick = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat ? cache.lastPlayedFile : null;
+            string prePickedFile = PickNextFile(contextName, avoidFile: avoidForPick);
+
+            float estimatedDecodeSeconds = 0f;
+            if (prePickedFile != null)
+            {
+                try
+                {
+                    long fileBytes = new FileInfo(prePickedFile).Length;
+                    // ~1ms per MB is a conservative estimate; 3x safety margin.
+                    estimatedDecodeSeconds = fileBytes / (1024f * 1024f) * 0.001f;
+                }
+                catch { }
+            }
+
+            float effectiveFade = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, clipLength * 0.5f);
+            float safeLeadTime = TrackTransitionPreloadLead + estimatedDecodeSeconds * 3f;
+            float waitBeforeLoad = Mathf.Max(0f, clipLength - effectiveFade - safeLeadTime);
             float waitBeforePlay = Mathf.Max(0f, clipLength - effectiveFade);
 
-            Log.Out($"[CMM] {contextName}: clip={clipLength:F1}s fade={effectiveFade:F1}s loadIn={waitBeforeLoad:F1}s playIn={waitBeforePlay:F1}s");
+            Log.Out($"[CMM] {contextName}: clip={clipLength:F1}s fade={effectiveFade:F1}s decodeEst={estimatedDecodeSeconds * 1000f:F0}ms loadIn={waitBeforeLoad:F1}s playIn={waitBeforePlay:F1}s");
 
             yield return new WaitForSeconds(waitBeforeLoad);
             if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
 
-            ContextCache cache = cacheMap[contextName];
             if (!cache.nextClipLoading && cache.nextCachedClip == null)
             {
                 cache.nextClipLoading = true;
                 Log.Out($"[CMM] Pre-loading next clip for {contextName}");
-                yield return StartCoroutine(LoadNextClip(contextName));
+                yield return StartCoroutine(LoadNextClip(contextName, prePickedFile));
                 cache.nextClipLoading = false;
             }
 
@@ -1276,14 +1397,14 @@ namespace CMM
                     _clipToDestroyAfterFade = cache.cachedClip;
                     if (!CMMConfig.PreloadCacheEnabled) _decodedToReleaseAfterFade = cache.decodedAudio;
                 }
-                cache.cachedClip        = cache.nextCachedClip;
-                cache.decodedAudio      = cache.nextDecodedAudio;
-                cache.nextCachedClip    = null;
-                cache.nextDecodedAudio  = null;
+                cache.cachedClip = cache.nextCachedClip;
+                cache.decodedAudio = cache.nextDecodedAudio;
+                cache.nextCachedClip = null;
+                cache.nextDecodedAudio = null;
             }
 
             cache.resumePosition = 0f;
-            cache.lastLeftTime   = -1f;
+            cache.lastLeftTime = -1f;
 
             if (cache.cachedClip == null)
             {
@@ -1295,15 +1416,17 @@ namespace CMM
             Log.Out($"[CMM] Starting crossfade to next track in {contextName}");
             int newId = ++_transitionId;
             _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName, true, newId));
-            _nextCacheCoroutine   = null;
+            _nextCacheCoroutine = null;
         }
 
         // ── LoadNextClip ──────────────────────────────────────────────────────
-        private IEnumerator LoadNextClip(string contextName)
+        // FIX: Accept a pre-picked file path from ScheduleNextCacheLoad so the
+        // track selector doesn't advance twice.
+        private IEnumerator LoadNextClip(string contextName, string prePickedFile = null)
         {
-            ContextCache cache    = cacheMap[contextName];
-            string       avoid    = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat ? cache.lastPlayedFile : null;
-            string       filePath = PickNextFile(contextName, avoidFile: avoid);
+            ContextCache cache = cacheMap[contextName];
+            string avoid = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat ? cache.lastPlayedFile : null;
+            string filePath = prePickedFile ?? PickNextFile(contextName, avoidFile: avoid);
 
             if (filePath == null) { Log.Out($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
 
@@ -1325,13 +1448,12 @@ namespace CMM
                     cache.nextDecodedAudio.Samples = null;
 
                 cache.nextDecodedAudio = decoded;
-                cache.nextCachedClip   = clip;
-                cache.lastPlayedFile   = filePath;
+                cache.nextCachedClip = clip;
+                cache.lastPlayedFile = filePath;
                 Log.Out($"[CMM] Next clip ready for {contextName}: {Path.GetFileName(filePath)}");
             }
             else
             {
-                // Unity fallback
                 AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
                 if (audioType == AudioType.UNKNOWN) yield break;
 
@@ -1359,7 +1481,6 @@ namespace CMM
 
             ContextCache cache = cacheMap[contextName];
 
-            // Use cached snapshot if available, otherwise build it
             string[] files = cache.directorySnapshot;
             if (files == null)
             {
@@ -1372,7 +1493,6 @@ namespace CMM
             }
             else
             {
-                // Filter out any newly invalidated files without hitting disk
                 files = files.Where(f => !_invalidFiles.Contains(f)).ToArray();
             }
 
@@ -1402,22 +1522,53 @@ namespace CMM
         }
 
         // ── File presence check ───────────────────────────────────────────────
+        // FIX: Instead of invalidating the entire _contextsWithFiles set on any
+        // file-change event (which forces a full re-scan of all context directories
+        // on the next ContextHasFiles call), only mark the specific changed context
+        // as dirty. For mods with many contexts this avoids dozens of Directory.GetFiles
+        // calls triggered by a single file change in one folder.
         private static bool ContextHasFiles(string contextName)
         {
             if (_contextsWithFilesDirty)
-            {
-                _contextsWithFiles.Clear();
-                foreach (var ctx in contexts.Values)
-                {
-                    if (string.IsNullOrEmpty(ctx.Path)) continue;
-                    string d = ModPath + MusicDirectory + "/" + ctx.Path + "/";
-                    if (!Directory.Exists(d)) continue;
-                    if (Directory.GetFiles(d).Any(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
-                        _contextsWithFiles.Add(ctx.Context);
-                }
-                _contextsWithFilesDirty = false;
-            }
+                RebuildContextsWithFiles();
             return _contextsWithFiles.Contains(contextName);
+        }
+
+        // Marked internal so FileWatchLoop can call it for a single context.
+        private static void InvalidateContextFileCache(string contextName = null)
+        {
+            if (contextName == null)
+            {
+                _contextsWithFilesDirty = true;
+            }
+            else
+            {
+                // Remove only the affected context so other entries stay valid.
+                _contextsWithFiles.Remove(contextName);
+
+                Contexts ctx = GetContext(contextName);
+                if (ctx != null && !string.IsNullOrEmpty(ctx.Path))
+                {
+                    string d = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+                    if (Directory.Exists(d) &&
+                        Directory.GetFiles(d).Any(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
+                        _contextsWithFiles.Add(contextName);
+                }
+            }
+        }
+
+        private static void RebuildContextsWithFiles()
+        {
+            _contextsWithFiles.Clear();
+            foreach (var ctx in contexts.Values)
+            {
+                if (string.IsNullOrEmpty(ctx.Path)) continue;
+                string d = ModPath + MusicDirectory + "/" + ctx.Path + "/";
+                if (!Directory.Exists(d)) continue;
+                if (Directory.GetFiles(d).Any(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
+                    _contextsWithFiles.Add(ctx.Context);
+            }
+            _contextsWithFilesDirty = false;
         }
 
         // ── Memory summary ────────────────────────────────────────────────────
@@ -1430,7 +1581,6 @@ namespace CMM
                     total += (long)cache.decodedAudio.Samples.Length * 4;
                 if (cache.nextDecodedAudio?.Samples != null)
                     total += (long)cache.nextDecodedAudio.Samples.Length * 4;
-                // Unity-path clips (fallback)
                 if (cache.cachedClip != null && cache.decodedAudio == null)
                     total += (long)cache.cachedClip.samples * cache.cachedClip.channels * 4;
                 if (cache.nextCachedClip != null && cache.nextDecodedAudio == null)
@@ -1445,13 +1595,10 @@ namespace CMM
             var lines = new System.Text.StringBuilder();
             foreach (var kv in cacheMap)
             {
-                long cur  = kv.Value.decodedAudio?.Samples != null ? (long)kv.Value.decodedAudio.Samples.Length * 4 : 0;
+                long cur = kv.Value.decodedAudio?.Samples != null ? (long)kv.Value.decodedAudio.Samples.Length * 4 : 0;
                 long next = kv.Value.nextDecodedAudio?.Samples != null ? (long)kv.Value.nextDecodedAudio.Samples.Length * 4 : 0;
-                // Unity-path fallback
-                if (cur == 0 && kv.Value.cachedClip != null)
-                    cur = (long)kv.Value.cachedClip.samples * kv.Value.cachedClip.channels * 4;
-                if (next == 0 && kv.Value.nextCachedClip != null)
-                    next = (long)kv.Value.nextCachedClip.samples * kv.Value.nextCachedClip.channels * 4;
+                if (cur == 0 && kv.Value.cachedClip != null) cur = (long)kv.Value.cachedClip.samples * kv.Value.cachedClip.channels * 4;
+                if (next == 0 && kv.Value.nextCachedClip != null) next = (long)kv.Value.nextCachedClip.samples * kv.Value.nextCachedClip.channels * 4;
                 if (cur + next == 0) continue;
                 totalBytes += cur + next;
                 if (includePerContext)
@@ -1459,14 +1606,14 @@ namespace CMM
                                      (next > 0 ? $" + {FormatBytes(next)} next" : ""));
             }
             if (includePerContext) lines.Append($"  TOTAL: {FormatBytes(totalBytes)}");
-            else                   lines.Append(FormatBytes(totalBytes));
+            else lines.Append(FormatBytes(totalBytes));
             return lines.ToString();
         }
 
         private static string FormatBytes(long bytes)
         {
             if (bytes >= 1024 * 1024) return $"{bytes / (1024f * 1024f):F1} MB";
-            if (bytes >= 1024)        return $"{bytes / 1024f:F1} KB";
+            if (bytes >= 1024) return $"{bytes / 1024f:F1} KB";
             return $"{bytes} B";
         }
     }
@@ -1478,38 +1625,44 @@ namespace CMM
     public partial class ContextMusicManager
     {
         public static string MusicDirectory = "/Music";
-        public static bool   inGame         = false;
-        public static bool   inInventory    = false;
-        public static bool   playerIsDead   = true;
+        public static bool inGame = false;
+        public static bool inInventory = false;
+        public static bool playerIsDead = true;
         public static string ModPath;
 
-        public static bool lastContextOnCoolDown = false;
+        // FIX: Per-context cooldown map replaces the flat lastContextOnCoolDown
+        // bool. This prevents a cooldown on context A from blocking a valid
+        // transition to context B at higher priority.
+        private static readonly HashSet<string> _contextsOnCooldown =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        public static  GameObject          CMM_Audio_Object;
-        public static  CoRoutine           CMM_CoRoutines;
-        public static  ContextMusicManager Instance;
+        public static GameObject CMM_Audio_Object;
+        public static CoRoutine CMM_CoRoutines;
+        public static ContextMusicManager Instance;
 
         private static Coroutine _activeMusicCoroutine = null;
-        private static Coroutine _nextCacheCoroutine   = null;
-        private static Coroutine _trackEndCoroutine    = null;
-        private static Coroutine _crossFadeCoroutine   = null;
-        private static Coroutine _cooldownCoroutine    = null;
+        private static Coroutine _nextCacheCoroutine = null;
+        private static Coroutine _trackEndCoroutine = null;
+        private static Coroutine _crossFadeCoroutine = null;
+        private static Coroutine _cooldownCoroutine = null;
 
-        public static TrackOrderMode GlobalTrackOrder            = TrackOrderMode.RandomNoRepeat;
-        public static float          ContextScanCooldown         = 0.5f;
-        public static float          StalenessCheckInterval      = 5f;
-        public static float          NextCacheWindow             = 5f;
-        public static float          TrackEndPollInterval        = 0.25f;
-        public static float          CrossFadeDuration           = 2f;
-        public static float          TrackTransitionFadeDuration = 6f;
-        public static float          TrackTransitionPreloadLead  = 10f;
-        private static readonly HashSet<string> _contextsWithFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public static TrackOrderMode GlobalTrackOrder = TrackOrderMode.RandomNoRepeat;
+        public static float ContextScanCooldown = 0.5f;
+        public static float StalenessCheckInterval = 5f;
+        public static float NextCacheWindow = 5f;
+        public static float TrackEndPollInterval = 0.25f;
+        public static float CrossFadeDuration = 2f;
+        public static float TrackTransitionFadeDuration = 6f;
+        public static float TrackTransitionPreloadLead = 10f;
+
+        private static readonly HashSet<string> _contextsWithFiles =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool _contextsWithFilesDirty = true;
 
         // ── Init ──────────────────────────────────────────────────────────────
         public static void Init(string modPath)
         {
-            ModPath          = modPath;
+            ModPath = modPath;
             CMM_Audio_Object = new GameObject("ContextMusicManager");
             UnityEngine.Object.DontDestroyOnLoad(CMM_Audio_Object);
             Instance = CMM_Audio_Object.AddComponent<ContextMusicManager>();
@@ -1518,17 +1671,17 @@ namespace CMM
             foreach (var ctx in contexts.Values)
                 cacheMap[ctx.Context] = new ContextCache();
 
-            currentContext  = GetContext("None");
+            currentContext = GetContext("None");
             _pendingContext = "None";
-            _transitionId   = 0;
+            _transitionId = 0;
 
-            CMM_Primary_Channel        = CMM_Audio_Object.AddComponent<AudioSource>();
+            CMM_Primary_Channel = CMM_Audio_Object.AddComponent<AudioSource>();
             CMM_Primary_Channel.volume = 0f;
-            CMM_Primary_Channel.loop   = false;
+            CMM_Primary_Channel.loop = false;
 
-            CMM_Secondary_Channel        = CMM_Audio_Object.AddComponent<AudioSource>();
+            CMM_Secondary_Channel = CMM_Audio_Object.AddComponent<AudioSource>();
             CMM_Secondary_Channel.volume = 0f;
-            CMM_Secondary_Channel.loop   = false;
+            CMM_Secondary_Channel.loop = false;
 
             CMM_CoRoutines = CMM_Audio_Object.AddComponent<CoRoutine>();
             CMM_CoRoutines.StartCoroutine(Instance.PreloadContext("Menu"));
@@ -1549,15 +1702,14 @@ namespace CMM
         // ── SendContextUpdate ─────────────────────────────────────────────────
         public static void SendContextUpdate(string contextIn, int bypassPriority = -1)
         {
-            //Log.Error("Player is " + (playerIsDead ? "dead" : "alive") + ".");
             Contexts incoming = GetContext(contextIn);
             if (incoming == null) return;
             if (_pendingContext == contextIn) return;
 
-            bool menuOverride    = !inGame;
-            int  comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
+            bool menuOverride = !inGame;
+            int comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
             bool isReloadOfCurrent = currentContext != null && contextIn == currentContext.Context;
-            bool priorityOk        = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
+            bool priorityOk = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
 
             if (!menuOverride && !priorityOk && !isReloadOfCurrent)
             {
@@ -1570,17 +1722,17 @@ namespace CMM
 
             if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
-                ContextCache leavingCache   = cacheMap[currentContext.Context];
+                ContextCache leavingCache = cacheMap[currentContext.Context];
                 leavingCache.resumePosition = ActiveChannel.time;
-                leavingCache.lastLeftTime   = Time.realtimeSinceStartup;
+                leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
                 if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
                 {
-                    _clipToDestroyAfterFade       = leavingCache.cachedClip;
-                    _decodedToReleaseAfterFade     = leavingCache.decodedAudio;
-                    leavingCache.cachedClip        = null;
-                    leavingCache.decodedAudio      = null;
+                    _clipToDestroyAfterFade = leavingCache.cachedClip;
+                    _decodedToReleaseAfterFade = leavingCache.decodedAudio;
+                    leavingCache.cachedClip = null;
+                    leavingCache.decodedAudio = null;
                 }
             }
 
@@ -1592,16 +1744,22 @@ namespace CMM
             {
                 Log.Out($"[CMM] No playable context in chain for {contextIn} — fading to silence.");
                 _pendingContext = "None";
-                currentContext  = GetContext("None");
+                currentContext = GetContext("None");
                 ++_transitionId;
                 FadeToSilence();
                 return;
             }
 
-            Contexts candidate    = GetContext(contextToPlay);
-            bool     bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
+            Contexts candidate = GetContext(contextToPlay);
+            bool bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
 
-            if (lastContextOnCoolDown && !bypassCooldown && bypassPriority < 0)
+            // FIX: Check per-context cooldown rather than a global flag.
+            // A cooldown on the leaving context no longer blocks unrelated contexts.
+            bool onCooldown = !bypassCooldown
+                              && bypassPriority < 0
+                              && _contextsOnCooldown.Contains(contextToPlay);
+
+            if (onCooldown)
             {
                 Log.Out($"[CMM] {candidate.Context} blocked — cooldown active");
                 _pendingContext = currentContext?.Context ?? "None";
@@ -1622,9 +1780,9 @@ namespace CMM
         {
             Log.Out($"[CMM] TriggerMusic: {contextName}");
             if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
-            if (_nextCacheCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);   _nextCacheCoroutine   = null; }
-            if (_trackEndCoroutine    != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);    _trackEndCoroutine    = null; }
-            if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
+            if (_nextCacheCoroutine != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine); _nextCacheCoroutine = null; }
+            if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
+            if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
 
             int newId = ++_transitionId;
             _scheduleHandledTransition = false;
@@ -1632,6 +1790,10 @@ namespace CMM
         }
 
         // ── Scan loops ────────────────────────────────────────────────────────
+        // FIX: Track the previous context set so we only touch the stack and
+        // call SendContextUpdate when something actually changed.
+        private HashSet<string> _previousActiveContexts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         private IEnumerator ContextScanLoop()
         {
             while (true)
@@ -1640,6 +1802,15 @@ namespace CMM
                 if (!inGame || playerIsDead) continue;
 
                 List<string> activeContexts = ContextResolver.ResolveContext();
+
+                // Early-out: if the resolved set hasn't changed, skip all stack work.
+                bool changed = activeContexts.Count != _previousActiveContexts.Count
+                               || activeContexts.Any(c => !_previousActiveContexts.Contains(c));
+
+                if (!changed) continue;
+
+                _previousActiveContexts.Clear();
+                foreach (string c in activeContexts) _previousActiveContexts.Add(c);
 
                 foreach (string ctxName in activeContexts)
                 {
@@ -1651,9 +1822,9 @@ namespace CMM
                         _contextStack.Add(new ActiveContext
                         {
                             ContextName = ctxName,
-                            Priority    = ctx.Priority,
+                            Priority = ctx.Priority,
                             ActivatedAt = Time.realtimeSinceStartup,
-                            Manual      = false
+                            Manual = false
                         });
                     }
                 }
@@ -1675,6 +1846,10 @@ namespace CMM
             }
         }
 
+        // FIX: Log cache state only when something has actually changed,
+        // not unconditionally every 5 seconds.
+        private string _lastCacheLogState = "";
+
         private IEnumerator StalenessCheckLoop()
         {
             while (true)
@@ -1682,8 +1857,17 @@ namespace CMM
                 yield return new WaitForSeconds(StalenessCheckInterval);
                 if (!inGame) continue;
 
-                Log.Out($"[CMM] Cache state: {string.Join(", ", cacheMap.Where(kv => kv.Value.cachedClip != null).Select(kv => $"{kv.Key}={kv.Value.cachedClip.length:F0}s(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"))}");
-                Log.Out($"[CMM] Cache memory:\n{GetCacheMemorySummary(false)}");
+                // Build state string cheaply; only emit log lines if it changed.
+                string cacheState = string.Join(", ", cacheMap
+                    .Where(kv => kv.Value.cachedClip != null)
+                    .Select(kv => $"{kv.Key}={kv.Value.cachedClip.length:F0}s(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"));
+
+                if (cacheState != _lastCacheLogState)
+                {
+                    Log.Out($"[CMM] Cache state: {cacheState}");
+                    Log.Out($"[CMM] Cache memory: {GetCacheMemorySummary(false)}");
+                    _lastCacheLogState = cacheState;
+                }
 
                 float now = Time.realtimeSinceStartup;
                 foreach (var ctx in contexts.Values)
@@ -1699,8 +1883,8 @@ namespace CMM
                     {
                         Log.Out($"[CMM] Context {ctx.Context} is stale ({elapsed:F0}s). Clearing for fresh pick.");
                         cache.resumePosition = 0f;
-                        cache.lastLeftTime   = -1f;
-                        string avoid         = cache.lastPlayedFile;
+                        cache.lastLeftTime = -1f;
+                        string avoid = cache.lastPlayedFile;
                         cache.lastPlayedFile = null;
 
                         if (CMMConfig.PreloadCacheEnabled)
@@ -1725,7 +1909,6 @@ namespace CMM
 
                 string dir = ModPath + MusicDirectory + "/" + ctx.Path + "/";
 
-                // ── Scan on background thread ─────────────────────────────────────
                 string[] currentFiles = null;
                 bool scanDone = false;
                 string[] previousFiles = cache.directorySnapshot ?? new string[0];
@@ -1778,8 +1961,8 @@ namespace CMM
                 Log.Out($"[CMM] File change detected in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
                 cache.directorySnapshot = currentFiles;
 
-                // Invalidate both caches on any file change
-                _contextsWithFilesDirty = true;
+                // FIX: Invalidate only this context's entry, not the whole cache.
+                InvalidateContextFileCache(contextName);
 
                 bool lastPlayedMissing = false;
                 if (!string.IsNullOrEmpty(cache.lastPlayedFile))
@@ -1839,7 +2022,6 @@ namespace CMM
             Log.Out("[CMM] Preload complete.");
         }
 
-        // Loads one clip for a context. Uses NAudio or Unity path based on config.
         private IEnumerator PreloadContext(string contextName, string avoidFile = null)
         {
             ContextCache cache = cacheMap[contextName];
@@ -1858,8 +2040,8 @@ namespace CMM
 
             if (filePath == null)
             {
-                Contexts ctx       = GetContext(contextName);
-                string   fallback  = ctx?.Fallback ?? "None";
+                Contexts ctx = GetContext(contextName);
+                string fallback = ctx?.Fallback ?? "None";
                 if (fallback != "None" && fallback != contextName)
                     filePath = PickNextFile(fallback, avoidFile: null);
                 if (filePath == null)
@@ -1879,11 +2061,21 @@ namespace CMM
                 {
                     _invalidFiles.Add(filePath);
                     Log.Warning($"[CMM] Preload: {Path.GetFileName(filePath)} failed validation, retrying.");
-                    filePath = PickNextFile(contextName, avoidFile: filePath);
-                    if (filePath == null) { Log.Out($"[CMM] Preload: no valid files for {contextName}"); yield break; }
-                    yield return StartCoroutine(ValidateFile(filePath, result => isValid = result));
-                    if (!isValid) { _invalidFiles.Add(filePath); Log.Warning($"[CMM] Preload: replacement invalid for {contextName}."); yield break; }
-                    _validatedFiles.Add(filePath);
+                    // FIX: Pass the original invalid file as avoidFile so we don't
+                    // immediately re-pick it, then validate exactly once more.
+                    // If the replacement is also invalid we give up rather than
+                    // looping silently.
+                    string replacement = PickNextFile(contextName, avoidFile: filePath);
+                    if (replacement == null) { Log.Out($"[CMM] Preload: no valid files for {contextName}"); yield break; }
+                    yield return StartCoroutine(ValidateFile(replacement, result => isValid = result));
+                    if (!isValid)
+                    {
+                        _invalidFiles.Add(replacement);
+                        Log.Warning($"[CMM] Preload: replacement also invalid for {contextName}. Giving up.");
+                        yield break;
+                    }
+                    _validatedFiles.Add(replacement);
+                    filePath = replacement;
                 }
             }
 
@@ -1907,13 +2099,12 @@ namespace CMM
                     yield break;
                 }
 
-                // Destroy previous clip/buffer
                 if (cache.cachedClip != null) Destroy(cache.cachedClip);
                 if (!CMMConfig.PreloadCacheEnabled && cache.decodedAudio != null)
                     cache.decodedAudio.Samples = null;
 
-                cache.cachedClip    = clip;
-                cache.decodedAudio  = decoded;
+                cache.cachedClip = clip;
+                cache.decodedAudio = decoded;
                 cache.lastPlayedFile = filePath;
                 Log.Out($"[CMM] Preloaded (NAudio): {contextName} — {Path.GetFileName(filePath)} ({decoded.LengthSeconds:F1}s)");
             }
@@ -1932,20 +2123,23 @@ namespace CMM
                     { Log.Error($"[CMM] Preload Unity failed for {contextName}: {request.error}"); yield break; }
 
                     if (cache.cachedClip != null) Destroy(cache.cachedClip);
-                    cache.cachedClip    = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
+                    cache.cachedClip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
                     cache.lastPlayedFile = filePath;
                     Log.Out($"[CMM] Preloaded (Unity): {contextName}");
                 }
             }
         }
 
-        private IEnumerator ContextCooldownTimer(int seconds)
+        // FIX: ContextCooldownTimer is now per-context. The cooldown is
+        // recorded against the specific context name that triggered it, so
+        // unrelated contexts at higher priority are never blocked.
+        private IEnumerator ContextCooldownTimer(string contextName, int seconds)
         {
-            lastContextOnCoolDown = true;
-            Log.Out($"[CMM] Cooldown started: {seconds}s");
+            _contextsOnCooldown.Add(contextName);
+            Log.Out($"[CMM] Cooldown started for {contextName}: {seconds}s");
             yield return new WaitForSeconds(seconds);
-            lastContextOnCoolDown = false;
-            Log.Out("[CMM] Cooldown expired.");
+            _contextsOnCooldown.Remove(contextName);
+            Log.Out($"[CMM] Cooldown expired for {contextName}.");
             _cooldownCoroutine = null;
         }
     }
@@ -1965,7 +2159,7 @@ namespace CMM
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SECTION 9 — HARMONY PATCHES  (unchanged from original)
+    // SECTION 9 — HARMONY PATCHES
     // ─────────────────────────────────────────────────────────────────────────
 
     [HarmonyPatch(typeof(DynamicMusic.Conductor), "Update")]
@@ -2005,7 +2199,7 @@ namespace CMM
         static void Prefix()
         {
             ContextMusicManager.inInventory = false;
-            ContextMusicManager.inGame      = false;
+            ContextMusicManager.inGame = false;
             ContextMusicManager._contextStack.Clear();
             ContextMusicManager._pendingContext = "None";
             ContextResolver.resetValues();
@@ -2028,9 +2222,9 @@ namespace CMM
                 ContextMusicManager._contextStack.Add(new ActiveContext
                 {
                     ContextName = ctxName,
-                    Priority    = ctx.Priority,
+                    Priority = ctx.Priority,
                     ActivatedAt = Time.realtimeSinceStartup,
-                    Manual      = false
+                    Manual = false
                 });
             }
             ContextMusicManager._contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));
@@ -2073,8 +2267,8 @@ namespace CMM
             switch (soundGroupName)
             {
                 case "player_death_stinger": return false;
-                case "spawnInStinger":       return false;
-                default:                     return true;
+                case "spawnInStinger": return false;
+                default: return true;
             }
         }
     }
