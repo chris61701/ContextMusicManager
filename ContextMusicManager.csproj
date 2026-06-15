@@ -177,13 +177,13 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Folder Include=".github\" />
     <Folder Include="Patches\" />
   </ItemGroup>
   <ItemGroup>
     <Analyzer Include="..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.InputModule.dll" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".github\copilot-instructions.md" />
     <None Include="app.config" />
     <None Include="packages.config" />
     <None Include="README.md" />
