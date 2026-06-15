@@ -1,0 +1,16 @@
+{
+  // This is a legacy (non-SDK) .NET Framework 4.8.1 project. C# Dev Kit
+  // cannot load non-SDK projects, so it must hand project/solution loading
+  // to the plain C# extension — otherwise NAudio symbols never resolve and
+  // Go to Definition / Peek does nothing.
+  "dotnet.preferCSharpExtension": true,
+
+  // Decompile external types (NAudio's WaveStream, etc.) when using
+  // Go to Definition (F12) / Peek Definition (Alt+F12) on a symbol
+  // that lives in a referenced DLL with no source.
+  "dotnet.navigation.navigateToDecompiledSources": true,
+
+  // If a referenced assembly ships SourceLink / embedded PDBs, prefer
+  // the real source over a decompile.
+  "dotnet.navigation.navigateToSourceLinkAndEmbeddedSources": true
+}

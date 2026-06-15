@@ -1,0 +1,86 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      "MSBUILD": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe"
+    }
+  },
+  "tasks": [
+    {
+      "label": "Build (Debug)",
+      "type": "process",
+      "command": "${env:MSBUILD}",
+      "args": [
+        "ContextMusicManager.sln",
+        "/t:Build",
+        "/p:Configuration=Debug",
+        "/p:Platform=Any CPU",
+        "/v:minimal",
+        "/nologo"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile",
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      }
+    },
+    {
+      "label": "Build (Release)",
+      "type": "process",
+      "command": "${env:MSBUILD}",
+      "args": [
+        "ContextMusicManager.sln",
+        "/t:Build",
+        "/p:Configuration=Release",
+        "/p:Platform=Any CPU",
+        "/v:minimal",
+        "/nologo"
+      ],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      }
+    },
+    {
+      "label": "Rebuild (Debug)",
+      "type": "process",
+      "command": "${env:MSBUILD}",
+      "args": [
+        "ContextMusicManager.sln",
+        "/t:Rebuild",
+        "/p:Configuration=Debug",
+        "/p:Platform=Any CPU",
+        "/v:minimal",
+        "/nologo"
+      ],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      }
+    },
+    {
+      "label": "Restore (NuGet packages.config)",
+      "type": "process",
+      "command": "${env:MSBUILD}",
+      "args": [
+        "ContextMusicManager.sln",
+        "/t:Restore",
+        "/v:minimal",
+        "/nologo"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      }
+    }
+  ]
+}

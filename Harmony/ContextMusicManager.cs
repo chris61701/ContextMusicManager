@@ -10,7 +10,8 @@ using System.Reflection;
 using System.Threading;
 using UnityEngine;
 using System.Diagnostics;
-using System.Text;
+using CMM;
+
 
 
 
@@ -2343,15 +2344,22 @@ namespace CMM
         // ── SendContextUpdate ─────────────────────────────────────────────────
         public static void SendContextUpdate(string contextIn, int bypassPriority = -1)
         {
+            // Get the context from the list of contexts
             Contexts incoming = GetContext(contextIn);
+            // if no context, return
             if (incoming == null) return;
+            // if the context waiting to be swapped to is already waiting to be transitioned to, there's no need to reprocess this
             if (_pendingContext == contextIn) return;
 
+            // if not ingame
             bool menuOverride = !inGame;
             int comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
+            // if currentContext is not null and the contetxIn is the currentContext
+            // if a current context was null and fallen back on, but is now valid and the contextIN, then swap to it
             bool isReloadOfCurrent = currentContext != null && contextIn == currentContext.Context;
             bool priorityOk = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
 
+            // if not in game, if not higher priority, if currentContext is re-validated
             if (!menuOverride && !priorityOk && !isReloadOfCurrent)
             {
                 Log.Out($"[CMM] {contextIn} rejected — not higher priority than {currentContext?.Context}");
@@ -2359,45 +2367,57 @@ namespace CMM
             }
 
             Log.Out($"[CMM] Context accepted: {currentContext?.Context} -> {contextIn}");
+            // having gotten this far, the next context to queue is contextIn
             _pendingContext = contextIn;
 
+            // if currentContext is not null, can be resumed, and music is currently playing
             if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
+                // save resume positions for the track we are leaving, if it can be resumed
                 ContextCache leavingCache = cacheMap[currentContext.Context];
                 leavingCache.resumePosition = ActiveChannel.time;
                 leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
+                // the condition for PreloadCache is likely obsolete
+                // if there is a clip in the cacheMap, set it to be destroyed after change?
                 if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
                 {
+                    // after fade is complete, this clip will be discarded
                     _clipToDestroyAfterFade = leavingCache.cachedClip;
                     _readerToDisposeAfterFade = leavingCache.currentReader;
                     _decodedToReleaseAfterFade = leavingCache.decodedAudio;
+                    // leaving cache is cleared for next entry
                     leavingCache.cachedClip = null;
                     leavingCache.currentReader = null;
                     leavingCache.decodedAudio = null;
                 }
             }
 
+            // if currentContext is not null and plays once, and the new context doesn't play once
+            // don't alter the return context
             if (currentContext != null && currentContext.PlayOnce && !incoming.PlayOnce)
                 _playOnceReturnContext = null;
 
+            // find out if the context is valid - will resolve fallbacks and what is playable
             string contextToPlay = ResolvePlayableContext(contextIn);
+            // if context/fallsback are all invalid, fade to silence
             if (contextToPlay == null)
             {
                 Log.Out($"[CMM] No playable context in chain for {contextIn} — fading to silence.");
                 _pendingContext = "None";
                 currentContext = GetContext("None");
+                // increment transition ID
                 ++_transitionId;
                 FadeToSilence();
                 return;
             }
 
             Contexts candidate = GetContext(contextToPlay);
+            // if incoming or candidate bypass cooldown
             bool bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
-
-            // FIX: Check per-context cooldown rather than a global flag.
-            // A cooldown on the leaving context no longer blocks unrelated contexts.
+            
+            // is the contextToPlay on cooldown and can it be bypassed by the candidate context
             bool onCooldown = !bypassCooldown
                               && bypassPriority < 0
                               && _contextsOnCooldown.Contains(contextToPlay);
@@ -2408,6 +2428,7 @@ namespace CMM
                 _pendingContext = currentContext?.Context ?? "None";
                 if (!CMMConfig.PreloadCacheEnabled)
                 {
+
                     ContextCache blocked = cacheMap[currentContext.Context];
                     if (blocked.cachedClip != null)
                     {
@@ -2450,6 +2471,8 @@ namespace CMM
         {
             while (true)
             {
+                Log.Out($"Current Context is: {currentContext.Context}");
+                Log.Out($"Player is dead? {playerIsDead}");
                 yield return new WaitForSeconds(ContextScanCooldown);
                 if (!inGame || playerIsDead) continue;
 
@@ -3000,6 +3023,7 @@ namespace CMM
     // SECTION 9 — HARMONY PATCHES
     // ─────────────────────────────────────────────────────────────────────────
 
+    // This happens when the world is almost finished loading the world is loading
     [HarmonyPatch(typeof(DynamicMusic.Conductor), "Update")]
     public class InGameMusicPatch
     {
@@ -3020,6 +3044,7 @@ namespace CMM
         }
     }
 
+    // this is called constantly while on the menu screen
     [HarmonyPatch(typeof(BackgroundMusicMono), "Play")]
     public class MenuMusicPatch
     {
@@ -3031,6 +3056,7 @@ namespace CMM
         }
     }
 
+    // this happens when leaving a gameworld and going back to the menu screen
     [HarmonyPatch(typeof(GameManager), "SaveAndCleanupWorld")]
     public class Patch_GameEnded
     {
@@ -3046,6 +3072,7 @@ namespace CMM
         }
     }
 
+    // This happens when the player spawn (both initially, and after death)
     [HarmonyPatch(typeof(EntityPlayerLocal), "AfterPlayerRespawn")]
     public class PlayerRespawn
     {
@@ -3087,12 +3114,14 @@ namespace CMM
         }
     }
 
+    // This patch exist for debuff purposes
     [HarmonyPatch(typeof(GameManager), "Awake")]
     public class StartupLogPatch
     {
         static void Postfix() => Log.Out("[CMM] Game started up!");
     }
 
+    // This patch exist for debuff purposes
     [HarmonyPatch(typeof(EntityPlayer), "Awake")]
     public static class Patch_SpawnStinger
     {
@@ -3113,6 +3142,7 @@ namespace CMM
         }
     }
 
+    // This keeps a log of sounds that have played so we can catch them later with patches
     [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
         new Type[] { typeof(string), typeof(int), typeof(float), typeof(bool), typeof(bool) })]
     public class Patch_LogPlayInsidePlayerHead
@@ -3120,13 +3150,15 @@ namespace CMM
         static bool Prefix(string soundGroupName) => AudioStingerHandler.Handle(soundGroupName);
     }
 
+    // this does the same thing as the previous function but exists for the overload version of the function
     [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
         new Type[] { typeof(string), typeof(int) })]
     public class Patch_LogPlayInsidePlayerHead2
     {
         static bool Prefix(string soundGroupNameBegin) => AudioStingerHandler.Handle(soundGroupNameBegin);
     }
-    //var world = GameManager.Instance.World.LoadWorld
+
+    // this exists to keep track of when the world starts loading, however, it has not been useful thus far
 [   HarmonyPatch(typeof(World), "LoadWorld")]
     public class LoadChecker
     {
