@@ -1,15 +1,10 @@
 {
   "version": "2.0.0",
-  "options": {
-    "env": {
-      "MSBUILD": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe"
-    }
-  },
   "tasks": [
     {
       "label": "Build (Debug)",
       "type": "process",
-      "command": "${env:MSBUILD}",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
       "args": [
         "ContextMusicManager.sln",
         "/t:Build",
@@ -31,7 +26,7 @@
     {
       "label": "Build (Release)",
       "type": "process",
-      "command": "${env:MSBUILD}",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
       "args": [
         "ContextMusicManager.sln",
         "/t:Build",
@@ -50,7 +45,7 @@
     {
       "label": "Rebuild (Debug)",
       "type": "process",
-      "command": "${env:MSBUILD}",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
       "args": [
         "ContextMusicManager.sln",
         "/t:Rebuild",
@@ -69,7 +64,7 @@
     {
       "label": "Restore (NuGet packages.config)",
       "type": "process",
-      "command": "${env:MSBUILD}",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
       "args": [
         "ContextMusicManager.sln",
         "/t:Restore",

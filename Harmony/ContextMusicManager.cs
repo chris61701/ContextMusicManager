@@ -10,7 +10,6 @@ using System.Reflection;
 using System.Threading;
 using UnityEngine;
 using System.Diagnostics;
-using CMM;
 
 
 
@@ -54,6 +53,14 @@ namespace CMM
         /// UnityWebRequest pipeline (mp3, ogg, wav only).
         /// Default: false to allow building without NAudio assemblies.
         /// </summary>
+        public static float VolumeModifier = 0.5f;
+        public static float GetVolume(bool inGame)
+        {
+            float inGameVolume = GamePrefs.GetFloat(
+                    inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+            
+            return inGameVolume * VolumeModifier;
+        }
         public static long HotSwapMaxFileSizeBytes = 100L * 1024 * 1024;
 #if NAUDIO
         public static bool UseNAudioDecoder = true;
@@ -98,11 +105,17 @@ namespace CMM
         public AudioClip cachedClip = null;
         public AudioClip nextCachedClip = null;
         public float resumePosition = 0f;
+        // For Opus pre-seek (SeekBeforePlay): Unity's AudioSource.time resets to
+        // 0 on Play() even though the reader is positioned at safeStart.  This
+        // offset is added when saving resumePosition so the saved value is the
+        // true absolute track position, not elapsed-since-play.
+        public float playbackOffset = 0f;
         public float lastLeftTime = -1f;
         public string lastPlayedFile = null;
         public int sequentialIndex = 0;
         public string[] directorySnapshot = null;
         public bool nextClipLoading = false;
+        public bool isPreloading = false;
 
         // Safe disposal helper — call after Destroy(clip) (or after a deferred
         // frame) so the audio thread is guaranteed off the reader.
@@ -398,6 +411,7 @@ namespace CMM
             private int _pcmBufStart = 0;
             private int _pcmBufEnd = 0;   // exclusive
             private float[] _readBuf = new float[8192]; // covers typical Unity audio buffer sizes
+            private byte[] _headerBytes; // Ogg header pages (BOS + comment), cached for PrependStream mid-file seeks
 
 
 
@@ -454,6 +468,12 @@ namespace CMM
             {
                 lock (_lock)
                 {
+                    // Disarm the initial-position interceptor once Unity's audio thread
+                    // starts reading.  After the first PCMReaderCallback any subsequent
+                    // PCMSetPositionCallback(0) is a genuine loop-to-start, not a
+                    // Play()-time reset, and must not be redirected to the resume frame.
+                    _pendingInitialFrame = -1;
+
                     int written = 0;
                     while (written < count)
                     {
@@ -477,9 +497,46 @@ namespace CMM
             }
 
             private int _seekCount = 0;
+            // Set before Play() to intercept Unity's PCMSetPositionCallback(0)
+            // that fires when Play() starts. The first position-0 seek is redirected
+            // to this frame so the very first DSP buffer fill reads from the resume
+            // point rather than the beginning of the track.
+            private long _pendingInitialFrame = -1;
+
+            public void SetInitialPosition(long sampleFrame)
+            {
+                lock (_lock) _pendingInitialFrame = sampleFrame;
+            }
+
+            // Pre-seek to targetFrame from byte 0 via decode-and-discard.
+            // Call BEFORE AudioSource.Play() on the main or a background thread.
+            // This bypasses PrependStream entirely — correct for any seek distance
+            // regardless of Ogg sequence-number continuity.  Also arms the
+            // SetInitialPosition interceptor as a safety net for platforms where
+            // Unity does fire PCMSetPositionCallback(0) from Play().
+            public void SeekBeforePlay(long targetFrame)
+            {
+                lock (_lock)
+                {
+                    OpenStreamAtByte(0);
+                    if (targetFrame > 0)
+                        DiscardSamplesLocked(targetFrame * _format.Channels);
+                    _pendingInitialFrame = targetFrame;
+                }
+            }
+
             // ── Seeking ───────────────────────────────────────────────────────
             private void SeekToSampleLocked(long targetFrame)
             {
+                // Intercept the PCMSetPositionCallback(0) Unity fires on Play().
+                // If we have a pending resume position, use it instead of 0 so
+                // that the first DSP buffer is filled from the correct place.
+                // Always clear the pending value — consumed once, or voided by
+                // any explicit non-zero seek that arrives first.
+                if (targetFrame == 0 && _pendingInitialFrame > 0)
+                    targetFrame = _pendingInitialFrame;
+                _pendingInitialFrame = -1;
+
                 _seekCount++;
 
                 if (_index.Count == 0)
@@ -490,7 +547,11 @@ namespace CMM
                 }
 
                 int pageIdx        = _index.FindPageForSample(targetFrame);
-                long pageByteOffset = _index.ByteOffsets[pageIdx];
+                // Go back 4 pages for ~80ms of Opus pre-roll. RFC 7845 §7 requires
+                // 80ms of decoder history after a seek; 2 pages was only ~40ms for
+                // typical ffmpeg-encoded files (1 frame/page × 20ms/frame).
+                int prerollIdx     = Math.Max(0, pageIdx - 4);
+                long pageByteOffset = _index.ByteOffsets[prerollIdx];
 
                 const float fastForwardWindowSeconds = 2f;
                 bool canFastForward =
@@ -534,35 +595,62 @@ namespace CMM
             // ── Internal helpers ──────────────────────────────────────────────
             private void OpenStreamAtByte(long byteOffset)
             {
-                var t0 = ProfStart(); // ← add this
-                _fileStream.Position = byteOffset;
-                _decoder = new OpusDecoder(48000, _format.Channels);
-                _oggStream = new OpusOggReadStream(_decoder, _fileStream);
+                var t0 = ProfStart();
                 _pcmBufStart = 0;
                 _pcmBufEnd = 0;
 
-                // Estimate sample position from granule of the nearest prior page
-                if (byteOffset == 0)
+                // Cache the Ogg header pages (BOS + comment) on first open.
+                // These are ~200 bytes and are needed by PrependStream so that
+                // OpusOggReadStream always sees a valid sequential stream starting
+                // with the mandatory header pages, regardless of where in the file
+                // we seek to.  Without this, the container reader never registers
+                // the logical stream serial number and delivers no packets.
+                if (_headerBytes == null && _index.Count > 0)
                 {
+                    long headerEnd = _index.ByteOffsets[0];
+                    _fileStream.Position = 0;
+                    _headerBytes = new byte[headerEnd];
+                    int total = 0, r;
+                    while (total < (int)headerEnd &&
+                           (r = _fileStream.Read(_headerBytes, total, (int)headerEnd - total)) > 0)
+                        total += r;
+                }
+
+                _decoder = new OpusDecoder(48000, _format.Channels);
+
+                if (byteOffset == 0 || _headerBytes == null)
+                {
+                    // Reading from the top — standard path, no PrependStream needed.
+                    _fileStream.Position = 0;
+                    _oggStream = new OpusOggReadStream(_decoder, _fileStream);
                     _samplePos = 0;
                 }
                 else
                 {
-                    // Walk backwards to find matching byte offset
+                    // Mid-file seek: present header bytes followed by audio data
+                    // from byteOffset as one sequential stream.  OpusOggReadStream
+                    // reads the header pages from _headerBytes, then reads audio
+                    // pages from _fileStream — no post-construction repositioning,
+                    // so any internal read-ahead buffer stays correctly aligned.
+                    _fileStream.Position = byteOffset;
+                    _oggStream = new OpusOggReadStream(_decoder,
+                        new PrependStream(_headerBytes, _fileStream));
+                    _samplePos = 0;
                     for (int i = _index.Count - 1; i >= 0; i--)
                     {
                         if (_index.ByteOffsets[i] <= byteOffset)
                         {
-                            // Granule is the LAST sample of the page, so actual
-                            // current position after opening here is approximately
-                            // that granule minus one page's worth.  We correct by
-                            // the discard loop in SeekToSampleLocked.
-                            _samplePos = Math.Max(0, _index.GranulePositions[i]
-                                                  - 48000 / 25); // ~40ms safety margin
+                            // GranulePositions[i] is the last sample of page i.
+                            // GranulePositions[i-1] is the last sample of the previous
+                            // page, which equals the index of the first sample of page i.
+                            // Using this avoids negative discard when pages contain more
+                            // than 1920 samples (e.g. 4+ frames per page from ffmpeg).
+                            _samplePos = (i > 0) ? _index.GranulePositions[i - 1] : 0L;
                             break;
                         }
                     }
                 }
+
                 ProfEnd(t0, $"OpenStreamAtByte({byteOffset})", 2f);
             }
 
@@ -620,6 +708,51 @@ namespace CMM
                     }
                 }
                 base.Dispose(disposing);
+            }
+
+            // Presents a fixed byte[] prefix followed by reads from a tail Stream,
+            // as if they were a single contiguous sequential stream.  Used to feed
+            // OpusOggReadStream the cached Ogg header pages before audio data from
+            // a mid-file seek position, without ever repositioning _fileStream after
+            // the OpusOggReadStream constructor runs.
+            private sealed class PrependStream : Stream
+            {
+                private readonly byte[] _prefix;
+                private readonly Stream _tail;
+                private int _prefixPos;
+
+                public PrependStream(byte[] prefix, Stream tail)
+                {
+                    _prefix = prefix;
+                    _tail = tail;
+                }
+
+                public override bool CanRead  => true;
+                public override bool CanSeek  => false;
+                public override bool CanWrite => false;
+                public override long Length   => throw new NotSupportedException();
+                public override long Position
+                {
+                    get => _prefixPos < _prefix.Length ? _prefixPos : _prefix.Length + _tail.Position;
+                    set => throw new NotSupportedException();
+                }
+                public override void Flush() { }
+                public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+                public override void SetLength(long value)                 => throw new NotSupportedException();
+                public override void Write(byte[] buf, int off, int cnt)   => throw new NotSupportedException();
+
+                public override int Read(byte[] buffer, int offset, int count)
+                {
+                    if (_prefixPos < _prefix.Length)
+                    {
+                        int available = _prefix.Length - _prefixPos;
+                        int toCopy = Math.Min(available, count);
+                        Array.Copy(_prefix, _prefixPos, buffer, offset, toCopy);
+                        _prefixPos += toCopy;
+                        return toCopy;
+                    }
+                    return _tail.Read(buffer, offset, count);
+                }
             }
         }
 
@@ -832,20 +965,23 @@ namespace CMM
                 // Bypass SampleChannel for Opus — SeekableOpusReader already
                 // outputs IEEE float and has its own ReadFloats fast path.
                 var directSrc = (SeekableOpusReader)reader;
-                var readLock = new object(); // shared with PCMSetPositionCallback
 
                 return AudioClip.Create(name, totalSamples, channels, sampleRate, true,
                     (float[] data) =>
                     {
                         var t0 = ProfStart();
-                        directSrc.ReadFloats(data, 0, data.Length);
+                        int filled = directSrc.ReadFloats(data, 0, data.Length);
+                        if (filled < data.Length)
+                            Array.Clear(data, filled, data.Length - filled);
                         ProfEnd(t0, "PCMRead_Opus", 1f);
                     },
                     (int newPosition) =>
                     {
                         // Unity passes sample-frame position (not float index).
                         // Position property on SeekableOpusReader expects bytes.
-                        reader.Position = (long)newPosition * channels * 4L;
+                        try { reader.Position = (long)newPosition * channels * 4L; }
+                        catch (Exception ex)
+                        { UnityEngine.Debug.LogWarning($"[CMM] Opus seek error at frame {newPosition}: {ex.Message}"); }
                     }
                 );
             }
@@ -1033,6 +1169,17 @@ namespace CMM
                     cursor = Mathf.Clamp(newPosition, 0, totalSamples - 1);
                 }
             );
+        }
+
+        // Non-streaming clip: PCM lives in Unity's native audio buffer so the
+        // audio thread never calls into managed code. Immune to GC pauses.
+        public static AudioClip CreateNonStreamingClip(DecodedAudio audio, string name)
+        {
+            if (audio?.Samples == null || audio.Samples.Length == 0) return null;
+            int totalSamples = audio.Samples.Length / audio.Channels;
+            var clip = AudioClip.Create(name, totalSamples, audio.Channels, audio.Frequency, false);
+            clip.SetData(audio.Samples, 0);
+            return clip;
         }
 
         // ── Quick validate ────────────────────────────────────────────────────
@@ -1334,39 +1481,39 @@ namespace CMM
 
         public void InitContexts()
         {
-            AddContext("Death", "events/death", "Ambient", false, 0, false, 3, 1, true, true, 100, true);
-            AddContext("Low_Health_Panic", "events/low_health", "Ambient", true, 30, false, 5, 0, true, true, 90, false);
-            AddContext("Blood_Moon_Combat", "blood_moon/combat", "Combat_High", true, 20, false, 3, 3, true, true, 71, false);
-            AddContext("Blood_Moon", "blood_moon", "Ambient", true, 30, false, 5, 5, true, true, 70, false);
+            AddContext("Death", "events/death", "Stack", false, 0, false, 3, 1, true, true, 100, true);
+            AddContext("Low_Health_Panic", "events/low_health", "Stack", true, 30, false, 5, 2, true, true, 90, false);
+            AddContext("Blood_Moon_Combat", "blood_moon/combat", "Stack", true, 20, false, 3, 3, true, true, 71, false);
+            AddContext("Blood_Moon", "blood_moon", "Stack", true, 30, false, 5, 5, true, true, 70, false);
             AddContext("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
             AddContext("Vehicle_Bicycle", "vehicle/bicycle", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
             AddContext("Vehicle_Minibike", "vehicle/minibike", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
             AddContext("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
             AddContext("Vehicle_4x4", "vehicle/4x4", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
-            AddContext("Vehicle", "vehicle", "Ambient", true, 30, false, 5, 3, true, true, 60, false);
-            AddContext("POI_Cleared", "poi/cleared", "Ambient", true, 60, false, 5, 5, true, true, 55, true);
+            AddContext("Vehicle", "vehicle", "Stack", true, 30, false, 5, 3, true, true, 60, false);
+            AddContext("POI_Cleared", "poi/cleared", "Stack", true, 60, false, 5, 5, true, true, 55, true);
             AddContext("Combat_High", "combat_high", "Combat_Low", true, 20, false, 3, 3, true, true, 51, false);
             AddContext("Combat_Low", "combat_low", "Tension_Low", true, 20, false, 3, 3, true, true, 50, false);
-            AddContext("Spawn", "events/spawn", "Ambient", false, 0, false, 3, 1, true, true, 45, true);
-            AddContext("Inventory", "inventory", "Ambient", true, 15, false, 0, 2, true, true, 40, false);
+            AddContext("Spawn", "events/spawn", "Stack", false, 0, false, 3, 1, true, true, 45, true);
+            AddContext("Inventory", "inventory", "Stack", true, 15, false, 0, 2, true, true, 40, false);
             AddContext("Tension_High", "tension_high", "Tension_Low", true, 30, false, 5, 5, false, true, 30, false);
-            AddContext("Tension_Low", "tension_low", "Ambient", true, 30, false, 5, 5, false, true, 30, false);
+            AddContext("Tension_Low", "tension_low", "Stack", true, 30, false, 5, 5, false, true, 30, false);
             AddContext("Trader_Joel", "trader/joel", "Trader", true, 120, false, 5, 5, false, true, 26, false);
             AddContext("Trader_Jen", "trader/jen", "Trader", true, 120, false, 5, 5, false, true, 26, false);
             AddContext("Trader_Rekt", "trader/rekt", "Trader", true, 120, false, 5, 5, false, true, 26, false);
             AddContext("Trader_Bob", "trader/bob", "Trader", true, 120, false, 5, 5, false, true, 26, false);
             AddContext("Trader_Hugh", "trader/hugh", "Trader", true, 120, false, 5, 5, false, true, 26, false);
-            AddContext("Trader", "trader", "Ambient", true, 120, false, 5, 5, false, true, 25, false);
+            AddContext("Trader", "trader", "Stack", true, 120, false, 5, 5, false, true, 25, false);
             AddContext("Home_Day", "home/day", "Home", true, 120, false, 5, 5, false, true, 15, false);
             AddContext("Home_Night", "home/night", "Home", true, 120, false, 5, 5, false, true, 15, false);
-            AddContext("Home", "home", "Ambient", true, 120, false, 5, 5, false, true, 15, false);
+            AddContext("Home", "home", "Stack", true, 120, false, 5, 5, false, true, 15, false);
             AddContext("POI_T5", "poi/t5", "POI", true, 60, false, 5, 5, false, true, 22, false);
             AddContext("POI_T4", "poi/t4", "POI", true, 60, false, 5, 5, false, true, 22, false);
             AddContext("POI_T3", "poi/t3", "POI", true, 60, false, 5, 5, false, true, 22, false);
             AddContext("POI_T2", "poi/t2", "POI", true, 60, false, 5, 5, false, true, 22, false);
             AddContext("POI_T1", "poi/t1", "POI", true, 60, false, 5, 5, false, true, 22, false);
-            AddContext("POI_T0", "poi/t0", "Ambient", true, 60, false, 5, 5, false, true, 21, false);
-            AddContext("POI", "poi", "Ambient", true, 60, false, 5, 5, false, true, 20, false);
+            AddContext("POI_T0", "poi/t0", "Stack", true, 60, false, 5, 5, false, true, 21, false);
+            AddContext("POI", "poi", "Stack", true, 60, false, 5, 5, false, true, 20, false);
             AddContext("Ambient_Forest", "ambient/forest", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
             AddContext("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
             AddContext("Ambient_Desert", "ambient/desert", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
@@ -1374,7 +1521,7 @@ namespace CMM
             AddContext("Ambient_Wasteland", "ambient/wasteland", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
             AddContext("Ambient", "ambient", "None", true, 120, false, 5, 4, false, true, 10, false);
             AddContext("None", "", "None", false, 0, false, 0, 0, true, true, 0, false);
-            AddContext("Menu", "menu", "Ambient", false, 0, true, 5, 2, true, true, 0, false);
+            AddContext("Menu", "menu", "None", false, 0, true, 5, 2, true, true, 0, false);
         }
 
         public static Contexts GetContext(string contextIn) =>
@@ -1384,6 +1531,8 @@ namespace CMM
         private static readonly HashSet<string> _validatedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Walks the fallback chain to find the nearest playable context.
+        // A fallback of "Stack" abandons the static chain and defers to the
+        // highest-priority active context in _contextStack that has files.
         private static string ResolvePlayableContext(string contextName)
         {
             string current = contextName;
@@ -1392,6 +1541,15 @@ namespace CMM
                 if (ContextHasFiles(current)) return current;
                 Contexts ctx = GetContext(current);
                 string fallback = ctx?.Fallback ?? "None";
+                if (fallback == "Stack")
+                {
+                    foreach (ActiveContext active in _contextStack)
+                    {
+                        if (active.ContextName == contextName) continue;
+                        if (ContextHasFiles(active.ContextName)) return active.ContextName;
+                    }
+                    return null;
+                }
                 if (fallback == "None" || fallback == current) return null;
                 current = fallback;
             }
@@ -1597,7 +1755,21 @@ namespace CMM
                 if (cache.cachedClip == null)
                 {
                     Log.Out($"[CMM] On-demand load for {contextName}...");
-                    yield return StartCoroutine(PreloadContext(contextName));
+                    if (cache.isPreloading)
+                    {
+                        // Proactive preload already in progress; wait for it instead of racing
+                        float onDemandWait = 0f;
+                        while (cache.isPreloading && cache.cachedClip == null && onDemandWait < 10f)
+                        {
+                            if (transitionId != _transitionId) yield break;
+                            yield return new WaitForSeconds(0.1f);
+                            onDemandWait += 0.1f;
+                        }
+                    }
+                    else
+                    {
+                        yield return StartCoroutine(PreloadContext(contextName));
+                    }
                 }
                 if (cache.cachedClip == null)
                 {
@@ -1636,36 +1808,65 @@ namespace CMM
                 ? Mathf.Clamp(startPosition, 0f, clipLen - 0.01f)
                 : 0f;
 
-            if (safeStart > 0f && cache.currentReader != null)
-            {
-                long targetFrame = (long)(safeStart * cache.currentReader.WaveFormat.SampleRate);
-                long targetByte = targetFrame * cache.currentReader.WaveFormat.Channels * 4L;
-                try { cache.currentReader.Position = targetByte; }
-                catch (Exception ex)
-                {
-                    Log.Warning($"[CMM] Pre-seek failed for {contextName}: {ex.Message}");
-                }
-                Log.Out($"[CMM] Pre-seek to frame {targetFrame} ({safeStart:F2}s) for {contextName}");
-            }
-
             incoming.clip = cache.cachedClip;
             incoming.loop = ctx.Loop;
             incoming.volume = 0f;
-            incoming.Play();
+
+            // Reset so a fresh play never inherits a previous session's offset.
+            cache.playbackOffset = 0f;
 
             if (safeStart > 0f)
             {
-                incoming.time = safeStart;
                 Log.Out($"[CMM] Seek to {safeStart:F2}s for {contextName} " +
                         $"(clip={clipLen:F1}s, streaming={cache.currentReader != null})");
+
+                if (cache.currentReader is NAudioDecoder.SeekableOpusReader opusRdr)
+                {
+                    // Unity does NOT call PCMSetPositionCallback(0) on Play() — it
+                    // just starts invoking PCMReaderCallback from wherever the reader
+                    // is.  We must pre-seek the reader to the resume frame BEFORE
+                    // Play() is called so the very first DSP buffer fill is correct.
+                    // Seek by opening from byte 0 + decode-discard (no PrependStream,
+                    // no Ogg sequence-number assumptions).  Done on a background thread
+                    // to avoid blocking the main thread for long tracks.
+                    long resumeFrame = (long)(safeStart * 48000f);
+                    bool[] seekDone = { false };
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        try   { opusRdr.SeekBeforePlay(resumeFrame); }
+                        catch (Exception ex)
+                        { UnityEngine.Debug.LogWarning($"[CMM] Opus pre-seek failed: {ex.Message}"); }
+                        seekDone[0] = true;
+                    });
+                    float seekWait = 0f;
+                    while (!seekDone[0] && seekWait < 30f)
+                    {
+                        if (transitionId != _transitionId) yield break;
+                        yield return null;
+                        seekWait += Time.unscaledDeltaTime;
+                    }
+                    if (!seekDone[0])
+                        Log.Warning($"[CMM] Opus pre-seek timed out for {contextName}");
+
+                    // AudioSource.time resets to 0 on Play() even though the reader
+                    // is at safeStart.  Record the offset so the leave-context code
+                    // can reconstruct the true absolute position when saving.
+                    cache.playbackOffset = safeStart;
+                }
+            }
+
+            incoming.Play();
+
+            if (safeStart > 0f && !(cache.currentReader is NAudioDecoder.SeekableOpusReader))
+            {
+                incoming.time = safeStart;
             }
 
             _primaryIsActive = !_primaryIsActive;
             AudioSource watchTarget = incoming;
 
             // ── Crossfade ────────────────────────────────────────────────────
-            float targetVolume = GamePrefs.GetFloat(
-                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+            float targetVolume = CMMConfig.GetVolume(inGame);
 
             if (CMMConfig.CrossfadeEnabled)
             {
@@ -1753,8 +1954,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
-                float currentVolume = GamePrefs.GetFloat(
-                    inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+                float currentVolume = CMMConfig.GetVolume(inGame);
                 if (Mathf.Approximately(currentVolume, previousVolume)) continue;
                 previousVolume = currentVolume;
                 if (_crossFadeCoroutine == null && ActiveChannel != null && ActiveChannel.isPlaying)
@@ -1765,19 +1965,17 @@ namespace CMM
         public static void UpdateVolume()
         {
             if (ActiveChannel == null) return;
-            ActiveChannel.volume = GamePrefs.GetFloat(
-                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
+            ActiveChannel.volume = CMMConfig.GetVolume(inGame);
         }
 
         // ── Crossfade ─────────────────────────────────────────────────────────
         private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming,
             float duration, int cooldownSeconds, float outgoingStartVol)
         {
+            float targetVolume = CMMConfig.GetVolume(inGame);
             float elapsed = 0f;
             while (elapsed < duration)
             {
-                float targetVolume = GamePrefs.GetFloat(
-                    inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
                 elapsed += Time.deltaTime;
                 float t = Mathf.Clamp01(elapsed / duration);
                 incoming.volume = Mathf.Lerp(0f, targetVolume, t);
@@ -1785,9 +1983,7 @@ namespace CMM
                 yield return null;
             }
 
-            float finalVolume = GamePrefs.GetFloat(
-                inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
-            incoming.volume = finalVolume;
+            incoming.volume = targetVolume;
             outgoing.Stop();
             outgoing.clip = null;
             outgoing.volume = 0f;
@@ -2344,22 +2540,16 @@ namespace CMM
         // ── SendContextUpdate ─────────────────────────────────────────────────
         public static void SendContextUpdate(string contextIn, int bypassPriority = -1)
         {
-            // Get the context from the list of contexts
             Contexts incoming = GetContext(contextIn);
-            // if no context, return
             if (incoming == null) return;
-            // if the context waiting to be swapped to is already waiting to be transitioned to, there's no need to reprocess this
             if (_pendingContext == contextIn) return;
 
-            // if not ingame
             bool menuOverride = !inGame;
             int comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
-            // if currentContext is not null and the contetxIn is the currentContext
-            // if a current context was null and fallen back on, but is now valid and the contextIN, then swap to it
+            // allows re-triggering a context that was a null-fallback but is now valid
             bool isReloadOfCurrent = currentContext != null && contextIn == currentContext.Context;
             bool priorityOk = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
 
-            // if not in game, if not higher priority, if currentContext is re-validated
             if (!menuOverride && !priorityOk && !isReloadOfCurrent)
             {
                 Log.Out($"[CMM] {contextIn} rejected — not higher priority than {currentContext?.Context}");
@@ -2367,57 +2557,46 @@ namespace CMM
             }
 
             Log.Out($"[CMM] Context accepted: {currentContext?.Context} -> {contextIn}");
-            // having gotten this far, the next context to queue is contextIn
             _pendingContext = contextIn;
 
-            // if currentContext is not null, can be resumed, and music is currently playing
             if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
-                // save resume positions for the track we are leaving, if it can be resumed
                 ContextCache leavingCache = cacheMap[currentContext.Context];
-                leavingCache.resumePosition = ActiveChannel.time;
+                // For Opus pre-seek plays: AudioSource.time starts at 0 (Play()
+                // resets Unity's internal clock) while the audio actually started
+                // at leavingCache.playbackOffset.  Add the offset to recover the
+                // true absolute track position.
+                leavingCache.resumePosition = ActiveChannel.time + leavingCache.playbackOffset;
                 leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
-                // the condition for PreloadCache is likely obsolete
-                // if there is a clip in the cacheMap, set it to be destroyed after change?
                 if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
                 {
-                    // after fade is complete, this clip will be discarded
                     _clipToDestroyAfterFade = leavingCache.cachedClip;
                     _readerToDisposeAfterFade = leavingCache.currentReader;
                     _decodedToReleaseAfterFade = leavingCache.decodedAudio;
-                    // leaving cache is cleared for next entry
                     leavingCache.cachedClip = null;
                     leavingCache.currentReader = null;
                     leavingCache.decodedAudio = null;
                 }
             }
 
-            // if currentContext is not null and plays once, and the new context doesn't play once
-            // don't alter the return context
             if (currentContext != null && currentContext.PlayOnce && !incoming.PlayOnce)
                 _playOnceReturnContext = null;
 
-            // find out if the context is valid - will resolve fallbacks and what is playable
             string contextToPlay = ResolvePlayableContext(contextIn);
-            // if context/fallsback are all invalid, fade to silence
             if (contextToPlay == null)
             {
                 Log.Out($"[CMM] No playable context in chain for {contextIn} — fading to silence.");
                 _pendingContext = "None";
                 currentContext = GetContext("None");
-                // increment transition ID
                 ++_transitionId;
                 FadeToSilence();
                 return;
             }
 
             Contexts candidate = GetContext(contextToPlay);
-            // if incoming or candidate bypass cooldown
             bool bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
-            
-            // is the contextToPlay on cooldown and can it be bypassed by the candidate context
             bool onCooldown = !bypassCooldown
                               && bypassPriority < 0
                               && _contextsOnCooldown.Contains(contextToPlay);
@@ -2471,8 +2650,6 @@ namespace CMM
         {
             while (true)
             {
-                Log.Out($"Current Context is: {currentContext.Context}");
-                Log.Out($"Player is dead? {playerIsDead}");
                 yield return new WaitForSeconds(ContextScanCooldown);
                 if (!inGame || playerIsDead) continue;
 
@@ -2536,26 +2713,6 @@ namespace CMM
                     }
                     _pendingContext = null; // only clear when we're actually transitioning
                     SendContextUpdate(topContext, 0);
-                }
-
-// Also add the same guard at the top of FileWatchLoop's "else" branch
-// (the one that calls SendContextUpdate(top, 0) when files change but the
-// playing track is still present):
-                else
-                {
-                    string top = GetTopContext();
-                    if (top != currentContext.Context)
-                    {
-                        // Same PlayOnce guard as ContextScanLoop.
-                        if (currentContext != null && currentContext.PlayOnce)
-                        {
-                            Contexts topCtx = GetContext(top);
-                            if (topCtx == null || topCtx.Priority <= currentContext.Priority)
-                                continue; // foreach body — skip this contextName iteration
-                        }
-                        _pendingContext = null;
-                        SendContextUpdate(top, 0);
-                    }
                 }
             }
         }
@@ -2621,7 +2778,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(2f);
-                if (!inGame) continue;
+                if (!inGame && currentContext?.Context != "Menu" && currentContext?.Context != "Ambient") continue;
                 if (currentContext == null || currentContext.Context == "None") continue;
 
                 // Build the set of contexts to watch: the current one PLUS every
@@ -2631,6 +2788,26 @@ namespace CMM
             { currentContext.Context };
                 foreach (var ac in _contextStack)
                     contextsToWatch.Add(ac.ContextName);
+                // Also watch the fallback chain of every already-watched context.
+                // POI_Tx is in activeContexts but "POI" never is, so "POI" never
+                // lands on _contextStack. Without this expansion, restoring files to
+                // a fallback-only context (e.g. POI when playing via POI_T1 -> POI
+                // -> Ambient) is never detected.
+                foreach (string seed in contextsToWatch.ToList())
+                {
+                    string cur = seed;
+                    for (int fi = 0; fi < 5; fi++)
+                    {
+                        Contexts fctx = GetContext(cur);
+                        string fb = fctx?.Fallback ?? "None";
+                        if (fb == "None" || fb == "Stack" || fb == cur) break;
+                        contextsToWatch.Add(fb);
+                        cur = fb;
+                    }
+                }
+                // Stack is empty on the menu screen — always watch Menu explicitly
+                // so file additions after a fallback to Ambient can re-trigger it.
+                if (!inGame) contextsToWatch.Add("Menu");
 
                 foreach (string contextName in contextsToWatch)
                 {
@@ -2662,8 +2839,12 @@ namespace CMM
                     // Special case: if we've never scanned this context and the folder
                     // exists, treat it as changed so we populate the snapshot.
                     bool neverScanned = !lastWriteTimes.ContainsKey(contextName);
+                    // Never trust the write-time shortcut for empty directories: Windows
+                    // can stamp the empty dir and a re-filled dir with the same timestamp
+                    // when the add happens within the same filesystem precision window.
+                    bool previouslyEmpty = !neverScanned && (cache.directorySnapshot?.Length ?? 0) == 0;
 
-                    if (!neverScanned && currentWriteTime == knownTime) continue;
+                    if (!neverScanned && !previouslyEmpty && currentWriteTime == knownTime) continue;
                     lastWriteTimes[contextName] = currentWriteTime;
 
                     // ── SLOW PATH: enumerate files ──────────────────────────────────
@@ -2686,10 +2867,12 @@ namespace CMM
                     var currentNorm = currentFiles.Select(norm).ToArray();
                     var previousNorm = previousFiles.Select(norm).ToArray();
 
-                    bool changed = neverScanned ||
-                                   currentNorm.Length != previousNorm.Length ||
-                                   currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).Any() ||
-                                   previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).Any();
+                    bool filesActuallyChanged =
+                        currentNorm.Length != previousNorm.Length ||
+                        currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).Any() ||
+                        previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).Any();
+
+                    bool changed = neverScanned || filesActuallyChanged;
                     if (!changed) continue;
 
                     // Update the snapshot and invalidate the file-presence cache so
@@ -2725,6 +2908,10 @@ namespace CMM
                         InvalidateContextFileCache(contextName);
                     }
 
+                    // First scan populates lastWriteTimes but shouldn't react if
+                    // the snapshot already matched (e.g. preload already ran).
+                    if (!filesActuallyChanged) continue;
+
                     Log.Out($"[CMM] File change in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
 
                     _previousPlayableContexts.Clear();
@@ -2732,7 +2919,14 @@ namespace CMM
                     // For non-current contexts, the snapshot + cache invalidation above
                     // is enough: ContextScanLoop will pick up the change on its next
                     // tick and call SendContextUpdate if the top context has changed.
-                    if (contextName != currentContext.Context) continue;
+                    // Exception: on the menu screen ContextScanLoop is skipped (!inGame),
+                    // so we must re-trigger Menu here when its files are restored.
+                    if (contextName != currentContext.Context)
+                    {
+                        if (!inGame && contextName == "Menu" && currentFiles.Length > 0)
+                            SendContextUpdate("Menu");
+                        continue;
+                    }
 
                     bool lastPlayedMissing = false;
                     if (!string.IsNullOrEmpty(cache.lastPlayedFile))
@@ -2758,9 +2952,9 @@ namespace CMM
                     if (currentFiles.Length == 0)
                     {
                         Log.Out($"[CMM] {contextName} folder emptied, re-evaluating.");
-                        string fallback = ResolvePlayableContext(ctx.Fallback) ?? "Ambient";
+                        string fallback = GetTopContext() ?? "Ambient";
                         _pendingContext = null;
-                        SendContextUpdate(fallback, currentContext.Priority + 1);
+                        SendContextUpdate(fallback, 0);
                     }
                     else if (lastPlayedMissing)
                     {
@@ -2776,8 +2970,8 @@ namespace CMM
                         }
                         else
                         {
-                            string fallback = ResolvePlayableContext(ctx.Fallback) ?? "Ambient";
-                            SendContextUpdate(fallback, currentContext.Priority + 1);
+                            string fallback = GetTopContext() ?? "Ambient";
+                            SendContextUpdate(fallback, 0);
                         }
                     }
                     else
@@ -2785,9 +2979,22 @@ namespace CMM
                         // Files changed but the playing track is still present.
                         // Re-evaluate the top context in case a higher-priority one
                         // is now unblocked.
+                        // On the menu screen the context stack is always empty, so
+                        // GetTopContext() always returns "Ambient" — which has no
+                        // files and causes FadeToSilence(), killing the menu preload.
+                        if (!inGame) continue;
                         string top = GetTopContext();
                         if (top != currentContext.Context)
                         {
+                            // Don't let the initial directory scan (neverScanned) or
+                            // a file-change event interrupt a PlayOnce context (Spawn/Death)
+                            // with something of lower or equal priority.
+                            if (currentContext != null && currentContext.PlayOnce)
+                            {
+                                Contexts topCtx = GetContext(top);
+                                if (topCtx == null || topCtx.Priority <= currentContext.Priority)
+                                    continue;
+                            }
                             _pendingContext = null;
                             SendContextUpdate(top, 0);
                         }
@@ -2810,6 +3017,15 @@ namespace CMM
         }
 
         private IEnumerator PreloadContext(string contextName, string avoidFile = null)
+        {
+            ContextCache cache = cacheMap[contextName];
+            if (cache.isPreloading) { yield break; }
+            cache.isPreloading = true;
+            yield return StartCoroutine(PreloadContextCore(contextName, avoidFile));
+            cache.isPreloading = false;
+        }
+
+        private IEnumerator PreloadContextCore(string contextName, string avoidFile = null)
         {
             ContextCache cache = cacheMap[contextName];
             string filePath;
@@ -2873,7 +3089,9 @@ namespace CMM
             // ── NAudio streaming path ─────────────────────────────────────────
             if (CMMConfig.UseNAudioDecoder)
             {
-                if (CMMConfig.PreloadCacheEnabled)
+                // Menu always uses full-decode so the PCMReaderCallback is a plain
+                // Array.Copy — immune to CPU pressure during the loading screen.
+                if (CMMConfig.PreloadCacheEnabled || contextName == "Menu")
                 {
                     // ── Full-decode path (PreloadCacheEnabled = true) ─────────
                     // Keep the existing full-decode behaviour so the preload
@@ -2908,8 +3126,13 @@ namespace CMM
                         yield break;
                     }
 
-                    AudioClip fullClip = NAudioDecoder.CreateStreamingClip(
-                        decoded, Path.GetFileNameWithoutExtension(filePath));
+                    // Menu uses a non-streaming clip so the audio thread reads from
+                    // Unity's native buffer — completely immune to GC pauses.
+                    // All other full-decode contexts keep the managed streaming path.
+                    bool isMenu = contextName == "Menu";
+                    AudioClip fullClip = isMenu
+                        ? NAudioDecoder.CreateNonStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath))
+                        : NAudioDecoder.CreateStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath));
                     if (fullClip == null) yield break;
 
                     if (cache.cachedClip != null) Destroy(cache.cachedClip);
@@ -2917,10 +3140,12 @@ namespace CMM
                     if (cache.decodedAudio != null) cache.decodedAudio.Samples = null;
 
                     cache.cachedClip = fullClip;
-                    cache.decodedAudio = decoded;
+                    // Menu: native buffer owns the samples now; drop the managed copy.
+                    if (isMenu) { decoded.Samples = null; decoded = null; }
+                    cache.decodedAudio = isMenu ? null : decoded;
                     cache.lastPlayedFile = filePath;
-                    Log.Out($"[CMM] Preloaded (full decode): {contextName} — " +
-                            $"{Path.GetFileName(filePath)} ({decoded.LengthSeconds:F1}s)");
+                    Log.Out($"[CMM] Preloaded (full decode{(isMenu ? "/native" : "")}): {contextName} — " +
+                            $"{Path.GetFileName(filePath)}");
                 }
                 else
                 {
