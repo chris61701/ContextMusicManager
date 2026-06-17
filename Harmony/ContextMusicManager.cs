@@ -88,48 +88,38 @@ namespace CMM
     // SECTION 2 — DATA STRUCTURES
     // ─────────────────────────────────────────────────────────────────────────
 
+    // Groups an AudioClip with its backing WaveStream and optional decoded PCM
+    // so current/next slots and the pending-disposal slot are each one field.
+    // Call Release() AFTER Destroy(Clip) — the audio thread must be off the
+    // clip before the WaveStream is disposed.
+    public struct TrackSlot
+    {
+        public AudioClip  Clip;
+        public WaveStream Reader;
+        public DecodedAudio Decoded;
+
+        public void Release()
+        {
+            Clip = null;
+            if (Reader  != null) { try { Reader.Dispose(); } catch { } Reader  = null; }
+            if (Decoded != null) { Decoded.Samples = null;               Decoded = null; }
+        }
+    }
+
     public class ContextCache
     {
-        // ── Streaming path (NAudio / SeekableOpusReader) ──────────────────────
-        // The WaveStream is kept alive for the entire life of the AudioClip
-        // because the PCMReaderCallback reads from it on the audio thread.
-        // Disposing it before Destroy(clip) is called is a hard error.
-        public WaveStream currentReader = null;
-        public WaveStream nextReader = null;
-
-        // ── Full-decode path (Opus only, or PreloadCacheEnabled = true) ───────
-        public DecodedAudio decodedAudio = null;
-        public DecodedAudio nextDecodedAudio = null;
-
-        // ── Shared ────────────────────────────────────────────────────────────
-        public AudioClip cachedClip = null;
-        public AudioClip nextCachedClip = null;
-        public float resumePosition = 0f;
-        // For Opus pre-seek (SeekBeforePlay): Unity's AudioSource.time resets to
-        // 0 on Play() even though the reader is positioned at safeStart.  This
-        // offset is added when saving resumePosition so the saved value is the
-        // true absolute track position, not elapsed-since-play.
-        public float playbackOffset = 0f;
+        public TrackSlot Current;
+        public TrackSlot Next;
+        // For Opus pre-seek: AudioSource.time resets to 0 on Play() even when
+        // the reader is at safeStart — add this offset to recover true position.
+        public float resumePosition;
+        public float playbackOffset;
         public float lastLeftTime = -1f;
-        public string lastPlayedFile = null;
-        public int sequentialIndex = 0;
-        public string[] directorySnapshot = null;
-        public bool nextClipLoading = false;
-        public bool isPreloading = false;
-
-        // Safe disposal helper — call after Destroy(clip) (or after a deferred
-        // frame) so the audio thread is guaranteed off the reader.
-        public void DisposeCurrentReader()
-        {
-            if (currentReader != null) { try { currentReader.Dispose(); } catch { } currentReader = null; }
-            if (decodedAudio != null) { decodedAudio.Samples = null; decodedAudio = null; }
-        }
-
-        public void DisposeNextReader()
-        {
-            if (nextReader != null) { try { nextReader.Dispose(); } catch { } nextReader = null; }
-            if (nextDecodedAudio != null) { nextDecodedAudio.Samples = null; nextDecodedAudio = null; }
-        }
+        public string lastPlayedFile;
+        public int sequentialIndex;
+        public string[] directorySnapshot;
+        public bool nextClipLoading;
+        public bool isPreloading;
     }
 
     public class ActiveContext
@@ -178,12 +168,6 @@ namespace CMM
 
     // ─────────────────────────────────────────────────────────────────────────
     // SECTION 3 — NAudio DECODER
-    // ─────────────────────────────────────────────────────────────────────────
-
-#if NAUDIO
-    // ─────────────────────────────────────────────────────────────────────────
-    // REPLACES: SECTION 3 — NAudio DECODER  (the entire #if NAUDIO block)
-    // The #else stub at the bottom is unchanged — keep it as-is.
     // ─────────────────────────────────────────────────────────────────────────
 
 #if NAUDIO
@@ -1215,7 +1199,6 @@ namespace CMM
             }
         }
     }
-#endif
 #else
     // Fallback stub — compiled when NAudio assemblies are absent.
     public static class NAudioDecoder
@@ -1269,7 +1252,7 @@ namespace CMM
 
     public static class ContextResolver
     {
-        static readonly float EnemyDetectRange = 20f;
+        static readonly float EnemyDetectRange = 30f;
         static readonly float TraderDetectRange = 40f;
         static readonly float HomeDetectRange = 70f;
         static readonly float PlayerHealthDangerThresholdPercent = 0.25f;
@@ -1468,57 +1451,58 @@ namespace CMM
         public static string _pendingContext = null;
         public static string _playOnceReturnContext = null;
 
-        private static void AddContext(string name, string path, string fallback,
-            bool canBeResumed, int staleTime, bool loop, int cooldown, int warmUp,
-            bool bypassesCooldown, bool canInterrupt, int priority, bool playOnce)
-        {
-            contexts[name] = new Contexts(name, path, fallback, canBeResumed, staleTime,
-                loop, cooldown, warmUp, bypassesCooldown, canInterrupt, priority, playOnce);
-        }
-
         public void InitContexts()
         {
-            AddContext("Death", "events/death", "Stack", false, 0, false, 3, 1, true, true, 100, true);
-            AddContext("Low_Health_Panic", "events/low_health", "Stack", true, 30, false, 5, 2, true, true, 90, false);
-            AddContext("Blood_Moon_Combat", "blood_moon/combat", "Stack", true, 20, false, 3, 3, true, true, 71, false);
-            AddContext("Blood_Moon", "blood_moon", "Stack", true, 30, false, 5, 5, true, true, 70, false);
-            AddContext("Vehicle_Gyrocopter", "vehicle/gyrocopter", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
-            AddContext("Vehicle_Bicycle", "vehicle/bicycle", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
-            AddContext("Vehicle_Minibike", "vehicle/minibike", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
-            AddContext("Vehicle_Motorcycle", "vehicle/motorcycle", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
-            AddContext("Vehicle_4x4", "vehicle/4x4", "Vehicle", true, 30, false, 5, 3, true, true, 61, false);
-            AddContext("Vehicle", "vehicle", "Stack", true, 30, false, 5, 3, true, true, 60, false);
-            AddContext("POI_Cleared", "poi/cleared", "Stack", true, 60, false, 5, 5, true, true, 55, true);
-            AddContext("Combat_High", "combat_high", "Combat_Low", true, 20, false, 3, 3, true, true, 51, false);
-            AddContext("Combat_Low", "combat_low", "Tension_Low", true, 20, false, 3, 3, true, true, 50, false);
-            AddContext("Spawn", "events/spawn", "Stack", false, 0, false, 3, 1, true, true, 45, true);
-            AddContext("Inventory", "inventory", "Stack", true, 15, false, 0, 2, true, true, 40, false);
-            AddContext("Tension_High", "tension_high", "Tension_Low", true, 30, false, 5, 5, false, true, 30, false);
-            AddContext("Tension_Low", "tension_low", "Stack", true, 30, false, 5, 5, false, true, 30, false);
-            AddContext("Trader_Joel", "trader/joel", "Trader", true, 120, false, 5, 5, false, true, 26, false);
-            AddContext("Trader_Jen", "trader/jen", "Trader", true, 120, false, 5, 5, false, true, 26, false);
-            AddContext("Trader_Rekt", "trader/rekt", "Trader", true, 120, false, 5, 5, false, true, 26, false);
-            AddContext("Trader_Bob", "trader/bob", "Trader", true, 120, false, 5, 5, false, true, 26, false);
-            AddContext("Trader_Hugh", "trader/hugh", "Trader", true, 120, false, 5, 5, false, true, 26, false);
-            AddContext("Trader", "trader", "Stack", true, 120, false, 5, 5, false, true, 25, false);
-            AddContext("Home_Day", "home/day", "Home", true, 120, false, 5, 5, false, true, 15, false);
-            AddContext("Home_Night", "home/night", "Home", true, 120, false, 5, 5, false, true, 15, false);
-            AddContext("Home", "home", "Stack", true, 120, false, 5, 5, false, true, 15, false);
-            AddContext("POI_T5", "poi/t5", "POI", true, 60, false, 5, 5, false, true, 22, false);
-            AddContext("POI_T4", "poi/t4", "POI", true, 60, false, 5, 5, false, true, 22, false);
-            AddContext("POI_T3", "poi/t3", "POI", true, 60, false, 5, 5, false, true, 22, false);
-            AddContext("POI_T2", "poi/t2", "POI", true, 60, false, 5, 5, false, true, 22, false);
-            AddContext("POI_T1", "poi/t1", "POI", true, 60, false, 5, 5, false, true, 22, false);
-            AddContext("POI_T0", "poi/t0", "Stack", true, 60, false, 5, 5, false, true, 21, false);
-            AddContext("POI", "poi", "Stack", true, 60, false, 5, 5, false, true, 20, false);
-            AddContext("Ambient_Forest", "ambient/forest", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
-            AddContext("Ambient_Burnt_Forest", "ambient/burnt_forest", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
-            AddContext("Ambient_Desert", "ambient/desert", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
-            AddContext("Ambient_Snow", "ambient/snow", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
-            AddContext("Ambient_Wasteland", "ambient/wasteland", "Ambient", true, 120, false, 5, 5, false, true, 11, false);
-            AddContext("Ambient", "ambient", "None", true, 120, false, 5, 4, false, true, 10, false);
-            AddContext("None", "", "None", false, 0, false, 0, 0, true, true, 0, false);
-            AddContext("Menu", "menu", "None", false, 0, true, 5, 2, true, true, 0, false);
+            // caninterrupt is always true — hardcoded below. Defaults:
+            // fallback="Stack", resume=true, stale=120, loop=false, cool=5, warm=5, bypass=false, once=false
+            void Add(string name, string path, string fallback = "Stack",
+                     bool resume = true, int stale = 120, bool loop = false,
+                     int cool = 5, int warm = 5, bool bypass = false,
+                     int priority = 0, bool once = false)
+                => contexts[name] = new Contexts(name, path, fallback, resume, stale,
+                                                 loop, cool, warm, bypass, true, priority, once);
+
+            Add("Death",             "events/death",        resume:false, stale:0,  cool:3, warm:1, bypass:true, priority:100, once:true);
+            Add("Low_Health_Panic",  "events/low_health",   stale:30,     cool:5,   warm:2, bypass:true, priority:90);
+            Add("Blood_Moon_Combat", "blood_moon/combat",   stale:20,     cool:3,   warm:3, bypass:true, priority:71);
+            Add("Blood_Moon",        "blood_moon",          stale:30,                        bypass:true, priority:70);
+            Add("Vehicle_Gyrocopter","vehicle/gyrocopter",  "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
+            Add("Vehicle_Bicycle",   "vehicle/bicycle",     "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
+            Add("Vehicle_Minibike",  "vehicle/minibike",    "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
+            Add("Vehicle_Motorcycle","vehicle/motorcycle",  "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
+            Add("Vehicle_4x4",       "vehicle/4x4",         "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
+            Add("Vehicle",           "vehicle",             stale:30,     cool:5,   warm:3, bypass:true, priority:60);
+            Add("POI_Cleared",       "poi/cleared",         stale:60,                        bypass:true, priority:55, once:true);
+            Add("Combat_High",       "combat_high",         "Combat_Low", stale:20, cool:3, warm:3, bypass:true, priority:51);
+            Add("Combat_Low",        "combat_low",         stale:20, cool:3, warm:3, bypass:true, priority:50);
+            Add("Spawn",             "events/spawn",        resume:false, stale:0,  cool:3, warm:1, bypass:true, priority:45, once:true);
+            Add("Inventory",         "inventory",           stale:15,     cool:0,   warm:2, bypass:true, priority:40);
+            Add("Tension_High",      "tension_high",        "Tension_Low", stale:30,                        priority:30);
+            Add("Tension_Low",       "tension_low",         stale:30,                                       priority:30);
+            Add("Trader_Joel",       "trader/joel",         "Trader",                                       priority:26);
+            Add("Trader_Jen",        "trader/jen",          "Trader",                                       priority:26);
+            Add("Trader_Rekt",       "trader/rekt",         "Trader",                                       priority:26);
+            Add("Trader_Bob",        "trader/bob",          "Trader",                                       priority:26);
+            Add("Trader_Hugh",       "trader/hugh",         "Trader",                                       priority:26);
+            Add("Trader",            "trader",                                                               priority:25);
+            Add("Home_Day",          "home/day",            "Home",                                         priority:15);
+            Add("Home_Night",        "home/night",          "Home",                                         priority:15);
+            Add("Home",              "home",                                                                 priority:15);
+            Add("POI_T5",            "poi/t5",              "POI",        stale:60,                         priority:22);
+            Add("POI_T4",            "poi/t4",              "POI",        stale:60,                         priority:22);
+            Add("POI_T3",            "poi/t3",              "POI",        stale:60,                         priority:22);
+            Add("POI_T2",            "poi/t2",              "POI",        stale:60,                         priority:22);
+            Add("POI_T1",            "poi/t1",              "POI",        stale:60,                         priority:22);
+            Add("POI_T0",            "poi/t0",                            stale:60,                         priority:21);
+            Add("POI",               "poi",                               stale:60,                          priority:20);
+            Add("Ambient_Forest",    "ambient/forest",      "Ambient",                                       priority:11);
+            Add("Ambient_Burnt_Forest","ambient/burnt_forest","Ambient",                                     priority:11);
+            Add("Ambient_Desert",    "ambient/desert",      "Ambient",                                       priority:11);
+            Add("Ambient_Snow",      "ambient/snow",        "Ambient",                                       priority:11);
+            Add("Ambient_Wasteland", "ambient/wasteland",   "Ambient",                                       priority:11);
+            Add("Ambient",           "ambient",             "None",       warm:4,                             priority:10);
+            Add("None",              "",       "None",  resume:false, stale:0,  cool:0, warm:0, bypass:true, priority:0);
+            Add("Menu",              "menu",   "None",  resume:false, stale:0,  loop:true, cool:5, warm:2, bypass:true, priority:0);
         }
 
         public static Contexts GetContext(string contextIn) =>
@@ -1602,9 +1586,7 @@ namespace CMM
         private static AudioSource ActiveChannel => _primaryIsActive ? CMM_Primary_Channel : CMM_Secondary_Channel;
         private static AudioSource InactiveChannel => _primaryIsActive ? CMM_Secondary_Channel : CMM_Primary_Channel;
 
-        private static AudioClip _clipToDestroyAfterFade = null;
-        private static WaveStream _readerToDisposeAfterFade = null;   // NEW
-        private static DecodedAudio _decodedToReleaseAfterFade = null;   // kept for PreloadCache path
+        private static TrackSlot _pendingDisposal;
         private static bool _scheduleHandledTransition = false;
         private static PropertyInfo _isLoadingProp = null;
         private static bool _isLoadingPropResolved = false;
@@ -1735,19 +1717,19 @@ namespace CMM
             {
                 // Clip may be null if files were removed and re-added (evicted from cache).
                 // Kick off a preload on-demand rather than spinning until timeout.
-                if (cache.cachedClip == null && !cache.isPreloading)
+                if (cache.Current.Clip == null && !cache.isPreloading)
                 {
                     Log.Out($"[CMM] PlayFromCache: clip missing for {contextName}, triggering on-demand preload.");
                     CMM_CoRoutines.StartCoroutine(PreloadContext(contextName));
                 }
                 float waited = 0f;
-                while (cache.cachedClip == null && waited < 10f)
+                while (cache.Current.Clip == null && waited < 10f)
                 {
                     if (transitionId != _transitionId) yield break;
                     yield return new WaitForSeconds(0.25f);
                     waited += 0.25f;
                 }
-                if (cache.cachedClip == null)
+                if (cache.Current.Clip == null)
                 {
                     Log.Out($"[CMM] PlayFromCache: no clip for {contextName} after wait.");
                     _activeMusicCoroutine = null;
@@ -1756,14 +1738,14 @@ namespace CMM
             }
             else
             {
-                if (cache.cachedClip == null)
+                if (cache.Current.Clip == null)
                 {
                     Log.Out($"[CMM] On-demand load for {contextName}...");
                     if (cache.isPreloading)
                     {
                         // Proactive preload already in progress; wait for it instead of racing
                         float onDemandWait = 0f;
-                        while (cache.isPreloading && cache.cachedClip == null && onDemandWait < 10f)
+                        while (cache.isPreloading && cache.Current.Clip == null && onDemandWait < 10f)
                         {
                             if (transitionId != _transitionId) yield break;
                             yield return new WaitForSeconds(0.1f);
@@ -1775,7 +1757,7 @@ namespace CMM
                         yield return StartCoroutine(PreloadContext(contextName));
                     }
                 }
-                if (cache.cachedClip == null)
+                if (cache.Current.Clip == null)
                 {
                     Log.Out($"[CMM] On-demand load failed for {contextName}.");
                     _activeMusicCoroutine = null;
@@ -1807,12 +1789,12 @@ namespace CMM
             AudioSource outgoing = ActiveChannel;
             float outgoingStartVol = outgoing.volume;
 
-            float clipLen = cache.cachedClip.length;
+            float clipLen = cache.Current.Clip.length;
             float safeStart = clipLen > 0.02f
                 ? Mathf.Clamp(startPosition, 0f, clipLen - 0.01f)
                 : 0f;
 
-            incoming.clip = cache.cachedClip;
+            incoming.clip = cache.Current.Clip;
             incoming.loop = ctx.Loop;
             incoming.volume = 0f;
 
@@ -1822,9 +1804,9 @@ namespace CMM
             if (safeStart > 0f)
             {
                 Log.Out($"[CMM] Seek to {safeStart:F2}s for {contextName} " +
-                        $"(clip={clipLen:F1}s, streaming={cache.currentReader != null})");
+                        $"(clip={clipLen:F1}s, streaming={cache.Current.Reader != null})");
 
-                if (cache.currentReader is NAudioDecoder.SeekableOpusReader opusRdr)
+                if (cache.Current.Reader is NAudioDecoder.SeekableOpusReader opusRdr)
                 {
                     // Unity does NOT call PCMSetPositionCallback(0) on Play() — it
                     // just starts invoking PCMReaderCallback from wherever the reader
@@ -1861,7 +1843,7 @@ namespace CMM
 
             incoming.Play();
 
-            if (safeStart > 0f && !(cache.currentReader is NAudioDecoder.SeekableOpusReader))
+            if (safeStart > 0f && !(cache.Current.Reader is NAudioDecoder.SeekableOpusReader))
             {
                 incoming.time = safeStart;
             }
@@ -1929,26 +1911,10 @@ namespace CMM
             DestroyPendingClipAndAudio();
         }
 
-        // Destroys pending clip and, in NAudio mode, releases the PCM buffer.
         private static void DestroyPendingClipAndAudio()
         {
-            if (_clipToDestroyAfterFade != null)
-            {
-                Destroy(_clipToDestroyAfterFade);
-                _clipToDestroyAfterFade = null;
-            }
-            // Streaming path: dispose the WaveStream after the clip is gone.
-            if (_readerToDisposeAfterFade != null)
-            {
-                try { _readerToDisposeAfterFade.Dispose(); } catch { }
-                _readerToDisposeAfterFade = null;
-            }
-            // Legacy full-decode path (PreloadCacheEnabled = true).
-            if (!CMMConfig.PreloadCacheEnabled && _decodedToReleaseAfterFade != null)
-            {
-                _decodedToReleaseAfterFade.Samples = null;
-                _decodedToReleaseAfterFade = null;
-            }
+            if (_pendingDisposal.Clip != null) Destroy(_pendingDisposal.Clip);
+            _pendingDisposal.Release();
         }
 
         // ── Volume ────────────────────────────────────────────────────────────
@@ -2116,17 +2082,16 @@ namespace CMM
                 cache.resumePosition = 0f;
                 cache.lastLeftTime = -1f;
 
-                if (cache.cachedClip != null)
+                if (cache.Current.Clip != null)
                 {
-                    Destroy(cache.cachedClip);
-                    cache.cachedClip = null;
-                    // One frame so the audio thread moves off before Dispose.
+                    Destroy(cache.Current.Clip);
+                    cache.Current.Clip = null;
                     yield return new WaitForEndOfFrame();
-                    cache.DisposeCurrentReader();
+                    cache.Current.Release();
                 }
 
                 yield return StartCoroutine(PreloadContext(contextName));
-                if (cache.cachedClip == null)
+                if (cache.Current.Clip == null)
                 {
                     Log.Out($"[CMM] Safety net load failed for {contextName}. Giving up.");
                     yield break;
@@ -2174,7 +2139,7 @@ namespace CMM
             yield return new WaitForSeconds(waitBeforeLoad);
             if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
 
-            if (!cache.nextClipLoading && cache.nextCachedClip == null)
+            if (!cache.nextClipLoading && cache.Next.Clip == null)
             {
                 cache.nextClipLoading = true;
                 Log.Out($"[CMM] Pre-loading next clip for {contextName}");
@@ -2188,41 +2153,29 @@ namespace CMM
 
             if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
 
-            if (cache.nextCachedClip == null)
+            if (cache.Next.Clip == null)
             {
                 Log.Out($"[CMM] Next clip not ready in time for {contextName}, loading inline.");
-                if (cache.cachedClip != null)
+                if (cache.Current.Clip != null)
                 {
-                    _clipToDestroyAfterFade = cache.cachedClip;
-                    _readerToDisposeAfterFade = cache.currentReader;   // streaming
-                    _decodedToReleaseAfterFade = cache.decodedAudio;   // legacy
-                    cache.cachedClip = null;
-                    cache.currentReader = null;
-                    cache.decodedAudio = null;
+                    _pendingDisposal = cache.Current;
+                    cache.Current = default;
                 }
                 yield return StartCoroutine(PreloadContext(contextName));
             }
             else
             {
                 // Promote next → current; stage current for deferred disposal.
-                if (cache.cachedClip != null)
-                {
-                    _clipToDestroyAfterFade = cache.cachedClip;
-                    _readerToDisposeAfterFade = cache.currentReader;
-                    _decodedToReleaseAfterFade = cache.decodedAudio;
-                }
-                cache.cachedClip = cache.nextCachedClip;
-                cache.currentReader = cache.nextReader;
-                cache.decodedAudio = cache.nextDecodedAudio;
-                cache.nextCachedClip = null;
-                cache.nextReader = null;
-                cache.nextDecodedAudio = null;
+                if (cache.Current.Clip != null)
+                    _pendingDisposal = cache.Current;
+                cache.Current = cache.Next;
+                cache.Next = default;
             }
 
             cache.resumePosition = 0f;
             cache.lastLeftTime = -1f;
 
-            if (cache.cachedClip == null)
+            if (cache.Current.Clip == null)
             {
                 Log.Out($"[CMM] No clip available for {contextName} transition. Giving up.");
                 yield break;
@@ -2264,12 +2217,9 @@ namespace CMM
 
                 if (clip == null) { reader.Dispose(); yield break; }
 
-                // Dispose previous next-slot
-                if (cache.nextCachedClip != null) Destroy(cache.nextCachedClip);
-                cache.DisposeNextReader();
-
-                cache.nextCachedClip = clip;
-                cache.nextReader = reader;
+                if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
+                cache.Next.Clip   = clip;
+                cache.Next.Reader = reader;
                 cache.lastPlayedFile = filePath;
                 Log.Out($"[CMM] Next clip ready (streaming) for {contextName}: {Path.GetFileName(filePath)}");
             }
@@ -2288,9 +2238,9 @@ namespace CMM
                     if (request.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
                     { Log.Error($"[CMM] LoadNextClip Unity failed: {request.error}"); yield break; }
 
-                    if (cache.nextCachedClip != null) Destroy(cache.nextCachedClip);
-                    cache.nextCachedClip = UnityEngine.Networking.DownloadHandlerAudioClip
-                                              .GetContent(request);
+                    if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
+                    cache.Next.Clip = UnityEngine.Networking.DownloadHandlerAudioClip
+                                          .GetContent(request);
                     cache.lastPlayedFile = filePath;
                     Log.Out($"[CMM] Next clip ready (Unity) for {contextName}: {Path.GetFileName(filePath)}");
                 }
@@ -2401,14 +2351,12 @@ namespace CMM
             long total = 0;
             foreach (var cache in cacheMap.Values)
             {
-                // Full-decode path only (PreloadCacheEnabled = true or Opus fallback)
-                if (cache.decodedAudio?.Samples != null) total += (long)cache.decodedAudio.Samples.Length * 4;
-                if (cache.nextDecodedAudio?.Samples != null) total += (long)cache.nextDecodedAudio.Samples.Length * 4;
-                // Unity fallback clips
-                if (cache.cachedClip != null && cache.currentReader == null && cache.decodedAudio == null)
-                    total += (long)cache.cachedClip.samples * cache.cachedClip.channels * 4;
-                if (cache.nextCachedClip != null && cache.nextReader == null && cache.nextDecodedAudio == null)
-                    total += (long)cache.nextCachedClip.samples * cache.nextCachedClip.channels * 4;
+                if (cache.Current.Decoded?.Samples != null) total += (long)cache.Current.Decoded.Samples.Length * 4;
+                if (cache.Next.Decoded?.Samples    != null) total += (long)cache.Next.Decoded.Samples.Length * 4;
+                if (cache.Current.Clip != null && cache.Current.Reader == null && cache.Current.Decoded == null)
+                    total += (long)cache.Current.Clip.samples * cache.Current.Clip.channels * 4;
+                if (cache.Next.Clip    != null && cache.Next.Reader    == null && cache.Next.Decoded    == null)
+                    total += (long)cache.Next.Clip.samples * cache.Next.Clip.channels * 4;
             }
             return total;
         }
@@ -2422,17 +2370,17 @@ namespace CMM
             {
                 ContextCache c = kv.Value;
 
-                bool curStreaming = c.cachedClip != null && c.currentReader != null;
-                bool nextStreaming = c.nextCachedClip != null && c.nextReader != null;
+                bool curStreaming  = c.Current.Clip != null && c.Current.Reader != null;
+                bool nextStreaming = c.Next.Clip    != null && c.Next.Reader    != null;
 
-                long cur = c.decodedAudio?.Samples != null ? (long)c.decodedAudio.Samples.Length * 4 : 0;
-                long next = c.nextDecodedAudio?.Samples != null ? (long)c.nextDecodedAudio.Samples.Length * 4 : 0;
-                if (cur == 0 && c.cachedClip != null && !curStreaming)
-                    cur = (long)c.cachedClip.samples * c.cachedClip.channels * 4;
-                if (next == 0 && c.nextCachedClip != null && !nextStreaming)
-                    next = (long)c.nextCachedClip.samples * c.nextCachedClip.channels * 4;
+                long cur  = c.Current.Decoded?.Samples != null ? (long)c.Current.Decoded.Samples.Length * 4 : 0;
+                long next = c.Next.Decoded?.Samples    != null ? (long)c.Next.Decoded.Samples.Length    * 4 : 0;
+                if (cur  == 0 && c.Current.Clip != null && !curStreaming)
+                    cur  = (long)c.Current.Clip.samples * c.Current.Clip.channels * 4;
+                if (next == 0 && c.Next.Clip    != null && !nextStreaming)
+                    next = (long)c.Next.Clip.samples    * c.Next.Clip.channels    * 4;
 
-                bool anyLoaded = c.cachedClip != null || c.nextCachedClip != null;
+                bool anyLoaded = c.Current.Clip != null || c.Next.Clip != null;
                 if (!anyLoaded) continue;
 
                 totalBytes += cur + next;
@@ -2574,14 +2522,10 @@ namespace CMM
                 leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 Log.Out($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
-                if (!CMMConfig.PreloadCacheEnabled && leavingCache.cachedClip != null)
+                if (!CMMConfig.PreloadCacheEnabled && leavingCache.Current.Clip != null)
                 {
-                    _clipToDestroyAfterFade = leavingCache.cachedClip;
-                    _readerToDisposeAfterFade = leavingCache.currentReader;
-                    _decodedToReleaseAfterFade = leavingCache.decodedAudio;
-                    leavingCache.cachedClip = null;
-                    leavingCache.currentReader = null;
-                    leavingCache.decodedAudio = null;
+                    _pendingDisposal = leavingCache.Current;
+                    leavingCache.Current = default;
                 }
             }
 
@@ -2621,16 +2565,10 @@ namespace CMM
                 {
 
                     ContextCache blocked = cacheMap[currentContext.Context];
-                    if (blocked.cachedClip != null)
+                    if (blocked.Current.Clip != null)
                     {
-                        Destroy(blocked.cachedClip);
-                        blocked.cachedClip = null;
-                        blocked.DisposeCurrentReader();
-                    }
-                    if (blocked.decodedAudio != null)
-                    {
-                        blocked.decodedAudio.Samples = null;
-                        blocked.decodedAudio = null;
+                        Destroy(blocked.Current.Clip);
+                        blocked.Current.Release();
                     }
                 }
                 return;
@@ -2748,8 +2686,8 @@ namespace CMM
 
                 // Build state string cheaply; only emit log lines if it changed.
                 string cacheState = string.Join(", ", cacheMap
-                    .Where(kv => kv.Value.cachedClip != null)
-                    .Select(kv => $"{kv.Key}={kv.Value.cachedClip.length:F0}s(next={(kv.Value.nextCachedClip != null ? "ready" : "null")})"));
+                    .Where(kv => kv.Value.Current.Clip != null)
+                    .Select(kv => $"{kv.Key}={kv.Value.Current.Clip.length:F0}s(next={(kv.Value.Next.Clip != null ? "ready" : "null")})"));
 
                 if (cacheState != _lastCacheLogState)
                 {
@@ -2954,14 +2892,10 @@ namespace CMM
                         {
                             Log.Out($"[CMM] Currently-playing file removed: {Path.GetFileName(cache.lastPlayedFile)}");
                             cache.lastPlayedFile = null;
-                            if (cache.cachedClip != null)
+                            if (cache.Current.Clip != null)
                             {
-                                _clipToDestroyAfterFade = cache.cachedClip;
-                                _readerToDisposeAfterFade = cache.currentReader;
-                                _decodedToReleaseAfterFade = cache.decodedAudio;
-                                cache.cachedClip = null;
-                                cache.currentReader = null;
-                                cache.decodedAudio = null;
+                                _pendingDisposal = cache.Current;
+                                cache.Current = default;
                             }
                             lastPlayedMissing = true;
                         }
@@ -2994,7 +2928,7 @@ namespace CMM
                         _pendingContext = null;
                         yield return StartCoroutine(PreloadContext(ctx.Context));
 
-                        if (cacheMap[ctx.Context].cachedClip != null)
+                        if (cacheMap[ctx.Context].Current.Clip != null)
                         {
                             Log.Out($"[CMM] Replacement clip ready for {ctx.Context}, triggering.");
                             currentContext = GetContext(ctx.Context);
@@ -3083,34 +3017,6 @@ namespace CMM
                 { Log.Out($"[CMM] Preload: no files for {contextName}"); yield break; }
             }
 
-            // ── Validate ──────────────────────────────────────────────────────
-            //if (!_validatedFiles.Contains(filePath))
-            //{
-            //    bool isValid = false;
-            //    yield return StartCoroutine(ValidateFile(filePath, r => isValid = r));
-            //    if (isValid)
-            //    {
-            //        _validatedFiles.Add(filePath);
-            //    }
-            //    else
-            //    {
-            //        _invalidFiles.Add(filePath);
-            //        Log.Warning($"[CMM] Preload: {Path.GetFileName(filePath)} failed validation, retrying.");
-            //        string replacement = PickNextFile(contextName, avoidFile: filePath);
-            //        if (replacement == null)
-            //        { Log.Out($"[CMM] Preload: no valid files for {contextName}"); yield break; }
-            //        yield return StartCoroutine(ValidateFile(replacement, r => isValid = r));
-            //        if (!isValid)
-            //        {
-            //            _invalidFiles.Add(replacement);
-            //            Log.Warning($"[CMM] Preload: replacement also invalid for {contextName}. Giving up.");
-            //            yield break;
-            //        }
-            //        _validatedFiles.Add(replacement);
-            //        filePath = replacement;
-            //    }
-            //}
-
             if (_invalidFiles.Contains(filePath))
             {
                 filePath = PickNextFile(contextName, avoidFile: filePath);
@@ -3167,14 +3073,13 @@ namespace CMM
                         : NAudioDecoder.CreateStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath));
                     if (fullClip == null) yield break;
 
-                    if (cache.cachedClip != null) Destroy(cache.cachedClip);
-                    cache.DisposeCurrentReader(); // no-op on full-decode path
-                    if (cache.decodedAudio != null) cache.decodedAudio.Samples = null;
+                    if (cache.Current.Clip != null) Destroy(cache.Current.Clip);
+                    cache.Current.Release();
 
-                    cache.cachedClip = fullClip;
+                    cache.Current.Clip = fullClip;
                     // Menu: native buffer owns the samples now; drop the managed copy.
                     if (isMenu) { decoded.Samples = null; decoded = null; }
-                    cache.decodedAudio = isMenu ? null : decoded;
+                    cache.Current.Decoded = isMenu ? null : decoded;
                     cache.lastPlayedFile = filePath;
                     Log.Out($"[CMM] Preloaded (full decode{(isMenu ? "/native" : "")}): {contextName} — " +
                             $"{Path.GetFileName(filePath)}");
@@ -3202,18 +3107,14 @@ namespace CMM
                         yield break;
                     }
 
-                    // Stage old clip/reader for deferred disposal
-                    if (cache.cachedClip != null)
+                    if (cache.Current.Clip != null)
                     {
-                        Destroy(cache.cachedClip);
-                        // Dispose after one frame via the cache helper — called
-                        // by DeferredDestroyPending on the next audio tick.
-                        // Here we dispose immediately since we're not mid-play.
-                        cache.DisposeCurrentReader();
+                        Destroy(cache.Current.Clip);
+                        cache.Current.Release();
                     }
 
-                    cache.cachedClip = clip;
-                    cache.currentReader = reader;
+                    cache.Current.Clip   = clip;
+                    cache.Current.Reader = reader;
                     cache.lastPlayedFile = filePath;
 
                     float lenSec = reader.Length > 0 && reader.WaveFormat.BlockAlign > 0
@@ -3240,8 +3141,9 @@ namespace CMM
                     if (request.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
                     { Log.Error($"[CMM] Preload Unity failed for {contextName}: {request.error}"); yield break; }
 
-                    if (cache.cachedClip != null) Destroy(cache.cachedClip);
-                    cache.cachedClip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
+                    if (cache.Current.Clip != null) Destroy(cache.Current.Clip);
+                    cache.Current.Release();
+                    cache.Current.Clip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
                     cache.lastPlayedFile = filePath;
                     Log.Out($"[CMM] Preloaded (Unity): {contextName}");
                 }
