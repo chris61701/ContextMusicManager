@@ -876,10 +876,7 @@ namespace CMM
                     case ".ogg":
                     case ".oga": return new VorbisWaveReader(ms);
                     case ".flac":
-                        // FlacReader may not have a Stream ctor — check your version.
-                        // If it does: return new FlacReader(ms);
-                        ms.Dispose();
-                        return new FlacReader(filePath);
+                        return new FlacReader(ms);
                     default:
                         ms.Dispose();
                         Log.Warning($"[CMM NAudio] No in-memory reader for extension '{ext}'");
@@ -925,7 +922,7 @@ namespace CMM
                 case ".aif": return new AiffFileReader(filePath);
                 case ".ogg":
                 case ".oga": return new VorbisWaveReader(stream);
-                case ".flac": return new FlacReader(filePath);
+                case ".flac": return new FlacReader(stream);
                 default:
                     Log.Warning($"[CMM NAudio] No stream reader for extension '{ext}'");
                     return null;
@@ -1392,7 +1389,7 @@ namespace CMM
                 if (nearHome) activeContexts.Add(isDay ? "Home_Day" : "Home_Night");
             }
 
-            PrefabInstance prefab = world.GetPOIAtPosition(player.position);
+            PrefabInstance prefab = world?.GetPOIAtPosition(player.position);
             if (prefab != null)
             {
                 string currentPoI = prefab.prefab.PrefabName;
@@ -1736,6 +1733,13 @@ namespace CMM
             // ── Ensure clip is available ─────────────────────────────────────
             if (CMMConfig.PreloadCacheEnabled)
             {
+                // Clip may be null if files were removed and re-added (evicted from cache).
+                // Kick off a preload on-demand rather than spinning until timeout.
+                if (cache.cachedClip == null && !cache.isPreloading)
+                {
+                    Log.Out($"[CMM] PlayFromCache: clip missing for {contextName}, triggering on-demand preload.");
+                    CMM_CoRoutines.StartCoroutine(PreloadContext(contextName));
+                }
                 float waited = 0f;
                 while (cache.cachedClip == null && waited < 10f)
                 {
@@ -2588,6 +2592,14 @@ namespace CMM
             if (contextToPlay == null)
             {
                 Log.Out($"[CMM] No playable context in chain for {contextIn} — fading to silence.");
+                // On the menu screen, BackgroundMusicMono.Play() fires every frame and calls
+                // SendContextUpdate("Menu") constantly. If we're already silent (currentContext == "None"),
+                // don't reset _pendingContext or restart FadeToSilence — that would stop the fade
+                // coroutine mid-run and prevent outgoing.Stop() from ever being reached.
+                // _pendingContext is already set to contextIn above (line ~2564), so subsequent
+                // calls from the patch will hit the guard and return early.
+                if (!inGame && currentContext?.Context == "None")
+                    return;
                 _pendingContext = "None";
                 currentContext = GetContext("None");
                 ++_transitionId;
@@ -2778,8 +2790,8 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(2f);
-                if (!inGame && currentContext?.Context != "Menu" && currentContext?.Context != "Ambient") continue;
-                if (currentContext == null || currentContext.Context == "None") continue;
+                if (!inGame && currentContext?.Context != "Menu" && currentContext?.Context != "Ambient" && currentContext?.Context != "None") continue;
+                if (currentContext == null) continue;
 
                 // Build the set of contexts to watch: the current one PLUS every
                 // context currently on the stack (they may have files added/removed
@@ -2924,7 +2936,13 @@ namespace CMM
                     if (contextName != currentContext.Context)
                     {
                         if (!inGame && contextName == "Menu" && currentFiles.Length > 0)
+                        {
+                            // If _pendingContext was set to "Menu" by the silent-guard above
+                            // (to block BackgroundMusicMono.Play() re-triggers), clear it now
+                            // so files being added back can actually start the music.
+                            if (_pendingContext == contextName) _pendingContext = null;
                             SendContextUpdate("Menu");
+                        }
                         continue;
                     }
 
@@ -2952,9 +2970,23 @@ namespace CMM
                     if (currentFiles.Length == 0)
                     {
                         Log.Out($"[CMM] {contextName} folder emptied, re-evaluating.");
-                        string fallback = GetTopContext() ?? "Ambient";
                         _pendingContext = null;
-                        SendContextUpdate(fallback, 0);
+                        if (currentContext.PlayOnce)
+                        {
+                            // PlayOnce events (Spawn/Death): don't wait for the fallback clip
+                            // to load before stopping — fade out immediately and let
+                            // ContextScanLoop re-evaluate the stack on its next tick.
+                            Log.Out($"[CMM] PlayOnce {contextName} removed during playback — fading out immediately.");
+                            ++_transitionId;
+                            _pendingContext = "None";
+                            currentContext = GetContext("None");
+                            FadeToSilence();
+                        }
+                        else
+                        {
+                            string fallback = GetTopContext() ?? "Ambient";
+                            SendContextUpdate(fallback, 0);
+                        }
                     }
                     else if (lastPlayedMissing)
                     {
