@@ -13,7 +13,7 @@
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <!-- Don't copy reference-related files (e.g. NAudio.*.xml doc files) to the output dir.
-         Content items like ModSettings.xml / ModInfo.xml are unaffected. -->
+         Content items like ModInfo.xml are unaffected. -->
     <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
     <ModName>ContextMusicManager</ModName>
     <ModVersion>0.0.1</ModVersion>
@@ -53,10 +53,19 @@
     <Content Include="Config\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="ModSettings.xml">
+    <Content Include="THIRD_PARTY_NOTICES.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\ContextMusicManager.cs" />
+    <Compile Include="Harmony\DataStructures.cs" />
+    <Compile Include="Harmony\CMMConfig.cs" />
+    <Compile Include="Harmony\NAudioDecoder.cs" />
+    <Compile Include="Harmony\ContextResolver.cs" />
+    <Compile Include="Harmony\ContextMusicManager.ContextStack.cs" />
+    <Compile Include="Harmony\ContextMusicManager.AudioPlayer.cs" />
+    <Compile Include="Harmony\ContextMusicManager.VanillaClips.cs" />
+    <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Content Include="ModInfo.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -119,6 +128,9 @@
       <HintPath>packages\NVorbis.0.10.4\lib\net45\NVorbis.dll</HintPath>
     </Reference>
     <Reference Include="System">
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Xml">
       <Private>False</Private>
     </Reference>
     <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">

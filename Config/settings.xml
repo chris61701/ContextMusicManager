@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CMMSettings>
+
+  <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
+  <VolumeModifier>0.5</VolumeModifier>
+
+  <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
+       Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
+       Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
+  <MusicPath>Music</MusicPath>
+
+  <!-- Fade between outgoing and incoming context instead of cutting immediately -->
+  <CrossfadeEnabled>true</CrossfadeEnabled>
+  <CrossFadeDuration>2.0</CrossFadeDuration>
+
+  <!-- Fade duration when a track ends naturally and transitions to the next -->
+  <TrackTransitionFadeDuration>6.0</TrackTransitionFadeDuration>
+  <!-- Start loading the next clip this many seconds before the current one ends -->
+  <TrackTransitionPreloadLead>10.0</TrackTransitionPreloadLead>
+
+  <!-- How often to scan for active context changes (seconds) -->
+  <ContextScanCooldown>0.5</ContextScanCooldown>
+  <!-- How often to check whether cached context data is stale (seconds) -->
+  <StalenessCheckInterval>5.0</StalenessCheckInterval>
+  <!-- How early before track end to begin caching the next clip (seconds) -->
+  <NextCacheWindow>5.0</NextCacheWindow>
+  <!-- How often to poll for natural track-end detection (seconds) -->
+  <TrackEndPollInterval>0.25</TrackEndPollInterval>
+
+  <!-- Track pick order within a context folder: Random, RandomNoRepeat, Sequential -->
+  <GlobalTrackOrder>RandomNoRepeat</GlobalTrackOrder>
+
+  <!-- Number of player-targeting enemies required to trigger combat music.
+       Combat_Low fires at or above the Low threshold, Combat_High at or above the High threshold. -->
+  <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
+  <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
+
+  <!-- Set to false to silence verbose [CMM] console output.
+       Log.Warning and Log.Error always emit regardless of this flag. -->
+  <DebugLogging>true</DebugLogging>
+
+</CMMSettings>

@@ -1,0 +1,234 @@
+THIRD-PARTY NOTICES
+Context Music Manager
+=====================
+
+This mod ships with the following third-party libraries. Their licenses are
+reproduced in full below as required by their respective terms.
+
+================================================================================
+ 1. NAudio 2.3.0
+    NAudio.Core 2.3.0
+    NAudio.Vorbis 1.5.0
+    NAudio.WinMM 2.3.0
+    NAudio.Asio 2.3.0
+    NAudio.Midi 2.3.0
+    NAudio.Wasapi 2.3.0
+    NAudio.WinForms 2.3.0
+    https://github.com/naudio/NAudio
+================================================================================
+
+MIT License
+
+Copyright (c) 2020 Mark Heath
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+ 2. NVorbis 0.10.4
+    https://github.com/NVorbis/NVorbis
+================================================================================
+
+MIT License
+
+Copyright (c) 2020 Andrew Ward
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+ 3. BunLabs.NAudio.Flac 2.0.1
+    https://github.com/BunLabs/NAudio.Flac
+================================================================================
+
+Microsoft Public License (MS-PL)
+
+Copyright (c) BunLabs
+
+This license governs use of the accompanying software. If you use the
+software, you accept this license. If you do not accept the license, do not
+use the software.
+
+1. Definitions
+
+The terms "reproduce," "reproduction," "derivative works," and "distribution"
+have the same meaning here as under U.S. copyright law. A "contribution" is
+the original software, or any additions or changes to the software. A
+"contributor" is any person that distributes its contribution under this
+license. "Licensed patents" are a contributor's patent claims that read
+directly on its contribution.
+
+2. Grant of Rights
+
+(A) Copyright Grant - Subject to the terms of this license, including the
+license conditions and limitations in section 3, each contributor grants you
+a non-exclusive, worldwide, royalty-free copyright license to reproduce its
+contribution, prepare derivative works of its contribution, and distribute
+its contribution or any derivative works that you create.
+
+(B) Patent Grant - Subject to the terms of this license, including the
+license conditions and limitations in section 3, each contributor grants you
+a non-exclusive, worldwide, royalty-free license under its licensed patents
+to make, have made, use, sell, offer for sale, import, and/or otherwise
+dispose of its contribution in the software or derivative works of the
+contribution in the software.
+
+3. Conditions and Limitations
+
+(A) No Trademark License - This license does not grant you rights to use any
+contributors' name, logo, or trademarks.
+
+(B) If you bring a patent claim against any contributor over patents that you
+claim are infringed by the software, your patent license from such contributor
+to the software ends automatically.
+
+(C) If you distribute any portion of the software, you must retain all
+copyright, patent, trademark, and attribution notices that are present in
+the software.
+
+(D) If you distribute any portion of the software in source code form, you
+may do so only under this license by including a complete copy of this license
+with your distribution. If you distribute any portion of the software in
+compiled or object code form, you may only do so under a license that complies
+with this license.
+
+(E) The software is licensed "as-is." You bear the risk of using it. The
+contributors give no express warranties, guarantees, or conditions. You may
+have additional consumer rights under your local laws which this license
+cannot change. To the extent permitted under your local laws, the contributors
+exclude the implied warranties of merchantability, fitness for a particular
+purpose and non-infringement.
+
+================================================================================
+ 4. Concentus.Oggfile 1.0.7
+    https://github.com/lostromb/concentus.oggfile
+================================================================================
+
+Microsoft Public License (MS-PL)
+
+Copyright (c) Logan Stromberg, Andrew Ward
+
+This license governs use of the accompanying software. If you use the
+software, you accept this license. If you do not accept the license, do not
+use the software.
+
+1. Definitions
+
+The terms "reproduce," "reproduction," "derivative works," and "distribution"
+have the same meaning here as under U.S. copyright law. A "contribution" is
+the original software, or any additions or changes to the software. A
+"contributor" is any person that distributes its contribution under this
+license. "Licensed patents" are a contributor's patent claims that read
+directly on its contribution.
+
+2. Grant of Rights
+
+(A) Copyright Grant - Subject to the terms of this license, including the
+license conditions and limitations in section 3, each contributor grants you
+a non-exclusive, worldwide, royalty-free copyright license to reproduce its
+contribution, prepare derivative works of its contribution, and distribute
+its contribution or any derivative works that you create.
+
+(B) Patent Grant - Subject to the terms of this license, including the
+license conditions and limitations in section 3, each contributor grants you
+a non-exclusive, worldwide, royalty-free license under its licensed patents
+to make, have made, use, sell, offer for sale, import, and/or otherwise
+dispose of its contribution in the software or derivative works of the
+contribution in the software.
+
+3. Conditions and Limitations
+
+(A) No Trademark License - This license does not grant you rights to use any
+contributors' name, logo, or trademarks.
+
+(B) If you bring a patent claim against any contributor over patents that you
+claim are infringed by the software, your patent license from such contributor
+to the software ends automatically.
+
+(C) If you distribute any portion of the software, you must retain all
+copyright, patent, trademark, and attribution notices that are present in
+the software.
+
+(D) If you distribute any portion of the software in source code form, you
+may do so only under this license by including a complete copy of this license
+with your distribution. If you distribute any portion of the software in
+compiled or object code form, you may only do so under a license that complies
+with this license.
+
+(E) The software is licensed "as-is." You bear the risk of using it. The
+contributors give no express warranties, guarantees, or conditions. You may
+have additional consumer rights under your local laws which this license
+cannot change. To the extent permitted under your local laws, the contributors
+exclude the implied warranties of merchantability, fitness for a particular
+purpose and non-infringement.
+
+================================================================================
+ 5. Concentus 2.2.2
+    https://github.com/lostromb/concentus
+================================================================================
+
+Copyright (c) 2001-2011 CSIRO
+Copyright (c) 2003-2013 Mark Borgerding
+Copyright (c) 2007-2008 INRIA
+Copyright (c) 2008      Thorvald Natvig
+Copyright (c) 2011-2013 Skype Limited
+Copyright (c) 2012      Xiph.Org Foundation
+Copyright (c) 2007-2011 Jean-Marc Valin
+Copyright (c) 2008-2013 Gregory Maxwell
+Copyright (c) 2010-2011 Timothy B. Terriberry
+Copyright (c) 2016      Logan Stromberg (C# port)
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
