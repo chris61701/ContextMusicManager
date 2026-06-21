@@ -30,73 +30,117 @@ namespace CMM
         public void InitContexts()
         {
             // caninterrupt is always true — hardcoded below. Defaults:
-            // fallback="Stack", resume=true, stale=120, loop=false, cool=5, warm=5, bypass=false, once=false
+            // fallback="Stack", resume=true, stale=120, loop=false, cool=5, fadeintime=5, bypass=false,
+            // once=false, warmup=0.  fadeintime = fade-in seconds; warmup = dwell seconds before viable.
             void Add(string name, string path, string fallback = "Stack",
                      bool resume = true, int stale = 120, bool loop = false,
-                     int cool = 5, int warm = 5, bool bypass = false,
-                     int priority = 0, bool once = false, float volume = -1f)
+                     int cool = 5, int fadeintime = 5, bool bypass = false,
+                     int priority = 0, bool once = false, float volume = -1f,
+                     int warmup = 0)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,
-                                                 loop, cool, warm, bypass, true, priority, once, volume);
+                                                 loop, cool, fadeintime, bypass, true, priority, once, volume,
+                                                 warmup);
 
-            Add("Death",               "events/death",          resume:false, stale:0,  cool:3, warm:1, bypass:true, priority:100, once:true);
-            Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   warm:2, bypass:true, priority:90);
-            Add("Blood_Moon_Combat",   "combat_blood_moon",     stale:20,     cool:3,   warm:3, bypass:true, priority:71);
+            Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
+            Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90);
+            Add("Blood_Moon_Combat",   "combat_blood_moon",     stale:20,     cool:3,   fadeintime:3, bypass:true, priority:71);
             Add("Blood_Moon",          "blood_moon",            stale:30,                        bypass:true, priority:70);
-            Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
-            Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
-            Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
-            Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
-            Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, warm:3, bypass:true, priority:61);
-            Add("Vehicle",             "vehicle",               stale:30,     cool:5,   warm:3, bypass:true, priority:60);
+            Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:2);
+            Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:2);
+            Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:2);
+            Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:2);
+            Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:2);
+            Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:60, warmup:2);
             Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:55, once:true, volume:1.0f);
-            Add("Combat_High",         "combat_high",           "Combat_Low", stale:20, cool:3, warm:3, bypass:true, priority:51);
-            Add("Combat_Low",          "combat_low",            "VanillaIfPanicked", stale:20, cool:3, warm:3, bypass:true, priority:50);
-            Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, warm:1, bypass:true, priority:45, once:true);
-            Add("Inventory",           "inventory",             stale:15,     cool:0,   warm:2, bypass:true, priority:40);
-            Add("Tension_High",        "tension_high",          "Tension_Low", stale:30,                       priority:30);
-            Add("Tension_Low",         "tension_low",           stale:30,                                      priority:30);
-            Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26);
-            Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26);
-            Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26);
-            Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26);
-            Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26);
-            Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25);
-            Add("Home_Night",          "home/night",            "Home",                                        priority:15);
-            Add("Home",                "home",                                                                 priority:15);
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22);
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22);
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", stale:60,                      priority:22);
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", stale:60,                      priority:22);
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", stale:60,                      priority:22);
-            Add("POI_Infested_T0",     "poi/infested/t0",       stale:60,                                      priority:21);
-            Add("POI_Infested",        "poi/infested",          stale:60,                                      priority:20);
-            Add("POI_T5",              "poi/t5",                "POI",        stale:60,                        priority:18);
-            Add("POI_T4",              "poi/t4",                "POI",        stale:60,                        priority:18);
-            Add("POI_T3",              "poi/t3",                "POI",        stale:60,                        priority:18);
-            Add("POI_T2",              "poi/t2",                "POI",        stale:60,                        priority:18);
-            Add("POI_T1",              "poi/t1",                "POI",        stale:60,                        priority:18);
-            Add("POI_T0",              "poi/t0",                stale:60,                                      priority:17);
-            Add("POI",                 "poi",                   stale:60,                                      priority:16);
-            Add("Ambient_Forest_Night",      "ambient/biome/forest/night",       "Ambient_Forest",            priority:13);
+            Add("Combat_High",         "combat_high",           "Combat_Low", stale:20, cool:3, fadeintime:3, bypass:true, priority:51);
+            Add("Combat_Low",          "combat_low",            "VanillaIfPanicked", stale:20, cool:3, fadeintime:3, bypass:true, priority:50);
+            Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:45, once:true);
+            Add("Inventory",           "inventory",             stale:15,     cool:0,   fadeintime:2, bypass:true, priority:40);
+            Add("Tension_High",        "tension_high",          "Tension_Low", stale:30,                       priority:30, warmup:2);
+            Add("Tension_Low",         "tension_low",           stale:30,                                      priority:30, warmup:2);
+            Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3);
+            Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3);
+            Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3);
+            Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, warmup:3);
+            Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, warmup:3);
+            Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25, warmup:3);
+            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5);
+            Add("Home",                "home",                                                                 priority:15, warmup:5);
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10);
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10);
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", stale:60,                      priority:22, warmup:10);
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", stale:60,                      priority:22, warmup:10);
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", stale:60,                      priority:22, warmup:10);
+            Add("POI_Infested_T0",     "poi/infested/t0",       stale:60,                                      priority:21, warmup:10);
+            Add("POI_Infested",        "poi/infested",          stale:60,                                      priority:20, warmup:10);
+            Add("POI_T5",              "poi/t5",                "POI",        stale:60,                        priority:18, warmup:5);
+            Add("POI_T4",              "poi/t4",                "POI",        stale:60,                        priority:18, warmup:5);
+            Add("POI_T3",              "poi/t3",                "POI",        stale:60,                        priority:18, warmup:5);
+            Add("POI_T2",              "poi/t2",                "POI",        stale:60,                        priority:18, warmup:5);
+            Add("POI_T1",              "poi/t1",                "POI",        stale:60,                        priority:18, warmup:5);
+            Add("POI_T0",              "poi/t0",                stale:60,                                      priority:17, warmup:5);
+            Add("POI",                 "poi",                   stale:60,                                      priority:16, warmup:5);
+            Add("Ambient_Forest_Night",      "ambient/biome/forest/night",       "Ambient_Night",             priority:13);
             Add("Ambient_Forest",            "ambient/biome/forest",             "Ambient",                   priority:12);
-            Add("Ambient_Burnt_Forest_Night","ambient/biome/burnt_forest/night", "Ambient_Burnt_Forest",      priority:13);
+            Add("Ambient_Burnt_Forest_Night","ambient/biome/burnt_forest/night", "Ambient_Night",             priority:13);
             Add("Ambient_Burnt_Forest",      "ambient/biome/burnt_forest",       "Ambient",                   priority:12);
-            Add("Ambient_Desert_Night",      "ambient/biome/desert/night",       "Ambient_Desert",            priority:13);
+            Add("Ambient_Desert_Night",      "ambient/biome/desert/night",       "Ambient_Night",             priority:13);
             Add("Ambient_Desert",            "ambient/biome/desert",             "Ambient",                   priority:12);
-            Add("Ambient_Snow_Night",        "ambient/biome/snow/night",         "Ambient_Snow",              priority:13);
+            Add("Ambient_Snow_Night",        "ambient/biome/snow/night",         "Ambient_Night",             priority:13);
             Add("Ambient_Snow",              "ambient/biome/snow",               "Ambient",                   priority:12);
-            Add("Ambient_Wasteland_Night",   "ambient/biome/wasteland/night",    "Ambient_Wasteland",         priority:13);
+            Add("Ambient_Wasteland_Night",   "ambient/biome/wasteland/night",    "Ambient_Night",             priority:13);
             Add("Ambient_Wasteland",         "ambient/biome/wasteland",          "Ambient",                   priority:12);
             Add("Ambient_Night",             "ambient/night",              "Ambient",                         priority:11);
-            Add("Ambient",                   "ambient",                    "VanillaIfDMS", warm:4,            priority:10);
+            Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10);
             // Sentinels — no path, no files
-            Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, warm:0, bypass:true, priority:0);
-            Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, warm:0, bypass:true, priority:-1);
-            Add("Menu",     "menu", "Vanilla", resume:false, stale:0, loop:true, cool:5, warm:2, bypass:true, priority:0);
+            Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0);
+            Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:-1);
+            Add("Menu",     "menu", "Vanilla", resume:false, stale:0, loop:true, cool:5, fadeintime:2, bypass:true, priority:0);
         }
 
         public static Contexts GetContext(string contextIn) =>
             contexts.TryGetValue(contextIn, out var ctx) ? ctx : null;
+
+        // Diagnostics for the WarmUp dwell: throttle the per-frame "still warming"
+        // spam to ~one line/second per context, and remember which contexts are
+        // warming so we can log a single "now viable" line when each one clears.
+        private static readonly Dictionary<string, float> _warmLogThrottle =
+            new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _warmingNow =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // True once a context has been on the stack long enough to satisfy its WarmUp
+        // dwell. WarmUp <= 0 (the default) is always satisfied immediately. A context
+        // that left and re-entered gets a fresh FirstSeenAt, so the dwell restarts.
+        private static bool DwellSatisfied(ActiveContext active)
+        {
+            Contexts ctx = GetContext(active.ContextName);
+            int warm = ctx?.WarmUp ?? 0;
+            if (warm <= 0) return true;
+
+            float now = Time.realtimeSinceStartup;
+            float remaining = warm - (now - active.FirstSeenAt);
+            if (remaining > 0f)
+            {
+                // Held back by dwell — this is the usual reason a context that's
+                // clearly "active" still isn't playing. Log it (throttled) so it's
+                // visible instead of a silent skip.
+                if (!_warmLogThrottle.TryGetValue(active.ContextName, out float last) || now - last >= 1f)
+                {
+                    _warmLogThrottle[active.ContextName] = now;
+                    CMMConfig.D($"[CMM] {active.ContextName} warming up — {remaining:F1}s left before it can trigger (WarmUp={warm}s)");
+                }
+                _warmingNow.Add(active.ContextName);
+                return false;
+            }
+
+            if (_warmingNow.Remove(active.ContextName))
+            {
+                _warmLogThrottle.Remove(active.ContextName);
+                CMMConfig.D($"[CMM] {active.ContextName} warmup complete — now viable to trigger");
+            }
+            return true;
+        }
 
         private static readonly HashSet<string> _invalidFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _validatedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -138,6 +182,7 @@ namespace CMM
                 {
                     foreach (ActiveContext active in _contextStack)
                     {
+                        if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
                         string resolved = ResolvePlayableContext(active.ContextName);
                         if (resolved != null) return resolved;
                     }
@@ -153,6 +198,7 @@ namespace CMM
                         return "Vanilla";
                     foreach (ActiveContext active in _contextStack)
                     {
+                        if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
                         string resolved = ResolvePlayableContext(active.ContextName);
                         if (resolved != null) return resolved;
                     }
@@ -175,6 +221,7 @@ namespace CMM
                     }
                     foreach (ActiveContext active in _contextStack)
                     {
+                        if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
                         string resolved = ResolvePlayableContext(active.ContextName);
                         if (resolved != null) return resolved;
                     }
@@ -190,6 +237,7 @@ namespace CMM
         {
             foreach (ActiveContext active in _contextStack)
             {
+                if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
                 string playable = ResolvePlayableContext(active.ContextName);
                 if (playable != null) return playable;
             }
@@ -334,6 +382,7 @@ namespace CMM
                     ContextName = contextName,
                     Priority = ctx.Priority,
                     ActivatedAt = Time.realtimeSinceStartup,
+                    FirstSeenAt = Time.realtimeSinceStartup,
                     Manual = true
                 });
                 _contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));

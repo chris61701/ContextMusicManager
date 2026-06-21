@@ -252,7 +252,7 @@ namespace CMM
                     ActiveChannelContext = contextName;
                     InactiveChannelContext = leavingCtx;
 
-                    float reclaimFade = ctx.WarmUp > 0f ? ctx.WarmUp : CrossFadeDuration;
+                    float reclaimFade = ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration;
                     CMMConfig.D($"[CMM] Reverse-fade reclaim: {contextName} ramping " +
                             $"{keep.volume:F2}→target over {reclaimFade:F1}s (dropping {leavingCtx ?? "None"})");
 
@@ -490,7 +490,7 @@ namespace CMM
                     fadeDuration = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, cLen * 0.5f);
                 }
                 else
-                    fadeDuration = ctx.WarmUp;
+                    fadeDuration = ctx.FadeInDuration;
 
                 _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
                     CrossFade(outgoing, incoming, fadeDuration, currentContext.Cooldown, outgoingStartVol, 0f, ctx.VolumeOverride, outFadeDuration));

@@ -91,12 +91,13 @@ namespace CMM
                         timeuntilcontextstale: IntAttr (el, "stale",    120),
                         loop:                  BoolAttr(el, "loop",     false),
                         cooldown:              IntAttr (el, "cool",     5),
-                        warmup:                IntAttr (el, "warm",     5),
+                        fadeInDuration:        IntAttr (el, "fadeintime", 5),
                         bypassescooldown:      BoolAttr(el, "bypass",   false),
                         caninterrupt:          true,
                         priority:              IntAttr (el, "priority", 0),
                         playOnce:              BoolAttr(el, "once",     false),
-                        volumeOverride:        FloatAttr(el, "volume",  -1f)
+                        volumeOverride:        FloatAttr(el, "volume",  -1f),
+                        warmup:                IntAttr (el, "warmup",   0)
                     );
                 }
 

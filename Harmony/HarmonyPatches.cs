@@ -147,6 +147,7 @@ namespace CMM
                     ContextName = ctxName,
                     Priority = ctx.Priority,
                     ActivatedAt = Time.realtimeSinceStartup,
+                    FirstSeenAt = Time.realtimeSinceStartup,
                     Manual = false
                 });
             }

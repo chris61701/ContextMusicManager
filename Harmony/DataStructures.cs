@@ -69,6 +69,11 @@ namespace CMM
         public int Priority;
         public float ActivatedAt;
         public bool Manual;
+        // When this entry first entered the stack. Unlike ActivatedAt (refreshed
+        // every scan while the context stays active), this is set once on insertion
+        // and drives the WarmUp dwell gate. A context that leaves and re-enters gets
+        // a fresh ActiveContext, so the dwell restarts from zero.
+        public float FirstSeenAt;
     }
 
     public class Contexts
@@ -80,7 +85,7 @@ namespace CMM
         public int TimeUntilContextStale { get; private set; }
         public bool Loop { get; private set; }
         public int Cooldown { get; private set; }
-        public int WarmUp { get; private set; }
+        public int FadeInDuration { get; private set; }
         public bool BypassesCooldown { get; private set; }
         public bool CanInterrupt { get; private set; }
         public int Priority { get; private set; }
@@ -88,12 +93,17 @@ namespace CMM
         // Per-context replacement for the global VolumeModifier. Negative means
         // "unset" — fall back to CMMConfig.VolumeModifier.
         public float VolumeOverride { get; private set; }
+        // Seconds this context must remain continuously active before it becomes
+        // eligible to trigger music. 0 = trigger immediately. Acts as an anti-flicker
+        // dwell so momentary contexts don't interrupt what's already playing.
+        public int WarmUp { get; private set; }
 
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
-            bool loop = false, int cooldown = 5, int warmup = 3,
+            bool loop = false, int cooldown = 5, int fadeInDuration = 3,
             bool bypassescooldown = false, bool caninterrupt = false,
-            int priority = 0, bool playOnce = false, float volumeOverride = -1f)
+            int priority = 0, bool playOnce = false, float volumeOverride = -1f,
+            int warmup = 0)
         {
             Context = context;
             Path = path;
@@ -102,12 +112,13 @@ namespace CMM
             TimeUntilContextStale = timeuntilcontextstale;
             Loop = loop;
             Cooldown = cooldown;
-            WarmUp = warmup;
+            FadeInDuration = fadeInDuration;
             BypassesCooldown = bypassescooldown;
             CanInterrupt = caninterrupt;
             Priority = priority;
             PlayOnce = playOnce;
             VolumeOverride = volumeOverride;
+            WarmUp = warmup;
         }
     }
 }

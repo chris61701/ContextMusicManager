@@ -16,6 +16,12 @@ namespace CMM
         static readonly float PlayerHealthDangerThresholdPercent = 0.25f;
         static readonly int DangerThreshold = 1;
         static readonly int CriticalThreshold = 4;
+        // CombatExitDelay: with no nearby aggro for this long, stop playing combat music.
+        // CombatCooldown: how long the encounter's tier stays REMEMBERED after that — re-aggro
+        // within this window resumes the previous (latched) intensity instead of restarting at
+        // Low; past it the encounter is forgotten and the next fight starts fresh at Low. The
+        // tier latches upward only (None→Low→High) and never steps back down mid-encounter.
+        static readonly float CombatExitDelay = 5f;
         static readonly float CombatCooldown = 10f;
 
         static string combatState = "None";
@@ -82,41 +88,56 @@ namespace CMM
                 if (entity == null) continue;
                 if (entity is EntityEnemy enemy && enemy.IsAlive())
                 {
-                    if (Vector3.Distance(player.position, enemy.position) < EnemyDetectRange) enemiesNearby++;
+                    // Range-gate ALL combat/tension counts. Previously only enemiesNearby was
+                    // distance-checked while the alert/aggro counts spanned every loaded chunk,
+                    // so alert enemies in other POIs or across the map drove our combat state
+                    // (kept combat from ending, and pushed it to High off non-nearby aggro).
+                    if (Vector3.Distance(player.position, enemy.position) >= EnemyDetectRange) continue;
+                    enemiesNearby++;
                     if (enemy.isAlert)
                     {
-                        if (enemy.GetAttackTarget() == player) { lastAggroTime = Time.realtimeSinceStartup; enemyAggroCount++; }
+                        if (enemy.GetAttackTarget() == player) enemyAggroCount++;
                         enemyAlertCount++;
                     }
                 }
             }
 
-            float timeSinceAggro = Time.realtimeSinceStartup - lastAggroTime;
+            float now = Time.realtimeSinceStartup;
+            // Refresh the combat cooldown whenever enough nearby enemies are actively
+            // targeting us. This timer — not the instantaneous aggro count — is what ends
+            // combat, so brief target losses (zombies dropping and reacquiring aggro) and
+            // mid-fight lulls with fewer enemies don't drop the music.
+            if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold)
+                lastAggroTime = now;
+
+            float timeSinceAggro = now - lastAggroTime;
             bool inCombat = false;
 
+            // Escalation is immediate; de-escalation is not. Within one encounter the tier
+            // only ever climbs (None→Low→High) so the music can rise to express tension but
+            // never steps High→Low to diminish mid-fight. It resets straight to None only
+            // once the cooldown expires — i.e. the encounter is genuinely over.
             if (enemyAggroCount >= CMMConfig.CombatHighEnemyThreshold)
-            {
                 combatState = "High";
-                activeContexts.Add("Combat_High");
-                if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
-                inCombat = true;
-            }
-            else if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold)
+            else if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold && combatState == "None")
+                combatState = "Low";
+
+            if (timeSinceAggro <= CombatExitDelay && combatState != "None")
             {
-                if (combatState != "High") combatState = "Low";
+                // Actively in combat, or within the short exit tail after the last aggro.
                 activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
                 if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
                 inCombat = true;
             }
-            else if (timeSinceAggro <= CombatCooldown && enemyAlertCount > 0)
+            else if (timeSinceAggro > CombatCooldown)
             {
-                activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
-                inCombat = true;
-            }
-            else if (timeSinceAggro > CombatCooldown && enemyAlertCount == 0)
-            {
+                // Past the memory window — forget the tier so the next fight starts at Low.
                 combatState = "None";
             }
+            // Between CombatExitDelay and CombatCooldown the tier is held but no combat
+            // music plays: re-aggroing in that window resumes at the latched tier (the
+            // combatState != "None" guard on the Low escalation above keeps it from
+            // restarting at Low), while a fully fresh fight begins at Low.
 
             // Bridge: the game triggers combat music when ThreatLevel is Panicked
             // (≥4 awake enemies in 50-unit box + ≥1 targeting any player).
@@ -124,6 +145,7 @@ namespace CMM
             if (!inCombat && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
             {
                 combatState = "High";
+                lastAggroTime = now;   // treat as live aggro so it sustains through the cooldown tail
                 if (!activeContexts.Contains("Combat_High")) activeContexts.Add("Combat_High");
                 if (isBloodmoon && !activeContexts.Contains("Blood_Moon_Combat")) activeContexts.Add("Blood_Moon_Combat");
                 inCombat = true;
@@ -158,7 +180,12 @@ namespace CMM
             if (prefab != null)
             {
                 string currentPoI = prefab.prefab.PrefabName;
-                int enemiesRemainingInPoi = prefab.sleeperVolumes.Count(v => !v.wasCleared);
+                // Mirror the clear quest: ignore volumes flagged isQuestExclude. Those hold
+                // passive/decorative spawns (caged animals, ambient critters) that never get
+                // wasCleared through combat, so counting them kept the total stuck above zero
+                // even after the POI was fully cleared and the quest completed.
+                int enemiesRemainingInPoi = prefab.sleeperVolumes.Count(v => !v.wasCleared && !v.isQuestExclude);
+                // CMM.CMMConfig.D($"[CMM] Sleeper volumes remaining: {enemiesRemainingInPoi}");
                 int tier = prefab.prefab.DifficultyTier;
                 // Only tiers 0–5 have dedicated contexts; anything else falls back to the
                 // tier-less POI / POI_Infested base context.

@@ -267,6 +267,11 @@ namespace CMM
         // resolving to "Home_Night" → "Vanilla" (or back) is detected as a change even
         // though the context itself never left the active set.
         private Dictionary<string, string> _previousPlayableContexts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Whether any stack entry was still warming up on the previous scan. A context
+        // finishing its WarmUp dwell is a state change that none of the other flags can
+        // see (the active set and resolved set are identical before and after), so we
+        // force one extra evaluation on the warming→clear edge to actually promote it.
+        private bool _hadWarmingContexts = false;
         private IEnumerator ContextScanLoop()
         {
             while (true)
@@ -302,7 +307,16 @@ namespace CMM
                 // hit the 1.5s eviction threshold yet — without this the early-continue fires
                 // on the second scan and the RemoveAll eviction check never runs again.
                 bool hasPendingEvictions = _contextStack.Any(c => !c.Manual && !activeContexts.Contains(c.ContextName));
-                if (!namesChanged && !playabilityChanged && !currentIsStuck && !vanillaIsActive && !hasPendingEvictions) continue;
+                // Keep scanning while any context is still warming up: its WarmUp dwell can
+                // elapse without the active set changing, and GetTopContext must re-run to
+                // promote it once it becomes viable.
+                bool hasWarmingContexts = _contextStack.Any(c => !DwellSatisfied(c));
+                // The tick a context finishes warming, hasWarmingContexts flips to false
+                // and every other flag is already false — so without catching this edge the
+                // early-out below swallows the promotion and the context never starts.
+                bool warmingJustCleared = _hadWarmingContexts && !hasWarmingContexts;
+                _hadWarmingContexts = hasWarmingContexts;
+                if (!namesChanged && !playabilityChanged && !currentIsStuck && !vanillaIsActive && !hasPendingEvictions && !hasWarmingContexts && !warmingJustCleared) continue;
 
                 _previousActiveContexts.Clear();
                 foreach (string c in activeContexts) _previousActiveContexts.Add(c);
@@ -322,6 +336,7 @@ namespace CMM
                             ContextName = ctxName,
                             Priority = ctx.Priority,
                             ActivatedAt = Time.realtimeSinceStartup,
+                            FirstSeenAt = Time.realtimeSinceStartup,
                             Manual = false
                         });
                     }

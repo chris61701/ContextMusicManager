@@ -15,7 +15,10 @@
     stale     - seconds before an abandoned resume position is forgotten  (0 = never resume)
     loop      - loop the clip rather than picking a new track on end
     cool      - seconds before this context can fire again after leaving
-    warm      - seconds a context must remain active before it triggers music
+    fadeintime - fade-in duration in seconds (the crossfade ramp when this context's music starts)
+    warmup    - seconds this context must remain CONTINUOUSLY active before it becomes
+                eligible to trigger music  (0 = trigger immediately; an anti-flicker dwell
+                so momentary contexts don't interrupt what's already playing)
     bypass    - skip cooldown check on entry  (use for stingers/events)
     priority  - higher value wins; equal priority never interrupts a playing context
     once      - play to completion then automatically return to previous context
@@ -25,91 +28,91 @@
 <Contexts>
 
   <!-- ── Events ─────────────────────────────────────────────────────── -->
-  <Context name="Death"            path="events/death"      resume="false" stale="0"  cool="3" warm="1" bypass="true" priority="100" once="true" />
-  <Context name="Low_Health_Panic" path="events/low_health"                stale="30" cool="5" warm="2" bypass="true" priority="90" />
-  <Context name="Spawn"            path="events/spawn"      resume="false" stale="0"  cool="3" warm="1" bypass="true" priority="45" once="true" />
+  <Context name="Death"            path="events/death"      resume="false" stale="0"  cool="3" fadeintime="1" bypass="true" priority="100" once="true" />
+  <Context name="Low_Health_Panic" path="events/low_health"                stale="30" cool="5" fadeintime="2" bypass="true" priority="90" />
+  <Context name="Spawn"            path="events/spawn"      resume="false" stale="0"  cool="3" fadeintime="1" bypass="true" priority="45" once="true" />
 
   <!-- ── Blood Moon ─────────────────────────────────────────────────── -->
-  <Context name="Blood_Moon_Combat" path="combat_blood_moon"                stale="20" cool="3" warm="3" bypass="true" priority="71" />
+  <Context name="Blood_Moon_Combat" path="combat_blood_moon"                stale="20" cool="3" fadeintime="3" bypass="true" priority="71" />
   <Context name="Blood_Moon"        path="blood_moon"                       stale="30"                   bypass="true" priority="70" />
 
   <!-- ── Vehicles ───────────────────────────────────────────────────── -->
-  <Context name="Vehicle_Gyrocopter"  path="vehicle/gyrocopter"  fallback="Vehicle" stale="30" cool="5" warm="3" bypass="true" priority="61" />
-  <Context name="Vehicle_Bicycle"     path="vehicle/bicycle"     fallback="Vehicle" stale="30" cool="5" warm="3" bypass="true" priority="61" />
-  <Context name="Vehicle_Minibike"    path="vehicle/minibike"    fallback="Vehicle" stale="30" cool="5" warm="3" bypass="true" priority="61" />
-  <Context name="Vehicle_Motorcycle"  path="vehicle/motorcycle"  fallback="Vehicle" stale="30" cool="5" warm="3" bypass="true" priority="61" />
-  <Context name="Vehicle_4x4"         path="vehicle/4x4"         fallback="Vehicle" stale="30" cool="5" warm="3" bypass="true" priority="61" />
-  <Context name="Vehicle"             path="vehicle"                                stale="30" cool="5" warm="3" bypass="true" priority="60" />
+  <Context name="Vehicle_Gyrocopter"  path="vehicle/gyrocopter"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="2" bypass="true" priority="61" />
+  <Context name="Vehicle_Bicycle"     path="vehicle/bicycle"     fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="2" bypass="true" priority="61" />
+  <Context name="Vehicle_Minibike"    path="vehicle/minibike"    fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="2" bypass="true" priority="61" />
+  <Context name="Vehicle_Motorcycle"  path="vehicle/motorcycle"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="2" bypass="true" priority="61" />
+  <Context name="Vehicle_4x4"         path="vehicle/4x4"         fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="2" bypass="true" priority="61" />
+  <Context name="Vehicle"             path="vehicle"                                stale="30" cool="5" fadeintime="3" warmup="2" bypass="true" priority="60" />
 
   <!-- ── Points of Interest ─────────────────────────────────────────── -->
   <!-- POI_Cleared fires once when the last sleeper in a POI is killed. -->
   <Context name="POI_Cleared" path="events/poi_cleared"       stale="60"           bypass="true" priority="55" once="true" volume="1.0" />
 
   <!-- Infested: playing while sleeper volumes still hold live enemies. -->
-  <Context name="POI_Infested_T5" path="poi/infested/t5" fallback="POI_Infested" stale="60" priority="22" />
-  <Context name="POI_Infested_T4" path="poi/infested/t4" fallback="POI_Infested" stale="60" priority="22" />
-  <Context name="POI_Infested_T3" path="poi/infested/t3" fallback="POI_Infested" stale="60" priority="22" />
-  <Context name="POI_Infested_T2" path="poi/infested/t2" fallback="POI_Infested" stale="60" priority="22" />
-  <Context name="POI_Infested_T1" path="poi/infested/t1" fallback="POI_Infested" stale="60" priority="22" />
-  <Context name="POI_Infested_T0" path="poi/infested/t0"                         stale="60" priority="21" />
-  <Context name="POI_Infested"    path="poi/infested"                            stale="60" priority="20" />
+  <Context name="POI_Infested_T5" path="poi/infested/t5" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
+  <Context name="POI_Infested_T4" path="poi/infested/t4" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
+  <Context name="POI_Infested_T3" path="poi/infested/t3" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
+  <Context name="POI_Infested_T2" path="poi/infested/t2" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
+  <Context name="POI_Infested_T1" path="poi/infested/t1" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
+  <Context name="POI_Infested_T0" path="poi/infested/t0"                         stale="60" priority="21" warmup="10" />
+  <Context name="POI_Infested"    path="poi/infested"                            stale="60" priority="20" warmup="10" />
 
   <!-- Non-infested: inside a POI with no live sleepers (cleared or never infested). -->
-  <Context name="POI_T5" path="poi/t5" fallback="POI" stale="60" priority="18" />
-  <Context name="POI_T4" path="poi/t4" fallback="POI" stale="60" priority="18" />
-  <Context name="POI_T3" path="poi/t3" fallback="POI" stale="60" priority="18" />
-  <Context name="POI_T2" path="poi/t2" fallback="POI" stale="60" priority="18" />
-  <Context name="POI_T1" path="poi/t1" fallback="POI" stale="60" priority="18" />
-  <Context name="POI_T0" path="poi/t0"                stale="60" priority="17" />
-  <Context name="POI"    path="poi"                   stale="60" priority="16" />
+  <Context name="POI_T5" path="poi/t5" fallback="POI" stale="60" priority="18" warmup="5" />
+  <Context name="POI_T4" path="poi/t4" fallback="POI" stale="60" priority="18" warmup="5" />
+  <Context name="POI_T3" path="poi/t3" fallback="POI" stale="60" priority="18" warmup="5" />
+  <Context name="POI_T2" path="poi/t2" fallback="POI" stale="60" priority="18" warmup="5" />
+  <Context name="POI_T1" path="poi/t1" fallback="POI" stale="60" priority="18" warmup="5" />
+  <Context name="POI_T0" path="poi/t0"                stale="60" priority="17" warmup="5" />
+  <Context name="POI"    path="poi"                   stale="60" priority="16" warmup="5" />
 
   <!-- ── Combat ─────────────────────────────────────────────────────── -->
-  <Context name="Combat_High" path="combat_high" fallback="Combat_Low"        stale="20" cool="3" warm="3" bypass="true" priority="51" />
-  <Context name="Combat_Low"  path="combat_low"  fallback="VanillaIfPanicked" stale="20" cool="3" warm="3" bypass="true" priority="50" />
+  <Context name="Combat_High" path="combat_high" fallback="Combat_Low"        stale="20" cool="3" fadeintime="3" bypass="true" priority="51" />
+  <Context name="Combat_Low"  path="combat_low"  fallback="VanillaIfPanicked" stale="20" cool="3" fadeintime="3" bypass="true" priority="50" />
 
   <!-- ── Inventory ──────────────────────────────────────────────────── -->
-  <Context name="Inventory" path="inventory" stale="15" cool="0" warm="2" bypass="true" priority="40" />
+  <Context name="Inventory" path="inventory" stale="15" cool="0" fadeintime="2" bypass="true" priority="40" />
 
   <!-- ── Tension ────────────────────────────────────────────────────── -->
-  <Context name="Tension_High" path="tension_high" fallback="Tension_Low" stale="30" priority="30" />
-  <Context name="Tension_Low"  path="tension_low"                         stale="30" priority="30" />
+  <Context name="Tension_High" path="tension_high" fallback="Tension_Low" stale="30" priority="30" warmup="2" />
+  <Context name="Tension_Low"  path="tension_low"                         stale="30" priority="30" warmup="2" />
 
   <!-- ── Traders ────────────────────────────────────────────────────── -->
-  <Context name="Trader_Joel" path="trader/joel" fallback="Trader" priority="26" />
-  <Context name="Trader_Jen"  path="trader/jen"  fallback="Trader" priority="26" />
-  <Context name="Trader_Rekt" path="trader/rekt" fallback="Trader" priority="26" />
-  <Context name="Trader_Bob"  path="trader/bob"  fallback="Trader" priority="26" />
-  <Context name="Trader_Hugh" path="trader/hugh" fallback="Trader" priority="26" />
-  <Context name="Trader"      path="trader"      fallback="VanillaIfDMS" priority="25" />
+  <Context name="Trader_Joel" path="trader/joel" fallback="Trader" priority="26" warmup="3" />
+  <Context name="Trader_Jen"  path="trader/jen"  fallback="Trader" priority="26" warmup="3" />
+  <Context name="Trader_Rekt" path="trader/rekt" fallback="Trader" priority="26" warmup="3" />
+  <Context name="Trader_Bob"  path="trader/bob"  fallback="Trader" priority="26" warmup="3" />
+  <Context name="Trader_Hugh" path="trader/hugh" fallback="Trader" priority="26" warmup="3" />
+  <Context name="Trader"      path="trader"      fallback="VanillaIfDMS" priority="25" warmup="3" />
 
   <!-- ── Home ───────────────────────────────────────────────────────── -->
   <!-- Home plays by day (and is the default); Home_Night provides night-exclusive
        tracks and falls back to Home when it has no files. -->
-  <Context name="Home_Night" path="home/night" fallback="Home" priority="15" />
-  <Context name="Home"       path="home"                       priority="15" />
+  <Context name="Home_Night" path="home/night" fallback="Home" priority="15" warmup="5" />
+  <Context name="Home"       path="home"                       priority="15" warmup="5" />
 
   <!-- ── Ambient ────────────────────────────────────────────────────── -->
   <!-- The biome base plays by day (and is the everyday default); each biome's
        optional _Night context provides night-exclusive tracks and falls back to
-       its biome base, which in turn falls back to Ambient. -->
-  <Context name="Ambient_Forest_Night"      path="ambient/biome/forest/night"       fallback="Ambient_Forest"       priority="11" />
+       the generic Ambient_Night, which in turn falls back to Ambient. -->
+  <Context name="Ambient_Forest_Night"      path="ambient/biome/forest/night"       fallback="Ambient_Night"        priority="11" />
   <Context name="Ambient_Forest"            path="ambient/biome/forest"             fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Burnt_Forest_Night" path="ambient/biome/burnt_forest/night" fallback="Ambient_Burnt_Forest" priority="11" />
+  <Context name="Ambient_Burnt_Forest_Night" path="ambient/biome/burnt_forest/night" fallback="Ambient_Night"        priority="11" />
   <Context name="Ambient_Burnt_Forest"      path="ambient/biome/burnt_forest"       fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Desert_Night"      path="ambient/biome/desert/night"       fallback="Ambient_Desert"       priority="11" />
+  <Context name="Ambient_Desert_Night"      path="ambient/biome/desert/night"       fallback="Ambient_Night"        priority="11" />
   <Context name="Ambient_Desert"            path="ambient/biome/desert"             fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Snow_Night"        path="ambient/biome/snow/night"         fallback="Ambient_Snow"         priority="11" />
+  <Context name="Ambient_Snow_Night"        path="ambient/biome/snow/night"         fallback="Ambient_Night"        priority="11" />
   <Context name="Ambient_Snow"              path="ambient/biome/snow"               fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Wasteland_Night"   path="ambient/biome/wasteland/night"    fallback="Ambient_Wasteland"    priority="11" />
+  <Context name="Ambient_Wasteland_Night"   path="ambient/biome/wasteland/night"    fallback="Ambient_Night"        priority="11" />
   <Context name="Ambient_Wasteland"         path="ambient/biome/wasteland"          fallback="Ambient"              priority="11" />
   <Context name="Ambient_Night"             path="ambient/night"              fallback="Ambient"              priority="10" />
-  <Context name="Ambient"                   path="ambient"                    fallback="VanillaIfDMS" warm="4" priority="10" />
+  <Context name="Ambient"                   path="ambient"                    fallback="VanillaIfDMS" fadeintime="4" priority="10" />
 
   <!-- ── Menu ───────────────────────────────────────────────────────── -->
-  <Context name="Menu" path="menu" fallback="Vanilla" resume="false" stale="0" loop="true" cool="5" warm="2" bypass="true" priority="0" />
+  <Context name="Menu" path="menu" fallback="Vanilla" resume="false" stale="0" loop="true" cool="5" fadeintime="2" bypass="true" priority="0" />
 
   <!-- ── Sentinels — required, do not remove ────────────────────────── -->
-  <Context name="Silence" path="" fallback="Silence" resume="false" stale="0" cool="0" warm="0" bypass="true" priority="0" />
-  <Context name="Vanilla" path="" fallback="Vanilla" resume="false" stale="0" cool="0" warm="0" bypass="true" priority="-1" />
+  <Context name="Silence" path="" fallback="Silence" resume="false" stale="0" cool="0" fadeintime="0" bypass="true" priority="0" />
+  <Context name="Vanilla" path="" fallback="Vanilla" resume="false" stale="0" cool="0" fadeintime="0" bypass="true" priority="-1" />
 
 </Contexts>
