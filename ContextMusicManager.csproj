@@ -221,4 +221,24 @@
     <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Website/@value" Value="https://www.nexusmods.com/7daystodie/mods/$(ModId)" />
     <Delete Files="$(OutputPath)netstandard.dll" />
   </Target>
+  <!-- Scaffold the Music library folder tree from the context definitions so a fresh
+       install has a drop-in folder for every context (including the Music root). Reads
+       the path attributes straight from Config/contexts.xml — the same list the mod
+       loads at runtime — so the two never drift.
+
+       Purely additive: MakeDir only creates directories that are missing. It never
+       deletes, empties, or overwrites an existing folder, and it never touches the
+       audio files inside one. Safe to run on every build over a populated library. -->
+  <Target Name="CreateMusicContextFolders" AfterTargets="Build"
+          Condition=" '$(Configuration)' != 'CI' And Exists('Config\contexts.xml') ">
+    <!-- Skip sentinels (path="") at the XPath level: an empty Result item makes the
+         XmlPeek output task fail with a zero-length parameter error. -->
+    <XmlPeek XmlInputPath="Config\contexts.xml" Query="/Contexts/Context[@path != '']/@path">
+      <Output TaskParameter="Result" ItemName="_ContextPath" />
+    </XmlPeek>
+    <MakeDir Directories="$(OutputPath)Music" />
+    <MakeDir Directories="$(OutputPath)Music\%(_ContextPath.Identity)" />
+    <Message Importance="high"
+             Text="[CMM] Ensured Music context folders under $(OutputPath)Music" />
+  </Target>
 </Project>
