@@ -51,12 +51,13 @@ namespace CMM
             Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:2);
             Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:60, warmup:2);
             Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:55, once:true, volume:1.0f);
+            Add("Combat_Boss",         "combat_boss",           "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:52);
             Add("Combat_High",         "combat_high",           "Combat_Low", stale:20, cool:3, fadeintime:3, bypass:true, priority:51);
             Add("Combat_Low",          "combat_low",            "VanillaIfPanicked", stale:20, cool:3, fadeintime:3, bypass:true, priority:50);
             Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:45, once:true);
             Add("Inventory",           "inventory",             stale:15,     cool:0,   fadeintime:2, bypass:true, priority:40);
-            Add("Tension_High",        "tension_high",          "Tension_Low", stale:30,                       priority:30, warmup:2);
-            Add("Tension_Low",         "tension_low",           stale:30,                                      priority:30, warmup:2);
+            Add("Tension_High",        "tension_high",          "Tension_Low", stale:30,                       priority:30);
+            Add("Tension_Low",         "tension_low",           stale:30,                                      priority:30);
             Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3);
             Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3);
             Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3);

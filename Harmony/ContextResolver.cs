@@ -21,15 +21,41 @@ namespace CMM
         // within this window resumes the previous (latched) intensity instead of restarting at
         // Low; past it the encounter is forgotten and the next fight starts fresh at Low. The
         // tier latches upward only (None→Low→High) and never steps back down mid-encounter.
-        static readonly float CombatExitDelay = 5f;
+        static readonly float CombatExitDelay = 2f;
         static readonly float CombatCooldown = 10f;
 
         static string combatState = "None";
+        // Latched combat tier index into CombatThreatConfig.Tiers (-1 = not in combat).
+        // Used by the weighted-threat path in place of the combatState string.
+        static int combatTier = -1;
         static float lastAggroTime = 0f;
         static bool wasInfested = false;
         static string lastPoI = "None";
 
-        public static void resetValues() { combatState = "None"; }
+#if CMM_DEBUG_HUD
+        // ── Live debug snapshot ───────────────────────────────────────────────
+        // Last values computed by ResolveContext, surfaced for the in-game threat
+        // HUD (see ContextMusicManager.DebugHud). Written on the main thread each
+        // scan tick; read by OnGUI on the same thread, so no synchronization needed.
+        // Compiled in only with CMM_DEBUG_HUD so shipping builds carry no overhead.
+        public static bool   ThreatScoringActive;   // weighted model configured & in use
+        public static float  ThreatScore;           // summed score this tick
+        public static int    ThreatTier = -1;        // latched tier index (-1 = none)
+        public static string ThreatTierContext = "None";
+        public static bool   InCombat;
+        public static int    EnemiesNearby, EnemyAlertCount, EnemyAggroCount;
+#endif
+
+        public static void resetValues() { combatState = "None"; combatTier = -1; }
+
+        // Resolves an entity's config class name (e.g. "zombieBoeFeral") for threat
+        // weighting. EntityClass.list is keyed by the entity's entityClass hash; guarded
+        // because a despawning entity can briefly carry an unmapped class id.
+        static string GetEntityClassName(Entity e)
+        {
+            try { return EntityClass.list[e.entityClass]?.entityClassName; }
+            catch { return null; }
+        }
 
         public static List<string> ResolveContext()
         {
@@ -46,6 +72,12 @@ namespace CMM
             float healthPct = player.Health / (float)player.GetMaxHealth();
 
             int enemyAggroCount = 0, enemyAlertCount = 0, enemiesNearby = 0;
+
+            // Weighted combat-threat accumulation. Only summed when configured, so the
+            // per-enemy class-name lookup is skipped entirely on the legacy path.
+            var threatCfg = CMMConfig.CombatThreat;
+            bool useThreatScore = threatCfg != null && threatCfg.IsConfigured;
+            float threatScore = 0f;
 
             if (isBloodmoon) activeContexts.Add("Blood_Moon");
 
@@ -96,60 +128,118 @@ namespace CMM
                     enemiesNearby++;
                     if (enemy.isAlert)
                     {
-                        if (enemy.GetAttackTarget() == player) enemyAggroCount++;
+                        if (enemy.GetAttackTarget() == player)
+                        {
+                            enemyAggroCount++;
+                            // Combat intensity is driven by who is actually targeting us,
+                            // so only player-targeting enemies contribute to the score.
+                            if (useThreatScore)
+                                threatScore += threatCfg.ScoreEnemy(GetEntityClassName(enemy));
+                        }
                         enemyAlertCount++;
                     }
                 }
             }
 
             float now = Time.realtimeSinceStartup;
-            // Refresh the combat cooldown whenever enough nearby enemies are actively
-            // targeting us. This timer — not the instantaneous aggro count — is what ends
-            // combat, so brief target losses (zombies dropping and reacquiring aggro) and
-            // mid-fight lulls with fewer enemies don't drop the music.
-            if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold)
-                lastAggroTime = now;
-
-            float timeSinceAggro = now - lastAggroTime;
             bool inCombat = false;
 
-            // Escalation is immediate; de-escalation is not. Within one encounter the tier
-            // only ever climbs (None→Low→High) so the music can rise to express tension but
-            // never steps High→Low to diminish mid-fight. It resets straight to None only
-            // once the cooldown expires — i.e. the encounter is genuinely over.
-            if (enemyAggroCount >= CMMConfig.CombatHighEnemyThreshold)
-                combatState = "High";
-            else if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold && combatState == "None")
-                combatState = "Low";
+            // The combat tier is held by lastAggroTime — not the instantaneous count/score —
+            // so brief target losses (zombies dropping and reacquiring aggro) and mid-fight
+            // lulls don't drop the music. Escalation is immediate; de-escalation is not:
+            // within one encounter the tier only ever climbs and never steps down mid-fight,
+            // resetting only once the cooldown fully expires (the encounter is genuinely over).
+            // Between CombatExitDelay and CombatCooldown the tier is held silently — re-aggroing
+            // resumes at the latched tier, while a fully fresh fight starts at the bottom tier.
+            if (useThreatScore)
+            {
+                // ── Weighted-threat path ──────────────────────────────────────
+                // A configurable score over nearby player-targeting enemies (type ×
+                // state) selects a combat tier, replacing the flat enemy-count test.
+                int instantTier = threatCfg.TierForScore(threatScore);
+                if (instantTier >= 0) lastAggroTime = now;
+                float timeSinceAggro = now - lastAggroTime;
 
-            if (timeSinceAggro <= CombatExitDelay && combatState != "None")
-            {
-                // Actively in combat, or within the short exit tail after the last aggro.
-                activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
-                if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
-                inCombat = true;
-            }
-            else if (timeSinceAggro > CombatCooldown)
-            {
-                // Past the memory window — forget the tier so the next fight starts at Low.
-                combatState = "None";
-            }
-            // Between CombatExitDelay and CombatCooldown the tier is held but no combat
-            // music plays: re-aggroing in that window resumes at the latched tier (the
-            // combatState != "None" guard on the Low escalation above keeps it from
-            // restarting at Low), while a fully fresh fight begins at Low.
+                if (instantTier > combatTier) combatTier = instantTier;   // climb only
 
-            // Bridge: the game triggers combat music when ThreatLevel is Panicked
-            // (≥4 awake enemies in 50-unit box + ≥1 targeting any player).
-            // Its detection range and criteria differ from ours, so we mirror it here.
-            if (!inCombat && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
-            {
-                combatState = "High";
-                lastAggroTime = now;   // treat as live aggro so it sustains through the cooldown tail
-                if (!activeContexts.Contains("Combat_High")) activeContexts.Add("Combat_High");
-                if (isBloodmoon && !activeContexts.Contains("Blood_Moon_Combat")) activeContexts.Add("Blood_Moon_Combat");
-                inCombat = true;
+                if (timeSinceAggro <= CombatExitDelay && combatTier >= 0)
+                {
+                    activeContexts.Add(threatCfg.Tiers[combatTier].Context);
+                    if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
+                    inCombat = true;
+                }
+                else if (timeSinceAggro > CombatCooldown)
+                {
+                    combatTier = -1;
+                }
+
+                // Panicked bridge → mirror the legacy path and escalate to the
+                // Combat_High tier (see note below). NOT the top tier: the game's
+                // Panicked check uses a wider 50u/any-player box than our in-range scan,
+                // so it routinely fires with nothing actually nearby — slamming to the
+                // top tier would over-escalate that generic signal all the way to
+                // Combat_Boss. Boss stays reserved for an actual high threat score.
+                if (!inCombat && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
+                {
+                    int bridgeTier = threatCfg.Tiers.FindIndex(t => t.Context == "Combat_High");
+                    if (bridgeTier < 0) bridgeTier = threatCfg.Tiers.Count - 1; // no High tier configured
+                    if (bridgeTier > combatTier) combatTier = bridgeTier;        // climb only, like the score path
+                    lastAggroTime = now;
+                    string top = threatCfg.Tiers[combatTier].Context;
+                    if (!activeContexts.Contains(top)) activeContexts.Add(top);
+                    if (isBloodmoon && !activeContexts.Contains("Blood_Moon_Combat")) activeContexts.Add("Blood_Moon_Combat");
+                    inCombat = true;
+                }
             }
+            else
+            {
+                // ── Legacy two-threshold count path ───────────────────────────
+                if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold)
+                    lastAggroTime = now;
+                float timeSinceAggro = now - lastAggroTime;
+
+                if (enemyAggroCount >= CMMConfig.CombatHighEnemyThreshold)
+                    combatState = "High";
+                else if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold && combatState == "None")
+                    combatState = "Low";
+
+                if (timeSinceAggro <= CombatExitDelay && combatState != "None")
+                {
+                    activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
+                    if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
+                    inCombat = true;
+                }
+                else if (timeSinceAggro > CombatCooldown)
+                {
+                    combatState = "None";
+                }
+
+                // Bridge: the game triggers combat music when ThreatLevel is Panicked
+                // (≥4 awake enemies in 50-unit box + ≥1 targeting any player). Its
+                // detection range and criteria differ from ours, so we mirror it here.
+                if (!inCombat && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
+                {
+                    combatState = "High";
+                    lastAggroTime = now;   // treat as live aggro so it sustains through the cooldown tail
+                    if (!activeContexts.Contains("Combat_High")) activeContexts.Add("Combat_High");
+                    if (isBloodmoon && !activeContexts.Contains("Blood_Moon_Combat")) activeContexts.Add("Blood_Moon_Combat");
+                    inCombat = true;
+                }
+            }
+
+#if CMM_DEBUG_HUD
+            // Publish the snapshot for the in-game threat HUD.
+            ThreatScoringActive = useThreatScore;
+            ThreatScore         = threatScore;
+            ThreatTier          = useThreatScore ? combatTier : -1;
+            ThreatTierContext   = useThreatScore
+                ? (combatTier >= 0 ? threatCfg.Tiers[combatTier].Context : "None")
+                : (combatState == "None" ? "None" : combatState == "High" ? "Combat_High" : "Combat_Low");
+            InCombat        = inCombat;
+            EnemiesNearby   = enemiesNearby;
+            EnemyAlertCount = enemyAlertCount;
+            EnemyAggroCount = enemyAggroCount;
+#endif
 
             if (inCombat && healthPct < PlayerHealthDangerThresholdPercent) activeContexts.Add("Low_Health_Panic");
 

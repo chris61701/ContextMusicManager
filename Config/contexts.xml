@@ -67,6 +67,10 @@
   <Context name="POI"    path="poi"                   stale="60" priority="16" warmup="5" />
 
   <!-- ── Combat ─────────────────────────────────────────────────────── -->
+  <!-- Combat tiers selected by the <CombatThreat> model in settings.xml. Add more
+       tiers here (and matching <Tier> bands in settings.xml) for finer escalation;
+       each falls back to the tier below so missing folders degrade gracefully. -->
+  <Context name="Combat_Boss" path="combat_boss" fallback="Combat_High"        stale="20" cool="3" fadeintime="3" bypass="true" priority="52" />
   <Context name="Combat_High" path="combat_high" fallback="Combat_Low"        stale="20" cool="3" fadeintime="3" bypass="true" priority="51" />
   <Context name="Combat_Low"  path="combat_low"  fallback="VanillaIfPanicked" stale="20" cool="3" fadeintime="3" bypass="true" priority="50" />
 
@@ -74,8 +78,8 @@
   <Context name="Inventory" path="inventory" stale="15" cool="0" fadeintime="2" bypass="true" priority="40" />
 
   <!-- ── Tension ────────────────────────────────────────────────────── -->
-  <Context name="Tension_High" path="tension_high" fallback="Tension_Low" stale="30" priority="30" warmup="2" />
-  <Context name="Tension_Low"  path="tension_low"                         stale="30" priority="30" warmup="2" />
+  <Context name="Tension_High" path="tension_high" fallback="Tension_Low" stale="30" priority="30" />
+  <Context name="Tension_Low"  path="tension_low"                         stale="30" priority="30" />
 
   <!-- ── Traders ────────────────────────────────────────────────────── -->
   <Context name="Trader_Joel" path="trader/joel" fallback="Trader" priority="26" warmup="3" />

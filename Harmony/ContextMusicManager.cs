@@ -643,15 +643,24 @@ namespace CMM
                             SendContextUpdate(fallback, 0);
                         }
                     }
-                    else if (lastPlayedMissing)
+                    else if (lastPlayedMissing || cache.Current.Borrowed)
                     {
+                        // Hot-swap reload. Two cases land here:
+                        //  • lastPlayedMissing — the custom file that was playing got removed.
+                        //  • cache.Current.Borrowed — we're looping the borrowed vanilla
+                        //    fallback clip and custom files have just been added back to the
+                        //    active context's folder. Re-populating must swap straight back
+                        //    to the custom track instead of riding the vanilla bed.
                         // FIX 1 applied here too — see above.
                         _pendingContext = null;
                         yield return StartCoroutine(PreloadContext(ctx.Context));
 
-                        if (cacheMap[ctx.Context].Current.Clip != null)
+                        // Only trigger when PreloadContext actually loaded a custom clip;
+                        // if it couldn't (no valid files), Current is still the borrowed
+                        // clip, so fall through to the normal fallback path instead.
+                        if (cacheMap[ctx.Context].Current.Clip != null && !cacheMap[ctx.Context].Current.Borrowed)
                         {
-                            CMMConfig.D($"[CMM] Replacement clip ready for {ctx.Context}, triggering.");
+                            CMMConfig.D($"[CMM] Custom track ready for {ctx.Context}, hot-swapping.");
                             currentContext = GetContext(ctx.Context);
                             TriggerMusic(ctx.Context);
                         }

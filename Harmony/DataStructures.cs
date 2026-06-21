@@ -1,5 +1,6 @@
 #define NAUDIO
 
+using System.Collections.Generic;
 using UnityEngine;
 #if NAUDIO
 using NAudio.Wave;
@@ -8,6 +9,63 @@ using NAudio.Wave;
 namespace CMM
 {
     public enum TrackOrderMode { Random, RandomNoRepeat, Sequential }
+
+    // One score band in the weighted combat-threat model. When the summed threat
+    // score reaches MinScore this band becomes eligible; the highest eligible band
+    // wins and its Context is emitted as the active combat context.
+    public struct TierBand
+    {
+        public string Context;
+        public float MinScore;
+    }
+
+    // Weighted combat-threat model loaded from <CombatThreat> in settings.xml.
+    //   score = Σ over in-range, player-targeting enemies of (typeWeight × stateMultiplier)
+    // The score selects one of the ordered Tiers, whose Context is emitted as the
+    // active combat context (replacing the flat enemy-count thresholds). Type and
+    // state matching is longest-substring-wins against the entity class name
+    // (e.g. "zombieBoeFeral" → no type key matches so DefaultWeight, state "feral").
+    // Unconfigured (Enabled false or no Tiers) ⇒ ResolveContext uses the legacy counts.
+    public class CombatThreatConfig
+    {
+        public bool Enabled;
+        public float DefaultWeight = 1f;
+        public readonly List<KeyValuePair<string, float>> Weights = new List<KeyValuePair<string, float>>();
+        public readonly List<KeyValuePair<string, float>> States  = new List<KeyValuePair<string, float>>();
+        public readonly List<TierBand> Tiers = new List<TierBand>(); // kept ascending by MinScore
+
+        public bool IsConfigured => Enabled && Tiers.Count > 0;
+
+        // Type weight × state multiplier for one enemy, by its config class name.
+        public float ScoreEnemy(string className)
+        {
+            if (string.IsNullOrEmpty(className)) return DefaultWeight;
+            string cn = className.ToLowerInvariant();
+
+            float weight = DefaultWeight; int bestW = -1;
+            foreach (var kv in Weights)
+                if (kv.Key.Length > bestW && cn.Contains(kv.Key)) { weight = kv.Value; bestW = kv.Key.Length; }
+
+            float mult = 1f; int bestS = -1;
+            foreach (var kv in States)
+                if (kv.Key.Length > bestS && cn.Contains(kv.Key)) { mult = kv.Value; bestS = kv.Key.Length; }
+
+            return weight * mult;
+        }
+
+        // Index of the highest tier whose MinScore is satisfied, or -1 when the
+        // score is below the first (lowest) band — i.e. not in combat.
+        public int TierForScore(float score)
+        {
+            int idx = -1;
+            for (int i = 0; i < Tiers.Count; i++)
+            {
+                if (score >= Tiers[i].MinScore) idx = i;
+                else break;
+            }
+            return idx;
+        }
+    }
 
     // Result of an NAudio decode operation, carried back to the main thread.
     public class DecodedAudio

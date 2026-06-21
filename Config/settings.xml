@@ -29,9 +29,54 @@
   <GlobalTrackOrder>RandomNoRepeat</GlobalTrackOrder>
 
   <!-- Number of player-targeting enemies required to trigger combat music.
+       Used ONLY when <CombatThreat> below is disabled or has no tiers.
        Combat_Low fires at or above the Low threshold, Combat_High at or above the High threshold. -->
   <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
   <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
+
+  <!-- ── Weighted combat threat ─────────────────────────────────────────
+       When enabled, combat intensity is chosen by SCORING the enemies that are
+       targeting you rather than just counting them. Each such enemy contributes
+       (type weight × state multiplier); the summed score selects the highest Tier
+       whose minScore it meets. Tier "context" names must exist in contexts.xml.
+
+       Matching is longest-substring-wins against the entity's class name, e.g.
+       "zombieDireWolf" → matches "direwolf" (4.5), not "wolf"; "zombieBoeFeral"
+       → no type key, so defaultWeight (1.0), × state "feral" (1.5). Weights are
+       calibrated to V1 health/damage: a standard walker ≈ 1.0.
+
+       Set enabled="false" to fall back to the simple thresholds above. -->
+  <CombatThreat enabled="true" defaultWeight="1.0">
+    <!-- Type weights -->
+    <Enemy match="crawler"      weight="0.6" />
+    <Enemy match="spider"       weight="1.3" />
+    <Enemy match="dog"          weight="1.4" />
+    <Enemy match="vulture"      weight="1.4" />
+    <Enemy match="coyote"       weight="1.5" />
+    <Enemy match="wolf"         weight="2.0" />
+    <Enemy match="mountainlion" weight="3.0" />
+    <Enemy match="screamer"     weight="3.5" />  <!-- summons hordes -->
+    <Enemy match="cop"          weight="3.5" />  <!-- ranged vomit + corpse explosion -->
+    <Enemy match="wight"        weight="3.5" />
+    <Enemy match="mutated"      weight="3.5" />
+    <Enemy match="bear"         weight="4.0" />  <!-- AoE, huge HP -->
+    <Enemy match="direwolf"     weight="4.5" />  <!-- 60 melee, very fast -->
+    <Enemy match="demolition"   weight="8.0" />  <!-- detonates -->
+    <Enemy match="grace"        weight="10.0" /> <!-- boss -->
+
+    <!-- State multipliers, applied on top of the type weight. Charged hits hardest
+         (60 melee), Infernal is tankiest; Radiated reuses the Feral hand (20 dmg)
+         but adds regeneration, so it sits between. -->
+    <State match="feral"    multiplier="1.5" />
+    <State match="radiated" multiplier="2.0" />
+    <State match="charged"  multiplier="2.75" />
+    <State match="infernal" multiplier="3.25" />
+
+    <!-- Score → combat tier (any order; sorted ascending on load). Highest met wins. -->
+    <Tier context="Combat_Low"  minScore="1"  />
+    <Tier context="Combat_High" minScore="6"  />
+    <Tier context="Combat_Boss" minScore="12" />
+  </CombatThreat>
 
   <!-- Set to false to silence verbose [CMM] console output.
        Log.Warning and Log.Error always emit regardless of this flag. -->

@@ -33,9 +33,17 @@ namespace CMM
         public static bool UnityStreamingEnabled = true;
 
         // Number of player-targeting enemies required to trigger combat music.
+        // Used only when the weighted CombatThreat model below is not configured;
         // Combat_Low fires at >= Low threshold, Combat_High at >= High threshold.
         public static int CombatLowEnemyThreshold = 1;
         public static int CombatHighEnemyThreshold = 4;
+
+        // Optional weighted combat-threat model (Config/settings.xml <CombatThreat>).
+        // When configured (enabled + at least one tier), ResolveContext scores nearby
+        // player-targeting enemies by type/state and maps the total to a combat tier,
+        // replacing the flat CombatLow/HighEnemyThreshold count test. Never null —
+        // an unconfigured instance reports IsConfigured = false and the legacy path runs.
+        public static CombatThreatConfig CombatThreat = new CombatThreatConfig();
 
         // Set to false in Config/settings.xml to silence verbose console output.
         // Log.Warning and Log.Error always emit regardless of this flag.
