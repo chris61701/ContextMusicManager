@@ -66,13 +66,23 @@ namespace CMM
     {
         public static BackgroundMusicMono CachedInstance;
 
-        // Mute/unmute all AudioSources on BackgroundMusicMono when CMM reclaims or yields the menu.
+        // Mute/unmute the vanilla menu music when CMM reclaims or yields the menu.
         // Uses mute rather than volume because UpdateTrack() overwrites volume every frame.
+        //
+        // Only the looping background-music sources are muted. BackgroundMusicMono's
+        // GameObject also hosts a non-looping AudioSource that the game plays menu UI
+        // sound effects through (via PlayOneShot, so its .clip is null at rest); muting
+        // it silenced all menu SFX. Music loops, the SFX source does not — so loop
+        // cleanly separates them. (Gating on isPlaying was unreliable: a UI one-shot can
+        // be mid-play at the instant we mute, which made the SFX loss intermittent.)
         public static void SetMenuMusicMuted(bool mute)
         {
             if (CachedInstance == null) return;
             foreach (var src in CachedInstance.GetComponents<AudioSource>())
+            {
+                if (!src.loop) continue;
                 src.mute = mute;
+            }
         }
 
         // The BackgroundMusicMono AudioSources, so CMM can fade their volume directly
