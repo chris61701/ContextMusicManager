@@ -20,7 +20,6 @@ namespace CMM
 
         private static int _transitionId = 0;
         public static string _pendingContext = null;
-        public static string _playOnceReturnContext = null;
 
         // When true, Conductor.Update() runs freely and BackgroundMusicMono is unblocked.
         public static bool vanillaIsActive = false;

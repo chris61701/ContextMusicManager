@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using UnityEngine;
 #if NAUDIO
@@ -84,28 +83,7 @@ namespace CMM
         }
 
         private static bool _scheduleHandledTransition = false;
-        private static PropertyInfo _isLoadingProp = null;
-        private static bool _isLoadingPropResolved = false;
         public static bool _gameIsLoading = false;
-
-        private static bool IsGameLoading()
-        {
-            if (!_isLoadingPropResolved)
-            {
-                _isLoadingPropResolved = true;
-                try
-                {
-                    var t = Type.GetType("LoadingScreen, Assembly-CSharp");
-                    _isLoadingProp = t?.GetProperty("IsLoading",
-                        BindingFlags.Public | BindingFlags.Static);
-                    Log.Warning("[CMM] - Game is loading");
-                }
-                catch { }
-            }
-            if (_isLoadingProp == null) return false;
-            try { return (bool)_isLoadingProp.GetValue(null); }
-            catch { return false; }
-        }
 
         // ── NAudio async decode helper ────────────────────────────────────────
         // FIX: Split into two phases so disk I/O and CPU decode are each on a
@@ -118,7 +96,6 @@ namespace CMM
         {
             // Wait until the engine is not mid-load so we don't compete for I/O.
             float loadWait = 0f;
-            //while (IsGameLoading() && loadWait < 8f)
             while (_gameIsLoading && loadWait < 8f)
             {
                 yield return new WaitForSeconds(0.25f);
@@ -392,9 +369,6 @@ namespace CMM
             bool loopThis = ctx.Loop || useGameClip;
             incoming.loop = loopThis;
             incoming.volume = 0f;
-
-            // Reset so a fresh play never inherits a previous session's offset.
-            cache.playbackOffset = 0f;
 
             if (safeStart > 0f)
             {
@@ -784,7 +758,6 @@ namespace CMM
                     .Where(c => c.ContextName != contextName)
                     .Select(c => ResolvePlayableContext(c.ContextName))
                     .FirstOrDefault(c => c != null) ?? "Ambient";
-                _playOnceReturnContext = null;
                 CMMConfig.D($"[CMM] PlayOnce finished, returning to: {returnTo}");
                 SendContextUpdate(returnTo, 0);
                 yield break;

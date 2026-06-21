@@ -21,7 +21,6 @@ namespace CMM
     {
         public static string MusicDirectory;  // absolute path; set in Init, overridable via settings.xml MusicPath
         public static bool inGame = false;
-        public static bool inInventory = false;
         public static bool playerIsDead = true;
         public static string ModPath;
 
@@ -46,7 +45,6 @@ namespace CMM
         public static TrackOrderMode GlobalTrackOrder = TrackOrderMode.RandomNoRepeat;
         public static float ContextScanCooldown = 0.5f;
         public static float StalenessCheckInterval = 5f;
-        public static float NextCacheWindow = 5f;
         public static float TrackEndPollInterval = 0.25f;
         public static float CrossFadeDuration = 2f;
         public static float TrackTransitionFadeDuration = 6f;
@@ -123,7 +121,7 @@ namespace CMM
                 if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
                 {
                     ContextCache leavingCache = cacheMap[currentContext.Context];
-                    leavingCache.resumePosition = ActiveChannel.time + leavingCache.playbackOffset;
+                    leavingCache.resumePosition = ActiveChannel.time;
                     leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                     CMMConfig.D($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s (→ Vanilla)");
                     // In streaming mode, release the clip so stale detection can pick a
@@ -160,11 +158,7 @@ namespace CMM
             if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
                 ContextCache leavingCache = cacheMap[currentContext.Context];
-                // For Opus pre-seek plays: AudioSource.time starts at 0 (Play()
-                // resets Unity's internal clock) while the audio actually started
-                // at leavingCache.playbackOffset.  Add the offset to recover the
-                // true absolute track position.
-                leavingCache.resumePosition = ActiveChannel.time + leavingCache.playbackOffset;
+                leavingCache.resumePosition = ActiveChannel.time;
                 leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 CMMConfig.D($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
@@ -174,9 +168,6 @@ namespace CMM
                     leavingCache.Current = default;
                 }
             }
-
-            if (currentContext != null && currentContext.PlayOnce && !incoming.PlayOnce)
-                _playOnceReturnContext = null;
 
             // PlayOnce contexts with no custom files: go silent rather than
             // resolving through the Stack fallback. This keeps the behavior

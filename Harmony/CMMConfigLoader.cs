@@ -50,7 +50,6 @@ namespace CMM
                 ContextMusicManager.TrackTransitionPreloadLead  = ReadFloat(root, "TrackTransitionPreloadLead",  ContextMusicManager.TrackTransitionPreloadLead);
                 ContextMusicManager.ContextScanCooldown         = ReadFloat(root, "ContextScanCooldown",         ContextMusicManager.ContextScanCooldown);
                 ContextMusicManager.StalenessCheckInterval      = ReadFloat(root, "StalenessCheckInterval",      ContextMusicManager.StalenessCheckInterval);
-                ContextMusicManager.NextCacheWindow             = ReadFloat(root, "NextCacheWindow",             ContextMusicManager.NextCacheWindow);
                 ContextMusicManager.TrackEndPollInterval        = ReadFloat(root, "TrackEndPollInterval",        ContextMusicManager.TrackEndPollInterval);
                 ContextMusicManager.GlobalTrackOrder            = ReadEnum<TrackOrderMode>(root, "GlobalTrackOrder", ContextMusicManager.GlobalTrackOrder);
 

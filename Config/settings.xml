@@ -22,8 +22,6 @@
   <ContextScanCooldown>0.5</ContextScanCooldown>
   <!-- How often to check whether cached context data is stale (seconds) -->
   <StalenessCheckInterval>5.0</StalenessCheckInterval>
-  <!-- How early before track end to begin caching the next clip (seconds) -->
-  <NextCacheWindow>5.0</NextCacheWindow>
   <!-- How often to poll for natural track-end detection (seconds) -->
   <TrackEndPollInterval>0.25</TrackEndPollInterval>
 

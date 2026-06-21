@@ -614,8 +614,6 @@ namespace CMM
 
         // ── OGG codec detection ───────────────────────────────────────────────
 
-        private static long _lastProfileTime;
-
         private static long ProfStart() => Stopwatch.GetTimestamp();
 
         private static void ProfEnd(long t0, string label, float warnMs = 2f)
@@ -911,37 +909,6 @@ namespace CMM
             }
         }
 
-        public static DecodedAudio DecodeFile(string filePath)
-        {
-            try
-            {
-                string ext = System.IO.Path.GetExtension(filePath).ToLower();
-                if (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath)))
-                    return DecodeOpus(filePath);
-
-                using (WaveStream reader = OpenReader(filePath))
-                {
-                    if (reader == null) return null;
-                    return DecodeWaveStream(reader, filePath);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Warning($"[CMM NAudio] Decode failed for {Path.GetFileName(filePath)}: {ex.Message}");
-                return null;
-            }
-        }
-
-        private static DecodedAudio DecodeOpus(string filePath)
-        {
-            try { return DecodeOpusFromBytes(File.ReadAllBytes(filePath), filePath); }
-            catch (Exception ex)
-            {
-                Log.Warning($"[CMM Concentus] Opus decode failed for {Path.GetFileName(filePath)}: {ex.Message}");
-                return null;
-            }
-        }
-
         private static DecodedAudio DecodeWaveStream(WaveStream reader, string filePath)
         {
             ISampleProvider samples = reader.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat
@@ -1110,12 +1077,6 @@ namespace CMM
                 case ".wav": return AudioType.WAV;
                 default:     return AudioType.UNKNOWN;
             }
-        }
-
-        public static DecodedAudio DecodeFile(string filePath)
-        {
-            Log.Warning($"[CMM] NAudio not available. DecodeFile unsupported for {Path.GetFileName(filePath)}");
-            return null;
         }
 
         public static AudioClip CreateStreamingClip(DecodedAudio audio, string name)

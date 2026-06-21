@@ -29,11 +29,6 @@ namespace CMM
     public static class MusicStates
     {
         public static bool DefaultMusicEnabled = false;
-        public static void ToggleDefaultMusic()
-        {
-            DefaultMusicEnabled = !DefaultMusicEnabled;
-            Log.Error($"[CMM] Default music enabled: {DefaultMusicEnabled}");
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -104,7 +99,6 @@ namespace CMM
     {
         static void Prefix()
         {
-            ContextMusicManager.inInventory = false;
             ContextMusicManager.inGame = false;
             ContextMusicManager.playerIsDead = true;
             ContextMusicManager._contextStack.Clear();

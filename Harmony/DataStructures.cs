@@ -51,10 +51,7 @@ namespace CMM
     {
         public TrackSlot Current;
         public TrackSlot Next;
-        // For Opus pre-seek: AudioSource.time resets to 0 on Play() even when
-        // the reader is at safeStart — add this offset to recover true position.
         public float resumePosition;
-        public float playbackOffset;
         public float lastLeftTime = -1f;
         public string lastPlayedFile;
         public int sequentialIndex;
