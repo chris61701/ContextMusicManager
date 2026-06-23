@@ -121,7 +121,7 @@ namespace CMM
                 if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
                 {
                     ContextCache leavingCache = cacheMap[currentContext.Context];
-                    leavingCache.resumePosition = ActiveChannel.time;
+                    leavingCache.resumePosition = GetPlaybackPosition(ActiveChannel, leavingCache);
                     leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                     CMMConfig.D($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s (→ Vanilla)");
                     // In streaming mode, release the clip so stale detection can pick a
@@ -158,7 +158,7 @@ namespace CMM
             if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
                 ContextCache leavingCache = cacheMap[currentContext.Context];
-                leavingCache.resumePosition = ActiveChannel.time;
+                leavingCache.resumePosition = GetPlaybackPosition(ActiveChannel, leavingCache);
                 leavingCache.lastLeftTime = Time.realtimeSinceStartup;
                 CMMConfig.D($"[CMM] Saved resume for {currentContext.Context}: {leavingCache.resumePosition:F2}s");
 
@@ -392,7 +392,7 @@ namespace CMM
                 long gcAfter = GC.GetTotalMemory(false);
                 long collected = gcBefore - gcAfter;
                 if (collected > 1024 * 1024)
-                    Log.Warning($"[CMM PERF] GC collected {collected / 1024f:F0} KB between staleness checks");
+                    CMMConfig.D($"[CMM PERF] GC collected {collected / 1024f:F0} KB between staleness checks");
 
                 if (!inGame) continue;
 
@@ -436,6 +436,14 @@ namespace CMM
         private IEnumerator FileWatchLoop()
         {
             var lastWriteTimes = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            // Re-validate blacklisted files no more than this often (seconds). The
+            // directory mtime does NOT change when a file finishes writing its contents,
+            // so a file that failed validation while still being copied in (locked /
+            // incomplete) would never be re-examined by the mtime fast path. This forces
+            // a periodic slow-path sweep while anything is blacklisted, so such files
+            // recover instead of being excluded forever.
+            const float BlacklistRetryInterval = 30f;
+            float lastBlacklistRetry = -BlacklistRetryInterval;
 
             while (true)
             {
@@ -480,6 +488,13 @@ namespace CMM
                         contextsToWatch.Add(ctx.Context);
                 }
 
+                // Once per tick, decide whether this sweep should also re-validate
+                // blacklisted files. Only ever true while something is blacklisted, so a
+                // clean library never pays for the extra enumeration.
+                bool blacklistRetryDue = _invalidFiles.Count > 0 &&
+                    (Time.realtimeSinceStartup - lastBlacklistRetry) >= BlacklistRetryInterval;
+                if (blacklistRetryDue) lastBlacklistRetry = Time.realtimeSinceStartup;
+
                 foreach (string contextName in contextsToWatch)
                 {
                     ContextCache cache = cacheMap.TryGetValue(contextName, out var c) ? c : null;
@@ -515,7 +530,7 @@ namespace CMM
                     // when the add happens within the same filesystem precision window.
                     bool previouslyEmpty = !neverScanned && (cache.directorySnapshot?.Length ?? 0) == 0;
 
-                    if (!neverScanned && !previouslyEmpty && currentWriteTime == knownTime) continue;
+                    if (!neverScanned && !previouslyEmpty && currentWriteTime == knownTime && !blacklistRetryDue) continue;
                     lastWriteTimes[contextName] = currentWriteTime;
 
                     // ── SLOW PATH: enumerate files ──────────────────────────────────
@@ -570,6 +585,14 @@ namespace CMM
                             {
                                 _invalidFiles.Add(newFile);
                                 Log.Warning($"[CMM] New file failed validation: {Path.GetFileName(newFile)}");
+                            }
+                            else
+                            {
+                                // Re-validation passed — clear any stale blacklist entry from
+                                // an earlier failed attempt (e.g. the file was still being
+                                // copied in / locked the first time we saw it). Without this a
+                                // transiently-bad file stays excluded even after it's fine.
+                                _invalidFiles.Remove(newFile);
                             }
                         }
                         currentFiles = currentFiles.Where(f => !_invalidFiles.Contains(norm(f))).ToArray();
@@ -636,6 +659,14 @@ namespace CMM
                             _pendingContext = null;
                             currentContext = GetContext("Silence");
                             FadeToSilence();
+                        }
+                        else if (!inGame)
+                        {
+                            // On the menu screen the context stack is empty, so GetTopContext()
+                            // can't surface the current context's fallback. Re-trigger the
+                            // current context itself so its OWN fallback chain resolves
+                            // (Menu -> Vanilla), handing the menu back to the game's music.
+                            SendContextUpdate(currentContext.Context);
                         }
                         else
                         {
@@ -864,8 +895,7 @@ namespace CMM
 
                     if (decoded == null)
                     {
-                        Log.Error($"[CMM] Preload (full decode) failed for {contextName}: {Path.GetFileName(filePath)}");
-                        _invalidFiles.Add(filePath);
+                        MarkInvalidIfCorrupt(filePath, $"Preload (full decode) failed for {contextName}");
                         InvalidateContextFileCache(contextName);
                         yield break;
                     }
@@ -899,8 +929,8 @@ namespace CMM
 
                     if (reader == null)
                     {
-                        Log.Error($"[CMM] Preload (stream) failed to open {contextName}: {Path.GetFileName(filePath)}");
-                        _invalidFiles.Add(filePath);
+                        // OpenReaderAsync already decided whether to blacklist (corrupt)
+                        // or skip (transient/missing); just refresh presence and bail.
                         InvalidateContextFileCache(contextName);
                         yield break;
                     }

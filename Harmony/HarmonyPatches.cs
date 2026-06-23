@@ -47,7 +47,7 @@ namespace CMM
             ContextMusicManager.LastKnownGameSection = __instance.CurrentSectionType.ToString();
 
             if (MusicStates.DefaultMusicEnabled || ContextMusicManager.vanillaIsActive) return true;
-            if (!firstMessageLogged) { CMMConfig.D("[CMM] Dynamic Music System ticks ignored!"); firstMessageLogged = true; }
+            if (!firstMessageLogged) { CMMConfig.D("[CMM] Dynamic Music System ticks muted!"); firstMessageLogged = true; }
 
             if (!ContextMusicManager.inGame)
             {
@@ -56,15 +56,72 @@ namespace CMM
                 ContextMusicManager.FadeToSilence();
                 ContextMusicManager.OnEnterGame();
             }
-            return false;
+
+            // Let vanilla DMS keep ticking; just mute it at the mixer instead of
+            // suppressing Update. Conductor.Update runs server-side bloodmoon work
+            // (eligibility + NetPackage sends, gated only by IsServer) before any audio
+            // logic, so returning false killed that game state on a single-player host.
+            // Muting dmsVol persists frame-to-frame (MixerController.Update only touches
+            // AllCbtVol), and keeping vanilla warm lets the "Vanilla" fallback fade in
+            // seamlessly mid-track rather than cold-starting. The vanillaIsActive guard
+            // above keeps this per-frame re-mute from fighting FadeInVanillaCoroutine
+            // when vanilla is the active fallback.
+            ContextMusicManager.SetVanillaMusicVolume(0f);
+            return true;
         }
     }
 
-    // this is called constantly while on the menu screen
-    [HarmonyPatch(typeof(BackgroundMusicMono), "Play")]
+#if GV_A20
+    // ─────────────────────────────────────────────────────────────────────────
+    // A20 COMBAT-MUSIC THROTTLE FIX (backport of the A21 FrequencyLimiter rule)
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // A20's DynamicMusic.FrequencyLimiter rations ALL sections (including Combat)
+    // by the "Dynamic Music daily time" setting: during its cooldown or on a failed
+    // random roll it does FilterAllBut(None), stripping Combat down to None so the
+    // Conductor never fades a combat cue in. With a reduced daily-time setting that
+    // cooldown can run many minutes, so vanilla combat music only starts a handful
+    // of times per session and otherwise goes silent mid-fight. (A21+ fixed this by
+    // exempting Combat — and None — from the limiter; ambient stays rationed, combat
+    // always fires.)
+    //
+    // This backports A21's exact rule onto A20: record whether Combat was requested
+    // before the limiter ran, and restore it afterward if the limiter stripped it.
+    // Combat only reaches the limiter when PlayerTracker already selected it (threat
+    // == Panicked), so restoring it can never spuriously force combat — it only undoes
+    // the throttle on a real fight. Non-combat sections stay subject to the daily-time
+    // setting, as intended.
+    [HarmonyPatch(typeof(DynamicMusic.FrequencyLimiter), "Filter")]
+    public class Patch_A20_FrequencyLimiter_ExemptCombat
+    {
+        static void Prefix(IList<MusicUtils.Enums.SectionType> _sectionTypes, out bool __state)
+        {
+            __state = _sectionTypes != null && _sectionTypes.Contains(MusicUtils.Enums.SectionType.Combat);
+        }
+
+        static void Postfix(bool __state, IList<MusicUtils.Enums.SectionType> __result)
+        {
+            if (__state && __result != null && !__result.Contains(MusicUtils.Enums.SectionType.Combat))
+                __result.Add(MusicUtils.Enums.SectionType.Combat);
+        }
+    }
+#endif
+
+    // On 3.0+, patches Play(); on A20/A21 where Play() doesn't exist, falls back to Update().
+    [HarmonyPatch]
     public class MenuMusicPatch
     {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(BackgroundMusicMono), "Play")
+            ?? AccessTools.Method(typeof(BackgroundMusicMono), "Update");
         public static BackgroundMusicMono CachedInstance;
+
+        // BackgroundMusicMono.Play(MusicTrack) exists in 1.0+/2.x/3.x but NOT in the older
+        // alphas (A20/A21), whose BackgroundMusicMono has only Start()/Update(). Returning
+        // false makes Harmony skip this patch there so PatchAll doesn't abort on a missing
+        // target; menu-music reclaim is simply unavailable on those versions (vanilla menu
+        // music plays). The cached-instance helpers below stay null-safe when unpatched.
+        // static bool Prepare() => AccessTools.Method(typeof(BackgroundMusicMono), "Play") != null;
 
         // Mute/unmute the vanilla menu music when CMM reclaims or yields the menu.
         // Uses mute rather than volume because UpdateTrack() overwrites volume every frame.
@@ -100,6 +157,30 @@ namespace CMM
             if (!ContextMusicManager.inGame)
                 ContextMusicManager.SendContextUpdate("Menu");
             return false;
+        }
+    }
+
+    // A20/A21: BackgroundMusicMono has no Play(MusicTrack) method, so MenuMusicPatch
+    // falls back to patching Update(). But Start() calls audioSource.Play() directly
+    // at a non-zero initial volume (0.1f A20, 0.01f A21) — the source is already
+    // playing before Update() can suppress it, producing the faint audible bleed.
+    // Patching Start() as a Postfix lets us mute at the earliest possible point.
+    // Safe on 3.0/2.6: if Play() never ran in Start() the mute is a no-op, and
+    // Prepare() skips the patch entirely if Start() doesn't exist.
+    [HarmonyPatch]
+    public class Patch_BackgroundMusicMono_Start
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(BackgroundMusicMono), "Start");
+
+        static bool Prepare() =>
+            AccessTools.Method(typeof(BackgroundMusicMono), "Start") != null;
+
+        static void Postfix(BackgroundMusicMono __instance)
+        {
+            if (ContextMusicManager.vanillaIsActive) return;
+            MenuMusicPatch.CachedInstance = __instance;
+            MenuMusicPatch.SetMenuMusicMuted(true);
         }
     }
 
@@ -186,7 +267,7 @@ namespace CMM
     [HarmonyPatch(typeof(EntityPlayer), "Awake")]
     public static class Patch_SpawnStinger
     {
-        public static void Prefix() => Log.Error("[CMM] Player spawned into world");
+        public static void Prefix() => CMMConfig.D("[CMM] Player spawned into world");
     }
 
     public static class AudioStingerHandler
@@ -204,10 +285,17 @@ namespace CMM
     }
 
     // This keeps a log of sounds that have played so we can catch them later with patches
-    [HarmonyPatch(typeof(Audio.Manager), "PlayInsidePlayerHead",
-        new Type[] { typeof(string), typeof(int), typeof(float), typeof(bool), typeof(bool) })]
+    // 3.0 exposes PlayInsidePlayerHead(string,int,float,bool,bool); the older alphas
+    // (A20/A21) have the 4-arg (string,int,float,bool). Resolve whichever exists at runtime
+    // so this patch applies on every version instead of aborting PatchAll on a null target.
+    [HarmonyPatch]
     public class Patch_LogPlayInsidePlayerHead
     {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(Audio.Manager), "PlayInsidePlayerHead",
+                new[] { typeof(string), typeof(int), typeof(float), typeof(bool), typeof(bool) })
+            ?? AccessTools.Method(typeof(Audio.Manager), "PlayInsidePlayerHead",
+                new[] { typeof(string), typeof(int), typeof(float), typeof(bool) });
         static bool Prefix(string soundGroupName) => AudioStingerHandler.Handle(soundGroupName);
     }
 
@@ -226,7 +314,7 @@ namespace CMM
 
         static bool Prefix()
         {
-            Log.Warning("[CMM] Game is loading, from LoadChecker.");
+            CMMConfig.D("[CMM] Game is loading, from LoadChecker.");
             ContextMusicManager._gameIsLoading = true;
             return true;
         }

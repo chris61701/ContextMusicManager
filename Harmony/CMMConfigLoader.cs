@@ -19,7 +19,7 @@ namespace CMM
             string path = SettingsFile(modPath);
             if (!File.Exists(path))
             {
-                Log.Out("[CMM] Config/settings.xml not found — using defaults.");
+                CMMConfig.D("[CMM] Config/settings.xml not found — using defaults.");
                 return;
             }
             try
@@ -33,6 +33,12 @@ namespace CMM
                 CMMConfig.ReverseFadeReclaim = ReadBool (root, "ReverseFadeReclaim", CMMConfig.ReverseFadeReclaim);
                 CMMConfig.DebugLogging       = ReadBool (root, "DebugLogging",       CMMConfig.DebugLogging);
 
+                CMMConfig.EnemyDetectRange                 = ReadFloat(root, "EnemyDetectRange",                 CMMConfig.EnemyDetectRange);
+                CMMConfig.HomeDetectRange                  = ReadFloat(root, "HomeDetectRange",                  CMMConfig.HomeDetectRange);
+                CMMConfig.PlayerHealthDangerThresholdPercent = ReadFloat(root, "PlayerHealthDangerThresholdPercent", CMMConfig.PlayerHealthDangerThresholdPercent);
+                CMMConfig.CombatExitDelay                  = ReadFloat(root, "CombatExitDelay",                  CMMConfig.CombatExitDelay);
+                CMMConfig.CombatCooldown                   = ReadFloat(root, "CombatCooldown",                   CMMConfig.CombatCooldown);
+
                 CMMConfig.CombatLowEnemyThreshold  = ReadInt(root, "CombatLowEnemyThreshold",  CMMConfig.CombatLowEnemyThreshold);
                 CMMConfig.CombatHighEnemyThreshold = ReadInt(root, "CombatHighEnemyThreshold", CMMConfig.CombatHighEnemyThreshold);
 
@@ -44,7 +50,7 @@ namespace CMM
                     ContextMusicManager.MusicDirectory = Path.IsPathRooted(rawMusicPath)
                         ? rawMusicPath
                         : Path.Combine(modPath, rawMusicPath);
-                    Log.Out($"[CMM] MusicPath resolved to: {ContextMusicManager.MusicDirectory}");
+                    CMMConfig.D($"[CMM] MusicPath resolved to: {ContextMusicManager.MusicDirectory}");
                 }
 
                 ContextMusicManager.CrossFadeDuration           = ReadFloat(root, "CrossFadeDuration",           ContextMusicManager.CrossFadeDuration);
@@ -55,7 +61,7 @@ namespace CMM
                 ContextMusicManager.TrackEndPollInterval        = ReadFloat(root, "TrackEndPollInterval",        ContextMusicManager.TrackEndPollInterval);
                 ContextMusicManager.GlobalTrackOrder            = ReadEnum<TrackOrderMode>(root, "GlobalTrackOrder", ContextMusicManager.GlobalTrackOrder);
 
-                Log.Out("[CMM] Config/settings.xml loaded.");
+                CMMConfig.D("[CMM] Config/settings.xml loaded.");
             }
             catch (Exception ex)
             {
@@ -68,7 +74,7 @@ namespace CMM
             string path = ContextsFile(modPath);
             if (!File.Exists(path))
             {
-                Log.Out("[CMM] Config/contexts.xml not found — using built-in defaults.");
+                CMMConfig.D("[CMM] Config/contexts.xml not found — using built-in defaults.");
                 return;
             }
             try
@@ -112,7 +118,7 @@ namespace CMM
                 foreach (var kv in built)
                     ContextMusicManager.contexts[kv.Key] = kv.Value;
 
-                Log.Out($"[CMM] Config/contexts.xml loaded: {built.Count} contexts.");
+                CMMConfig.D($"[CMM] Config/contexts.xml loaded: {built.Count} contexts.");
             }
             catch (Exception ex)
             {
@@ -164,7 +170,7 @@ namespace CMM
             }
 
             cfg.Tiers.Sort((a, b) => a.MinScore.CompareTo(b.MinScore));
-            Log.Out($"[CMM] CombatThreat: enabled={cfg.Enabled}, {cfg.Weights.Count} weights, " +
+            CMMConfig.D($"[CMM] CombatThreat: enabled={cfg.Enabled}, {cfg.Weights.Count} weights, " +
                     $"{cfg.States.Count} states, {cfg.Tiers.Count} tiers.");
             return cfg;
         }

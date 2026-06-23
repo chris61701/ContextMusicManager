@@ -11,18 +11,11 @@ namespace CMM
 
     public static class ContextResolver
     {
-        static readonly float EnemyDetectRange = 30f;
-        static readonly float HomeDetectRange = 70f;
-        static readonly float PlayerHealthDangerThresholdPercent = 0.25f;
         static readonly int DangerThreshold = 1;
-        static readonly int CriticalThreshold = 4;
-        // CombatExitDelay: with no nearby aggro for this long, stop playing combat music.
-        // CombatCooldown: how long the encounter's tier stays REMEMBERED after that — re-aggro
-        // within this window resumes the previous (latched) intensity instead of restarting at
-        // Low; past it the encounter is forgotten and the next fight starts fresh at Low. The
-        // tier latches upward only (None→Low→High) and never steps back down mid-encounter.
-        static readonly float CombatExitDelay = 2f;
-        static readonly float CombatCooldown = 10f;
+        // EnemyDetectRange, HomeDetectRange, PlayerHealthDangerThresholdPercent,
+        // CombatExitDelay and CombatCooldown are tunable in Config/settings.xml (see
+        // CMMConfig). CombatExitDelay/CombatCooldown govern how the latched combat tier
+        // is held and forgotten — see CMMConfig for the full description.
 
         static string combatState = "None";
         // Latched combat tier index into CombatThreatConfig.Tiers (-1 = not in combat).
@@ -57,6 +50,35 @@ namespace CMM
             catch { return null; }
         }
 
+        // The game's Panicked signal uses a wider 50u/any-player box than our in-range
+        // scan and routinely fires with nothing actually nearby. We only honor it as a
+        // BRIDGE TO VANILLA combat music: when we ship no combat music of our own,
+        // escalating to Combat_High lets the fallback chain (Combat_High → Combat_Low →
+        // Combat → VanillaIfPanicked) hand off to the game's combat track. If we DO have combat
+        // music (Combat_High, Combat_Low, or the base Combat), we trust our own threat detection instead
+        // and ignore the Panicked signal entirely, so its loose box can't spuriously
+        // trigger our tracks when our scan found nothing in range.
+        static bool PanickedBridgeAllowed() =>
+            !ContextMusicManager.ContextHasFiles("Combat_High") &&
+            !ContextMusicManager.ContextHasFiles("Combat_Low") &&
+            !ContextMusicManager.ContextHasFiles("Combat");
+
+#if !GV_V3
+        // Pre-3.0 TraderArea has no GetTrader(): resolve the trader entity by finding the
+        // EntityTrader whose area is this one (EntityTrader.traderArea is public in all
+        // older versions). Only called when the player is inside a trader area, so the
+        // entity-list scan is rare. Snapshots the list — the game may mutate it mid-scan.
+        static EntityTrader FindTraderForArea(World world, TraderArea area)
+        {
+            var list = world?.Entities?.list;
+            if (list == null) return null;
+            foreach (var e in new List<Entity>(list))
+                if (e is EntityTrader t && ReferenceEquals(t.traderArea, area))
+                    return t;
+            return null;
+        }
+#endif
+
         public static List<string> ResolveContext()
         {
             //Stopwatch sw = Stopwatch.StartNew();
@@ -68,7 +90,15 @@ namespace CMM
 
             var activeContexts = new List<string>();
             bool isDay = world.IsDaytime();
-            bool isBloodmoon = world.isEventBloodMoon;
+            // World.isEventBloodMoon is public in 2.6/3.0 but private in A20/A21; the
+            // Alphas fall back to the player's public EntityAlive.IsBloodMoon flag, which
+            // is set while a blood moon is active.
+            bool isBloodmoon =
+#if GV_A20 || GV_A21
+                player.IsBloodMoon;
+#else
+                world.isEventBloodMoon;
+#endif
             float healthPct = player.Health / (float)player.GetMaxHealth();
 
             int enemyAggroCount = 0, enemyAlertCount = 0, enemiesNearby = 0;
@@ -79,7 +109,9 @@ namespace CMM
             bool useThreatScore = threatCfg != null && threatCfg.IsConfigured;
             float threatScore = 0f;
 
-            if (isBloodmoon) activeContexts.Add("Blood_Moon");
+            // Swimming: in deep enough water to swim (not mere shallow wading). The
+            // 8s WarmUp dwell on the context keeps brief dips from interrupting music.
+            if (player.IsSwimming()) activeContexts.Add("Swimming");
 
             if (player.AttachedToEntity is EntityVehicle vehicle)
             {
@@ -97,7 +129,14 @@ namespace CMM
             TraderArea traderArea = world.GetTraderAreaAt(player.GetBlockPosition());
             if (traderArea != null)
             {
-                EntityTrader traderEntity = traderArea.GetTrader();
+                // TraderArea.GetTrader() exists only in 3.0; older versions have no
+                // area→trader link, so resolve the trader entity by its area instead.
+                EntityTrader traderEntity =
+#if GV_V3
+                    traderArea.GetTrader();
+#else
+                    FindTraderForArea(world, traderArea);
+#endif
                 if (traderEntity?.TraderInfo?.IsOpen == true)
                 {
                     string n = traderEntity.EntityName?.ToLower() ?? "";
@@ -124,9 +163,9 @@ namespace CMM
                     // distance-checked while the alert/aggro counts spanned every loaded chunk,
                     // so alert enemies in other POIs or across the map drove our combat state
                     // (kept combat from ending, and pushed it to High off non-nearby aggro).
-                    if (Vector3.Distance(player.position, enemy.position) >= EnemyDetectRange) continue;
+                    if (Vector3.Distance(player.position, enemy.position) >= CMMConfig.EnemyDetectRange) continue;
                     enemiesNearby++;
-                    if (enemy.isAlert)
+                    if (enemy.IsAlert)
                     {
                         if (enemy.GetAttackTarget() == player)
                         {
@@ -162,24 +201,25 @@ namespace CMM
 
                 if (instantTier > combatTier) combatTier = instantTier;   // climb only
 
-                if (timeSinceAggro <= CombatExitDelay && combatTier >= 0)
+                if (timeSinceAggro <= CMMConfig.CombatExitDelay && combatTier >= 0)
                 {
                     activeContexts.Add(threatCfg.Tiers[combatTier].Context);
                     if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
                     inCombat = true;
                 }
-                else if (timeSinceAggro > CombatCooldown)
+                else if (timeSinceAggro > CMMConfig.CombatCooldown)
                 {
                     combatTier = -1;
                 }
 
-                // Panicked bridge → mirror the legacy path and escalate to the
-                // Combat_High tier (see note below). NOT the top tier: the game's
-                // Panicked check uses a wider 50u/any-player box than our in-range scan,
-                // so it routinely fires with nothing actually nearby — slamming to the
-                // top tier would over-escalate that generic signal all the way to
-                // Combat_Boss. Boss stays reserved for an actual high threat score.
-                if (!inCombat && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
+                // Panicked bridge → escalate to the Combat_High tier (see note below).
+                // NOT the top tier: the game's Panicked check uses a wider 50u/any-player
+                // box than our in-range scan, so it routinely fires with nothing actually
+                // nearby — slamming to the top tier would over-escalate that generic signal
+                // all the way to Combat_Boss. Boss stays reserved for an actual high threat
+                // score. Gated by PanickedBridgeAllowed(): only when we have no combat music
+                // of our own, so this stays a pure vanilla-fallback bridge (see its note).
+                if (!inCombat && PanickedBridgeAllowed() && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
                 {
                     int bridgeTier = threatCfg.Tiers.FindIndex(t => t.Context == "Combat_High");
                     if (bridgeTier < 0) bridgeTier = threatCfg.Tiers.Count - 1; // no High tier configured
@@ -203,13 +243,13 @@ namespace CMM
                 else if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold && combatState == "None")
                     combatState = "Low";
 
-                if (timeSinceAggro <= CombatExitDelay && combatState != "None")
+                if (timeSinceAggro <= CMMConfig.CombatExitDelay && combatState != "None")
                 {
                     activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
                     if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
                     inCombat = true;
                 }
-                else if (timeSinceAggro > CombatCooldown)
+                else if (timeSinceAggro > CMMConfig.CombatCooldown)
                 {
                     combatState = "None";
                 }
@@ -217,7 +257,9 @@ namespace CMM
                 // Bridge: the game triggers combat music when ThreatLevel is Panicked
                 // (≥4 awake enemies in 50-unit box + ≥1 targeting any player). Its
                 // detection range and criteria differ from ours, so we mirror it here.
-                if (!inCombat && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
+                // Gated by PanickedBridgeAllowed(): only when we have no combat music of
+                // our own, so this stays a pure vanilla-fallback bridge (see its note).
+                if (!inCombat && PanickedBridgeAllowed() && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
                 {
                     combatState = "High";
                     lastAggroTime = now;   // treat as live aggro so it sustains through the cooldown tail
@@ -241,10 +283,9 @@ namespace CMM
             EnemyAggroCount = enemyAggroCount;
 #endif
 
-            if (inCombat && healthPct < PlayerHealthDangerThresholdPercent) activeContexts.Add("Low_Health_Panic");
+            if (inCombat && healthPct < CMMConfig.PlayerHealthDangerThresholdPercent) activeContexts.Add("Low_Health_Panic");
 
-            if (enemiesNearby >= CriticalThreshold && enemyAlertCount >= CriticalThreshold && !inCombat) activeContexts.Add("Tension_High");
-            else if (enemiesNearby >= DangerThreshold && enemyAlertCount >= DangerThreshold && !inCombat) activeContexts.Add("Tension_Low");
+            if (enemiesNearby >= DangerThreshold && enemyAlertCount >= DangerThreshold && !inCombat) activeContexts.Add("Tension");
 
             if (player is EntityPlayerLocal localPlayer && localPlayer.persistentPlayerData != null)
             {
@@ -252,7 +293,7 @@ namespace CMM
                 if (localPlayer.persistentPlayerData.HasBedrollPos)
                 {
                     Vector3i bed = localPlayer.persistentPlayerData.BedrollPos;
-                    nearHome = Vector3.Distance(player.position, bed) < HomeDetectRange;
+                    nearHome = Vector3.Distance(player.position, bed) < CMMConfig.HomeDetectRange;
                 }
                 if (!nearHome)
                 {
@@ -260,7 +301,7 @@ namespace CMM
                     if (claims.Count > 0)
                     {
                         Vector3i nearest = claims.OrderBy(c => Vector3.Distance(player.position, c.ToVector3())).First();
-                        nearHome = Vector3.Distance(player.position, nearest.ToVector3()) < HomeDetectRange;
+                        nearHome = Vector3.Distance(player.position, nearest.ToVector3()) < CMMConfig.HomeDetectRange;
                     }
                 }
                 if (nearHome) activeContexts.Add(isDay ? "Home" : "Home_Night");
@@ -269,17 +310,26 @@ namespace CMM
             PrefabInstance prefab = world?.GetPOIAtPosition(player.position);
             if (prefab != null)
             {
-                string currentPoI = prefab.prefab.PrefabName;
-                // Mirror the clear quest: ignore volumes flagged isQuestExclude. Those hold
-                // passive/decorative spawns (caged animals, ambient critters) that never get
-                // wasCleared through combat, so counting them kept the total stuck above zero
-                // even after the POI was fully cleared and the quest completed.
+                // In 3.0, PrefabName is a property backed by location.FileNameNoExtension and
+                // is always populated. In A21 it is a plain field that defaults to "" unless
+                // the prefab XML explicitly sets it (most don't). Fall back to PrefabInstance.name
+                // (locationName.id) so the cleared-POI guard has a stable, non-empty identifier
+                // on all versions.
+                string prefabName = prefab.prefab?.PrefabName;
+                string currentPoI = !string.IsNullOrEmpty(prefabName) ? prefabName : prefab.name;
+                int totalVolumes   = prefab.sleeperVolumes.Count;
+                int clearedVolumes = prefab.sleeperVolumes.Count(v => v.wasCleared);
+                int excludedVolumes = prefab.sleeperVolumes.Count(v => v.isQuestExclude);
                 int enemiesRemainingInPoi = prefab.sleeperVolumes.Count(v => !v.wasCleared && !v.isQuestExclude);
-                // CMM.CMMConfig.D($"[CMM] Sleeper volumes remaining: {enemiesRemainingInPoi}");
-                int tier = prefab.prefab.DifficultyTier;
+                int tier = prefab.prefab?.DifficultyTier ?? 0;
+                string tierSuffix = (tier >= 0 && tier <= 5) ? "_T" + tier : "";
+
+                CMMConfig.D($"[CMM POI] name='{currentPoI}' tier={tier} tierSuffix='{tierSuffix}' " +
+                            $"volumes={totalVolumes} cleared={clearedVolumes} excluded={excludedVolumes} remaining={enemiesRemainingInPoi} " +
+                            $"wasInfested={wasInfested} lastPoI={lastPoI}");
+
                 // Only tiers 0–5 have dedicated contexts; anything else falls back to the
                 // tier-less POI / POI_Infested base context.
-                string tierSuffix = (tier >= 0 && tier <= 5) ? "_T" + tier : "";
                 if (enemiesRemainingInPoi > 0)
                 {
                     wasInfested = true;
@@ -310,9 +360,21 @@ namespace CMM
                 default: biomeBase = "Ambient"; break;
             }
             // During the day the biome base folder is used directly (it holds the
-            // everyday day+night tracks). At night we prefer a night-exclusive
-            // context, which falls back to the biome base when it has no files.
-            activeContexts.Add(isDay ? biomeBase : biomeBase + "_Night");
+            // everyday day+night tracks). At night we prefer the biome's night-exclusive
+            // context, but ALSO push the biome's day context (at lower priority) so a
+            // biome with no night music — and no generic Ambient_Night music — falls back
+            // to its OWN day theme before the generic Ambient. The night context falls
+            // back to Ambient_Night, which falls back to the Stack, where this day context
+            // is then found (the night context itself is skipped by the re-entry guard).
+            if (isDay)
+            {
+                activeContexts.Add(biomeBase);
+            }
+            else
+            {
+                activeContexts.Add(biomeBase + "_Night");
+                activeContexts.Add(biomeBase);
+            }
             //sw.Stop();
             //Log.Out($"[CMM] ResolvedContext took {sw.Elapsed.TotalMilliseconds:F3} ms");
 

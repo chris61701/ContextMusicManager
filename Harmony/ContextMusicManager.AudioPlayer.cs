@@ -85,6 +85,35 @@ namespace CMM
         private static bool _scheduleHandledTransition = false;
         public static bool _gameIsLoading = false;
 
+        // ── Playback position (version-independent) ───────────────────────────
+        // AudioSource.time is unreliable for streaming AudioClip.Create clips on
+        // older Unity: A20 (Unity 2020.3) reports ~0 for PCM-callback clips, so the
+        // resume capture stored 0 and every "resume" restarted at the top. A21
+        // (2021.3) and 3.0 report it correctly. Derive the position from the backing
+        // NAudio reader's consumed-frame count instead — version-independent, and
+        // only a hair (one DSP/read buffer, tens of ms) ahead of the audible point.
+        // Falls back to AudioSource.time when there is no streaming reader (borrowed
+        // vanilla clips, or the preload full-PCM path where .time is reliable anyway).
+        private static float GetPlaybackPosition(AudioSource channel, ContextCache cache)
+        {
+            if (channel == null) return 0f;
+#if NAUDIO
+            WaveStream reader = cache?.Current.Reader;
+            if (reader != null)
+            {
+                try
+                {
+                    int blockAlign = reader.WaveFormat.BlockAlign;
+                    int sampleRate = reader.WaveFormat.SampleRate;
+                    if (blockAlign > 0 && sampleRate > 0)
+                        return (float)(reader.Position / (double)blockAlign / sampleRate);
+                }
+                catch { /* reader disposed or mid-seek; fall back to AudioSource.time */ }
+            }
+#endif
+            return channel.time;
+        }
+
         // ── NAudio async decode helper ────────────────────────────────────────
         // FIX: Split into two phases so disk I/O and CPU decode are each on a
         // background thread but the main thread yields a frame between them.
@@ -117,10 +146,7 @@ namespace CMM
             while (!finished) yield return null;
 
             if (reader == null)
-            {
-                _invalidFiles.Add(filePath);
-                Log.Error($"[CMM] Preload: failed to open {Path.GetFileName(filePath)}, marking invalid");
-            }
+                MarkInvalidIfCorrupt(filePath, "Preload: failed to open");
 
             onComplete(reader);
         }
@@ -237,7 +263,7 @@ namespace CMM
                         CrossFade(drop, keep, reclaimFade, currentContext.Cooldown, drop.volume, keep.volume, ctx.VolumeOverride));
 
                     float reclaimLen = keep.clip.length;
-                    float reclaimPos = keep.time;
+                    float reclaimPos = GetPlaybackPosition(keep, cache);
                     if (!ctx.Loop)
                     {
                         _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(
@@ -412,30 +438,31 @@ namespace CMM
             }
 
             incoming.clip = cache.Current.Clip;
+            CMMConfig.D($"[CMM] Clip assigned: samples={incoming.clip.samples} ch={incoming.clip.channels} len={incoming.clip.length:F2}s");
 
             incoming.Play();
+            CMMConfig.D($"[CMM] After Play(): isPlaying={incoming.isPlaying} time={incoming.time:F3}s vol={incoming.volume:F2}");
 
+            // Pin the playhead after Play() — even for a fresh start (safeStart == 0).
+            // The AudioSource can carry a stale `time` from a previously-interrupted
+            // crossfade: a channel that never received Stop() (Stop only runs at the
+            // END of CrossFade/FadeToSilence) keeps its playhead live, and assigning a
+            // new clip does not reliably zero it on every Unity version. On A21 this
+            // made a first-play track begin mid-song at the leaving track's offset.
+            // Writing time here also forces Unity to flush the streaming clip's primed
+            // DSP buffer and re-request from `safeStart` (for Opus resumes this discards
+            // the frame-0 samples Unity primed before the pre-seek ran). incoming.volume
+            // is still 0 at this point (the crossfade ramps it up), so any one-frame
+            // correction burst is silent.
+            incoming.time = safeStart;
 #if NAUDIO
-            if (safeStart > 0f)
-            {
-                // Setting AudioSource.time after Play() forces Unity to flush the
-                // streaming clip's primed DSP buffer and re-request samples from the
-                // reader's current position. For Opus this discards the frame-0
-                // samples Unity primed when the clip was first created (before the
-                // resume pre-seek ran) — the cause of the brief start-of-track burst
-                // on a crossfade-off resume. The pre-seek already left the reader at
-                // safeStart, so the SetPosition callback this triggers is a no-op
-                // seek; the only effect we want here is the buffer flush.
-                incoming.time = safeStart;
-                if (cache.Current.Reader is NAudioDecoder.SeekableOpusReader flushedRdr)
-                    flushedRdr.ClearInitialSeekIntercept();
-            }
-#else
-            if (safeStart > 0f)
-            {
-                incoming.time = safeStart;
-            }
+            // On a resume the reader was pre-seeked to safeStart and the SetInitialPosition
+            // interceptor armed; disarm it now the explicit time-set has committed the
+            // position, so a later loop restart's SetPosition(0) isn't redirected to it.
+            if (safeStart > 0f && cache.Current.Reader is NAudioDecoder.SeekableOpusReader flushedRdr)
+                flushedRdr.ClearInitialSeekIntercept();
 #endif
+            CMMConfig.D($"[CMM] Pinned time: requested={safeStart:F3}s actual={incoming.time:F3}s isPlaying={incoming.isPlaying}");
 
             _primaryIsActive = !_primaryIsActive;
             // incoming is now the active channel; outgoing (the leaving context)
@@ -444,6 +471,12 @@ namespace CMM
             ActiveChannelContext = contextName;
             InactiveChannelContext = previousActiveContext;
             AudioSource watchTarget = incoming;
+
+            // On the menu, a real custom track is now starting — fade out any vanilla
+            // title theme still audible underneath (A20 cold-start, where the mod loaded
+            // too late for the Start-postfix mute). Skipped for borrowed vanilla beds.
+            if (!inGame && !cache.Current.Borrowed)
+                FadeOutMenuVanillaIfAudible();
 
             // ── Crossfade ────────────────────────────────────────────────────
             float targetVolume = CMMConfig.GetVolume(inGame, ctx.VolumeOverride);
@@ -567,6 +600,7 @@ namespace CMM
             outgoing.Stop();
             outgoing.clip = null;
             outgoing.volume = 0f;
+            CMMConfig.D($"[CMM] CrossFade done: vol={incoming.volume:F3} target={targetVolume:F3} isPlaying={incoming.isPlaying}");
 
             // FIX: Defer destroy past the end of the crossfade coroutine so the
             // audio thread has fully moved off the outgoing clip. One frame is
@@ -697,6 +731,27 @@ namespace CMM
                 if (sources[i] != null) sources[i].volume = startVols[i];
             CMMConfig.D("[CMM] FadeOutMenuVanilla: complete (muted).");
             _menuVanillaFadeCoroutine = null;
+        }
+
+        // Menu cold-start (A20): the mod can load many seconds into the main menu, long
+        // after the game's BackgroundMusicMono.Start() already began playing the vanilla
+        // title theme — so the Start-postfix mute never caught it and it's still audible
+        // when CMM's own menu track is finally ready. Rather than hard-cutting it, fade it
+        // out over the crossfade window as the custom track fades in. No-op on A21/3.0
+        // (the Start postfix muted the bed before it was ever audible), whenever the bed
+        // is already silent/muted, or when a menu fade is already running. Only invoked
+        // from PlayFromCache when a real custom menu track is actually starting, so we
+        // never silence vanilla unless there's a custom track to replace it.
+        public static void FadeOutMenuVanillaIfAudible()
+        {
+            if (inGame) return;
+            if (_menuVanillaFadeCoroutine != null) return;
+            var sources = MenuMusicPatch.GetMenuSources();
+            if (sources == null) return;
+            bool audible = sources.Any(s => s != null && s.loop && !s.mute && s.volume > 0f);
+            if (!audible) return;
+            CMMConfig.D("[CMM] Menu cold-start: fading leftover vanilla title theme out as custom track takes over.");
+            _menuVanillaFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutMenuVanillaCoroutine(CrossFadeDuration));
         }
 
         // ── Track-end watcher ─────────────────────────────────────────────────
@@ -1018,6 +1073,30 @@ namespace CMM
             bool has = snap != null && snap.Any(f => !_invalidFiles.Contains(f));
             if (has) _contextsWithFiles.Add(contextName);
             else _contextsWithFiles.Remove(contextName);
+        }
+
+        // Blacklist a file ONLY when it genuinely exists but can't be opened/decoded
+        // (corrupt or unsupported). A file that is missing at open time was moved or
+        // deleted mid-operation — a transient, not corruption: blacklisting it would
+        // permanently exclude a perfectly valid track that is still (or again) on disk,
+        // because _invalidFiles is only cleared when the watcher sees an actual removal.
+        // Returns true if the file was blacklisted.
+        private static bool MarkInvalidIfCorrupt(string filePath, string reason)
+        {
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    Log.Warning($"[CMM] {reason}: {Path.GetFileName(filePath)} not on disk — " +
+                                "transient (moved/removed), not blacklisting.");
+                    return false;
+                }
+            }
+            catch { /* path error — fall through and treat as invalid */ }
+
+            _invalidFiles.Add(filePath);
+            Log.Error($"[CMM] {reason}: {Path.GetFileName(filePath)}, marking invalid");
+            return true;
         }
 
         // Marked private so FileWatchLoop can call it for a single context.

@@ -8,11 +8,10 @@ using System.Threading;
 using UnityEngine;
 #if NAUDIO
 using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
 using NAudio.Vorbis;
-using NAudio.Flac;
 using Concentus;
 using Concentus.Oggfile;
+using CSCore.Codecs.FLAC;
 #endif
 
 namespace CMM
@@ -26,7 +25,17 @@ namespace CMM
     {
         private static readonly HashSet<string> _naudioExts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac" };
+            {
+                ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus",
+                // BunLabs.NAudio.Flac targets netstandard2.0 and uses Span<T> internally.
+                // Mono 2021.3.19 (A21's Unity) has incomplete Span<T> JIT support and
+                // hard-crashes when the FLAC decoder's Read() is called. Exclude .flac there.
+                // A20 (Unity 2020.3) does not have this issue — FLAC works once netstandard.dll
+                // ships alongside the mod (which the A20 build now does).
+// #if !GV_A21
+                ".flac",
+// #endif
+            };
 
         private static readonly HashSet<string> _unityExts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -335,6 +344,9 @@ namespace CMM
             // Keeps the interceptor alive even if PCMReaderCallback fires first, which
             // was the root cause of the brief position-0 play on Opus resumes.
             private bool _interceptNextSeek = false;
+            // One-shot flag: log end-of-stream once per decoder session (reset on reopen)
+            // so the audio thread doesn't spam the log on every buffer fill after EOS.
+            private volatile bool _eosLogged = false;
 
             public void SetInitialPosition(long sampleFrame)
             {
@@ -411,15 +423,9 @@ namespace CMM
                     _samplePos <= targetFrame &&
                     (targetFrame - _samplePos) < (long)(48000 * fastForwardWindowSeconds);
 
+                CMMConfig.D($"[CMM] OpusSeek #{_seekCount}: frame={targetFrame} ({targetFrame / 48000f:F2}s) samplePos={_samplePos} fastFwd={canFastForward}");
                 if (!canFastForward)
-                {
-                    // Log outside hot path is not possible here since we hold _lock,
-                    // but reopening is rare (only on context resume / loop), so a
-                    // brief log is acceptable at that frequency.
-                    // DO NOT log on every seek — only on reopen.
-                    UnityEngine.Debug.Log($"[CMM] OpusReopen seek #{_seekCount} → frame {targetFrame}");
                     OpenStreamAtByte(pageByteOffset);
-                }
 
                 long discard = targetFrame - _samplePos;
                 if (discard > 0)
@@ -451,6 +457,7 @@ namespace CMM
                 var t0 = ProfStart();
                 _pcmBufStart = 0;
                 _pcmBufEnd = 0;
+                _eosLogged = false;
 
                 // Cache the Ogg header pages (BOS + comment) on first open.
                 // These are ~200 bytes and are needed by PrependStream so that
@@ -472,7 +479,15 @@ namespace CMM
                 _decoder?.Dispose();
                 _decoder = OpusCodecFactory.CreateDecoder(48000, _format.Channels);
 
-                if (byteOffset == 0 || _headerBytes == null)
+                // A seek at or before the first audio page (ByteOffsets[0]) is just a
+                // read from the top: the header pages occupy [0, ByteOffsets[0]) and the
+                // first audio page is the natural continuation of the top-down stream.
+                // Routing it through the PrependStream mid-file path instead produces an
+                // OpusOggReadStream that yields no packets (immediate EOS) — which silently
+                // killed playback whenever Unity's PCMSetPositionCallback(0) fired after the
+                // audio thread had already advanced _samplePos past 0 during clip priming.
+                bool atOrBeforeFirstPage = _index.Count > 0 && byteOffset <= _index.ByteOffsets[0];
+                if (byteOffset == 0 || _headerBytes == null || atOrBeforeFirstPage)
                 {
                     // Reading from the top — standard path, no PrependStream needed.
                     _fileStream.Position = 0;
@@ -529,7 +544,14 @@ namespace CMM
             {
                 long t0 = Stopwatch.GetTimestamp();
                 if (_oggStream == null || !_oggStream.HasNextPacket)
+                {
+                    if (!_eosLogged)
+                    {
+                        _eosLogged = true;
+                        CMMConfig.D($"[CMM] Opus: stream end at samplePos={_samplePos} ({_samplePos / 48000f:F2}s)");
+                    }
                     return false;
+                }
 
                 short[] packet = _oggStream.DecodeNextPacket();
                 if (packet == null || packet.Length == 0) return false;
@@ -545,7 +567,7 @@ namespace CMM
                 _pcmBufStart = 0;
                 _pcmBufEnd = packet.Length;
                 float ms = (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
-                if (ms > 1f) Log.Warning($"[CMM PERF] OpusDecodePacket: {ms:F2}ms");
+                if (ms > 1f) CMMConfig.D($"[CMM PERF] OpusDecodePacket: {ms:F2}ms");
                 return true;
             }
 
@@ -612,6 +634,52 @@ namespace CMM
             }
         }
 
+        // ═════════════════════════════════════════════════════════════════════
+        // CSCORE FLAC READER
+        // Adapts CSCore.Codecs.FLAC.FlacFile (net35, no Span<T>) to the NAudio
+        // WaveStream contract so it slots into CreateStreamingClipFromReader
+        // identically to the other format readers.  Pre-scans the file/stream
+        // on construction (synchronous, always called on a background thread)
+        // to build CSCore's internal seek index, enabling accurate Position.set.
+        // ═════════════════════════════════════════════════════════════════════
+        private sealed class CsCoreFlacReader : WaveStream
+        {
+            private readonly CSCore.Codecs.FLAC.FlacFile _flac;
+            private readonly WaveFormat _waveFormat;
+
+            public CsCoreFlacReader(string filePath)
+            {
+                _flac = new FlacFile(filePath);
+                _waveFormat = BuildFormat(_flac.WaveFormat);
+            }
+
+            public CsCoreFlacReader(Stream stream)
+            {
+                _flac = new FlacFile(stream, FlacPreScanMode.Sync);
+                _waveFormat = BuildFormat(_flac.WaveFormat);
+            }
+
+            private static WaveFormat BuildFormat(CSCore.WaveFormat f)
+                => new WaveFormat(f.SampleRate, f.BitsPerSample, f.Channels);
+
+            public override WaveFormat WaveFormat => _waveFormat;
+            public override long Length         => _flac.Length;
+            public override long Position
+            {
+                get => _flac.Position;
+                set => _flac.Position = value;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+                => _flac.Read(buffer, offset, count);
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _flac.Dispose();
+                base.Dispose(disposing);
+            }
+        }
+
         // ── OGG codec detection ───────────────────────────────────────────────
 
         private static long ProfStart() => Stopwatch.GetTimestamp();
@@ -619,7 +687,7 @@ namespace CMM
         private static void ProfEnd(long t0, string label, float warnMs = 2f)
         {
             float ms = (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
-            if (ms > warnMs) Log.Warning($"[CMM PERF] {label}: {ms:F2}ms");
+            if (ms > warnMs) CMMConfig.D($"[CMM PERF] {label}: {ms:F2}ms");
         }
         public static bool IsOpusOgg(string filePath)
         {
@@ -670,7 +738,7 @@ namespace CMM
         public static WaveStream OpenStreamingReader(string filePath)
         {
             if (!Thread.CurrentThread.IsBackground)
-                Log.Warning($"[CMM PERF] OpenStreamingReader called on main thread for {Path.GetFileName(filePath)}!");
+                CMMConfig.D($"[CMM PERF] OpenStreamingReader called on main thread for {Path.GetFileName(filePath)}!");
 
             byte[] raw = null;
             try
@@ -730,7 +798,7 @@ namespace CMM
                     case ".ogg":
                     case ".oga": return new VorbisWaveReader(ms);
                     case ".flac":
-                        return new FlacReader(ms);
+                        return new CsCoreFlacReader(ms);
                     default:
                         ms.Dispose();
                         Log.Warning($"[CMM NAudio] No in-memory reader for extension '{ext}'");
@@ -757,7 +825,7 @@ namespace CMM
                 case ".aif": return new AiffFileReader(filePath);
                 case ".ogg":
                 case ".oga": return new VorbisWaveReader(filePath);
-                case ".flac": return new FlacReader(filePath);
+                case ".flac": return new CsCoreFlacReader(filePath);
                 default:
                     Log.Warning($"[CMM NAudio] No reader for extension '{ext}'");
                     return null;
@@ -776,10 +844,66 @@ namespace CMM
                 case ".aif": return new AiffFileReader(filePath);
                 case ".ogg":
                 case ".oga": return new VorbisWaveReader(stream);
-                case ".flac": return new FlacReader(stream);
+                case ".flac": return new CsCoreFlacReader(stream);
                 default:
                     Log.Warning($"[CMM NAudio] No stream reader for extension '{ext}'");
                     return null;
+            }
+        }
+
+        // ── PCM → float converter ─────────────────────────────────────────────
+        // Replaces NAudio's SampleChannel/ConvertWaveProviderIntoSampleProvider,
+        // which triggers a hard JIT crash in Mono 2021.3.19 (Unity A21) for both
+        // the ACM fallback path (unsupported encodings) and the Pcm16BitToSampleProvider
+        // path (valid 16-bit PCM). Neither crash is catchable. This class is pure
+        // managed code with no NAudio converter chain dependency.
+        private sealed class PcmToFloatProvider : ISampleProvider
+        {
+            private readonly IWaveProvider _source;
+            private readonly int _bytesPerSample;
+            private byte[] _buf = new byte[4096];
+
+            public WaveFormat WaveFormat { get; }
+
+            public PcmToFloatProvider(IWaveProvider source)
+            {
+                _source = source;
+                _bytesPerSample = source.WaveFormat.BitsPerSample / 8;
+                WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(
+                    source.WaveFormat.SampleRate, source.WaveFormat.Channels);
+            }
+
+            public int Read(float[] buffer, int offset, int count)
+            {
+                int bytesNeeded = count * _bytesPerSample;
+                if (_buf.Length < bytesNeeded) _buf = new byte[bytesNeeded];
+                int bytesRead = _source.Read(_buf, 0, bytesNeeded);
+                int samples = bytesRead / _bytesPerSample;
+                switch (_bytesPerSample)
+                {
+                    case 2:
+                        for (int i = 0; i < samples; i++)
+                            buffer[offset + i] = (short)(_buf[i * 2] | (_buf[i * 2 + 1] << 8)) / 32768f;
+                        break;
+                    case 3:
+                        for (int i = 0; i < samples; i++)
+                        {
+                            int s = _buf[i*3] | (_buf[i*3+1] << 8) | (_buf[i*3+2] << 16);
+                            if (s > 0x7FFFFF) s -= 0x1000000;
+                            buffer[offset + i] = s / 8388608f;
+                        }
+                        break;
+                    case 4:
+                        for (int i = 0; i < samples; i++)
+                            buffer[offset + i] = (_buf[i*4] | (_buf[i*4+1] << 8) | (_buf[i*4+2] << 16) | (_buf[i*4+3] << 24)) / 2147483648f;
+                        break;
+                    default: // 8-bit unsigned
+                        for (int i = 0; i < samples; i++)
+                            buffer[offset + i] = (_buf[i] - 128) / 128f;
+                        break;
+                }
+                if (samples < count) Array.Clear(buffer, offset + samples, count - samples);
+                return samples;
             }
         }
 
@@ -797,10 +921,25 @@ namespace CMM
         {
             if (reader == null) return null;
 
-            // Normalise to float samples regardless of source encoding.
-            ISampleProvider src = reader.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat
-                ? reader.ToSampleProvider()
-                : new SampleChannel(reader, forceStereo: false);
+            var enc = reader.WaveFormat.Encoding;
+            int bps = reader.WaveFormat.BitsPerSample;
+            CMMConfig.D($"[CMM NAudio] Clip '{name}': {enc} {bps}bit {reader.WaveFormat.SampleRate}Hz {reader.WaveFormat.Channels}ch");
+
+            // SampleChannel internally uses Windows ACM P/Invoke for non-PCM formats, and its
+            // Pcm16BitToSampleProvider path triggers a hard JIT crash in Mono 2021.3.19 (A21).
+            // Both crash variants bypass .NET exception handling and cannot be caught. Use our
+            // own PCM→float converter for all PCM depths to avoid the NAudio code path entirely.
+            ISampleProvider src;
+            if (enc == WaveFormatEncoding.IeeeFloat)
+                src = reader.ToSampleProvider();
+            else if (enc == WaveFormatEncoding.Pcm && (bps == 8 || bps == 16 || bps == 24 || bps == 32))
+                src = new PcmToFloatProvider(reader);
+            else
+            {
+                Log.Warning($"[CMM NAudio] '{name}' has unsupported encoding '{enc}' {bps}bit — " +
+                            $"skipped to prevent crash. Re-encode as PCM WAV, OGG, FLAC, or MP3.");
+                return null;
+            }
 
             int channels = src.WaveFormat.Channels;
             int sampleRate = src.WaveFormat.SampleRate;
@@ -911,9 +1050,19 @@ namespace CMM
 
         private static DecodedAudio DecodeWaveStream(WaveStream reader, string filePath)
         {
-            ISampleProvider samples = reader.WaveFormat.Encoding == WaveFormatEncoding.IeeeFloat
-                ? reader.ToSampleProvider()
-                : new SampleChannel(reader, forceStereo: false);
+            var enc = reader.WaveFormat.Encoding;
+            int bps = reader.WaveFormat.BitsPerSample;
+            ISampleProvider samples;
+            if (enc == WaveFormatEncoding.IeeeFloat)
+                samples = reader.ToSampleProvider();
+            else if (enc == WaveFormatEncoding.Pcm && (bps == 8 || bps == 16 || bps == 24 || bps == 32))
+                samples = new PcmToFloatProvider(reader);
+            else
+            {
+                Log.Warning($"[CMM NAudio] '{Path.GetFileName(filePath)}' has unsupported encoding '{enc}' {bps}bit — " +
+                            $"skipped to prevent crash. Re-encode as PCM WAV, OGG, FLAC, or MP3.");
+                return null;
+            }
 
             int channels = samples.WaveFormat.Channels;
             int frequency = samples.WaveFormat.SampleRate;

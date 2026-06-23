@@ -28,11 +28,19 @@
   <!-- Track pick order within a context folder: Random, RandomNoRepeat, Sequential -->
   <GlobalTrackOrder>RandomNoRepeat</GlobalTrackOrder>
 
-  <!-- Number of player-targeting enemies required to trigger combat music.
-       Used ONLY when <CombatThreat> below is disabled or has no tiers.
-       Combat_Low fires at or above the Low threshold, Combat_High at or above the High threshold. -->
-  <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
-  <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
+  <!-- ── Context detection tuning ───────────────────────────────────────
+       Max distance (game units) an enemy is counted toward combat/tension state. -->
+  <EnemyDetectRange>30</EnemyDetectRange>
+  <!-- Distance (game units) from your bedroll or land claim that counts as "home". -->
+  <HomeDetectRange>70</HomeDetectRange>
+  <!-- Health fraction (0.0–1.0) below which combat escalates to Low_Health_Panic. -->
+  <PlayerHealthDangerThresholdPercent>0.30</PlayerHealthDangerThresholdPercent>
+  <!-- CombatExitDelay: with no nearby aggro for this many seconds, stop playing combat
+       music. CombatCooldown: how long after that the encounter's tier stays remembered —
+       re-aggro within this window resumes the latched intensity instead of restarting at
+       the bottom tier; past it the next fight starts fresh. -->
+  <CombatExitDelay>2.0</CombatExitDelay>
+  <CombatCooldown>10.0</CombatCooldown>
 
   <!-- ── Weighted combat threat ─────────────────────────────────────────
        When enabled, combat intensity is chosen by SCORING the enemies that are
@@ -75,11 +83,17 @@
     <!-- Score → combat tier (any order; sorted ascending on load). Highest met wins. -->
     <Tier context="Combat_Low"  minScore="1"  />
     <Tier context="Combat_High" minScore="6"  />
-    <Tier context="Combat_Boss" minScore="12" />
+    <Tier context="Combat_Boss" minScore="18" />
   </CombatThreat>
+
+  <!-- Number of player-targeting enemies required to trigger combat music.
+       Used ONLY when <CombatThreat> below is disabled or has no tiers.
+       Combat_Low fires at or above the Low threshold, Combat_High at or above the High threshold. -->
+  <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
+  <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
 
   <!-- Set to false to silence verbose [CMM] console output.
        Log.Warning and Log.Error always emit regardless of this flag. -->
-  <DebugLogging>true</DebugLogging>
+  <DebugLogging>false</DebugLogging>
 
 </CMMSettings>

@@ -38,6 +38,22 @@ namespace CMM
         public static int CombatLowEnemyThreshold = 1;
         public static int CombatHighEnemyThreshold = 4;
 
+        // ── Context detection tuning (Config/settings.xml) ─────────────────────
+        // Max distance (game units) an enemy is counted toward combat/tension state.
+        public static float EnemyDetectRange = 30f;
+        // Distance (game units) from a bedroll or land-claim that counts as "home".
+        public static float HomeDetectRange = 70f;
+        // Health fraction (0–1) below which combat escalates to Low_Health_Panic.
+        public static float PlayerHealthDangerThresholdPercent = 0.30f;
+        // CombatExitDelay: with no nearby aggro for this long (seconds), stop playing
+        // combat music. CombatCooldown: how long the encounter's tier stays REMEMBERED
+        // after that — re-aggro within this window resumes the previous (latched)
+        // intensity instead of restarting at the bottom tier; past it the encounter is
+        // forgotten and the next fight starts fresh. The tier latches upward only and
+        // never steps back down mid-encounter.
+        public static float CombatExitDelay = 2f;
+        public static float CombatCooldown = 10f;
+
         // Optional weighted combat-threat model (Config/settings.xml <CombatThreat>).
         // When configured (enabled + at least one tier), ResolveContext scores nearby
         // player-targeting enemies by type/state and maps the total to a combat tier,

@@ -11,24 +11,76 @@
     <AssemblyName>ContextMusicManager</AssemblyName>
     <TargetFrameworkVersion>v4.8.1</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
-    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <!-- Off: this is a mod DLL loaded into the game's process, and .NET only honors
+         binding redirects from the host .exe's config — a ContextMusicManager.dll.config
+         is ignored at runtime, so don't generate one. -->
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
     <!-- Don't copy reference-related files (e.g. NAudio.*.xml doc files) to the output dir.
          Content items like ModInfo.xml are unaffected. -->
     <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
-    <ModName>ContextMusicManager</ModName>
-    <ModVersion>0.0.1</ModVersion>
-    <ModDescription>Plays custom music based on context</ModDescription>
-    <ModId>99999</ModId>
     <GamePath>..\..\..\..\Steam\steamapps\common\7 Days To Die</GamePath>
     <ModsPath>..\..\..\..\vortex_udf_7_days_to_die\Mods</ModsPath>
     <TargetFrameworkProfile />
+  </PropertyGroup>
+
+  <!-- ── Target game version ─────────────────────────────────────────────
+       Select which installed game version to build/deploy/package against:
+         msbuild -p:GameVersion="2.6 b12"
+       Defaults to the current release. Everything version-specific (game-assembly
+       HintPaths, the deploy Mods folder, the release zip name, and a GV_* compile
+       symbol) derives from this one property. Add a version by copying a block below. -->
+  <PropertyGroup>
+    <GameVersion Condition="'$(GameVersion)' == ''">3.0.0 b257</GameVersion>
+    <!-- Debug builds rewrite the DEPLOYED settings.xml MusicPath to this; override with
+         -p:DebugMusicPath=... . Release ships the committed value ("Music") untouched. -->
+    <DebugMusicPath Condition="'$(DebugMusicPath)' == ''">J:\7D2D_Custom_Music</DebugMusicPath>
+    <!-- A plain Debug build (including the VS Build button, which never passes a target)
+         fans out to EVERY game install via the DebugFanout target below, so all four
+         Mods folders stay in sync. Override with -p:CMMDeployAll=false for a quick
+         single-version build into just the selected GameVersion's install. Always false
+         for the fan-out child builds (the _CMMFanoutChild guard) to prevent recursion. -->
+    <CMMDeployAll Condition="'$(CMMDeployAll)' == '' And '$(_CMMFanoutChild)' == 'true'">false</CMMDeployAll>
+    <CMMDeployAll Condition="'$(CMMDeployAll)' == ''">true</CMMDeployAll>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(GameVersion)' == '3.0.0 b257'">
+    <GameInstallDir>C:\_Games\Steam\steamapps\common\7 Days To Die</GameInstallDir>
+    <GameVersionDefine>GV_V3</GameVersionDefine>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(GameVersion)' == '2.6 b12'">
+    <GameInstallDir>H:\_Games\7 Days To Die - 2.6 b12</GameInstallDir>
+    <GameVersionDefine>GV_V26</GameVersionDefine>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(GameVersion)' == 'Alpha 20.7 b1'">
+    <GameInstallDir>H:\_Games\7 Days To Die - Alpha 20.7 b1</GameInstallDir>
+    <GameVersionDefine>GV_A20</GameVersionDefine>
+    <!-- Alphas ship 0Harmony in Managed, not Mods\0_TFP_Harmony. -->
+    <HarmonyHintPath>$(GameInstallDir)\7DaysToDie_Data\Managed\0Harmony.dll</HarmonyHintPath>
+    <!-- A20 uses the legacy <ModInfo>-root ModInfo format (no <DisplayName>). -->
+    <LegacyModInfo>true</LegacyModInfo>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(GameVersion)' == 'Alpha 21.2 b37'">
+    <GameInstallDir>H:\_Games\7 Days To Die - Alpha 21.2 b37</GameInstallDir>
+    <GameVersionDefine>GV_A21</GameVersionDefine>
+    <!-- Alphas ship 0Harmony in Managed, not Mods\0_TFP_Harmony. -->
+    <HarmonyHintPath>$(GameInstallDir)\7DaysToDie_Data\Managed\0Harmony.dll</HarmonyHintPath>
+  </PropertyGroup>
+
+  <!-- Paths derived from the selected install root. -->
+  <PropertyGroup>
+    <GameManagedDir>$(GameInstallDir)\7DaysToDie_Data\Managed</GameManagedDir>
+    <GameModsDir>$(GameInstallDir)\Mods</GameModsDir>
+    <!-- 0Harmony ships under Mods\0_TFP_Harmony in 1.0+/2.x/3.x. Older alphas may store
+         it elsewhere or not ship it — override with -p:HarmonyHintPath=...\0Harmony.dll. -->
+    <HarmonyHintPath Condition="'$(HarmonyHintPath)' == ''">$(GameModsDir)\0_TFP_Harmony\0Harmony.dll</HarmonyHintPath>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
-    <OutputPath>..\..\..\AppData\Roaming\7DaysToDie\Mods\ContextMusicManager\</OutputPath>
+    <!-- Debug deploys straight into the selected game's own Mods folder for live testing. -->
+    <OutputPath>$(GameModsDir)\ContextMusicManager\</OutputPath>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
@@ -40,11 +92,13 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugType>none</DebugType>
     <Optimize>true</Optimize>
-    <OutputPath>..\..\..\AppData\Roaming\7DaysToDie\Mods\ContextMusicManager\</OutputPath>
+    <!-- Release stages to a CLEAN per-version folder (never the live game/music dirs)
+         so the packaged zip contains only the mod, not your music library. -->
+    <OutputPath>$(MSBuildProjectDirectory)\dist\staging\$(GameVersion)\ContextMusicManager\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>3</WarningLevel>
-    <AbsoluteOutputPath>$(MSBuildProjectDirectory)\$(OutputPath)</AbsoluteOutputPath>
+    <AbsoluteOutputPath>$(OutputPath)</AbsoluteOutputPath>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'CI|AnyCPU' ">
@@ -59,8 +113,16 @@
     <EnableDebugHud Condition="'$(EnableDebugHud)' == ''">false</EnableDebugHud>
     <DefineConstants Condition="'$(EnableDebugHud)' == 'true'">$(DefineConstants);CMM_DEBUG_HUD</DefineConstants>
   </PropertyGroup>
+  <!-- Per-version compile symbol (GV_V3 / GV_V26 / GV_A20 / GV_A21) so source can
+       #if-guard APIs that differ across game versions (e.g. the Dynamic Music System
+       does not exist before 1.0). -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(GameVersionDefine)' != ''">$(DefineConstants);$(GameVersionDefine)</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
-    <Content Include="Config\**\*">
+    <!-- Localization.txt is excluded: it was leftover template junk from another mod
+         (crosshair/weapons keys) and 7DTD auto-loads it, so it must not ship. -->
+    <Content Include="Config\**\*" Exclude="Config\Localization.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="THIRD_PARTY_NOTICES.txt">
@@ -84,11 +146,11 @@
   </ItemGroup>
   <ItemGroup Condition=" '$(Configuration)' != 'CI' ">
     <Reference Include="0Harmony">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\Mods\0_TFP_Harmony\0Harmony.dll</HintPath>
+      <HintPath>$(HarmonyHintPath)</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Assembly-CSharp">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <HintPath>$(GameManagedDir)\Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -100,7 +162,7 @@
       <HintPath>packages\Concentus.Oggfile.1.0.7\lib\net452\Concentus.Oggfile.dll</HintPath>
     </Reference>
     <Reference Include="LogLibrary">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\LogLibrary.dll</HintPath>
+      <HintPath>$(GameManagedDir)\LogLibrary.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Microsoft.Win32.Registry, Version=4.1.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
@@ -116,8 +178,15 @@
     <Reference Include="NAudio.Core, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
       <HintPath>packages\NAudio.Core.2.3.0\lib\netstandard2.0\NAudio.Core.dll</HintPath>
     </Reference>
+    <!--
     <Reference Include="NAudio.Flac, Version=2.0.1.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>packages\BunLabs.NAudio.Flac.2.0.1\lib\netstandard2.0\NAudio.Flac.dll</HintPath>
+    </Reference>
+    -->
+    <!-- CSCore provides FLAC decoding (FlacFile) without Span<T>, working across all
+         Unity/Mono versions including A21 where BunLabs.NAudio.Flac hard-crashed the JIT. -->
+    <Reference Include="CSCore, Version=1.2.1.2, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>packages\CSCore.1.2.1.2\lib\net35-client\CSCore.dll</HintPath>
     </Reference>
     <Reference Include="NAudio.Midi, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
       <HintPath>packages\NAudio.Midi.2.3.0\lib\netstandard2.0\NAudio.Midi.dll</HintPath>
@@ -178,35 +247,35 @@
       <Private>True</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.AudioModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.CoreModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestAudioModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.UnityWebRequestAudioModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.UnityWebRequestAudioModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.UnityWebRequestModule">
-      <HintPath>..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <HintPath>$(GameManagedDir)\UnityEngine.UnityWebRequestModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -214,31 +283,76 @@
     <Folder Include="Patches\" />
   </ItemGroup>
   <ItemGroup>
-    <Analyzer Include="..\..\..\..\..\..\_Games\Steam\steamapps\common\7 Days To Die\7DaysToDie_Data\Managed\UnityEngine.InputModule.dll" />
+    <Analyzer Include="$(GameManagedDir)\UnityEngine.InputModule.dll" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".github\copilot-instructions.md" />
-    <None Include="app.config" />
     <None Include="packages.config" />
     <None Include="README.md" />
+    <None Include="ModInfo.A20.xml" />
   </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <!-- BeforeBuild/AfterBuild MUST be declared AFTER the targets import, or the SDK's empty
+       defaults (imported later) override them and they silently never run. -->
   <Target Name="BeforeBuild">
-    <!-- Clean ONLY stale build artifacts from the output dir. Never wipe the whole
-         directory: it also holds the user's music library, which must be preserved. -->
+    <!-- Make sure the deploy target exists (Alpha installs don't ship a Mods folder). -->
+    <MakeDir Condition="'$(Configuration)' == 'Debug'" Directories="$(GameModsDir)" />
+    <!-- Release: wipe the per-version staging dir so the zip never carries stale files.
+         Staging is build-generated and holds no music, so a full wipe is safe here. -->
+    <RemoveDir Condition="'$(Configuration)' == 'Release'" Directories="$(OutputPath)" />
+    <!-- Debug: clean ONLY stale build artifacts from the deploy dir. Never wipe the
+         whole directory in case anything else lives alongside it. -->
     <ItemGroup>
       <_StaleArtifacts Include="$(OutputPath)*.dll;$(OutputPath)*.pdb;$(OutputPath)*.dll.config" />
     </ItemGroup>
-    <Delete Files="@(_StaleArtifacts)" />
+    <Delete Condition="'$(Configuration)' == 'Debug'" Files="@(_StaleArtifacts)" />
   </Target>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Target Name="AfterBuild" Condition=" '$(Configuration)' != 'CI' ">
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Name/@value" Value="$(ModName)" />
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/DisplayName/@value" Value="$(ModName)" />
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Author/@value" Value="Velasha" />
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Description/@value" Value="$(ModDescription)" />
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Version/@value" Value="$(ModVersion)" />
-    <XmlPoke XmlInputPath="$(OutputPath)\ModInfo.xml" Query="/xml/Website/@value" Value="https://www.nexusmods.com/7daystodie/mods/$(ModId)" />
-    <Delete Files="$(OutputPath)netstandard.dll" />
+    <!-- ModInfo.xml is authoritative: it ships verbatim (copied via the Content item
+         above), so its values are edited directly in the source file, not rewritten here. -->
+    <!-- Old-style projects don't auto-copy netstandard.dll the way SDK-style projects do,
+         so this Delete is a no-op in practice — kept as a safeguard in case the toolchain
+         ever starts producing it for non-A20 targets where it is not needed. -->
+    <Delete Condition="'$(GameVersionDefine)' != 'GV_A20'" Files="$(OutputPath)netstandard.dll" />
+  </Target>
+
+  <!-- A20 only: copy the runtime netstandard.dll type-forwarding shim into the mod folder.
+       A20 runs on Unity 2020.3 whose Mono has no netstandard.dll in Managed; without it
+       the netstandard2.0 NAudio sub-assemblies (NAudio.Core, NAudio.Vorbis, etc.) throw
+       ReflectionTypeLoadException and Harmony never patches.  All newer game targets ship
+       a Mono that handles netstandard2.0 natively, so they don't need this file.
+       This project is old-style (ToolsVersion 12.0) and does not auto-copy netstandard.dll
+       the way SDK-style projects do, so we copy it explicitly here.
+       Default source: dotnet CLI Build.Extensions (net461 variant, MIT licensed).
+       Override with -p:NetStandardShimDll=<path> when building with VS MSBuild. -->
+  <PropertyGroup Condition="'$(GameVersionDefine)' == 'GV_A20'">
+    <NetStandardShimDll Condition="'$(NetStandardShimDll)' == ''">$(MSBuildExtensionsPath)\Microsoft\Microsoft.NET.Build.Extensions\net461\lib\netstandard.dll</NetStandardShimDll>
+  </PropertyGroup>
+  <Target Name="CopyNetStandardShimForA20" AfterTargets="AfterBuild"
+          Condition="'$(GameVersionDefine)' == 'GV_A20' And '$(Configuration)' != 'CI'">
+    <Warning Condition="!Exists('$(NetStandardShimDll)')"
+             Text="[CMM] netstandard.dll shim not found at '$(NetStandardShimDll)'. A20 NAudio will fail to load. Override with -p:NetStandardShimDll=&lt;path&gt;." />
+    <Copy SourceFiles="$(NetStandardShimDll)" DestinationFolder="$(OutputPath)"
+          Condition="Exists('$(NetStandardShimDll)')"
+          SkipUnchangedFiles="true" />
+    <Message Condition="Exists('$(NetStandardShimDll)')" Importance="high"
+             Text="[CMM] Copied netstandard.dll shim for A20 from $(NetStandardShimDll)" />
+  </Target>
+
+  <!-- A20 only: overwrite the deployed ModInfo.xml with the legacy nested-<ModInfo> format
+       (A20 expects <xml> root wrapping a <ModInfo> element; the modern format flattens the
+       fields directly under <xml>). Runs after the normal content copy. The Version is
+       synced from the authoritative ModInfo.xml so the two never drift. -->
+  <Target Name="DeployLegacyModInfo" AfterTargets="Build"
+          Condition="'$(LegacyModInfo)' == 'true' And '$(Configuration)' != 'CI'">
+    <XmlPeek XmlInputPath="ModInfo.xml" Query="/xml/Version/@value">
+      <Output TaskParameter="Result" ItemName="_AuthoredVersion" />
+    </XmlPeek>
+    <Copy SourceFiles="ModInfo.A20.xml" DestinationFiles="$(OutputPath)ModInfo.xml"
+          SkipUnchangedFiles="false" OverwriteReadOnlyFiles="true" />
+    <XmlPoke XmlInputPath="$(OutputPath)ModInfo.xml" Query="/xml/ModInfo/Version/@value"
+             Value="@(_AuthoredVersion)" />
+    <Message Importance="high" Text="[CMM] A20 legacy ModInfo deployed (Version @(_AuthoredVersion))" />
   </Target>
   <!-- Scaffold the Music library folder tree from the context definitions so a fresh
        install has a drop-in folder for every context (including the Music root). Reads
@@ -249,7 +363,7 @@
        deletes, empties, or overwrites an existing folder, and it never touches the
        audio files inside one. Safe to run on every build over a populated library. -->
   <Target Name="CreateMusicContextFolders" AfterTargets="Build"
-          Condition=" '$(Configuration)' != 'CI' And Exists('Config\contexts.xml') ">
+          Condition=" '$(Configuration)' == 'Release' And Exists('Config\contexts.xml') ">
     <!-- Skip sentinels (path="") at the XPath level: an empty Result item makes the
          XmlPeek output task fail with a zero-length parameter error. -->
     <XmlPeek XmlInputPath="Config\contexts.xml" Query="/Contexts/Context[@path != '']/@path">
@@ -257,7 +371,126 @@
     </XmlPeek>
     <MakeDir Directories="$(OutputPath)Music" />
     <MakeDir Directories="$(OutputPath)Music\%(_ContextPath.Identity)" />
+    <!-- Drop a .keep into every context folder. Mod managers (e.g. Vortex) strip empty
+         folders on install, which would wipe the drop-in tree; a placeholder file keeps
+         each folder present. The audio scanner ignores non-audio extensions, so .keep is
+         inert. Users can delete it once they add their own tracks. -->
+    <WriteLinesToFile File="$(OutputPath)Music\%(_ContextPath.Identity)\.keep"
+                      Lines="Placeholder so mod managers don't delete this empty folder. Drop your music files here (you can delete this file once you do)."
+                      Overwrite="true" />
     <Message Importance="high"
-             Text="[CMM] Ensured Music context folders under $(OutputPath)Music" />
+             Text="[CMM] Ensured Music context folders (with .keep placeholders) under $(OutputPath)Music" />
+  </Target>
+
+  <!-- Fail fast on a bad/unknown -p:GameVersion before the compiler emits a wall of
+       'type not found' errors from missing game assemblies. -->
+  <Target Name="ValidateGameVersion" BeforeTargets="Build">
+    <Error Condition="'$(GameInstallDir)' == ''"
+           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.0.0 b257', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
+    <Error Condition="!Exists('$(GameManagedDir)')"
+           Text="Game Managed folder not found for GameVersion '$(GameVersion)': $(GameManagedDir)" />
+    <Warning Condition="!Exists('$(HarmonyHintPath)')"
+             Text="0Harmony.dll not found at $(HarmonyHintPath) — override with -p:HarmonyHintPath=... if this version stores it elsewhere." />
+    <Message Importance="high" Text="[CMM] Building '$(Configuration)' against GameVersion '$(GameVersion)' ($(GameInstallDir))" />
+  </Target>
+
+  <!-- Debug only: point the DEPLOYED settings.xml at the personal music library.
+       The committed Config/settings.xml keeps the release value ("Music"), so the
+       repo can never accidentally ship a machine-specific path. -->
+  <Target Name="SetDebugSettings" AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Debug'">
+    <!-- Guarantee the deployed Config is an EXACT mirror of the repo on every Debug build:
+         wipe it (dropping any renamed/removed files) then re-copy with an explicit Copy.
+         This bypasses the normal CopyToOutputDirectory path, which MSBuild can skip as
+         "up-to-date" on incremental builds and which never removes orphaned files — so
+         structural changes to settings.xml/contexts.xml always propagate. Config holds
+         only repo XML; the music library lives at MusicPath, not here, so wiping is safe. -->
+    <RemoveDir Directories="$(OutputPath)Config" />
+    <ItemGroup>
+      <_DebugCfg Include="Config\**\*" Exclude="Config\Localization.txt" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DebugCfg)"
+          DestinationFiles="@(_DebugCfg->'$(OutputPath)Config\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="false" />
+    <!-- Then point at the personal library and enable verbose logging for testing.
+         The committed settings.xml keeps the release values (Music / DebugLogging=false). -->
+    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
+             Query="/CMMSettings/MusicPath" Value="$(DebugMusicPath)" />
+    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
+             Query="/CMMSettings/DebugLogging" Value="true" />
+    <Message Importance="high"
+             Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true" />
+  </Target>
+
+  <!-- Release only: zip the staged mod as
+       'ContextMusicManager V<modversion> for <gameversion>.zip' under dist\.
+       Runs after the Music scaffold target so the empty drop-in tree is included.
+       The mod version is read from ModInfo.xml (its authoritative source). -->
+  <Target Name="PackageRelease" AfterTargets="CreateMusicContextFolders"
+          Condition="'$(Configuration)' == 'Release'">
+    <XmlPeek XmlInputPath="ModInfo.xml" Query="/xml/Version/@value">
+      <Output TaskParameter="Result" ItemName="_ModVersionItem" />
+    </XmlPeek>
+    <PropertyGroup>
+      <_ModVersion>@(_ModVersionItem)</_ModVersion>
+      <_StageParent>$(MSBuildProjectDirectory)\dist\staging\$(GameVersion)</_StageParent>
+      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion) for $(GameVersion).zip</_ZipPath>
+    </PropertyGroup>
+    <Delete Files="$(_ZipPath)" />
+    <!-- SourceDirectory is the parent of ContextMusicManager\, so the folder itself
+         becomes the top-level entry in the zip (extracts straight into Mods\). -->
+    <ZipDirectory SourceDirectory="$(_StageParent)" DestinationFile="$(_ZipPath)" Overwrite="true" />
+    <Message Importance="high" Text="[CMM] Packaged $(_ZipPath)" />
+  </Target>
+
+  <!-- All targetable game versions, in one place. Used by DeployAll / PackageAll to
+       fan a build out across every install. Keep in sync with the GameVersion
+       PropertyGroups near the top. -->
+  <ItemGroup>
+    <CMMGameVersions Include="3.0.0 b257" />
+    <CMMGameVersions Include="2.6 b12" />
+    <CMMGameVersions Include="Alpha 21.2 b37" />
+    <CMMGameVersions Include="Alpha 20.7 b1" />
+  </ItemGroup>
+
+  <!-- Build + deploy the Debug mod into EVERY game install's Mods folder for testing:
+         dotnet msbuild ContextMusicManager.csproj -t:DeployAll
+       Each version compiles against its own assemblies (with its GV_* symbol) and
+       deploys to that install's Mods\ContextMusicManager, with MusicPath repointed to
+       the personal library. Runs them in sequence via the MSBuild task so each is a
+       clean per-version build (different references + DefineConstants force a recompile). -->
+  <Target Name="DeployAll">
+    <Message Importance="high" Text="[CMM] DeployAll — building Debug for all versions: @(CMMGameVersions)" />
+    <MSBuild Projects="$(MSBuildProjectFullPath)"
+             Targets="Build"
+             Properties="Configuration=Debug;GameVersion=%(CMMGameVersions.Identity);_CMMFanoutChild=true" />
+    <Message Importance="high" Text="[CMM] DeployAll complete — deployed to all game Mods folders." />
+  </Target>
+
+  <!-- Make a plain Debug build (e.g. the VS Build button, which runs Build with no
+       explicit target) deploy to EVERY install, not just the selected GameVersion.
+       The in-process build already compiled+deployed its own version; here we fan out
+       to the OTHER versions, each as its own clean per-version build (different game
+       references + GV_* symbol force a recompile — you can't copy one DLL to all four).
+       _CMMFanoutChild=true on the children sets CMMDeployAll=false, so they don't
+       re-fan and recurse. Disable the whole thing with -p:CMMDeployAll=false. -->
+  <Target Name="DebugFanout" AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Debug' And '$(CMMDeployAll)' == 'true'">
+    <Message Importance="high" Text="[CMM] Debug fan-out from '$(GameVersion)' to other installs: @(CMMGameVersions)" />
+    <MSBuild Projects="$(MSBuildProjectFullPath)"
+             Targets="Build"
+             Condition="'%(CMMGameVersions.Identity)' != '$(GameVersion)'"
+             Properties="Configuration=Debug;GameVersion=%(CMMGameVersions.Identity);_CMMFanoutChild=true" />
+    <Message Importance="high" Text="[CMM] Debug fan-out complete — deployed to all game Mods folders." />
+  </Target>
+
+  <!-- Package release zips for every version in one go:
+         dotnet msbuild ContextMusicManager.csproj -t:PackageAll -->
+  <Target Name="PackageAll">
+    <Message Importance="high" Text="[CMM] PackageAll — Release zips for all versions: @(CMMGameVersions)" />
+    <MSBuild Projects="$(MSBuildProjectFullPath)"
+             Targets="Build"
+             Properties="Configuration=Release;GameVersion=%(CMMGameVersions.Identity)" />
+    <Message Importance="high" Text="[CMM] PackageAll complete — zips in dist\." />
   </Target>
 </Project>

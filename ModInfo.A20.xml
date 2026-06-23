@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Legacy ModInfo format for Alpha 20: an <xml> root wrapping a nested <ModInfo>
+     element, with no <DisplayName>. Alpha 21+ / 1.0 / 2.x / 3.x flatten the fields
+     directly under <xml> (no <ModInfo> level) in ModInfo.xml. Deployed in place of
+     ModInfo.xml only for the 'Alpha 20.7 b1' GameVersion (see the DeployLegacyModInfo
+     target). The Version value is kept in sync from ModInfo.xml at build time, so edit
+     other fields here if Name/Author/Description/Website change. -->
+<xml>
+  <ModInfo>
+    <Name value="ContextMusicManager" />
+    <Description value="Plays custom music based on context." />
+    <Author value="Velasha" />
+    <Version value="1.0.1" />
+    <Website value="https://www.nexusmods.com/7daystodie/mods/10649" />
+  </ModInfo>
+</xml>

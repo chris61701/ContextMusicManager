@@ -1,0 +1,104 @@
+# Changelog
+
+All notable changes to Context Music Manager are documented here.
+
+## 1.0.1
+
+First multi-version release. CMM now builds, deploys, and packages against
+Alpha 20.7, Alpha 21.2, 2.6, and 3.0 from a single project, and a large batch of
+audio-engine and context-detection fixes land alongside it.
+
+### Added
+
+- **Multi-version support (A20 / A21 / 2.6 / 3.0).** A single MSBuild `GameVersion`
+  property now derives everything version-specific: game-assembly paths, the deploy
+  Mods folder, the release zip name, and a `GV_*` compile symbol used to `#if`-guard
+  per-version APIs.
+  - `DeployAll` / `PackageAll` targets, plus a Debug fan-out so a plain Debug build
+    deploys to every installed version's Mods folder at once.
+  - `ValidateGameVersion` fails fast on an unknown/missing game install instead of
+    emitting a wall of "type not found" errors.
+- **A20 legacy ModInfo support.** A20 expects the nested `<xml><ModInfo>…</ModInfo></xml>`
+  format; `ModInfo.A20.xml` is deployed in its place for the A20 target, with the
+  version kept in sync from the authoritative `ModInfo.xml` at build time.
+- **A20 `netstandard.dll` shim.** A20's Unity 2020.3 Mono ships no `netstandard.dll`,
+  so the netstandard2.0 NAudio assemblies failed to load and Harmony never patched.
+  The build now copies the shim into the A20 mod folder.
+- **`Swimming` context.** Plays while the player is in deep enough water to swim, with
+  an 8s dwell so brief dips don't interrupt the current track.
+- **Generic `Combat` fallback tier.** The combat chain now degrades
+  `Blood_Moon_Combat → Combat_Boss → Combat_High → Combat_Low → Combat → vanilla`,
+  so missing custom folders fall through gracefully to vanilla combat music.
+- **`.keep` placeholders** in every scaffolded Music context folder so mod managers
+  (e.g. Vortex) don't strip the empty drop-in tree on install.
+- **New `settings.xml` tuning knobs:** `EnemyDetectRange`, `HomeDetectRange`,
+  `PlayerHealthDangerThresholdPercent`, `CombatExitDelay`, `CombatCooldown`
+  (previously hard-coded constants).
+
+### Fixed
+
+- **A20 combat music rarely played / went silent.** A20's `FrequencyLimiter` rations
+  *all* sections — including Combat — by the "Dynamic Music daily time" setting, so on
+  a reduced daily-time setting vanilla combat music only started a handful of times per
+  session. Backported A21's rule (exempt Combat from the limiter) via a Harmony
+  patch, so when CMM falls back to vanilla, combat music now fires reliably.
+- **FLAC crash on A21.** Replaced `BunLabs.NAudio.Flac` (uses `Span<T>`, hard-crashes
+  the Mono 2021.3.19 JIT on A21) with `CSCore.Codecs.FLAC`, wrapped in a new
+  `CsCoreFlacReader`. FLAC now works across all supported versions.
+- **PCM playback crash on A21.** NAudio's `SampleChannel` / `Pcm16BitToSampleProvider`
+  triggers an uncatchable Mono JIT crash on A21. Replaced with a self-contained
+  `PcmToFloatProvider` covering 8/16/24/32-bit PCM. Unsupported encodings are now
+  skipped with a warning instead of crashing the game.
+- **Opus/streaming resume restarted at the top (A20).** Resume position is now derived
+  from the backing reader's consumed-frame count rather than `AudioSource.time`, which
+  A20's Unity reports as ~0 for streaming clips. The playhead is also pinned after
+  `Play()` to defeat a stale offset carried over from an interrupted crossfade.
+- **Opus seek to the first page caused silent EOS.** A seek at/before the first audio
+  page now reads from the top instead of routing through the mid-file PrependStream
+  path (which produced an immediately-ended stream and killed playback).
+- **Vanilla blood-moon state lost on a single-player host.** The in-game music patch
+  now mutes vanilla Dynamic Music *at the mixer* instead of suppressing
+  `Conductor.Update`, preserving the server-side blood-moon work that ran there — and
+  letting the "Vanilla" fallback fade in seamlessly mid-track.
+- **Menu music bleed / cold-start.** Mute the vanilla title theme at
+  `BackgroundMusicMono.Start` (the earliest point), and fade out any leftover vanilla
+  title theme when a custom menu track takes over after a late A20 load.
+- **Valid tracks getting permanently blacklisted.** A file that fails to open is only
+  blacklisted if it actually exists on disk (corrupt/unsupported). A file still being
+  copied in (locked/incomplete) is treated as transient, and the file watcher now
+  re-validates blacklisted files periodically so they recover once fully written.
+- **Spurious custom combat triggers.** The vanilla "Panicked" bridge — which uses a
+  wider 50u/any-player box than CMM's in-range scan — is now used only when CMM ships
+  no combat music of its own, so it can't fire custom combat tracks when nothing is
+  actually nearby.
+
+### Changed
+
+- **Combat is now scored by the weighted threat model** with `Combat_Boss` requiring a
+  higher score (minScore 12 → 18) so Boss is reserved for genuinely heavy fights.
+- **Merged `Tension_High` / `Tension_Low` into a single `Tension` context.**
+- **Removed the standalone `Blood_Moon` and `Inventory` contexts.** Blood-moon combat
+  is handled by `Blood_Moon_Combat`.
+- **Music folder layout reorganized** for a flatter, more intuitive tree:
+  `combat_*` → `combat/*`, `tension_*` → `tension`, `ambient/biome/<x>` →
+  `ambient/<x>`, biome night folders → `ambient/<x>/_night`, `ambient/night` →
+  `ambient/_night`.
+- **Night ambient fallback** now reaches a biome's *own* day theme before the generic
+  Ambient: the night context falls back through the stack, where the resolver also
+  places the biome's day context at night.
+- **Cross-version detection** for blood moon (`player.IsBloodMoon` on A20/A21 vs
+  `World.isEventBloodMoon` on 2.6/3.0), trader resolution (entity scan pre-3.0 vs
+  `TraderArea.GetTrader()` on 3.0), and POI name (falls back to the prefab instance
+  name where `PrefabName` is empty on A21).
+- **Debug logging is off by default** (`DebugLogging=false`), and most verbose logging
+  is routed through the debug-gated logger. Warnings/errors still always emit.
+- Debug builds deploy straight into the selected game's Mods folder; Release stages to
+  a clean per-version folder and packages a `dist\` zip (never touching the live game
+  or music directories).
+
+### Removed
+
+- **`Config/Localization.txt`** — leftover template junk (crosshair/weapon keys) from
+  another mod that 7DTD would auto-load.
+- **`app.config`** — binding redirects from a mod DLL's `.config` are ignored by the
+  game's host process, so it served no purpose; `AutoGenerateBindingRedirects` is now off.
