@@ -1,4 +1,3 @@
-#define NAUDIO
 
 using System;
 using System.Collections;
@@ -8,9 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using UnityEngine;
-#if NAUDIO
 using NAudio.Wave;
-#endif
 
 namespace CMM
 {
@@ -53,11 +50,7 @@ namespace CMM
         {
             // Borrowed game-owned clips are never ours to destroy/dispose — just drop them.
             if (slot.Borrowed) return;
-#if NAUDIO
             if (slot.Clip == null && slot.Reader == null && slot.Decoded == null) return;
-#else
-            if (slot.Clip == null && slot.Decoded == null) return;
-#endif
             _pendingDisposals.Enqueue(slot);
         }
 
@@ -97,7 +90,6 @@ namespace CMM
         private static float GetPlaybackPosition(AudioSource channel, ContextCache cache)
         {
             if (channel == null) return 0f;
-#if NAUDIO
             WaveStream reader = cache?.Current.Reader;
             if (reader != null)
             {
@@ -110,7 +102,6 @@ namespace CMM
                 }
                 catch { /* reader disposed or mid-seek; fall back to AudioSource.time */ }
             }
-#endif
             return channel.time;
         }
 
@@ -120,7 +111,6 @@ namespace CMM
         // This keeps the main thread responsive throughout and avoids a single
         // large ThreadPool item that could block the pool for 500-800ms on slow
         // spinning disks or large files.
-#if NAUDIO
         private IEnumerator OpenReaderAsync(string filePath, Action<WaveStream> onComplete)
         {
             // Wait until the engine is not mid-load so we don't compete for I/O.
@@ -150,14 +140,12 @@ namespace CMM
 
             onComplete(reader);
         }
-#endif
 
         // ── Validation ────────────────────────────────────────────────────────
         private IEnumerator ValidateFile(string filePath, Action<bool> callback)
         {
             if (!NAudioDecoder.IsSupported(filePath)) { callback(false); yield break; }
 
-            if (CMMConfig.UseNAudioDecoder)
             {
                 Stopwatch sw = Stopwatch.StartNew();
                 bool valid = false;
@@ -173,28 +161,6 @@ namespace CMM
                 sw.Stop();
                 CMMConfig.D($"[CMM] QuickValidateWithCache took {sw.Elapsed.TotalMilliseconds:F3} ms");
                 callback(valid);
-            }
-            else
-            {
-                AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
-                if (audioType == AudioType.UNKNOWN) { callback(false); yield break; }
-
-                using (var req = UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(
-                           "file:///" + filePath.Replace("\\", "/"), audioType))
-                {
-                    ((UnityEngine.Networking.DownloadHandlerAudioClip)req.downloadHandler).streamAudio = false;
-                    yield return req.SendWebRequest();
-                    if (req.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
-                    {
-                        Log.Warning($"[CMM] Validation failed (Unity) for {Path.GetFileName(filePath)}: {req.error}");
-                        callback(false);
-                        yield break;
-                    }
-                    AudioClip clip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(req);
-                    bool valid = clip != null && clip.samples > 0 && clip.channels > 0 && clip.length > 0.5f;
-                    if (clip != null) Destroy(clip);
-                    callback(valid);
-                }
             }
         }
 
@@ -260,7 +226,7 @@ namespace CMM
                             $"{keep.volume:F2}→target over {reclaimFade:F1}s (dropping {leavingCtx ?? "None"})");
 
                     _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                        CrossFade(drop, keep, reclaimFade, currentContext.Cooldown, drop.volume, keep.volume, ctx.VolumeOverride));
+                        CrossFade(drop, keep, reclaimFade, _cooldownTarget?.Cooldown ?? 0, drop.volume, keep.volume, ctx.VolumeOverride));
 
                     float reclaimLen = keep.clip.length;
                     float reclaimPos = GetPlaybackPosition(keep, cache);
@@ -401,7 +367,6 @@ namespace CMM
                 CMMConfig.D($"[CMM] Seek to {safeStart:F2}s for {contextName} " +
                         $"(clip={clipLen:F1}s, streaming={cache.Current.Reader != null})");
 
-#if NAUDIO
                 if (cache.Current.Reader is NAudioDecoder.SeekableOpusReader opusRdr)
                 {
                     // Unity does NOT call PCMSetPositionCallback(0) on Play() — it
@@ -434,7 +399,6 @@ namespace CMM
                     // makes Unity's AudioSource.time track the true absolute position,
                     // so the leave-context code needs no offset correction.
                 }
-#endif
             }
 
             incoming.clip = cache.Current.Clip;
@@ -455,13 +419,11 @@ namespace CMM
             // is still 0 at this point (the crossfade ramps it up), so any one-frame
             // correction burst is silent.
             incoming.time = safeStart;
-#if NAUDIO
             // On a resume the reader was pre-seeked to safeStart and the SetInitialPosition
             // interceptor armed; disarm it now the explicit time-set has committed the
             // position, so a later loop restart's SetPosition(0) isn't redirected to it.
             if (safeStart > 0f && cache.Current.Reader is NAudioDecoder.SeekableOpusReader flushedRdr)
                 flushedRdr.ClearInitialSeekIntercept();
-#endif
             CMMConfig.D($"[CMM] Pinned time: requested={safeStart:F3}s actual={incoming.time:F3}s isPlaying={incoming.isPlaying}");
 
             _primaryIsActive = !_primaryIsActive;
@@ -500,7 +462,7 @@ namespace CMM
                     fadeDuration = ctx.FadeInDuration;
 
                 _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                    CrossFade(outgoing, incoming, fadeDuration, currentContext.Cooldown, outgoingStartVol, 0f, ctx.VolumeOverride, outFadeDuration));
+                    CrossFade(outgoing, incoming, fadeDuration, _cooldownTarget?.Cooldown ?? 0, outgoingStartVol, 0f, ctx.VolumeOverride, outFadeDuration));
             }
             else
             {
@@ -611,10 +573,12 @@ namespace CMM
             if (cooldownSeconds > 0)
             {
                 if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
-                // FIX: pass the context name so the cooldown is associated with
-                // the leaving context rather than blocking everything globally.
+                // Associate the cooldown with the LEAVING context (_cooldownTarget),
+                // captured before currentContext was reassigned to the incoming one.
+                // currentContext here is already the incoming context, so using it
+                // would put the just-started context on cooldown instead.
                 _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(
-                    ContextCooldownTimer(currentContext?.Context ?? "None", cooldownSeconds));
+                    ContextCooldownTimer(_cooldownTarget?.Context ?? "None", cooldownSeconds));
             }
             _crossFadeCoroutine = null;
         }
@@ -951,9 +915,7 @@ namespace CMM
             if (filePath == null)
             { CMMConfig.D($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
 
-            if (CMMConfig.UseNAudioDecoder)
             {
-#if NAUDIO
                 WaveStream reader = null;
                 yield return StartCoroutine(OpenReaderAsync(filePath, r => reader = r));
 
@@ -973,29 +935,6 @@ namespace CMM
                 cache.Next.Reader = reader;
                 cache.lastPlayedFile = filePath;
                 CMMConfig.D($"[CMM] Next clip ready (streaming) for {contextName}: {Path.GetFileName(filePath)}");
-#endif
-            }
-            else
-            {
-                // Unity fallback path — unchanged
-                AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
-                if (audioType == AudioType.UNKNOWN) yield break;
-
-                using (var request = UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(
-                           "file:///" + filePath.Replace("\\", "/"), audioType))
-                {
-                    ((UnityEngine.Networking.DownloadHandlerAudioClip)request.downloadHandler)
-                        .streamAudio = CMMConfig.UnityStreamingEnabled;
-                    yield return request.SendWebRequest();
-                    if (request.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
-                    { Log.Error($"[CMM] LoadNextClip Unity failed: {request.error}"); yield break; }
-
-                    if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
-                    cache.Next.Clip = UnityEngine.Networking.DownloadHandlerAudioClip
-                                          .GetContent(request);
-                    cache.lastPlayedFile = filePath;
-                    CMMConfig.D($"[CMM] Next clip ready (Unity) for {contextName}: {Path.GetFileName(filePath)}");
-                }
             }
         }
 

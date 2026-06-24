@@ -2,6 +2,43 @@
 
 All notable changes to Context Music Manager are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **Panicked combat bridge could slam to the top tier.** When no tier is literally
+  named `Combat_High`, the vanilla "Panicked" bridge now falls back to the
+  second-from-top tier instead of the last one, so the loose Panicked signal can no
+  longer fire the heaviest fight music (e.g. `Combat_Boss`) on its own.
+- **`GetContext(null)` guard.** A null context key now short-circuits to `null`
+  instead of being passed into the dictionary lookup.
+
+### Changed
+
+- **Lower per-tick allocations in `ResolveContext`.** The per-tick entity scan now
+  reuses a single shared scratch `List<Entity>` (Clear + AddRange) instead of
+  allocating a fresh snapshot list every tick. The "near home" land-claim check
+  early-exits on the first in-range claim using a squared-distance compare instead of
+  `OrderBy(...).First()` with a per-claim `sqrt`, and the POI sleeper-volume tallies
+  are counted in one pass instead of four LINQ `Count()` enumerations.
+
+### Removed
+
+- **Dead Unity decoder / streaming fallback.** CMM originally relied on Unity's
+  `UnityWebRequestMultimedia` decoder before the NAudio engine replaced it. The Unity
+  path had been permanently disabled by a file-scoped `#define NAUDIO` on every audio
+  source file, so every Unity `else` branch was unreachable. Removed all of it: the
+  `UseNAudioDecoder` / `UnityStreamingEnabled` flags, the `GetUnityAudioType` helper and
+  `_unityExts` set, the three Unity fallback branches (validate / load / preload), the
+  duplicate `#else` `NAudioDecoder` class, and the entire `#define`/`#if NAUDIO`
+  scaffolding (the live NAudio code is now unconditional). No behavior change — the
+  Unity path could never run.
+
+### Build
+
+- **"Package All (Release zips)" VS Code task** that invokes the `PackageAll` MSBuild
+  target to produce every version's release zip in one run.
+
 ## 1.0.1
 
 First multi-version release. CMM now builds, deploys, and packages against

@@ -1,10 +1,7 @@
-#define NAUDIO
 
 using System.Collections.Generic;
 using UnityEngine;
-#if NAUDIO
 using NAudio.Wave;
-#endif
 
 namespace CMM
 {
@@ -84,9 +81,7 @@ namespace CMM
     public struct TrackSlot
     {
         public AudioClip  Clip;
-#if NAUDIO
         public WaveStream Reader;
-#endif
         public DecodedAudio Decoded;
         // True when Clip is a borrowed game-owned asset (a vanilla DMS section
         // clip we play on our own channel). We must NEVER Destroy() or dispose
@@ -98,9 +93,7 @@ namespace CMM
         {
             Clip = null;
             Borrowed = false;
-#if NAUDIO
             if (Reader  != null) { try { Reader.Dispose(); } catch { } Reader  = null; }
-#endif
             if (Decoded != null) { Decoded.Samples = null;               Decoded = null; }
         }
     }

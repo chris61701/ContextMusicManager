@@ -1,4 +1,3 @@
-#define NAUDIO
 
 using UnityEngine;
 
@@ -18,11 +17,6 @@ namespace CMM
             return inGameVolume * modifier;
         }
         public static long HotSwapMaxFileSizeBytes = 100L * 1024 * 1024;
-#if NAUDIO
-        public static bool UseNAudioDecoder = true;
-#else
-        public static bool UseNAudioDecoder = false;
-#endif
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
         // inactive channel, reverse that fade (ramp it back up from its current
@@ -30,7 +24,6 @@ namespace CMM
         // Config/settings.xml to fall back to the old reload-from-resume behavior.
         public static bool ReverseFadeReclaim = true;
         public static bool PreloadCacheEnabled = false;
-        public static bool UnityStreamingEnabled = true;
 
         // Number of player-targeting enemies required to trigger combat music.
         // Used only when the weighted CombatThreat model below is not configured;

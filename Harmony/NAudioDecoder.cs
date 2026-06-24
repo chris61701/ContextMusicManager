@@ -1,4 +1,3 @@
-#define NAUDIO
 
 using System;
 using System.Collections.Generic;
@@ -6,13 +5,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using UnityEngine;
-#if NAUDIO
 using NAudio.Wave;
 using NAudio.Vorbis;
 using Concentus;
 using Concentus.Oggfile;
 using CSCore.Codecs.FLAC;
-#endif
 
 namespace CMM
 {
@@ -20,44 +17,18 @@ namespace CMM
     // NAudio DECODER
     // ─────────────────────────────────────────────────────────────────────────
 
-#if NAUDIO
     public static class NAudioDecoder
     {
         private static readonly HashSet<string> _naudioExts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus",
-                // BunLabs.NAudio.Flac targets netstandard2.0 and uses Span<T> internally.
-                // Mono 2021.3.19 (A21's Unity) has incomplete Span<T> JIT support and
-                // hard-crashes when the FLAC decoder's Read() is called. Exclude .flac there.
-                // A20 (Unity 2020.3) does not have this issue — FLAC works once netstandard.dll
-                // ships alongside the mod (which the A20 build now does).
-// #if !GV_A21
-                ".flac",
-// #endif
+                ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac",
             };
-
-        private static readonly HashSet<string> _unityExts =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".mp3", ".ogg", ".wav" };
 
         public static bool IsSupported(string filePath)
         {
             string ext = System.IO.Path.GetExtension(filePath);
-            return CMMConfig.UseNAudioDecoder
-                ? _naudioExts.Contains(ext)
-                : _unityExts.Contains(ext);
-        }
-
-        public static AudioType GetUnityAudioType(string filePath)
-        {
-            switch (System.IO.Path.GetExtension(filePath).ToLower())
-            {
-                case ".mp3": return AudioType.MPEG;
-                case ".ogg": return AudioType.OGGVORBIS;
-                case ".wav": return AudioType.WAV;
-                default: return AudioType.UNKNOWN;
-            }
+            return _naudioExts.Contains(ext);
         }
 
         // Returns true if this file must be fully decoded before playback
@@ -1190,7 +1161,10 @@ namespace CMM
                     if (reader == null) return false;
                     return reader.WaveFormat.SampleRate > 0
                         && reader.WaveFormat.Channels > 0
-                        && reader.Length > 0;
+                        && reader.Length > 0
+                        // Reject sub-half-second stubs (truncated/corrupt files whose
+                        // header still parses), matching the Unity-clip validation path.
+                        && reader.TotalTime.TotalSeconds > 0.5;
                 }
             }
             catch (Exception ex)
@@ -1201,44 +1175,4 @@ namespace CMM
             }
         }
     }
-#else
-    // Fallback stub — compiled when NAudio assemblies are absent.
-    public static class NAudioDecoder
-    {
-        private static readonly HashSet<string> _naudioExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac" };
-
-        private static readonly HashSet<string> _unityExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".mp3", ".ogg", ".wav" };
-
-        public static bool IsSupported(string filePath)
-        {
-            string ext = System.IO.Path.GetExtension(filePath);
-            return CMMConfig.UseNAudioDecoder ? _naudioExts.Contains(ext) : _unityExts.Contains(ext);
-        }
-
-        public static AudioType GetUnityAudioType(string filePath)
-        {
-            switch (System.IO.Path.GetExtension(filePath).ToLower())
-            {
-                case ".mp3": return AudioType.MPEG;
-                case ".ogg": return AudioType.OGGVORBIS;
-                case ".wav": return AudioType.WAV;
-                default:     return AudioType.UNKNOWN;
-            }
-        }
-
-        public static AudioClip CreateStreamingClip(DecodedAudio audio, string name)
-        {
-            Log.Warning("[CMM] NAudio not available. CreateStreamingClip unsupported.");
-            return null;
-        }
-
-        public static bool QuickValidate(string filePath)
-        {
-            Log.Warning($"[CMM] NAudio not available. QuickValidate returning false for {Path.GetFileName(filePath)}");
-            return false;
-        }
-    }
-#endif
 }

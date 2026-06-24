@@ -98,7 +98,7 @@ namespace CMM
         }
 
         public static Contexts GetContext(string contextIn) =>
-            contexts.TryGetValue(contextIn, out var ctx) ? ctx : null;
+            contextIn != null && contexts.TryGetValue(contextIn, out var ctx) ? ctx : null;
 
         // Diagnostics for the WarmUp dwell: throttle the per-frame "still warming"
         // spam to ~one line/second per context, and remember which contexts are

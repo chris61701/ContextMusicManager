@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using MusicUtils.Enums;
 using UnityEngine;
 
@@ -24,6 +23,12 @@ namespace CMM
         static float lastAggroTime = 0f;
         static bool wasInfested = false;
         static string lastPoI = "None";
+
+        // Reused snapshot buffer for the per-tick entity scan. ResolveContext runs once
+        // per scan tick on the main thread (never re-entrant), so a single shared buffer
+        // we Clear()+AddRange() into avoids allocating a fresh List<Entity> (and its
+        // backing array) every tick while keeping the mid-scan-mutation safety.
+        static readonly List<Entity> _entityScratch = new List<Entity>();
 
 #if CMM_DEBUG_HUD
         // ── Live debug snapshot ───────────────────────────────────────────────
@@ -153,8 +158,9 @@ namespace CMM
             // Snapshot the entity list before iterating — the game can add or remove
             // entities (spawns, deaths, chunk unloads) while this loop runs, which
             // causes InvalidOperationException on the live List<Entity>.
-            var entitySnapshot = new List<Entity>(world.Entities.list);
-            foreach (var entity in entitySnapshot)
+            _entityScratch.Clear();
+            _entityScratch.AddRange(world.Entities.list);
+            foreach (var entity in _entityScratch)
             {
                 if (entity == null) continue;
                 if (entity is EntityEnemy enemy && enemy.IsAlive())
@@ -222,7 +228,11 @@ namespace CMM
                 if (!inCombat && PanickedBridgeAllowed() && localPlayerEarly?.ThreatLevel?.Category == ThreatLevelType.Panicked)
                 {
                     int bridgeTier = threatCfg.Tiers.FindIndex(t => t.Context == "Combat_High");
-                    if (bridgeTier < 0) bridgeTier = threatCfg.Tiers.Count - 1; // no High tier configured
+                    // No tier literally named Combat_High: fall back to the second-from-top
+                    // tier, never the top one. Slamming the loose Panicked signal to the top
+                    // (e.g. Combat_Boss) is exactly what the note above forbids.
+                    if (bridgeTier < 0) bridgeTier = threatCfg.Tiers.Count - 2;
+                    if (bridgeTier < 0) bridgeTier = 0;   // single-tier config
                     if (bridgeTier > combatTier) combatTier = bridgeTier;        // climb only, like the score path
                     lastAggroTime = now;
                     string top = threatCfg.Tiers[combatTier].Context;
@@ -297,11 +307,17 @@ namespace CMM
                 }
                 if (!nearHome)
                 {
-                    var claims = localPlayer.persistentPlayerData.GetLandProtectionBlocks();
-                    if (claims.Count > 0)
+                    // "Nearest claim within range" is equivalent to "any claim within
+                    // range", so early-exit on the first hit instead of sorting all
+                    // claims (OrderBy().First()). Squared compare avoids the per-claim sqrt.
+                    float homeRangeSqr = CMMConfig.HomeDetectRange * CMMConfig.HomeDetectRange;
+                    foreach (var c in localPlayer.persistentPlayerData.GetLandProtectionBlocks())
                     {
-                        Vector3i nearest = claims.OrderBy(c => Vector3.Distance(player.position, c.ToVector3())).First();
-                        nearHome = Vector3.Distance(player.position, nearest.ToVector3()) < CMMConfig.HomeDetectRange;
+                        if ((player.position - c.ToVector3()).sqrMagnitude < homeRangeSqr)
+                        {
+                            nearHome = true;
+                            break;
+                        }
                     }
                 }
                 if (nearHome) activeContexts.Add(isDay ? "Home" : "Home_Night");
@@ -317,10 +333,16 @@ namespace CMM
                 // on all versions.
                 string prefabName = prefab.prefab?.PrefabName;
                 string currentPoI = !string.IsNullOrEmpty(prefabName) ? prefabName : prefab.name;
-                int totalVolumes   = prefab.sleeperVolumes.Count;
-                int clearedVolumes = prefab.sleeperVolumes.Count(v => v.wasCleared);
-                int excludedVolumes = prefab.sleeperVolumes.Count(v => v.isQuestExclude);
-                int enemiesRemainingInPoi = prefab.sleeperVolumes.Count(v => !v.wasCleared && !v.isQuestExclude);
+                // One pass instead of four LINQ Count() enumerations (each with its own
+                // delegate). enemiesRemainingInPoi drives the logic; the rest feed the log.
+                int totalVolumes = prefab.sleeperVolumes.Count;
+                int clearedVolumes = 0, excludedVolumes = 0, enemiesRemainingInPoi = 0;
+                foreach (var v in prefab.sleeperVolumes)
+                {
+                    if (v.wasCleared) clearedVolumes++;
+                    if (v.isQuestExclude) excludedVolumes++;
+                    if (!v.wasCleared && !v.isQuestExclude) enemiesRemainingInPoi++;
+                }
                 int tier = prefab.prefab?.DifficultyTier ?? 0;
                 string tierSuffix = (tier >= 0 && tier <= 5) ? "_T" + tier : "";
 

@@ -76,6 +76,23 @@
         "reveal": "always",
         "clear": true
       }
+    },
+    {
+      "label": "Package All (Release zips)",
+      "type": "process",
+      "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
+      "args": [
+        "ContextMusicManager.csproj",
+        "/t:PackageAll",
+        "/v:minimal",
+        "/nologo"
+      ],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": {
+        "reveal": "always",
+        "clear": true
+      }
     }
   ]
 }

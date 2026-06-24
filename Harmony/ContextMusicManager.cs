@@ -1,4 +1,3 @@
-#define NAUDIO
 
 using System;
 using System.Collections;
@@ -7,9 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using UnityEngine;
-#if NAUDIO
 using NAudio.Wave;
-#endif
 
 namespace CMM
 {
@@ -29,6 +26,12 @@ namespace CMM
         // transition to context B at higher priority.
         private static readonly HashSet<string> _contextsOnCooldown =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // The context we are leaving in the current transition. Captured before
+        // currentContext is reassigned to the incoming candidate, so CrossFade can
+        // put the LEAVING context on cooldown (its own cool= value) rather than the
+        // one that just started. Null when no prior context was playing.
+        private static Contexts _cooldownTarget;
 
         public static GameObject CMM_Audio_Object;
         public static CoRoutine CMM_CoRoutines;
@@ -103,7 +106,7 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
             CMM_CoRoutines.StartCoroutine(Instance.DiagnosticLoop());
 
-            CMMConfig.D($"[CMM] Initialized! Decoder: {(CMMConfig.UseNAudioDecoder ? "NAudio" : "Unity")} | Preload: {CMMConfig.PreloadCacheEnabled}");
+            CMMConfig.D($"[CMM] Initialized! Decoder: NAudio | Preload: {CMMConfig.PreloadCacheEnabled}");
         }
 
         public static void OnEnterGame()
@@ -216,10 +219,10 @@ namespace CMM
             {
                 CMMConfig.D($"[CMM] {candidate.Context} blocked — cooldown active");
                 _pendingContext = currentContext?.Context ?? "Silence";
-                if (!CMMConfig.PreloadCacheEnabled)
+                if (!CMMConfig.PreloadCacheEnabled
+                    && currentContext != null
+                    && cacheMap.TryGetValue(currentContext.Context, out var blocked))
                 {
-
-                    ContextCache blocked = cacheMap[currentContext.Context];
                     if (blocked.Current.Clip != null)
                     {
                         if (!blocked.Current.Borrowed) Destroy(blocked.Current.Clip);
@@ -232,6 +235,7 @@ namespace CMM
             if (vanillaIsActive)
                 DeactivateVanilla();
 
+            _cooldownTarget = currentContext;   // the context being left (for its cooldown)
             currentContext = candidate;
             TriggerMusic(contextToPlay);
         }
@@ -711,6 +715,10 @@ namespace CMM
                         // files and causes FadeToSilence(), killing the menu preload.
                         if (!inGame) continue;
                         string top = GetTopContext();
+                        // null = nothing playable + DMS off. Don't forward null into
+                        // GetContext/SendContextUpdate (Dictionary rejects a null key);
+                        // let ContextScanLoop fade to silence on its next tick.
+                        if (top == null) continue;
                         if (top != currentContext.Context)
                         {
                             // Don't let the initial directory scan (neverScanned) or
@@ -861,7 +869,6 @@ namespace CMM
             }
 
             // ── NAudio streaming path ─────────────────────────────────────────
-            if (CMMConfig.UseNAudioDecoder)
             {
                 // Menu always uses full-decode so the PCMReaderCallback is a plain
                 // Array.Copy — immune to CPU pressure during the loading screen.
@@ -922,7 +929,6 @@ namespace CMM
                 }
                 else
                 {
-#if NAUDIO
                     // ── Streaming path (default) ──────────────────────────────
                     WaveStream reader = null;
                     yield return StartCoroutine(OpenReaderAsync(filePath, r => reader = r));
@@ -962,29 +968,6 @@ namespace CMM
                             $"{Path.GetFileName(filePath)}" +
                             (lenSec > 0 ? $" ({lenSec:F1}s)" : "") +
                             (NAudioDecoder.IsOpusFile(filePath) ? " [Opus/seekable]" : ""));
-#endif
-                }
-            }
-            else
-            {
-                // ── Unity fallback path ───────────────────────────────────────
-                AudioType audioType = NAudioDecoder.GetUnityAudioType(filePath);
-                if (audioType == AudioType.UNKNOWN) yield break;
-
-                using (var request = UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(
-                           "file:///" + filePath.Replace("\\", "/"), audioType))
-                {
-                    ((UnityEngine.Networking.DownloadHandlerAudioClip)request.downloadHandler)
-                        .streamAudio = CMMConfig.UnityStreamingEnabled;
-                    yield return request.SendWebRequest();
-                    if (request.result != UnityEngine.Networking.UnityWebRequest.Result.Success)
-                    { Log.Error($"[CMM] Preload Unity failed for {contextName}: {request.error}"); yield break; }
-
-                    if (cache.Current.Clip != null && !cache.Current.Borrowed) Destroy(cache.Current.Clip);
-                    cache.Current.Release();
-                    cache.Current.Clip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
-                    cache.lastPlayedFile = filePath;
-                    CMMConfig.D($"[CMM] Preloaded (Unity): {contextName}");
                 }
             }
         }
