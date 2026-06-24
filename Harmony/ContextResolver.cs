@@ -116,7 +116,15 @@ namespace CMM
 
             // Swimming: in deep enough water to swim (not mere shallow wading). The
             // 8s WarmUp dwell on the context keeps brief dips from interrupting music.
+            // A20: IsSwimming() requires inWaterPercent > 0.7f (head mostly under),
+            // so floating at the surface (head above water, ~0.4–0.65 range) is missed.
+            // inWaterPercent > 0.4f covers waist-deep+; the game's own speed-reduction
+            // starts at 0.3f, so 0.4f safely clears shallow ankle/knee wading.
+#if GV_A20
+            if (player.isSwimming || player.inWaterPercent > 0.4f) activeContexts.Add("Swimming");
+#else
             if (player.IsSwimming()) activeContexts.Add("Swimming");
+#endif
 
             if (player.AttachedToEntity is EntityVehicle vehicle)
             {
@@ -370,32 +378,42 @@ namespace CMM
                 wasInfested = false;
             }
 
-            string biomeName = world.GetBiome((int)player.position.x, (int)player.position.z)?.m_sBiomeName;
-            string biomeBase;
-            switch (biomeName)
+            // Guard on the biome object itself: GetBiome() returns null when the chunk at
+            // the player's position isn't loaded yet (e.g. immediately after a debug
+            // teleport in A20 before destination chunks stream in). Falling through to
+            // default:"Ambient" in that case would lock in the wrong generic Ambient_Night
+            // context for as long as chunks stay unloaded, because the scan loop keeps
+            // refreshing it. Skipping the ambient block entirely when biome is null lets
+            // the current music continue until the next scan tick when chunks are ready.
+            var biome = world.GetBiome((int)player.position.x, (int)player.position.z);
+            if (biome != null)
             {
-                case "pine_forest": biomeBase = "Ambient_Forest"; break;
-                case "desert": biomeBase = "Ambient_Desert"; break;
-                case "burnt_forest": biomeBase = "Ambient_Burnt_Forest"; break;
-                case "snow": biomeBase = "Ambient_Snow"; break;
-                case "wasteland": biomeBase = "Ambient_Wasteland"; break;
-                default: biomeBase = "Ambient"; break;
-            }
-            // During the day the biome base folder is used directly (it holds the
-            // everyday day+night tracks). At night we prefer the biome's night-exclusive
-            // context, but ALSO push the biome's day context (at lower priority) so a
-            // biome with no night music — and no generic Ambient_Night music — falls back
-            // to its OWN day theme before the generic Ambient. The night context falls
-            // back to Ambient_Night, which falls back to the Stack, where this day context
-            // is then found (the night context itself is skipped by the re-entry guard).
-            if (isDay)
-            {
-                activeContexts.Add(biomeBase);
-            }
-            else
-            {
-                activeContexts.Add(biomeBase + "_Night");
-                activeContexts.Add(biomeBase);
+                string biomeBase;
+                switch (biome.m_sBiomeName)
+                {
+                    case "pine_forest": biomeBase = "Ambient_Forest"; break;
+                    case "desert": biomeBase = "Ambient_Desert"; break;
+                    case "burnt_forest": biomeBase = "Ambient_Burnt_Forest"; break;
+                    case "snow": biomeBase = "Ambient_Snow"; break;
+                    case "wasteland": biomeBase = "Ambient_Wasteland"; break;
+                    default: biomeBase = "Ambient"; break;
+                }
+                // During the day the biome base folder is used directly (it holds the
+                // everyday day+night tracks). At night we prefer the biome's night-exclusive
+                // context, but ALSO push the biome's day context (at lower priority) so a
+                // biome with no night music — and no generic Ambient_Night music — falls back
+                // to its OWN day theme before the generic Ambient. The night context falls
+                // back to Ambient_Night, which falls back to the Stack, where this day context
+                // is then found (the night context itself is skipped by the re-entry guard).
+                if (isDay)
+                {
+                    activeContexts.Add(biomeBase);
+                }
+                else
+                {
+                    activeContexts.Add(biomeBase + "_Night");
+                    activeContexts.Add(biomeBase);
+                }
             }
             //sw.Stop();
             //Log.Out($"[CMM] ResolvedContext took {sw.Elapsed.TotalMilliseconds:F3} ms");

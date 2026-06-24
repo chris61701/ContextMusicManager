@@ -222,24 +222,40 @@ namespace CMM
                 ContextMusicManager.OnEnterGame();
             }
 
-            List<string> worldContexts = ContextResolver.ResolveContext();
-            foreach (string ctxName in worldContexts)
-            {
-                Contexts ctx = ContextMusicManager.GetContext(ctxName);
-                if (ctx == null) continue;
-                ContextMusicManager._contextStack.Add(new ActiveContext
-                {
-                    ContextName = ctxName,
-                    Priority = ctx.Priority,
-                    ActivatedAt = Time.realtimeSinceStartup,
-                    FirstSeenAt = Time.realtimeSinceStartup,
-                    Manual = false
-                });
-            }
-            ContextMusicManager._contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));
             if (ContextMusicManager.playerIsDead)
+            {
+                // Death-respawn: rebuild the stack immediately so Spawn's TrackEndWatcher
+                // can return to the correct zone when the stinger ends.
+                List<string> worldContexts = ContextResolver.ResolveContext();
+                foreach (string ctxName in worldContexts)
+                {
+                    Contexts ctx = ContextMusicManager.GetContext(ctxName);
+                    if (ctx == null) continue;
+                    ContextMusicManager._contextStack.Add(new ActiveContext
+                    {
+                        ContextName = ctxName,
+                        Priority = ctx.Priority,
+                        ActivatedAt = Time.realtimeSinceStartup,
+                        FirstSeenAt = Time.realtimeSinceStartup,
+                        Manual = false
+                    });
+                }
+                ContextMusicManager._contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));
                 ContextMusicManager.SendContextUpdate("Spawn");
-            ContextMusicManager.playerIsDead = false;
+                ContextMusicManager.playerIsDead = false;
+            }
+            else
+            {
+                // Teleport: leave the stack empty. Rebuilding it here populates stale
+                // pre-teleport zone contexts (e.g. Ambient_Forest_Night) that then sit
+                // on the stack alongside the correct destination contexts (same priority 12)
+                // for up to 1.5s — the eviction grace window. When GetTopContext() happens
+                // to pick the stale entry it matches currentContext and no transition fires,
+                // so the wrong zone plays until eviction clears it. Leaving the stack empty
+                // lets the scan loop read the actual destination position on its next tick
+                // and populate the stack cleanly with no stale competition.
+                ContextMusicManager.playerIsDead = false;
+            }
         }
     }
 
