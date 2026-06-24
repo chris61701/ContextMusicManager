@@ -2,7 +2,7 @@
 
 All notable changes to Context Music Manager are documented here.
 
-## Unreleased
+## 1.0.2
 
 ### Fixed
 
