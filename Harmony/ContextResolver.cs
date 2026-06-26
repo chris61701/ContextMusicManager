@@ -20,6 +20,15 @@ namespace CMM
         // Latched combat tier index into CombatThreatConfig.Tiers (-1 = not in combat).
         // Used by the weighted-threat path in place of the combatState string.
         static int combatTier = -1;
+        // Biome token latched when combat (re)engages (e.g. "Desert"), so the biome-specific
+        // combat music stays the one the player is fighting in even if they cross into another
+        // biome while combat is CONTINUOUSLY going. Unlike the combat TIER (held/resumed through
+        // the longer CombatCooldown), the biome deliberately does NOT honor that cooldown: it
+        // re-locks each time the active-combat window (CombatExitDelay) lapses and combat then
+        // re-engages. Leave a fight in the wasteland, re-enter in the desert, and the track
+        // switches to desert while the tier still resumes at the held High/Boss. Cleared when
+        // the encounter fully ends (cooldown expires). "" = generic, no biome variant.
+        static string combatBiomeToken = "";
         static float lastAggroTime = 0f;
         static bool wasInfested = false;
         static string lastPoI = "None";
@@ -44,7 +53,7 @@ namespace CMM
         public static int    EnemiesNearby, EnemyAlertCount, EnemyAggroCount;
 #endif
 
-        public static void resetValues() { combatState = "None"; combatTier = -1; }
+        public static void resetValues() { combatState = "None"; combatTier = -1; combatBiomeToken = ""; }
 
         // Resolves an entity's config class name (e.g. "zombieBoeFeral") for threat
         // weighting. EntityClass.list is keyed by the entity's entityClass hash; guarded
@@ -59,14 +68,13 @@ namespace CMM
         // scan and routinely fires with nothing actually nearby. We only honor it as a
         // BRIDGE TO VANILLA combat music: when we ship no combat music of our own,
         // escalating to Combat_High lets the fallback chain (Combat_High → Combat_Low →
-        // Combat → VanillaIfPanicked) hand off to the game's combat track. If we DO have combat
-        // music (Combat_High, Combat_Low, or the base Combat), we trust our own threat detection instead
-        // and ignore the Panicked signal entirely, so its loose box can't spuriously
-        // trigger our tracks when our scan found nothing in range.
+        // VanillaIfPanicked) hand off to the game's combat track. If we DO have combat music
+        // (Combat_High or the base Combat_Low — the combat/ root folder), we trust our own
+        // threat detection instead and ignore the Panicked signal entirely, so its loose box
+        // can't spuriously trigger our tracks when our scan found nothing in range.
         static bool PanickedBridgeAllowed() =>
             !ContextMusicManager.ContextHasFiles("Combat_High") &&
-            !ContextMusicManager.ContextHasFiles("Combat_Low") &&
-            !ContextMusicManager.ContextHasFiles("Combat");
+            !ContextMusicManager.ContextHasFiles("Combat_Low");
 
 #if !GV_V3
         // Pre-3.0 TraderArea has no GetTrader(): resolve the trader entity by finding the
@@ -194,6 +202,45 @@ namespace CMM
                 }
             }
 
+            // Resolve the biome ONCE up front. Both the combat block (biome-specific
+            // combat music) and the ambient block at the end of this method consume it,
+            // so a single lookup feeds both. GetBiome returns null when the chunk at the
+            // player's position isn't streamed in yet (e.g. immediately after a debug
+            // teleport in A20); biomeToken stays "" in that case, so combat falls back to
+            // the plain tier and the ambient block is skipped entirely (see its note).
+            var biome = world.GetBiome((int)player.position.x, (int)player.position.z);
+            string biomeToken = "";
+            if (biome != null)
+            {
+                switch (biome.m_sBiomeName)
+                {
+                    case "pine_forest":  biomeToken = "Forest"; break;
+                    case "desert":       biomeToken = "Desert"; break;
+                    case "burnt_forest": biomeToken = "Burnt_Forest"; break;
+                    case "snow":         biomeToken = "Snow"; break;
+                    case "wasteland":    biomeToken = "Wasteland"; break;
+                    // Unknown biome → no token; combat uses the plain tier and ambient
+                    // falls through to the generic "Ambient" base below.
+                }
+            }
+
+            // Adds a combat tier context plus, when the encounter's biome is known, its
+            // biome-specific variant (e.g. Combat_High + Combat_High_Forest). The variant
+            // outranks its base tier (priority band 59–62, see contexts.xml) so biome combat
+            // music wins when it has files, and falls back to the plain tier — today's behavior
+            // — when it doesn't. Uses combatBiomeToken (latched at encounter start), NOT the
+            // live biomeToken, so crossing into another biome mid-fight doesn't swap the track.
+            // Only one combat tier is active per tick, so no cross-tier priority inversion.
+            void AddCombatTier(string tierContext)
+            {
+                if (!activeContexts.Contains(tierContext)) activeContexts.Add(tierContext);
+                if (combatBiomeToken.Length > 0)
+                {
+                    string biomeTier = tierContext + "_" + combatBiomeToken;
+                    if (!activeContexts.Contains(biomeTier)) activeContexts.Add(biomeTier);
+                }
+            }
+
             float now = Time.realtimeSinceStartup;
             bool inCombat = false;
 
@@ -210,20 +257,36 @@ namespace CMM
                 // A configurable score over nearby player-targeting enemies (type ×
                 // state) selects a combat tier, replacing the flat enemy-count test.
                 int instantTier = threatCfg.TierForScore(threatScore);
-                if (instantTier >= 0) lastAggroTime = now;
+                // Whether the ACTIVE-combat window had lapsed as of the previous aggro (the
+                // music had stopped) — computed before lastAggroTime is refreshed. Drives the
+                // biome RE-capture below, which intentionally ignores the longer tier cooldown.
+                bool combatHadLapsed = (now - lastAggroTime) > CMMConfig.CombatExitDelay;
+                if (instantTier >= 0)
+                {
+                    lastAggroTime = now;
+                    // (Re)latch the biome whenever combat (re)engages: a brand-new encounter
+                    // (combatTier < 0) OR a re-engagement after the active-combat window lapsed
+                    // (combatHadLapsed). So leaving combat in the wasteland and re-entering in
+                    // the desert switches Combat_*_Wasteland → Combat_*_Desert, even though the
+                    // tier itself still resumes at the held High/Boss. The else-if back-fills the
+                    // token when the biome chunk wasn't streamed in yet on the opening tick.
+                    if (combatTier < 0 || combatHadLapsed) combatBiomeToken = biomeToken;
+                    else if (combatBiomeToken.Length == 0) combatBiomeToken = biomeToken;
+                }
                 float timeSinceAggro = now - lastAggroTime;
 
                 if (instantTier > combatTier) combatTier = instantTier;   // climb only
 
                 if (timeSinceAggro <= CMMConfig.CombatExitDelay && combatTier >= 0)
                 {
-                    activeContexts.Add(threatCfg.Tiers[combatTier].Context);
+                    AddCombatTier(threatCfg.Tiers[combatTier].Context);
                     if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
                     inCombat = true;
                 }
                 else if (timeSinceAggro > CMMConfig.CombatCooldown)
                 {
                     combatTier = -1;
+                    combatBiomeToken = "";   // encounter over — forget the latched biome
                 }
 
                 // Panicked bridge → escalate to the Combat_High tier (see note below).
@@ -243,8 +306,7 @@ namespace CMM
                     if (bridgeTier < 0) bridgeTier = 0;   // single-tier config
                     if (bridgeTier > combatTier) combatTier = bridgeTier;        // climb only, like the score path
                     lastAggroTime = now;
-                    string top = threatCfg.Tiers[combatTier].Context;
-                    if (!activeContexts.Contains(top)) activeContexts.Add(top);
+                    AddCombatTier(threatCfg.Tiers[combatTier].Context);
                     if (isBloodmoon && !activeContexts.Contains("Blood_Moon_Combat")) activeContexts.Add("Blood_Moon_Combat");
                     inCombat = true;
                 }
@@ -252,8 +314,20 @@ namespace CMM
             else
             {
                 // ── Legacy two-threshold count path ───────────────────────────
+                // See the weighted path: re-capture the biome on combat re-engagement once
+                // the active-combat window has lapsed, independent of the tier cooldown.
+                bool combatHadLapsed = (now - lastAggroTime) > CMMConfig.CombatExitDelay;
                 if (enemyAggroCount >= CMMConfig.CombatLowEnemyThreshold)
+                {
+                    // (Re)latch the biome on a fresh encounter (combatState "None") OR a
+                    // re-engagement after the active-combat window lapsed (combatHadLapsed),
+                    // so re-entering combat in a new biome switches the biome track even while
+                    // the tier is still held. The else-if back-fills if the biome wasn't loaded
+                    // yet — same hold-for-the-fight behavior as the weighted path above.
+                    if (combatState == "None" || combatHadLapsed) combatBiomeToken = biomeToken;
+                    else if (combatBiomeToken.Length == 0) combatBiomeToken = biomeToken;
                     lastAggroTime = now;
+                }
                 float timeSinceAggro = now - lastAggroTime;
 
                 if (enemyAggroCount >= CMMConfig.CombatHighEnemyThreshold)
@@ -263,13 +337,14 @@ namespace CMM
 
                 if (timeSinceAggro <= CMMConfig.CombatExitDelay && combatState != "None")
                 {
-                    activeContexts.Add(combatState == "High" ? "Combat_High" : "Combat_Low");
+                    AddCombatTier(combatState == "High" ? "Combat_High" : "Combat_Low");
                     if (isBloodmoon) activeContexts.Add("Blood_Moon_Combat");
                     inCombat = true;
                 }
                 else if (timeSinceAggro > CMMConfig.CombatCooldown)
                 {
                     combatState = "None";
+                    combatBiomeToken = "";   // encounter over — forget the latched biome
                 }
 
                 // Bridge: the game triggers combat music when ThreatLevel is Panicked
@@ -281,7 +356,7 @@ namespace CMM
                 {
                     combatState = "High";
                     lastAggroTime = now;   // treat as live aggro so it sustains through the cooldown tail
-                    if (!activeContexts.Contains("Combat_High")) activeContexts.Add("Combat_High");
+                    AddCombatTier("Combat_High");
                     if (isBloodmoon && !activeContexts.Contains("Blood_Moon_Combat")) activeContexts.Add("Blood_Moon_Combat");
                     inCombat = true;
                 }
@@ -305,30 +380,39 @@ namespace CMM
 
             if (enemiesNearby >= DangerThreshold && enemyAlertCount >= DangerThreshold && !inCombat) activeContexts.Add("Tension");
 
-            if (player is EntityPlayerLocal localPlayer && localPlayer.persistentPlayerData != null)
+            if (player is EntityPlayerLocal localPlayer)
             {
-                bool nearHome = false;
-                if (localPlayer.persistentPlayerData.HasBedrollPos)
+                // persistentPlayerData is null on the entity for the entire first session of a
+                // new game: GameManager.setLocalPlayerEntity() assigns it BEFORE CreatePlayerData()
+                // runs, so it captures null and is never re-assigned. GetPersistentLocalPlayer()
+                // always reflects the current authoritative PPD, including after the new-game path.
+                var ppd = localPlayer.persistentPlayerData
+                       ?? GameManager.Instance?.GetPersistentLocalPlayer();
+                if (ppd != null)
                 {
-                    Vector3i bed = localPlayer.persistentPlayerData.BedrollPos;
-                    nearHome = Vector3.Distance(player.position, bed) < CMMConfig.HomeDetectRange;
-                }
-                if (!nearHome)
-                {
-                    // "Nearest claim within range" is equivalent to "any claim within
-                    // range", so early-exit on the first hit instead of sorting all
-                    // claims (OrderBy().First()). Squared compare avoids the per-claim sqrt.
-                    float homeRangeSqr = CMMConfig.HomeDetectRange * CMMConfig.HomeDetectRange;
-                    foreach (var c in localPlayer.persistentPlayerData.GetLandProtectionBlocks())
+                    bool nearHome = false;
+                    if (ppd.HasBedrollPos)
                     {
-                        if ((player.position - c.ToVector3()).sqrMagnitude < homeRangeSqr)
+                        Vector3i bed = ppd.BedrollPos;
+                        nearHome = Vector3.Distance(player.position, bed) < CMMConfig.HomeDetectRange;
+                    }
+                    if (!nearHome)
+                    {
+                        // "Nearest claim within range" is equivalent to "any claim within
+                        // range", so early-exit on the first hit instead of sorting all
+                        // claims (OrderBy().First()). Squared compare avoids the per-claim sqrt.
+                        float homeRangeSqr = CMMConfig.HomeDetectRange * CMMConfig.HomeDetectRange;
+                        foreach (var c in ppd.GetLandProtectionBlocks())
                         {
-                            nearHome = true;
-                            break;
+                            if ((player.position - c.ToVector3()).sqrMagnitude < homeRangeSqr)
+                            {
+                                nearHome = true;
+                                break;
+                            }
                         }
                     }
+                    if (nearHome) activeContexts.Add(isDay ? "Home" : "Home_Night");
                 }
-                if (nearHome) activeContexts.Add(isDay ? "Home" : "Home_Night");
             }
 
             PrefabInstance prefab = world?.GetPOIAtPosition(player.position);
@@ -378,26 +462,19 @@ namespace CMM
                 wasInfested = false;
             }
 
-            // Guard on the biome object itself: GetBiome() returns null when the chunk at
-            // the player's position isn't loaded yet (e.g. immediately after a debug
-            // teleport in A20 before destination chunks stream in). Falling through to
-            // default:"Ambient" in that case would lock in the wrong generic Ambient_Night
-            // context for as long as chunks stay unloaded, because the scan loop keeps
-            // refreshing it. Skipping the ambient block entirely when biome is null lets
-            // the current music continue until the next scan tick when chunks are ready.
-            var biome = world.GetBiome((int)player.position.x, (int)player.position.z);
+            // Guard on the biome object itself: GetBiome() (resolved up front, above the
+            // combat block) returns null when the chunk at the player's position isn't
+            // loaded yet (e.g. immediately after a debug teleport in A20 before destination
+            // chunks stream in). Falling through to default:"Ambient" in that case would lock
+            // in the wrong generic Ambient_Night context for as long as chunks stay unloaded,
+            // because the scan loop keeps refreshing it. Skipping the ambient block entirely
+            // when biome is null lets the current music continue until the next scan tick when
+            // chunks are ready.
             if (biome != null)
             {
-                string biomeBase;
-                switch (biome.m_sBiomeName)
-                {
-                    case "pine_forest": biomeBase = "Ambient_Forest"; break;
-                    case "desert": biomeBase = "Ambient_Desert"; break;
-                    case "burnt_forest": biomeBase = "Ambient_Burnt_Forest"; break;
-                    case "snow": biomeBase = "Ambient_Snow"; break;
-                    case "wasteland": biomeBase = "Ambient_Wasteland"; break;
-                    default: biomeBase = "Ambient"; break;
-                }
+                // biomeToken is "" for an unknown biome name, which yields the generic
+                // "Ambient" base — the same fallback the old default: case produced.
+                string biomeBase = biomeToken.Length > 0 ? "Ambient_" + biomeToken : "Ambient";
                 // During the day the biome base folder is used directly (it holds the
                 // everyday day+night tracks). At night we prefer the biome's night-exclusive
                 // context, but ALSO push the biome's day context (at lower priority) so a

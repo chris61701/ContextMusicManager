@@ -80,8 +80,10 @@
     <State match="charged"  multiplier="2.75" />
     <State match="infernal" multiplier="3.25" />
 
-    <!-- Score → combat tier (any order; sorted ascending on load). Highest met wins. -->
-    <Tier context="Combat_Low"  minScore="1"  />
+    <!-- Score → combat tier (any order; sorted ascending on load). Highest met wins.
+         minScore is a float, so fractional thresholds are allowed (e.g. 0.5 lets a
+         single sub-1.0-weight enemy such as a crawler still open the Low tier). -->
+    <Tier context="Combat_Low"  minScore="0.5" />
     <Tier context="Combat_High" minScore="6"  />
     <Tier context="Combat_Boss" minScore="18" />
   </CombatThreat>

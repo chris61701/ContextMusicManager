@@ -68,20 +68,51 @@
   <Context name="POI"    path="poi"                   stale="60" priority="16" warmup="5" />
 
   <!-- ── Combat ─────────────────────────────────────────────────────── -->
-  <!-- Combat tiers selected by the <CombatThreat> model in settings.xml. Add more
-       tiers here (and matching <Tier> bands in settings.xml) for finer escalation;
-       each falls back to the tier below so missing folders degrade gracefully. All
-       tiers (and Blood_Moon_Combat) ultimately fall back to the generic Combat
-       context, which in turn falls back to vanilla combat music. -->
+  <!-- Three combat tiers selected by the <CombatThreat> model in settings.xml. The
+       combat/ root folder IS the base (low) tier; the escalations live in its _high and
+       _boss subfolders, underscore-prefixed so the directory scan never confuses them with
+       the per-biome subfolders below. Boss → High → Low; Low bridges to vanilla combat
+       music (when DMS is on and the game threat is Panicked). Folder scanning is top-level
+       only, so combat/ (Low) does NOT pick up files sitting in _high / _boss / <biome>. -->
   <!-- Blood_Moon_Combat: combat during a blood moon night (highest combat priority). -->
   <Context name="Blood_Moon_Combat" path="combat/blood_moon" fallback="Combat_Boss"  stale="20" cool="3" fadeintime="3" bypass="true" priority="71" />
-  <Context name="Combat_Boss" path="combat/boss" fallback="Combat_High"        stale="20" cool="3" fadeintime="3" bypass="true" priority="52" />
-  <Context name="Combat_High" path="combat/high" fallback="Combat_Low"        stale="20" cool="3" fadeintime="3" bypass="true" priority="51" />
-  <Context name="Combat_Low"  path="combat/low"  fallback="Combat"            stale="20" cool="3" fadeintime="3" bypass="true" priority="50" />
-  <Context name="Combat"      path="combat"      fallback="VanillaIfPanicked" stale="20" cool="3" fadeintime="3" bypass="true" priority="49" />
+  <Context name="Combat_Boss" path="combat/_boss" fallback="Combat_High"       stale="20" cool="3" fadeintime="3" bypass="true" priority="52" />
+  <Context name="Combat_High" path="combat/_high" fallback="Combat_Low"        stale="20" cool="3" fadeintime="3" bypass="true" priority="51" />
+  <Context name="Combat_Low"  path="combat"       fallback="VanillaIfPanicked" stale="20" cool="3" fadeintime="3" bypass="true" priority="50" />
+
+  <!-- Biome-specific combat tiers. Each biome gets a combat/<biome> folder that mirrors
+       the generic layout: the biome folder root is that biome's low tier, with _high and
+       _boss subfolders for escalation. The resolver puts the biome variant on the stack
+       alongside the active generic tier whenever combat fires in a known biome (e.g.
+       Combat_High + Combat_High_Forest). Each variant outranks its generic counterpart
+       (priority band 60–62) so biome combat music wins when its folder has tracks, and
+       falls back to the matching generic tier when the folder is empty. Only the one active
+       tier gets a variant on the stack, so the band never inverts across tiers.
+       Blood_Moon_Combat stays generic (no biome split). Empty folders are intentional:
+       ship only the biome/tier combinations you have music for. -->
+  <!-- Burnt forest -->
+  <Context name="Combat_Boss_Burnt_Forest"  path="combat/burnt_forest/_boss"  fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
+  <Context name="Combat_High_Burnt_Forest"  path="combat/burnt_forest/_high"  fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
+  <Context name="Combat_Low_Burnt_Forest"   path="combat/burnt_forest"        fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <!-- Desert -->
+  <Context name="Combat_Boss_Desert"        path="combat/desert/_boss"        fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
+  <Context name="Combat_High_Desert"        path="combat/desert/_high"        fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
+  <Context name="Combat_Low_Desert"         path="combat/desert"              fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <!-- Forest -->
+  <Context name="Combat_Boss_Forest"        path="combat/forest/_boss"        fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
+  <Context name="Combat_High_Forest"        path="combat/forest/_high"        fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
+  <Context name="Combat_Low_Forest"         path="combat/forest"              fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <!-- Snow -->
+  <Context name="Combat_Boss_Snow"          path="combat/snow/_boss"          fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
+  <Context name="Combat_High_Snow"          path="combat/snow/_high"          fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
+  <Context name="Combat_Low_Snow"           path="combat/snow"                fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <!-- Wasteland -->
+  <Context name="Combat_Boss_Wasteland"     path="combat/wasteland/_boss"     fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
+  <Context name="Combat_High_Wasteland"     path="combat/wasteland/_high"     fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
+  <Context name="Combat_Low_Wasteland"      path="combat/wasteland"           fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
 
   <!-- ── Tension ────────────────────────────────────────────────────── -->
-  <Context name="Tension" path="tension" stale="30" priority="30" />
+  <Context name="Tension" path="tension" stale="30" priority="30" warmup="2" />
 
   <!-- ── Traders ────────────────────────────────────────────────────── -->
   <Context name="Trader_Joel" path="trader/joel" fallback="Trader" priority="26" warmup="3" />
@@ -119,7 +150,7 @@
   <Context name="Ambient"                   path="ambient"                    fallback="VanillaIfDMS" fadeintime="4" priority="10" />
 
   <!-- ── Menu ───────────────────────────────────────────────────────── -->
-  <Context name="Menu" path="menu" fallback="Vanilla" resume="false" stale="0" loop="true" cool="5" fadeintime="2" bypass="true" priority="0" />
+  <Context name="Menu" path="menu" fallback="Vanilla" resume="false" stale="0" cool="5" fadeintime="2" bypass="true" priority="0" />
 
   <!-- ── Sentinels — required, do not remove ────────────────────────── -->
   <Context name="Silence" path="" fallback="Silence" resume="false" stale="0" cool="0" fadeintime="0" bypass="true" priority="0" />

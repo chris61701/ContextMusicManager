@@ -50,12 +50,35 @@ namespace CMM
             Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:1);
             Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:60, warmup:2);
             Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:55, once:true, volume:1.0f);
-            Add("Combat_Boss",         "combat/boss",           "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:52);
-            Add("Combat_High",         "combat/high",           "Combat_Low", stale:20, cool:3, fadeintime:3, bypass:true, priority:51);
-            Add("Combat_Low",          "combat/low",            "Combat",     stale:20, cool:3, fadeintime:3, bypass:true, priority:50);
-            Add("Combat",              "combat",                "VanillaIfPanicked", stale:20, cool:3, fadeintime:3, bypass:true, priority:49);
+            // Three combat tiers. The combat/ root folder IS the base (Low) tier; _high and
+            // _boss subfolders hold the escalations (underscore-prefixed so the top-level
+            // directory scan never confuses them with the per-biome subfolders). Low bridges
+            // to vanilla via VanillaIfPanicked. Mirrors contexts.xml.
+            Add("Combat_Boss",         "combat/_boss",          "Combat_High",       stale:20, cool:3, fadeintime:3, bypass:true, priority:52);
+            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, cool:3, fadeintime:3, bypass:true, priority:51);
+            Add("Combat_Low",          "combat",                "VanillaIfPanicked", stale:20, cool:3, fadeintime:3, bypass:true, priority:50);
+            // Biome-specific combat tiers (mirror contexts.xml). Each biome's combat/<biome>
+            // folder mirrors the generic layout (root = Low, _high / _boss = escalations).
+            // Each variant outranks its generic counterpart so biome combat music wins when
+            // its folder has tracks, else falls back to the matching generic tier. The resolver
+            // only stacks the variant for the one active tier, so the 60–62 band never inverts.
+            Add("Combat_Boss_Burnt_Forest", "combat/burnt_forest/_boss", "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
+            Add("Combat_High_Burnt_Forest", "combat/burnt_forest/_high", "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
+            Add("Combat_Low_Burnt_Forest",  "combat/burnt_forest",       "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
+            Add("Combat_Boss_Desert",       "combat/desert/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
+            Add("Combat_High_Desert",       "combat/desert/_high",       "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
+            Add("Combat_Low_Desert",        "combat/desert",             "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
+            Add("Combat_Boss_Forest",       "combat/forest/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
+            Add("Combat_High_Forest",       "combat/forest/_high",       "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
+            Add("Combat_Low_Forest",        "combat/forest",             "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
+            Add("Combat_Boss_Snow",         "combat/snow/_boss",         "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
+            Add("Combat_High_Snow",         "combat/snow/_high",         "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
+            Add("Combat_Low_Snow",          "combat/snow",               "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
+            Add("Combat_Boss_Wasteland",    "combat/wasteland/_boss",    "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
+            Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
+            Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
             Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:45, once:true);
-            Add("Tension",             "tension",               stale:30,                                      priority:30);
+            Add("Tension",             "tension",               stale:30,                                      priority:30, warmup:2);
             Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3);
             Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3);
             Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3);
@@ -94,7 +117,7 @@ namespace CMM
             // Sentinels — no path, no files
             Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0);
             Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:-1);
-            Add("Menu",     "menu", "Vanilla", resume:false, stale:0, loop:true, cool:5, fadeintime:2, bypass:true, priority:0);
+            Add("Menu",     "menu", "Vanilla", resume:false, stale:0, cool:5, fadeintime:2, bypass:true, priority:0);
         }
 
         public static Contexts GetContext(string contextIn) =>

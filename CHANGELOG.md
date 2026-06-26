@@ -2,6 +2,44 @@
 
 All notable changes to Context Music Manager are documented here.
 
+## 1.0.2a
+
+### Added
+
+- **Biome-specific combat music.** Each combat tier now layers a biome variant on the
+  stack alongside its generic tier whenever combat fires in a known biome — e.g.
+  `Combat_High` + `Combat_High_Forest`. The variant outranks its generic counterpart
+  (priority band 60–62, below `Blood_Moon_Combat`) so biome combat music wins when its
+  folder has tracks, and falls back to the generic tier — the existing behavior — when
+  the folder is empty. Only the one active tier ever gets a variant on the stack, so the
+  band never inverts across tiers. `Blood_Moon_Combat` stays generic (no biome split).
+
+- **Combat music tracks the biome you're fighting in.** The biome is latched when a fight
+  engages and held for the whole continuous encounter, so crossing into another biome
+  mid-fight does NOT swap the track. Unlike the combat *tier* (held/resumed through the
+  cooldown), the biome deliberately re-locks each time combat actually re-engages after the
+  music has stopped: leave a fight in the wasteland, re-enter in the desert, and the track
+  switches to the desert variant while the tier still resumes at its held High/Boss level.
+
+### Changed
+
+- **Combat folder layout reorganized into three tiers.** The `Music/combat/` root folder
+  is now the base (Low) tier directly, with `_high` and `_boss` subfolders for the
+  escalations (replacing the old `combat/low`, `combat/high`, `combat/boss` folders). Each
+  biome mirrors this under `combat/<biome>/` — e.g. `combat/forest` (Low),
+  `combat/forest/_high`, `combat/forest/_boss`. The `_`-prefixed tier subfolders are never
+  confused with the biome subfolders (folder scanning is top-level only), the same way
+  `ambient/<biome>/_night` works. **Migration:** move existing `combat/low/*` tracks up to
+  `combat/`, and `combat/high` → `combat/_high`, `combat/boss` → `combat/_boss`.
+
+- **Combat threat tier thresholds accept fractional scores.** `minScore` is now documented
+  as a float, and the default `Combat_Low` threshold dropped from `1` to `0.5` so a single
+  low-weight enemy (e.g. a crawler at 0.6) still opens combat music.
+
+- **Tension no longer flickers before combat.** Added a 2-second warm-up to the `Tension`
+  context so a quick escalation from "enemy spotted" straight into a fight goes directly to
+  combat music instead of briefly playing a tension sting first.
+
 ## 1.0.2
 
 ### Fixed

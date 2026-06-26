@@ -30,7 +30,7 @@
        HintPaths, the deploy Mods folder, the release zip name, and a GV_* compile
        symbol) derives from this one property. Add a version by copying a block below. -->
   <PropertyGroup>
-    <GameVersion Condition="'$(GameVersion)' == ''">3.0.0 b257</GameVersion>
+    <GameVersion Condition="'$(GameVersion)' == ''">3.0.0 b259</GameVersion>
     <!-- Debug builds rewrite the DEPLOYED settings.xml MusicPath to this; override with
          -p:DebugMusicPath=... . Release ships the committed value ("Music") untouched. -->
     <DebugMusicPath Condition="'$(DebugMusicPath)' == ''">J:\7D2D_Custom_Music</DebugMusicPath>
@@ -43,7 +43,7 @@
     <CMMDeployAll Condition="'$(CMMDeployAll)' == ''">true</CMMDeployAll>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(GameVersion)' == '3.0.0 b257'">
+  <PropertyGroup Condition="'$(GameVersion)' == '3.0.0 b259'">
     <GameInstallDir>C:\_Games\Steam\steamapps\common\7 Days To Die</GameInstallDir>
     <GameVersionDefine>GV_V3</GameVersionDefine>
   </PropertyGroup>
@@ -386,7 +386,7 @@
        'type not found' errors from missing game assemblies. -->
   <Target Name="ValidateGameVersion" BeforeTargets="Build">
     <Error Condition="'$(GameInstallDir)' == ''"
-           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.0.0 b257', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
+           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.0.0 b259', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
     <Error Condition="!Exists('$(GameManagedDir)')"
            Text="Game Managed folder not found for GameVersion '$(GameVersion)': $(GameManagedDir)" />
     <Warning Condition="!Exists('$(HarmonyHintPath)')"
@@ -447,7 +447,7 @@
        fan a build out across every install. Keep in sync with the GameVersion
        PropertyGroups near the top. -->
   <ItemGroup>
-    <CMMGameVersions Include="3.0.0 b257" />
+    <CMMGameVersions Include="3.0.0 b259" />
     <CMMGameVersions Include="2.6 b12" />
     <CMMGameVersions Include="Alpha 21.2 b37" />
     <CMMGameVersions Include="Alpha 20.7 b1" />
