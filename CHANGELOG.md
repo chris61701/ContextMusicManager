@@ -4,6 +4,15 @@ All notable changes to Context Music Manager are documented here.
 
 ## 1.0.2b
 
+### Changed
+
+- **Music folder placeholders are now named after their context.** The drop-in tree's
+  empty-folder placeholders (previously all named `.keep`) are now named for the context
+  that feeds each folder — e.g. `Music/combat/.Combat_Low`,
+  `Music/ambient/wasteland/_night/.Ambient_Wasteland_Night` — so a glance at a folder
+  tells you which context's music goes there. They're still inert hidden files the audio
+  scanner ignores, and you can delete one once you add your own tracks.
+
 ### Fixed
 
 - **Day/night music flicker at the home/biome transition.** When a day↔night context

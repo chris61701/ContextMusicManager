@@ -356,30 +356,58 @@
   </Target>
   <!-- Scaffold the Music library folder tree from the context definitions so a fresh
        install has a drop-in folder for every context (including the Music root). Reads
-       the path attributes straight from Config/contexts.xml — the same list the mod
-       loads at runtime — so the two never drift.
+       the name+path attributes straight from Config/contexts.xml — the same list the mod
+       loads at runtime — so the two never drift. Each folder gets a placeholder named
+       after the context that maps to it (e.g. combat/ -> .Combat_Low) so the empty
+       drop-in tree survives mod managers (e.g. Vortex) that strip empty folders, and the
+       filename tells you which context the folder feeds.
 
-       Purely additive: MakeDir only creates directories that are missing. It never
-       deletes, empties, or overwrites an existing folder, and it never touches the
+       Purely additive: only creates missing directories and writes the placeholder. It
+       never deletes, empties, or overwrites an existing folder, and it never touches the
        audio files inside one. Safe to run on every build over a populated library. -->
+  <!-- Inline task: reads name+path from the SAME Context node (just like the runtime
+       loader) so the placeholder filename can be the context name. A plain XmlPeek can
+       only pull one attribute at a time and gives no way to pair a path with its name. -->
+  <UsingTask TaskName="ScaffoldMusicFolders" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <ContextsXml ParameterType="System.String" Required="true" />
+      <MusicRoot   ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Xml" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        const string note = "Placeholder so mod managers don't delete this empty folder. Drop your music files here (you can delete this file once you do).";
+        var doc = new XmlDocument();
+        doc.Load(ContextsXml);
+        Directory.CreateDirectory(MusicRoot);
+        foreach (XmlNode node in doc.DocumentElement.ChildNodes)
+        {
+            if (node.NodeType != XmlNodeType.Element || node.Name != "Context") continue;
+            var el = (XmlElement)node;
+            string name = el.GetAttribute("name");
+            string path = el.GetAttribute("path");
+            // Skip sentinels (empty path) and any unnamed node — same as the loader.
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(path)) continue;
+            string dir = Path.Combine(MusicRoot, path.Replace('/', Path.DirectorySeparatorChar)
+                                                     .Replace('\\', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(dir);
+            // Placeholder named after the context that maps here (e.g. .Combat_Low),
+            // so a glance at the folder tells you which context it feeds. The audio
+            // scanner ignores non-audio extensions, so the dotfile is inert.
+            File.WriteAllText(Path.Combine(dir, "." + name), note);
+        }
+        Log.LogMessage(MessageImportance.High,
+            "[CMM] Ensured Music context folders (with .<context> placeholders) under " + MusicRoot);
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
   <Target Name="CreateMusicContextFolders" AfterTargets="Build"
           Condition=" '$(Configuration)' == 'Release' And Exists('Config\contexts.xml') ">
-    <!-- Skip sentinels (path="") at the XPath level: an empty Result item makes the
-         XmlPeek output task fail with a zero-length parameter error. -->
-    <XmlPeek XmlInputPath="Config\contexts.xml" Query="/Contexts/Context[@path != '']/@path">
-      <Output TaskParameter="Result" ItemName="_ContextPath" />
-    </XmlPeek>
-    <MakeDir Directories="$(OutputPath)Music" />
-    <MakeDir Directories="$(OutputPath)Music\%(_ContextPath.Identity)" />
-    <!-- Drop a .keep into every context folder. Mod managers (e.g. Vortex) strip empty
-         folders on install, which would wipe the drop-in tree; a placeholder file keeps
-         each folder present. The audio scanner ignores non-audio extensions, so .keep is
-         inert. Users can delete it once they add their own tracks. -->
-    <WriteLinesToFile File="$(OutputPath)Music\%(_ContextPath.Identity)\.keep"
-                      Lines="Placeholder so mod managers don't delete this empty folder. Drop your music files here (you can delete this file once you do)."
-                      Overwrite="true" />
-    <Message Importance="high"
-             Text="[CMM] Ensured Music context folders (with .keep placeholders) under $(OutputPath)Music" />
+    <ScaffoldMusicFolders ContextsXml="Config\contexts.xml" MusicRoot="$(OutputPath)Music" />
   </Target>
 
   <!-- Fail fast on a bad/unknown -p:GameVersion before the compiler emits a wall of
