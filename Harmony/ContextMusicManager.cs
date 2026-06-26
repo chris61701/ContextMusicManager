@@ -84,6 +84,7 @@ namespace CMM
             CMMConfigLoader.LoadSettings(modPath);
             CMMConfigLoader.LoadContexts(modPath);
             LoudnessStore.Load(modPath);
+            ScriptHost.Load(modPath);   // external Lua decision script (Config/context.lua)
 
             foreach (var ctx in contexts.Values)
                 cacheMap[ctx.Context] = new ContextCache();
@@ -787,6 +788,10 @@ namespace CMM
                     done = true;
                 });
                 while (!done) yield return null;
+
+                // Hot-reload the Lua decision script on its own write-time change.
+                // Cheap stamp check on the main thread; only re-parses when it changed.
+                ScriptHost.CheckReload();
 
                 if (settingsChanged)
                 {

@@ -296,6 +296,13 @@ namespace CMM
             var gameState = BuildSnapshot();
             if (gameState == null) return new List<string>();
 
+            // When a Config/context.lua is loaded it OWNS the decision logic; the
+            // built-in C# path below is the fallback for when no script is present
+            // (missing, or failed to load/compile). ScriptHost.Resolve never throws —
+            // a script error returns the last good token set — so a bad script can
+            // never take down audio or the main thread.
+            if (ScriptHost.Active) return ScriptHost.Resolve(gameState);
+
             var activeContexts = new List<string>();
             bool isDay = gameState.IsDay;
             bool isBloodmoon = gameState.IsBloodMoon;
