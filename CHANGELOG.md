@@ -2,6 +2,26 @@
 
 All notable changes to Context Music Manager are documented here.
 
+## 1.0.2b
+
+### Fixed
+
+- **Day/night music flicker at the home/biome transition.** When a day↔night context
+  swap happened (e.g. `Home` → `Home_Night`), the incoming context restarted its full
+  warm-up dwell from zero, leaving a gap where neither variant was eligible and a
+  lower-priority context (typically biome `Ambient`) would play for a few seconds before
+  the night theme took over. Sibling contexts can now share the dwell so the swap stays
+  viable continuously and no longer leaks the wrong track.
+
+### Added
+
+- **`warmgroup` context attribute.** Contexts that hand off to each other (like a
+  day/night pair) can be tagged with a shared `warmgroup`. When one joins while a group
+  sibling is still active, it inherits the group's oldest warm-up start instead of
+  restarting its own — so the handoff doesn't drop out for the full warm-up. Each context
+  still uses its own `warmup` value; keep group members' warmups equal for a predictable
+  dwell. `Home` and `Home_Night` ship tagged `warmgroup="home"`.
+
 ## 1.0.2a
 
 ### Added

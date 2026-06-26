@@ -104,7 +104,8 @@ namespace CMM
                         priority:              IntAttr (el, "priority", 0),
                         playOnce:              BoolAttr(el, "once",     false),
                         volumeOverride:        FloatAttr(el, "volume",  -1f),
-                        warmup:                IntAttr (el, "warmup",   0)
+                        warmup:                IntAttr (el, "warmup",   0),
+                        warmGroup:             StrAttr (el, "warmgroup", null)
                     );
                 }
 

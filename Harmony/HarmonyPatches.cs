@@ -231,12 +231,13 @@ namespace CMM
                 {
                     Contexts ctx = ContextMusicManager.GetContext(ctxName);
                     if (ctx == null) continue;
+                    float seenAt = Time.realtimeSinceStartup;
                     ContextMusicManager._contextStack.Add(new ActiveContext
                     {
                         ContextName = ctxName,
                         Priority = ctx.Priority,
-                        ActivatedAt = Time.realtimeSinceStartup,
-                        FirstSeenAt = Time.realtimeSinceStartup,
+                        ActivatedAt = seenAt,
+                        FirstSeenAt = ContextMusicManager.InheritedFirstSeen(ctxName, seenAt),
                         Manual = false
                     });
                 }

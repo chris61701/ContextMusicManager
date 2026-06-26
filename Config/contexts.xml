@@ -19,6 +19,13 @@
     warmup    - seconds this context must remain CONTINUOUSLY active before it becomes
                 eligible to trigger music  (0 = trigger immediately; an anti-flicker dwell
                 so momentary contexts don't interrupt what's already playing)
+    warmgroup - optional tag shared by contexts that hand off to each other (e.g. a
+                day/night pair). When one joins while a group sibling is still active,
+                it inherits the group's oldest warmup start instead of restarting its
+                own — so a day↔night swap stays viable continuously instead of dropping
+                out for the full warmup and letting a lower context play briefly. Each
+                context still uses its OWN warmup value; keep group members' warmups
+                equal for a predictable dwell.
     bypass    - skip cooldown check on entry  (use for stingers/events)
     priority  - higher value wins; equal priority never interrupts a playing context
     once      - play to completion then automatically return to previous context
@@ -125,8 +132,8 @@
   <!-- ── Home ───────────────────────────────────────────────────────── -->
   <!-- Home plays by day (and is the default); Home_Night provides night-exclusive
        tracks and falls back to Home when it has no files. -->
-  <Context name="Home_Night" path="home/night" fallback="Home" priority="15" warmup="5" />
-  <Context name="Home"       path="home"                       priority="15" warmup="5" />
+  <Context name="Home_Night" path="home/night" fallback="Home" priority="15" warmup="5" warmgroup="home" />
+  <Context name="Home"       path="home"                       priority="15" warmup="5" warmgroup="home" />
 
   <!-- ── Ambient ────────────────────────────────────────────────────── -->
   <!-- The biome base plays by day (and is the everyday default); each biome's

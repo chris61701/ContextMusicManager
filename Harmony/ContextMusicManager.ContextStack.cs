@@ -35,10 +35,10 @@ namespace CMM
                      bool resume = true, int stale = 120, bool loop = false,
                      int cool = 5, int fadeintime = 5, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
-                     int warmup = 0)
+                     int warmup = 0, string warmgroup = null)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,
                                                  loop, cool, fadeintime, bypass, true, priority, once, volume,
-                                                 warmup);
+                                                 warmup, warmgroup);
 
             Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
             Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90);
@@ -85,8 +85,8 @@ namespace CMM
             Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, warmup:3);
             Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, warmup:3);
             Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25, warmup:3);
-            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5);
-            Add("Home",                "home",                                                                 priority:15, warmup:5);
+            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home");
+            Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
             Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10);
             Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10);
@@ -162,6 +162,29 @@ namespace CMM
                 CMMConfig.D($"[CMM] {active.ContextName} warmup complete — now viable to trigger");
             }
             return true;
+        }
+
+        // FirstSeenAt for a context about to join the stack. Normally this is just
+        // "now", which (re)starts its WarmUp dwell. But if the context belongs to a
+        // WarmGroup and a sibling in that group is already on the stack, inherit the
+        // group's OLDEST FirstSeenAt so the dwell carries across the handoff instead
+        // of restarting — e.g. a day/night swap (Home -> Home_Night) stays viable
+        // continuously rather than dropping out for the full WarmUp and letting a
+        // lower context leak through. The outgoing sibling is still present here
+        // because stack inserts run before the absence-based eviction each scan.
+        internal static float InheritedFirstSeen(string contextName, float now)
+        {
+            string group = GetContext(contextName)?.WarmGroup;
+            if (string.IsNullOrEmpty(group)) return now;
+            float oldest = now;
+            foreach (ActiveContext ac in _contextStack)
+            {
+                if (ac.ContextName == contextName) continue;
+                if (string.Equals(GetContext(ac.ContextName)?.WarmGroup, group,
+                                   StringComparison.OrdinalIgnoreCase))
+                    oldest = Mathf.Min(oldest, ac.FirstSeenAt);
+            }
+            return oldest;
         }
 
         private static readonly HashSet<string> _invalidFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -399,12 +422,13 @@ namespace CMM
                 Contexts ctx = GetContext(contextName);
                 if (ctx == null) return;
                 if (ResolvePlayableContext(contextName) == null) return;
+                float nowPush = Time.realtimeSinceStartup;
                 _contextStack.Add(new ActiveContext
                 {
                     ContextName = contextName,
                     Priority = ctx.Priority,
-                    ActivatedAt = Time.realtimeSinceStartup,
-                    FirstSeenAt = Time.realtimeSinceStartup,
+                    ActivatedAt = nowPush,
+                    FirstSeenAt = InheritedFirstSeen(contextName, nowPush),
                     Manual = true
                 });
                 _contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));

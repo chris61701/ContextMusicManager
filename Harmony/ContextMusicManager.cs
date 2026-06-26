@@ -326,12 +326,13 @@ namespace CMM
                         Contexts ctx = GetContext(ctxName);
                         if (ctx == null) continue;
                         if (ResolvePlayableContext(ctxName) == null) continue;
+                        float seenAt = Time.realtimeSinceStartup;
                         _contextStack.Add(new ActiveContext
                         {
                             ContextName = ctxName,
                             Priority = ctx.Priority,
-                            ActivatedAt = Time.realtimeSinceStartup,
-                            FirstSeenAt = Time.realtimeSinceStartup,
+                            ActivatedAt = seenAt,
+                            FirstSeenAt = InheritedFirstSeen(ctxName, seenAt),
                             Manual = false
                         });
                     }

@@ -145,13 +145,19 @@ namespace CMM
         // eligible to trigger music. 0 = trigger immediately. Acts as an anti-flicker
         // dwell so momentary contexts don't interrupt what's already playing.
         public int WarmUp { get; private set; }
+        // Optional warmup-group tag. Contexts sharing a non-empty WarmGroup carry the
+        // dwell across a handoff: when one joins the stack while a sibling is still
+        // present, it inherits the group's oldest FirstSeenAt instead of restarting
+        // its WarmUp from zero. Null/empty = not grouped (the default). See
+        // ContextMusicManager.InheritedFirstSeen.
+        public string WarmGroup { get; private set; }
 
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
             bool loop = false, int cooldown = 5, int fadeInDuration = 3,
             bool bypassescooldown = false, bool caninterrupt = false,
             int priority = 0, bool playOnce = false, float volumeOverride = -1f,
-            int warmup = 0)
+            int warmup = 0, string warmGroup = null)
         {
             Context = context;
             Path = path;
@@ -167,6 +173,7 @@ namespace CMM
             PlayOnce = playOnce;
             VolumeOverride = volumeOverride;
             WarmUp = warmup;
+            WarmGroup = warmGroup;
         }
     }
 }
