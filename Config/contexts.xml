@@ -53,26 +53,36 @@
   <Context name="Swimming" path="swimming" priority="23" warmup="5" />
 
   <!-- ── Points of Interest ─────────────────────────────────────────── -->
-  <!-- POI_Cleared fires once when the last sleeper in a POI is killed. -->
-  <Context name="POI_Cleared" path="events/poi_cleared"       stale="60"           bypass="true" priority="55" once="true" volume="1.0" />
+  <!-- POI_Cleared fires once when the last sleeper in a POI is killed. Priority must
+       outrank lingering combat: clearing a POI means you were just fighting, so combat
+       (generic 50-52 AND biome 60-62) is still on the stack during the brief eviction
+       window. At 91 the stinger wins over all combat tiers, Blood_Moon (71), and
+       Low_Health_Panic (90); only Death (100) supersedes it. -->
+  <Context name="POI_Cleared" path="events/poi_cleared"       stale="60"           bypass="true" priority="91" once="true" volume="1.0" />
+
+  <!-- Infested and non-infested POI contexts share warmgroup="poi" so the clear handoff
+       (POI_Infested_Tn -> POI_Tn) is continuous: the joining non-infested context inherits
+       the group's oldest warmup start instead of restarting its own dwell, so it's viable
+       immediately and ambient never leaks through the gap while the POI_Cleared stinger
+       fades. Each context still uses its own warmup value. -->
 
   <!-- Infested: playing while sleeper volumes still hold live enemies. -->
-  <Context name="POI_Infested_T5" path="poi/infested/t5" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
-  <Context name="POI_Infested_T4" path="poi/infested/t4" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
-  <Context name="POI_Infested_T3" path="poi/infested/t3" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
-  <Context name="POI_Infested_T2" path="poi/infested/t2" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
-  <Context name="POI_Infested_T1" path="poi/infested/t1" fallback="POI_Infested" stale="60" priority="22" warmup="10" />
-  <Context name="POI_Infested_T0" path="poi/infested/t0"                         stale="60" priority="21" warmup="10" />
-  <Context name="POI_Infested"    path="poi/infested"                            stale="60" priority="20" warmup="10" />
+  <Context name="POI_Infested_T5" path="poi/infested/t5" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested_T4" path="poi/infested/t4" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested_T3" path="poi/infested/t3" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested_T2" path="poi/infested/t2" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested_T1" path="poi/infested/t1" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested_T0" path="poi/infested/t0"                         stale="60" priority="21" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested"    path="poi/infested"                            stale="60" priority="20" warmup="10" warmgroup="poi" />
 
   <!-- Non-infested: inside a POI with no live sleepers (cleared or never infested). -->
-  <Context name="POI_T5" path="poi/t5" fallback="POI" stale="60" priority="18" warmup="5" />
-  <Context name="POI_T4" path="poi/t4" fallback="POI" stale="60" priority="18" warmup="5" />
-  <Context name="POI_T3" path="poi/t3" fallback="POI" stale="60" priority="18" warmup="5" />
-  <Context name="POI_T2" path="poi/t2" fallback="POI" stale="60" priority="18" warmup="5" />
-  <Context name="POI_T1" path="poi/t1" fallback="POI" stale="60" priority="18" warmup="5" />
-  <Context name="POI_T0" path="poi/t0"                stale="60" priority="17" warmup="5" />
-  <Context name="POI"    path="poi"                   stale="60" priority="16" warmup="5" />
+  <Context name="POI_T5" path="poi/t5" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
+  <Context name="POI_T4" path="poi/t4" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
+  <Context name="POI_T3" path="poi/t3" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
+  <Context name="POI_T2" path="poi/t2" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
+  <Context name="POI_T1" path="poi/t1" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
+  <Context name="POI_T0" path="poi/t0"                stale="60" priority="17" warmup="5" warmgroup="poi" />
+  <Context name="POI"    path="poi"                   stale="60" priority="16" warmup="5" warmgroup="poi" />
 
   <!-- ── Combat ─────────────────────────────────────────────────────── -->
   <!-- Three combat tiers selected by the <CombatThreat> model in settings.xml. The

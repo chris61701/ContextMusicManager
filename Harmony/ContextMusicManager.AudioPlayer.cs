@@ -46,6 +46,14 @@ namespace CMM
         // live streaming FileStream handle. Drained by DestroyPendingClipAndAudio().
         private static readonly Queue<TrackSlot> _pendingDisposals = new Queue<TrackSlot>();
 
+        // Background loudness sweep state. _loudnessQueue holds files awaiting a
+        // measurement; _loudnessProcessed marks files resolved this session (measured,
+        // confirmed current, or skipped) so we don't re-stat/re-measure them. Both are
+        // main-thread only, like LoudnessStore.
+        private static readonly Queue<string> _loudnessQueue = new Queue<string>();
+        private static readonly HashSet<string> _loudnessProcessed =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         private static void StagePendingDisposal(TrackSlot slot)
         {
             // Borrowed game-owned clips are never ours to destroy/dispose — just drop them.
@@ -226,7 +234,7 @@ namespace CMM
                             $"{keep.volume:F2}→target over {reclaimFade:F1}s (dropping {leavingCtx ?? "None"})");
 
                     _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                        CrossFade(drop, keep, reclaimFade, _cooldownTarget?.Cooldown ?? 0, drop.volume, keep.volume, ctx.VolumeOverride));
+                        CrossFade(drop, keep, reclaimFade, _cooldownTarget?.Cooldown ?? 0, drop.volume, keep.volume, contextName));
 
                     float reclaimLen = keep.clip.length;
                     float reclaimPos = GetPlaybackPosition(keep, cache);
@@ -327,6 +335,26 @@ namespace CMM
 
             if (transitionId != _transitionId) yield break;
 
+            // ── Loudness normalization ───────────────────────────────────────
+            // Normal tracks: if the sweep hasn't reached this one yet, measure it now
+            // (block) so even the first play is normalized. Stingers/events (PlayOnce)
+            // must fire instantly — they NEVER block; instead we kick off a background
+            // measure so subsequent fires are normalized (this first fire uses whatever
+            // gain is already cached, unity on first encounter). Skipped for borrowed
+            // vanilla clips (no file).
+            if (!useGameClip && !cache.Current.Borrowed)
+            {
+                if (ctx.PlayOnce)
+                {
+                    CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(cache.lastPlayedFile));
+                }
+                else
+                {
+                    yield return StartCoroutine(EnsureLoudnessMeasured(cache.lastPlayedFile));
+                    if (transitionId != _transitionId) yield break;
+                }
+            }
+
             // ── Resume position ──────────────────────────────────────────────
             float startPosition = 0f;
             if (ctx.CanBeResumed && cache.resumePosition > 0f)
@@ -345,10 +373,39 @@ namespace CMM
             }
 
             // ── Channel setup ────────────────────────────────────────────────
-            AudioSource incoming = InactiveChannel;
-            AudioSource outgoing = ActiveChannel;
+            // Normally the newcomer reuses the idle InactiveChannel and the playing
+            // ActiveChannel becomes the outgoing fade. But a faster context switch can
+            // INTERRUPT an in-flight crossfade — TriggerMusic stops the coroutine before
+            // its closing Stop() runs — leaving BOTH channels audible: ActiveChannel
+            // rising into the half-arrived context, InactiveChannel still falling from the
+            // one before it. Blindly reusing InactiveChannel then hard-cuts whatever is
+            // louder there (often the original track the listener is anchored on, while
+            // the transient gets the graceful fade — backwards). Instead, repurpose the
+            // QUIETER of the two channels for the newcomer so the DOMINANT track is the one
+            // that crossfades out gracefully; the quiet leftover we evict is barely
+            // audible. In the normal case InactiveChannel is idle (not playing, volume 0),
+            // so this reduces to the old behaviour exactly.
+            string activeCtxName = ActiveChannelContext;
+            string inactiveCtxName = InactiveChannelContext;
+            AudioSource incoming, outgoing;
+            string previousActiveContext;
+            if (InactiveChannel.isPlaying && InactiveChannel.volume > ActiveChannel.volume)
+            {
+                // Interrupted crossfade and the Inactive leftover is the louder track:
+                // fade IT out and repurpose the quieter Active channel for the newcomer.
+                incoming = ActiveChannel;
+                outgoing = InactiveChannel;
+                previousActiveContext = inactiveCtxName;
+                CMMConfig.D($"[CMM] Interrupted crossfade: fading out louder '{inactiveCtxName ?? "None"}' " +
+                        $"({outgoing.volume:F2}), evicting quieter '{activeCtxName ?? "None"}' ({incoming.volume:F2}) for {contextName}");
+            }
+            else
+            {
+                incoming = InactiveChannel;
+                outgoing = ActiveChannel;
+                previousActiveContext = activeCtxName;
+            }
             float outgoingStartVol = outgoing.volume;
-            string previousActiveContext = ActiveChannelContext;
 
             float clipLen = cache.Current.Clip.length;
             float safeStart = clipLen > 0.02f
@@ -426,10 +483,14 @@ namespace CMM
                 flushedRdr.ClearInitialSeekIntercept();
             CMMConfig.D($"[CMM] Pinned time: requested={safeStart:F3}s actual={incoming.time:F3}s isPlaying={incoming.isPlaying}");
 
-            _primaryIsActive = !_primaryIsActive;
-            // incoming is now the active channel; outgoing (the leaving context)
-            // becomes the inactive channel and may still fade for a few seconds —
-            // record both so a re-entry can reverse that fade instead of restarting.
+            // incoming becomes the active channel. Derive the flag from the concrete
+            // channel identity (not a blind toggle): after the quieter-channel selection
+            // above, incoming may be EITHER physical channel, so a toggle could point
+            // ActiveChannel at the wrong source.
+            _primaryIsActive = (incoming == CMM_Primary_Channel);
+            // outgoing (the leaving context) becomes the inactive channel and may still
+            // fade for a few seconds — record both so a re-entry can reverse that fade
+            // instead of restarting.
             ActiveChannelContext = contextName;
             InactiveChannelContext = previousActiveContext;
             AudioSource watchTarget = incoming;
@@ -441,7 +502,7 @@ namespace CMM
                 FadeOutMenuVanillaIfAudible();
 
             // ── Crossfade ────────────────────────────────────────────────────
-            float targetVolume = CMMConfig.GetVolume(inGame, ctx.VolumeOverride);
+            float targetVolume = GetContextVolume(contextName);
 
             if (CMMConfig.CrossfadeEnabled)
             {
@@ -462,7 +523,7 @@ namespace CMM
                     fadeDuration = ctx.FadeInDuration;
 
                 _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                    CrossFade(outgoing, incoming, fadeDuration, _cooldownTarget?.Cooldown ?? 0, outgoingStartVol, 0f, ctx.VolumeOverride, outFadeDuration));
+                    CrossFade(outgoing, incoming, fadeDuration, _cooldownTarget?.Cooldown ?? 0, outgoingStartVol, 0f, contextName, outFadeDuration));
             }
             else
             {
@@ -516,13 +577,35 @@ namespace CMM
         }
 
         // ── Volume ────────────────────────────────────────────────────────────
+        // Per-context target volume = global/override volume × the active track's
+        // loudness-normalization gain. The gain is keyed to the file currently loaded
+        // for the context (cache.lastPlayedFile); unmeasured tracks and borrowed
+        // vanilla clips resolve to a neutral 1.0, so this matches GetVolume exactly
+        // until a measurement exists.
+        public static float GetContextVolume(string contextName)
+        {
+            Contexts ctx = contextName != null ? GetContext(contextName) : null;
+            float vol = CMMConfig.GetVolume(inGame, ctx?.VolumeOverride ?? -1f);
+            if (contextName != null
+                && cacheMap.TryGetValue(contextName, out ContextCache cache)
+                && cache.lastPlayedFile != null)
+                vol *= LoudnessStore.GetTrackGain(cache.lastPlayedFile);
+            return vol;
+        }
+
         private IEnumerator VolumeSyncLoop()
         {
             float previousVolume = -1f;
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
-                float currentVolume = CMMConfig.GetVolume(inGame, currentContext?.VolumeOverride ?? -1f);
+                // Key off ActiveChannelContext, NOT currentContext: currentContext is
+                // reassigned to the incoming context before PlayFromCache swaps the
+                // audio channels, so for a short window ActiveChannel still plays the
+                // OUTGOING track. Using currentContext's loudness gain there would ramp
+                // the still-playing old track to the incoming track's normalized level.
+                // ActiveChannelContext always names whatever is actually on ActiveChannel.
+                float currentVolume = GetContextVolume(ActiveChannelContext);
                 if (Mathf.Approximately(currentVolume, previousVolume)) continue;
                 previousVolume = currentVolume;
                 if (_crossFadeCoroutine == null && ActiveChannel != null && ActiveChannel.isPlaying)
@@ -533,15 +616,147 @@ namespace CMM
         public static void UpdateVolume()
         {
             if (ActiveChannel == null) return;
-            ActiveChannel.volume = CMMConfig.GetVolume(inGame, currentContext?.VolumeOverride ?? -1f);
+            // ActiveChannelContext, not currentContext — see VolumeSyncLoop: the two can
+            // briefly disagree across a context switch, and ActiveChannel must be scaled
+            // by the gain of the track it is actually playing.
+            ActiveChannel.volume = GetContextVolume(ActiveChannelContext);
+        }
+
+        // ── Loudness: measure-on-demand (block-before-play) ───────────────────
+        // Ensures `filePath` has a current LUFS measurement, measuring it now (on a
+        // background thread, awaited) if not. Called from PlayFromCache before a track
+        // starts so the first play is normalized. No-op when normalization is off, the
+        // file is gone, or it's already current.
+        private IEnumerator EnsureLoudnessMeasured(string filePath)
+        {
+            if (!CMMConfig.LoudnessNormalizationEnabled || string.IsNullOrEmpty(filePath)) yield break;
+
+            long size = 0, mtime = 0;
+            bool ok = true;
+            try
+            {
+                var fi = new FileInfo(filePath);
+                if (!fi.Exists) ok = false;
+                else { size = fi.Length; mtime = fi.LastWriteTimeUtc.Ticks; }
+            }
+            catch { ok = false; }
+            if (!ok) yield break;
+            if (LoudnessStore.HasCurrent(filePath, size, mtime)) yield break;
+
+            bool done = false;
+            TrackLoudness res = default;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { res = NAudioDecoder.MeasureLoudness(filePath); } catch { }
+                done = true;
+            });
+            while (!done) yield return null;
+
+            _loudnessProcessed.Add(filePath);
+            if (res.Ok)
+            {
+                LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak);
+                CMMConfig.D($"[CMM] Loudness (block) {Path.GetFileName(filePath)}: {res.Lufs:F1} LUFS");
+            }
+        }
+
+        // ── Loudness: background sweep ────────────────────────────────────────
+        // Walks every context's file snapshot and measures any track without a
+        // current entry, one file per tick on a background thread, so most tracks are
+        // already normalized by the time they first play (making the block path above
+        // rarely fire). Paused while the game is loading or a crossfade is in flight so
+        // it never competes with playback.
+        private IEnumerator LoudnessSweepLoop()
+        {
+            yield return new WaitForSeconds(LoudnessSweepStartDelay);
+
+            while (true)
+            {
+                yield return new WaitForSeconds(LoudnessSweepInterval);
+                if (!CMMConfig.LoudnessNormalizationEnabled) continue;
+                if (_gameIsLoading || _crossFadeCoroutine != null) continue;
+
+                if (_loudnessQueue.Count == 0) RefillLoudnessQueue();
+                if (_loudnessQueue.Count == 0) continue;
+
+                string path = _loudnessQueue.Dequeue();
+                if (string.IsNullOrEmpty(path) || _loudnessProcessed.Contains(path)) continue;
+                if (_invalidFiles.Contains(path)) { _loudnessProcessed.Add(path); continue; }
+
+                long size = 0, mtime = 0;
+                bool ok = true;
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (!fi.Exists) ok = false;
+                    else { size = fi.Length; mtime = fi.LastWriteTimeUtc.Ticks; }
+                }
+                catch { ok = false; }
+                if (!ok) { _loudnessProcessed.Add(path); continue; }
+
+                if (LoudnessStore.HasCurrent(path, size, mtime)) { _loudnessProcessed.Add(path); continue; }
+
+                bool done = false;
+                TrackLoudness res = default;
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try { res = NAudioDecoder.MeasureLoudness(path); } catch { }
+                    done = true;
+                });
+                while (!done) yield return null;
+
+                _loudnessProcessed.Add(path);
+                if (res.Ok)
+                {
+                    LoudnessStore.Store(path, res.Size, mtime, res.Hash, res.Lufs, res.Peak);
+                    CMMConfig.D($"[CMM] Loudness swept {Path.GetFileName(path)}: {res.Lufs:F1} LUFS (peak {res.Peak:F3})");
+                    // If we just measured the track that's currently playing, refresh
+                    // the live channel volume so the normalization takes effect now.
+                    // Gate on ActiveChannelContext (the track actually audible), matching
+                    // what UpdateVolume now scales.
+                    if (ActiveChannelContext != null
+                        && cacheMap.TryGetValue(ActiveChannelContext, out ContextCache cc)
+                        && string.Equals(cc.lastPlayedFile, path, StringComparison.OrdinalIgnoreCase))
+                        UpdateVolume();
+                }
+            }
+        }
+
+        // Enqueues every snapshot file not already resolved this session. Pure in-memory
+        // (no disk); the per-file stat happens only when a file is dequeued.
+        private static void RefillLoudnessQueue()
+        {
+            foreach (var cache in cacheMap.Values)
+            {
+                string[] snap = cache.directorySnapshot;
+                if (snap == null) continue;
+                foreach (string f in snap)
+                    if (!_loudnessProcessed.Contains(f) && !_invalidFiles.Contains(f))
+                        _loudnessQueue.Enqueue(f);
+            }
+        }
+
+        // ── Loudness: debounced cache save ────────────────────────────────────
+        private IEnumerator LoudnessSaveLoop()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(LoudnessSaveDebounce);
+                if (LoudnessStore.Dirty) LoudnessStore.Save();
+            }
         }
 
         // ── Crossfade ─────────────────────────────────────────────────────────
         private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming,
             float duration, int cooldownSeconds, float outgoingStartVol, float incomingStartVol = 0f,
-            float volumeOverride = -1f, float outDuration = -1f)
+            string incomingContext = null, float outDuration = -1f)
         {
-            float targetVolume = CMMConfig.GetVolume(inGame, volumeOverride);
+            // The incoming side fades to its context volume INCLUDING the loudness gain
+            // of its current track; the outgoing side always fades to 0 (its gain is
+            // irrelevant). incomingContext == null falls back to a neutral global volume.
+            float targetVolume = incomingContext != null
+                ? GetContextVolume(incomingContext)
+                : CMMConfig.GetVolume(inGame);
             // The outgoing track may fade over a different span than the incoming one
             // (e.g. a PlayOnce stinger enters fast but lets the previous track leave
             // gracefully). When unset, both share the same duration.
@@ -1054,6 +1269,34 @@ namespace CMM
                 ApplyPresenceFromSnapshot(contextName, cache);
             else
                 _presenceDirty.Add(contextName);
+        }
+
+        // A file we tried to play is gone from disk. Remove it from the context's
+        // directory snapshot right now and re-derive presence, so the resolver and
+        // PickNextFile stop re-selecting the same missing file on every scan tick.
+        // Without this, a removed file that isn't blacklisted ("not on disk" is treated
+        // as a transient move/lock, not corruption) keeps the context in a replay loop
+        // until a background rescan happens to refresh the snapshot — which it won't,
+        // because the failure path only re-derives presence from the STALE snapshot.
+        // Also queues an authoritative disk rescan to catch any sibling changes.
+        private static void PruneMissingFromSnapshot(string contextName, string filePath)
+        {
+            if (cacheMap.TryGetValue(contextName, out ContextCache cache))
+            {
+                string[] snap = cache.directorySnapshot;
+                if (snap != null && snap.Length > 0)
+                {
+                    string[] pruned = snap.Where(f =>
+                        !string.Equals(f, filePath, StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (pruned.Length != snap.Length)
+                    {
+                        cache.directorySnapshot = pruned;
+                        ApplyPresenceFromSnapshot(contextName, cache);
+                        CMMConfig.D($"[CMM] Pruned missing file from {contextName} snapshot: {Path.GetFileName(filePath)}");
+                    }
+                }
+            }
+            _presenceDirty.Add(contextName);
         }
 
         // Synchronous full rebuild. Disk-bound, so it is only used as the one-time

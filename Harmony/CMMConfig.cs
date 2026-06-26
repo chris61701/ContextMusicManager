@@ -17,6 +17,18 @@ namespace CMM
             return inGameVolume * modifier;
         }
         public static long HotSwapMaxFileSizeBytes = 100L * 1024 * 1024;
+
+        // ── Loudness normalization (EBU R128) ─────────────────────────────────
+        // When enabled, each track's measured integrated loudness yields a per-track
+        // gain (target − measured, in dB) folded into the volume multiplier. See
+        // LoudnessStore / R128Analyzer. Target sits on the quiet side so most
+        // corrections are attenuations (always achievable) and boosts stay modest
+        // given the AudioSource.volume ≤ 1 ceiling.
+        public static bool LoudnessNormalizationEnabled = true;
+        public static float LoudnessTargetLufs = -18f;
+        // Cap on the AUTO boost (a near-silent track can't ask for unbounded gain).
+        // Attenuation is uncapped. userTrim is applied on top and clamped separately.
+        public static float LoudnessMaxBoostDb = 12f;
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
         // inactive channel, reverse that fade (ramp it back up from its current

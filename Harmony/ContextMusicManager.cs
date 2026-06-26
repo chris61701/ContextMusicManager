@@ -62,11 +62,19 @@ namespace CMM
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public static float PresenceScanInterval = 0.5f;
 
+        // ── Loudness sweep / save pacing ───────────────────────────────────────
+        public static float LoudnessSweepStartDelay = 8f;   // let startup settle first
+        public static float LoudnessSweepInterval = 1f;     // one file per tick, throttled
+        public static float LoudnessSaveDebounce = 5f;      // flush the cache if dirty
+
         // ── Init ──────────────────────────────────────────────────────────────
         public static void Init(string modPath)
         {
             ModPath = modPath;
             MusicDirectory = Path.Combine(modPath, "Music");
+#if CMM_LOUDNESS_SELFTEST
+            R128SelfTest.Run();
+#endif
             CMM_Audio_Object = new GameObject("ContextMusicManager");
             UnityEngine.Object.DontDestroyOnLoad(CMM_Audio_Object);
             Instance = CMM_Audio_Object.AddComponent<ContextMusicManager>();
@@ -75,6 +83,7 @@ namespace CMM
             // Override built-in defaults with external config files if present.
             CMMConfigLoader.LoadSettings(modPath);
             CMMConfigLoader.LoadContexts(modPath);
+            LoudnessStore.Load(modPath);
 
             foreach (var ctx in contexts.Values)
                 cacheMap[ctx.Context] = new ContextCache();
@@ -105,6 +114,8 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.ConfigWatchLoop());
             CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
             CMM_CoRoutines.StartCoroutine(Instance.DiagnosticLoop());
+            CMM_CoRoutines.StartCoroutine(Instance.LoudnessSweepLoop());
+            CMM_CoRoutines.StartCoroutine(Instance.LoudnessSaveLoop());
 
             CMMConfig.D($"[CMM] Initialized! Decoder: NAudio | Preload: {CMMConfig.PreloadCacheEnabled}");
         }
@@ -904,7 +915,10 @@ namespace CMM
                     if (decoded == null)
                     {
                         MarkInvalidIfCorrupt(filePath, $"Preload (full decode) failed for {contextName}");
-                        InvalidateContextFileCache(contextName);
+                        if (!File.Exists(filePath))
+                            PruneMissingFromSnapshot(contextName, filePath);
+                        else
+                            InvalidateContextFileCache(contextName);
                         yield break;
                     }
 
@@ -937,8 +951,14 @@ namespace CMM
                     if (reader == null)
                     {
                         // OpenReaderAsync already decided whether to blacklist (corrupt)
-                        // or skip (transient/missing); just refresh presence and bail.
-                        InvalidateContextFileCache(contextName);
+                        // or skip (transient/missing). If the file is genuinely gone, drop
+                        // it from the snapshot now so the resolver stops re-picking this
+                        // same missing file every scan tick (removed-file replay loop);
+                        // otherwise just refresh presence from the existing snapshot.
+                        if (!File.Exists(filePath))
+                            PruneMissingFromSnapshot(contextName, filePath);
+                        else
+                            InvalidateContextFileCache(contextName);
                         yield break;
                     }
 

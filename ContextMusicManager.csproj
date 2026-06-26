@@ -133,6 +133,9 @@
     <Compile Include="Harmony\DataStructures.cs" />
     <Compile Include="Harmony\CMMConfig.cs" />
     <Compile Include="Harmony\NAudioDecoder.cs" />
+    <Compile Include="Harmony\LoudnessAnalyzer.cs" />
+    <Compile Include="Harmony\LoudnessStore.cs" />
+    <Compile Include="Harmony\R128SelfTest.cs" />
     <Compile Include="Harmony\ContextResolver.cs" />
     <Compile Include="Harmony\ContextMusicManager.ContextStack.cs" />
     <Compile Include="Harmony\ContextMusicManager.AudioPlayer.cs" />

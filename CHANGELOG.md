@@ -2,6 +2,40 @@
 
 All notable changes to Context Music Manager are documented here.
 
+## 1.0.3
+
+### Added
+
+- **Loudness normalization (EBU R128).** Each track is measured once for its integrated
+  loudness (LUFS) and played back at a per-track gain, so quiet and loud tracks sit at a
+  consistent perceived level instead of jumping in volume between tracks. Measurements are
+  cached in `Cache/loudness.xml` keyed by file content (FNV-1a hash), so renaming or moving
+  a track keeps its value. The track you need next is measured up front; a throttled
+  background sweep pre-measures the rest one file per tick. Measurement runs on a background
+  thread and retains no PCM, so memory stays flat regardless of track length. Tunable in
+  `settings.xml` via `LoudnessNormalizationEnabled`, `LoudnessTargetLufs` (default -18 LUFS),
+  and `LoudnessMaxBoostDb` (default 12 dB; attenuation is uncapped — the boost cap exists
+  because `AudioSource.volume` can't exceed 1.0).
+
+### Changed
+
+- **POI infested→cleared handoff is now continuous.** All POI contexts (infested and
+  non-infested) share `warmgroup="poi"`, so when the last sleeper dies the non-infested POI
+  context inherits the group's warm-up start instead of restarting its own dwell. Ambient no
+  longer leaks through the gap while the `POI_Cleared` stinger fades.
+
+### Fixed
+
+- **`POI_Cleared` stinger could be buried under lingering combat.** Clearing a POI means you
+  were just fighting, so combat contexts (generic and biome) are still on the stack during
+  the brief eviction window. `POI_Cleared` priority moved from 55 to 91 so the one-shot
+  stinger wins over all combat tiers, `Blood_Moon_Combat`, and `Low_Health_Panic` — only
+  `Death` supersedes it.
+- **Removed-file replay loop.** When a track failed to open because the file was genuinely
+  gone, the resolver kept re-picking that same missing file every scan tick. Missing files
+  are now pruned from the presence snapshot on the failed open, so the resolver moves on
+  instead of retrying the dead path.
+
 ## 1.0.2b
 
 ### Changed

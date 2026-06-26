@@ -13,6 +13,19 @@ using CSCore.Codecs.FLAC;
 
 namespace CMM
 {
+    // Result of a one-pass loudness measurement (see NAudioDecoder.MeasureLoudness).
+    // Hash + Size are captured from the same byte read so the caller can store them
+    // without re-touching the file. Ok is false when the file couldn't be read or
+    // its encoding is unsupported, or it was too short/quiet to yield a reading.
+    public struct TrackLoudness
+    {
+        public bool Ok;
+        public string Hash;
+        public long Size;
+        public double Lufs;
+        public double Peak;
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // NAudio DECODER
     // ─────────────────────────────────────────────────────────────────────────
@@ -820,6 +833,118 @@ namespace CMM
                     Log.Warning($"[CMM NAudio] No stream reader for extension '{ext}'");
                     return null;
             }
+        }
+
+        // ── Loudness measurement ──────────────────────────────────────────────
+        // One full decode pass to integrated LUFS (EBU R128), plus the FNV-1a
+        // content hash computed from the same byte read. No PCM is retained — the
+        // R128Analyzer accumulates running statistics, so memory stays at a few KB
+        // regardless of track length. Mirrors the byte-read + Opus/generic reader
+        // branch in OpenStreamingReader / CreateStreamingClipFromReader.
+        //
+        // Called on a BACKGROUND thread (by the loudness sweep / block-before-play).
+        // Pure measurement — touches no Unity main-thread state. The caller commits
+        // the TrackLoudness into LoudnessStore on the main thread.
+        public static TrackLoudness MeasureLoudness(string filePath)
+        {
+            var fail = new TrackLoudness { Ok = false };
+
+            byte[] raw;
+            long size;
+            try
+            {
+                size = new FileInfo(filePath).Length;
+                if (size > CMMConfig.HotSwapMaxFileSizeBytes)
+                {
+                    Log.Warning($"[CMM] Loudness: {Path.GetFileName(filePath)} too large to buffer " +
+                                "— skipping normalization (plays at unity gain).");
+                    return fail;
+                }
+                raw = File.ReadAllBytes(filePath);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[CMM] Loudness: could not read {Path.GetFileName(filePath)}: {ex.Message}");
+                return fail;
+            }
+
+            string hash = LoudnessStore.HashBytes(raw, raw.Length);
+            string ext = Path.GetExtension(filePath).ToLower();
+            bool isOpus = ext == ".opus" ||
+                ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(raw));
+
+            WaveStream reader = null;
+            try
+            {
+                if (isOpus)
+                {
+                    OggPageIndex index = OggPageIndex.BuildFromBytes(raw, filePath);
+                    reader = new SeekableOpusReader(raw, index, filePath);
+                }
+                else
+                {
+                    reader = OpenReaderFromMemory(raw, ext, filePath);
+                }
+                if (reader == null) return fail;
+
+                LoudnessResult result = AnalyzeToEnd(reader, filePath);
+                if (!result.Valid) return fail;
+
+                return new TrackLoudness
+                {
+                    Ok = true,
+                    Hash = hash,
+                    Size = size,
+                    Lufs = result.IntegratedLufs,
+                    Peak = result.SamplePeak,
+                };
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[CMM] Loudness: measure failed for {Path.GetFileName(filePath)}: {ex.Message}");
+                return fail;
+            }
+            finally
+            {
+                reader?.Dispose();
+            }
+        }
+
+        // Pulls the whole stream through the R128 analyzer. Uses SeekableOpusReader's
+        // ReadFloats fast path for Opus (it already outputs IEEE float), and the same
+        // PCM→float conversion as the clip factory for everything else.
+        private static LoudnessResult AnalyzeToEnd(WaveStream reader, string filePath)
+        {
+            var buf = new float[16384];
+
+            if (reader is SeekableOpusReader opus)
+            {
+                var analyzer = new R128Analyzer(reader.WaveFormat.SampleRate, reader.WaveFormat.Channels);
+                int n;
+                while ((n = opus.ReadFloats(buf, 0, buf.Length)) > 0)
+                    analyzer.Feed(buf, n);
+                return analyzer.Finish();
+            }
+
+            var enc = reader.WaveFormat.Encoding;
+            int bps = reader.WaveFormat.BitsPerSample;
+            ISampleProvider src;
+            if (enc == WaveFormatEncoding.IeeeFloat)
+                src = reader.ToSampleProvider();
+            else if (enc == WaveFormatEncoding.Pcm && (bps == 8 || bps == 16 || bps == 24 || bps == 32))
+                src = new PcmToFloatProvider(reader);
+            else
+            {
+                Log.Warning($"[CMM] Loudness: '{Path.GetFileName(filePath)}' unsupported encoding " +
+                            $"'{enc}' {bps}bit — skipping normalization.");
+                return new LoudnessResult { Valid = false };
+            }
+
+            var analyzer2 = new R128Analyzer(src.WaveFormat.SampleRate, src.WaveFormat.Channels);
+            int read;
+            while ((read = src.Read(buf, 0, buf.Length)) > 0)
+                analyzer2.Feed(buf, read);
+            return analyzer2.Finish();
         }
 
         // ── PCM → float converter ─────────────────────────────────────────────

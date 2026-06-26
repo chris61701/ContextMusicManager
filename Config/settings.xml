@@ -4,6 +4,22 @@
   <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
   <VolumeModifier>0.5</VolumeModifier>
 
+  <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
+       When enabled, each track is measured once (integrated LUFS) and played back
+       at a per-track gain so quiet and loud tracks sit at a consistent perceived
+       level. Measurements are cached in Cache/loudness.xml (keyed by file content,
+       so renames/moves keep their value). The first time a track is needed it is
+       measured up-front; a background sweep pre-measures the rest.
+         LoudnessTargetLufs  – reference level. Sits below 0 so most corrections are
+                               attenuations; AudioSource volume can't exceed 1.0, so
+                               very quiet tracks boost only as far as VolumeModifier
+                               leaves headroom (≈2× at the 0.5 default).
+         LoudnessMaxBoostDb  – cap on how much a quiet track may be boosted (dB).
+                               Attenuation is uncapped. -->
+  <LoudnessNormalizationEnabled>true</LoudnessNormalizationEnabled>
+  <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
+  <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
+
   <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
        Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
        Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
