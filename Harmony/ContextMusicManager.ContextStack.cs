@@ -363,22 +363,90 @@ namespace CMM
         }
 
         // ── Cache cleanup ─────────────────────────────────────────────────────
-        // Called on game exit to release all AudioClips and WaveStreams so Unity
-        // and NAudio can reclaim the memory before the menu screen loads.
+        // Releases all AudioClips and WaveStreams so Unity and NAudio can reclaim
+        // the memory before the menu screen loads. Immediate (hard-cut) form — the
+        // game-exit path uses FadeOutAndCleanup() to fade first; this remains for the
+        // no-runner fallback and any caller that genuinely wants an instant teardown.
         public static void CleanupAllCaches()
         {
-            // Stop any in-flight music coroutines first so none of them re-triggers
-            // a read (or a fresh play) on a reader we're about to dispose.
+            StopMusicCoroutines();
+            StopAndDetachChannels();
+            DisposeAllCaches();
+        }
+
+        // ── Game-exit graceful teardown ───────────────────────────────────────
+        // Fades the playing channel(s) to silence over the crossfade window, THEN
+        // releases the caches and brings up the menu music — so returning to the menu
+        // fades out instead of hard-cutting (CMM_Audio_Object is DontDestroyOnLoad, so
+        // the fade coroutine survives the world unload). Falls back to the immediate
+        // teardown when no coroutine runner is available.
+        public static void FadeOutAndCleanup()
+        {
+            // Stop the in-flight transition coroutines now (not inside the fade): the
+            // fade below is itself assigned to _crossFadeCoroutine, both so a second
+            // exit can cancel it and so VolumeSyncLoop stays suppressed while it runs.
+            StopMusicCoroutines();
+
+            if (Instance == null || CMM_CoRoutines == null)
+            {
+                StopAndDetachChannels();
+                DisposeAllCaches();
+                SendContextUpdate("Menu");
+                return;
+            }
+
+            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutAndCleanupCoroutine());
+        }
+
+        // Game-exit fade is intentionally longer than the in-game CrossFadeDuration —
+        // a slower, more deliberate fade as the world tears down and the menu loads.
+        private const float ExitFadeDuration = 5f;
+
+        private System.Collections.IEnumerator FadeOutAndCleanupCoroutine()
+        {
+            AudioSource a = ActiveChannel;
+            AudioSource b = InactiveChannel;
+            float aStart = (a != null && a.isPlaying) ? a.volume : 0f;
+            float bStart = (b != null && b.isPlaying) ? b.volume : 0f;
+
+            if (aStart > 0.0001f || bStart > 0.0001f)
+            {
+                float elapsed = 0f;
+                while (elapsed < ExitFadeDuration)
+                {
+                    elapsed += Time.deltaTime;
+                    float t = Mathf.Clamp01(elapsed / ExitFadeDuration);
+                    if (a != null && a.isPlaying) a.volume = Mathf.Lerp(aStart, 0f, t);
+                    if (b != null && b.isPlaying) b.volume = Mathf.Lerp(bStart, 0f, t);
+                    yield return null;
+                }
+            }
+
+            // Faded out — now do the actual teardown the hard-cut path does up front.
+            StopAndDetachChannels();
+            DisposeAllCaches();
+            _crossFadeCoroutine = null;
+
+            // Music has faded and caches are released — bring up the menu music.
+            SendContextUpdate("Menu");
+        }
+
+        // Stop any in-flight music coroutines so none re-triggers a read (or a fresh
+        // play) on a reader we're about to dispose.
+        private static void StopMusicCoroutines()
+        {
             if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
             if (_nextCacheCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);  _nextCacheCoroutine  = null; }
             if (_trackEndCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);   _trackEndCoroutine   = null; }
             if (_crossFadeCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);  _crossFadeCoroutine  = null; }
+        }
 
-            // Stop and detach both channels BEFORE disposing readers. Unity's audio
-            // thread keeps invoking a streaming clip's PCMReaderCallback until the
-            // AudioSource is stopped; disposing the backing WaveStream while a clip
-            // is still playing throws an NRE on every buffer fill (the console spam
-            // seen on a return to the menu).
+        // Stop and detach both channels BEFORE disposing readers. Unity's audio thread
+        // keeps invoking a streaming clip's PCMReaderCallback until the AudioSource is
+        // stopped; disposing the backing WaveStream while a clip is still playing throws
+        // an NRE on every buffer fill (the console spam seen on a return to the menu).
+        private static void StopAndDetachChannels()
+        {
             foreach (var src in new[] { CMM_Primary_Channel, CMM_Secondary_Channel })
             {
                 if (src == null) continue;
@@ -386,10 +454,14 @@ namespace CMM
                 src.clip = null;
                 src.volume = 0f;
             }
+        }
 
-            // Stage every cached clip/reader for deferred disposal (one frame later)
-            // so the audio thread is fully off the clips before their readers are
-            // disposed — same safety guarantee the normal transition path uses.
+        // Stage every cached clip/reader for deferred disposal (one frame later) so the
+        // audio thread is fully off the clips before their readers are disposed — the
+        // same safety guarantee the normal transition path uses — and reset per-context
+        // state.
+        private static void DisposeAllCaches()
+        {
             foreach (var cache in cacheMap.Values)
             {
                 StagePendingDisposal(cache.Current);

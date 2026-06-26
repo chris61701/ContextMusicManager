@@ -194,9 +194,11 @@ namespace CMM
             ContextMusicManager.playerIsDead = true;
             ContextMusicManager._contextStack.Clear();
             ContextMusicManager._pendingContext = "Silence";
-            ContextMusicManager.CleanupAllCaches();
             ScriptHost.Reset();   // clear the Lua script's cross-tick state on world-unload
-            ContextMusicManager.SendContextUpdate("Menu");
+            // Fade the game music out, THEN release caches and bring up the menu music
+            // (FadeOutAndCleanup ends with SendContextUpdate("Menu")), instead of the
+            // old hard-cut CleanupAllCaches() + immediate Menu switch.
+            ContextMusicManager.FadeOutAndCleanup();
         }
     }
 

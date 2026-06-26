@@ -521,8 +521,21 @@ namespace CMM
 
                     string dir = Path.Combine(MusicDirectory, ctx.Path);
 
-                    // ── FAST PATH: single stat ──────────────────────────────────────
+                    bool isActiveContext =
+                        string.Equals(contextName, currentContext.Context, StringComparison.OrdinalIgnoreCase);
+                    // For the ACTIVE context we can't trust the directory write-time:
+                    // exFAT/FAT (e.g. an SD card), some network shares, and junctions do
+                    // NOT reliably bump a folder's mtime when a file is moved/deleted out
+                    // of it, so the stat shortcut would miss the removal of the playing
+                    // track. Instead of enumerating the whole folder every tick (O(n) —
+                    // catastrophic at tens of thousands of files), we ping the ONE file
+                    // that's playing. That single stat is O(1) regardless of folder size;
+                    // a full enumeration only happens once the ping shows it gone.
+                    string playingFile = isActiveContext ? cache.lastPlayedFile : null;
+
+                    // ── FAST PATH: single stat (+ one ping for the active context) ──────
                     DateTime currentWriteTime = DateTime.MinValue;
+                    bool playingFileGone = false;
                     bool statDone = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
@@ -531,6 +544,8 @@ namespace CMM
                             currentWriteTime = Directory.Exists(dir)
                                   ? Directory.GetLastWriteTimeUtc(dir)
                                   : DateTime.MinValue;
+                            if (!string.IsNullOrEmpty(playingFile))
+                                playingFileGone = !File.Exists(playingFile);
                         }
                         catch { }
                         statDone = true;
@@ -546,9 +561,31 @@ namespace CMM
                     // can stamp the empty dir and a re-filled dir with the same timestamp
                     // when the add happens within the same filesystem precision window.
                     bool previouslyEmpty = !neverScanned && (cache.directorySnapshot?.Length ?? 0) == 0;
+                    // Enumerate the active context only when its playing file has actually
+                    // vanished, or while it's riding the borrowed vanilla bed (custom files
+                    // may have just been added back). Otherwise the cheap mtime/ping gate
+                    // below lets us skip the folder walk entirely.
+                    bool activeNeedsScan = isActiveContext && (playingFileGone || cache.Current.Borrowed);
 
-                    if (!neverScanned && !previouslyEmpty && currentWriteTime == knownTime && !blacklistRetryDue) continue;
+                    if (!activeNeedsScan && !neverScanned && !previouslyEmpty
+                        && currentWriteTime == knownTime && !blacklistRetryDue) continue;
                     lastWriteTimes[contextName] = currentWriteTime;
+
+                    // ── FAST REACTION: the ping found the playing file gone ──────────
+                    // We already know exactly what changed, so react off the in-memory
+                    // snapshot (trim the gone file, pick a still-present replacement,
+                    // play it) instead of walking the whole folder. This keeps the
+                    // hot-swap O(1) in folder size — the disk enumeration below would be
+                    // the expensive part at tens of thousands of files. Other adds/removes
+                    // are reconciled lazily (on a later mtime change, or when a stale pick
+                    // fails to open). Borrowed beds still take the slow path: detecting
+                    // custom files ADDED back needs a real enumeration, and that folder is
+                    // empty of custom files so the walk is cheap.
+                    if (isActiveContext && playingFileGone && !cache.Current.Borrowed)
+                    {
+                        yield return StartCoroutine(HotSwapFromMissingPlayingFile(contextName, playingFile));
+                        continue;
+                    }
 
                     // ── SLOW PATH: enumerate files ──────────────────────────────────
                     string[] currentFiles = null;
@@ -827,6 +864,70 @@ namespace CMM
                     _contextsWithFilesDirty = true;
                     _previousPlayableContexts.Clear();
                 }
+            }
+        }
+
+        // ── Hot-swap when the playing file is moved/deleted out from under us ───
+        // Driven by FileWatchLoop's cheap File.Exists ping, NOT a folder walk, so it
+        // stays O(1) in folder size. Trims the gone file from the in-memory snapshot,
+        // picks a replacement that STILL exists on disk (skipping any that have also
+        // been moved out — "check the next one exists too"), and plays it; falls back
+        // when nothing playable remains.
+        private IEnumerator HotSwapFromMissingPlayingFile(string contextName, string goneFile)
+        {
+            ContextCache cache = cacheMap[contextName];
+            CMMConfig.D($"[CMM] Playing file gone (ping): {Path.GetFileName(goneFile)} in {contextName}");
+
+            // Drop the gone file from snapshot + presence + validation bookkeeping.
+            PruneMissingFromSnapshot(contextName, goneFile);
+            _validatedFiles.Remove(goneFile);
+            _invalidFiles.Remove(goneFile);
+
+            // Release the clip that was playing it.
+            cache.lastPlayedFile = null;
+            if (cache.Current.Clip != null && !cache.Current.Borrowed)
+            {
+                StagePendingDisposal(cache.Current);
+                cache.Current = default;
+            }
+
+            // Pick a replacement that still exists, pruning any that have also been
+            // moved out. Each miss is one cheap stat — never a folder walk.
+            string replacement = null;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                string pick = PickNextFile(contextName, avoidFile: goneFile);
+                if (pick == null) break;                       // nothing left
+                if (File.Exists(pick)) { replacement = pick; break; }
+                PruneMissingFromSnapshot(contextName, pick);   // also gone — drop and retry
+            }
+
+            if (replacement != null)
+            {
+                _pendingContext = null;
+                // Hand the verified pick to the loader; PreloadContextCore reuses
+                // lastPlayedFile when it still exists, so it won't re-pick or re-verify.
+                cache.lastPlayedFile = replacement;
+                yield return StartCoroutine(PreloadContext(contextName));
+                if (cache.Current.Clip != null && !cache.Current.Borrowed)
+                {
+                    CMMConfig.D($"[CMM] Hot-swap (ping) to {Path.GetFileName(replacement)} in {contextName}.");
+                    currentContext = GetContext(contextName);
+                    TriggerMusic(contextName);
+                    yield break;
+                }
+            }
+
+            // Nothing playable left — re-evaluate / fall back (mirrors the slow path's
+            // folder-emptied handling).
+            CMMConfig.D($"[CMM] No playable file left in {contextName} after removal — re-evaluating.");
+            _pendingContext = null;
+            if (!inGame)
+                SendContextUpdate(currentContext.Context);
+            else
+            {
+                string fallback = GetTopContext() ?? "Ambient";
+                SendContextUpdate(fallback, 0);
             }
         }
 
