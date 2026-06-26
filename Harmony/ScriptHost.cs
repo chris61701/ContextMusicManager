@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using MoonSharp.Interpreter;
 
 namespace CMM
@@ -8,9 +9,16 @@ namespace CMM
     // ─────────────────────────────────────────────────────────────────────────
     // SCRIPT HOST
     // ─────────────────────────────────────────────────────────────────────────
-    // Hosts the external Lua decision script (Config/context.lua) via MoonSharp.
-    // BuildSnapshot() polls the game into a GameState; this turns that snapshot
-    // into the active context tokens by calling the script's resolve(gameState, cfg).
+    // Hosts the Lua decision script via MoonSharp. ContextResolver.BuildSnapshot()
+    // polls the game into a GameState; this turns that snapshot into the active
+    // context tokens by calling the script's resolve(gameState, cfg). There is no
+    // built-in C# decision path — the script IS the resolver.
+    //
+    // The script is loaded in two tiers, so a working baseline always exists:
+    //   1. on-disk Config/context.lua  — the user-editable copy
+    //   2. embedded default            — the same file baked into the DLL, used when
+    //                                    the on-disk copy is missing or fails to compile
+    //                                    (a user can't corrupt what's inside the assembly)
     //
     // Contract (API v1):
     //   resolve(gameState, cfg) -> table   array of context-token strings (order = intent;
@@ -27,16 +35,18 @@ namespace CMM
     public static class ScriptHost
     {
         const int SupportedApi = 1;
+        const string EmbeddedResourceName = "context.lua";   // see <EmbeddedResource> in the .csproj
 
-        static Script  _script;        // current good interpreter (null until first good load)
-        static Closure _resolveFn;     // resolve(gameState, cfg); null ⇒ host disabled, use built-in path
+        static Script  _script;        // current good interpreter
+        static Closure _resolveFn;     // resolve(gameState, cfg)
         static Closure _resetFn;       // optional reset()
 
         static string   _scriptPath;
-        static DateTime _lastAttemptStamp;   // file write time of the last load ATTEMPT (success or fail),
-                                             // so a broken file isn't re-parsed every reload check
+        static DateTime _lastAttemptStamp;   // write time of the last on-disk load ATTEMPT (success or
+                                             // fail), so a broken file isn't re-parsed every reload check
         static string   _lastLoadError;      // de-dups repeated load-error logging
         static string   _lastRunError;       // de-dups repeated runtime-error logging
+        static bool     _usingEmbedded;      // active script is the DLL-embedded default, not on-disk
 
         // Reused marshalling tables (resolve runs single-threaded on the scan tick),
         // and the last successful token set used as the runtime-error fallback.
@@ -44,10 +54,15 @@ namespace CMM
         static Table _cfgTable;
         static readonly List<string> _lastGood = new List<string>();
 
-        // True when a good script is loaded and the built-in C# resolver should defer
-        // to it. False ⇒ no script (missing/broken on first load) ⇒ caller keeps the
-        // built-in behavior.
+        // A script is essentially always loaded (on-disk override or embedded default);
+        // Active is false only if even the embedded baseline fails to compile (e.g.
+        // MoonSharp can't run), in which case ResolveContext returns no contexts.
         public static bool Active => _resolveFn != null;
+
+        // Diagnostics (debug HUD): whether the embedded default is in use, and the
+        // most recent resolved token set.
+        public static bool UsingEmbeddedDefault => _usingEmbedded;
+        public static IReadOnlyList<string> LastContexts => _lastGood;
 
         public static string ScriptPath(string modPath) =>
             Path.Combine(modPath, "Config", "context.lua");
@@ -60,8 +75,8 @@ namespace CMM
             TryLoad();
         }
 
-        // Cheap stamp check; reloads only when the file's write time changed since the
-        // last attempt. Call from the existing config-watch loop.
+        // Cheap stamp check; reloads only when the on-disk file's write time changed
+        // since the last attempt. Call from the existing config-watch loop.
         public static void CheckReload()
         {
             if (_scriptPath == null) return;
@@ -73,39 +88,84 @@ namespace CMM
             catch { /* transient IO during an external save — retry next check */ }
         }
 
+        // Tier 1: on-disk Config/context.lua. Tier 2: the embedded default — used when
+        // the on-disk copy is missing or fails to compile, so there is ALWAYS a working
+        // baseline a user can't corrupt.
         static void TryLoad()
         {
-            if (!File.Exists(_scriptPath))
+            if (File.Exists(_scriptPath))
             {
-                // Only a problem once — log a single notice and stay on the built-in path.
-                LogLoadError($"context.lua not found at {_scriptPath} — using built-in resolver.");
+                // Record the attempt stamp up front so a file that fails to load isn't
+                // re-parsed on every CheckReload; a fresh edit (new stamp) retries.
+                try { _lastAttemptStamp = File.GetLastWriteTimeUtc(_scriptPath); } catch { }
+
+                string src = null;
+                try { src = File.ReadAllText(_scriptPath); }
+                catch (Exception ex) { LogLoadError($"context.lua read failed: {ex.Message} — using embedded default."); }
+
+                if (src != null && TryCompile(src, "context.lua", "Config/context.lua"))
+                {
+                    _usingEmbedded = false;
+                    return;
+                }
+                // Present but unreadable or broken → fall back to the embedded baseline.
+                LoadEmbedded();
                 return;
             }
 
-            // Record the attempt stamp up front so a file that fails to load isn't
-            // re-parsed on every CheckReload; a fresh edit (new stamp) retries.
-            try { _lastAttemptStamp = File.GetLastWriteTimeUtc(_scriptPath); } catch { }
+            // No on-disk override → embedded baseline.
+            LoadEmbedded();
+        }
 
+        static void LoadEmbedded()
+        {
+            string src = ReadEmbeddedDefault();
+            if (src == null)
+            {
+                LogLoadError("embedded default context.lua is missing from the assembly — no resolver available!");
+                return;
+            }
+            if (TryCompile(src, "context.lua", "embedded default context.lua"))
+                _usingEmbedded = true;
+        }
+
+        static string ReadEmbeddedDefault()
+        {
+            try
+            {
+                using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream(EmbeddedResourceName))
+                {
+                    if (s == null) return null;
+                    using (var r = new StreamReader(s)) return r.ReadToEnd();
+                }
+            }
+            catch { return null; }
+        }
+
+        // Compiles + validates a script source. On success swaps it in as the active
+        // interpreter (with fresh reused marshalling tables) and returns true; on failure
+        // logs (rate-limited) and returns false, leaving the previous good script in place.
+        static bool TryCompile(string source, string codeName, string origin)
+        {
             try
             {
                 var script = NewSandbox();
-                script.DoString(File.ReadAllText(_scriptPath), null, "context.lua");
+                script.DoString(source, null, codeName);
 
                 DynValue ver = script.Globals.Get("API_VERSION");
                 if (ver.Type != DataType.Number || (int)ver.Number != SupportedApi)
                 {
-                    LogLoadError($"context.lua targets API {DescribeApi(ver)} but this build supports v{SupportedApi} — keeping previous script.");
-                    return;
+                    LogLoadError($"{origin} targets API {DescribeApi(ver)} but this build supports v{SupportedApi}.");
+                    return false;
                 }
 
                 DynValue resolve = script.Globals.Get("resolve");
                 if (resolve.Type != DataType.Function)
                 {
-                    LogLoadError("context.lua defines no resolve(gameState, cfg) function — keeping previous script.");
-                    return;
+                    LogLoadError($"{origin} defines no resolve(gameState, cfg) function.");
+                    return false;
                 }
 
-                // Commit: swap in the new interpreter and its reused marshalling tables.
                 _script    = script;
                 _resolveFn = resolve.Function;
                 DynValue reset = script.Globals.Get("reset");
@@ -115,15 +175,18 @@ namespace CMM
 
                 _lastLoadError = null;
                 _lastRunError  = null;
-                Log.Out($"[CMM] context.lua loaded (API v{SupportedApi}).");
+                Log.Out($"[CMM] {origin} loaded (API v{SupportedApi}).");
+                return true;
             }
             catch (SyntaxErrorException ex)
             {
-                LogLoadError($"context.lua syntax error: {ex.DecoratedMessage} — keeping previous script.");
+                LogLoadError($"{origin} syntax error: {ex.DecoratedMessage}");
+                return false;
             }
             catch (Exception ex)
             {
-                LogLoadError($"context.lua load failed: {ex.Message} — keeping previous script.");
+                LogLoadError($"{origin} load failed: {ex.Message}");
+                return false;
             }
         }
 
@@ -172,7 +235,7 @@ namespace CMM
             return new List<string>(_lastGood);
         }
 
-        // Calls the script's reset() (world-unload hook). Mirrors ContextResolver.resetValues().
+        // Calls the script's reset() — the world-unload hook that clears its cross-tick state.
         public static void Reset()
         {
             if (_resetFn == null) return;

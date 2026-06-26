@@ -8,10 +8,10 @@ namespace CMM
     // ─────────────────────────────────────────────────────────────────────────
     // DEBUG HUD
     // ─────────────────────────────────────────────────────────────────────────
-    // A small top-left overlay showing the live CombatThreat state, for tuning
-    // weights/tiers against real encounters. Toggled with Numpad 8; hidden by
-    // default and purely diagnostic — it reads the snapshot ResolveContext
-    // publishes each scan tick and never influences playback.
+    // A small top-left overlay showing the active decision source (the on-disk
+    // context.lua or the embedded default), the context currently playing, and the
+    // tokens the script last resolved. Toggled with Numpad 8; hidden by default and
+    // purely diagnostic — it reads ScriptHost state and never influences playback.
 
     public partial class ContextMusicManager
     {
@@ -23,11 +23,11 @@ namespace CMM
 
         private void Update()
         {
-            // Numpad 8 toggles the threat HUD. Cheap per-frame check, no allocation.
+            // Numpad 8 toggles the HUD. Cheap per-frame check, no allocation.
             if (Input.GetKeyDown(KeyCode.Keypad8))
             {
                 _threatHudVisible = !_threatHudVisible;
-                CMMConfig.D($"[CMM] Threat HUD {(_threatHudVisible ? "shown" : "hidden")}.");
+                CMMConfig.D($"[CMM] Context HUD {(_threatHudVisible ? "shown" : "hidden")}.");
             }
         }
 
@@ -37,33 +37,22 @@ namespace CMM
 
             EnsureHudStyles();
 
-            string body;
-            if (ContextResolver.ThreatScoringActive)
-            {
-                string tier = ContextResolver.ThreatTier >= 0
-                    ? $"{ContextResolver.ThreatTierContext}  (tier {ContextResolver.ThreatTier})"
-                    : "None";
-                body =
-                    $"Score:      {ContextResolver.ThreatScore:F1}\n" +
-                    $"Tier:       {tier}\n" +
-                    $"In combat:  {(ContextResolver.InCombat ? "yes" : "no")}\n" +
-                    $"Targeting:  {ContextResolver.EnemyAggroCount}    Alert: {ContextResolver.EnemyAlertCount}    Nearby: {ContextResolver.EnemiesNearby}\n" +
-                    $"Playing:    {currentContext?.Context ?? "null"}";
-            }
-            else
-            {
-                body =
-                    "CombatThreat disabled\n(using legacy enemy counts)\n" +
-                    $"Targeting:  {ContextResolver.EnemyAggroCount}    Alert: {ContextResolver.EnemyAlertCount}    Nearby: {ContextResolver.EnemiesNearby}\n" +
-                    $"Playing:    {currentContext?.Context ?? "null"}";
-            }
+            string source = ScriptHost.Active
+                ? (ScriptHost.UsingEmbeddedDefault ? "context.lua (embedded default)" : "context.lua")
+                : "NONE — script failed to load";
+            var resolved = ScriptHost.LastContexts;
+            string active = (resolved != null && resolved.Count > 0) ? string.Join(", ", resolved) : "(none)";
+            string body =
+                $"Source:   {source}\n" +
+                $"Playing:  {currentContext?.Context ?? "null"}\n" +
+                $"Resolved: {active}";
 
-            const float x = 10f, y = 10f, w = 360f, h = 132f;
+            const float x = 10f, y = 10f, w = 420f, h = 150f;
             var box = new Rect(x, y, w, h);
 
             // Dark translucent backdrop so the text stays legible over any scene.
             GUI.DrawTexture(box, _hudBgTex, ScaleMode.StretchToFill);
-            GUI.Label(new Rect(x + 12f, y + 8f, w - 24f, 22f), "CMM • Combat Threat  [Num8]", _hudHeaderStyle);
+            GUI.Label(new Rect(x + 12f, y + 8f, w - 24f, 22f), "CMM • Context  [Num8]", _hudHeaderStyle);
             GUI.Label(new Rect(x + 12f, y + 34f, w - 24f, h - 40f), body, _hudBodyStyle);
         }
 
@@ -81,7 +70,7 @@ namespace CMM
                 {
                     fontSize = 14,
                     alignment = TextAnchor.UpperLeft,
-                    wordWrap = false
+                    wordWrap = true
                 };
                 _hudBodyStyle.normal.textColor = Color.white;
             }

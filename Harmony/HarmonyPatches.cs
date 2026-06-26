@@ -195,8 +195,7 @@ namespace CMM
             ContextMusicManager._contextStack.Clear();
             ContextMusicManager._pendingContext = "Silence";
             ContextMusicManager.CleanupAllCaches();
-            ContextResolver.resetValues();
-            ScriptHost.Reset();   // clear the Lua script's cross-tick state too
+            ScriptHost.Reset();   // clear the Lua script's cross-tick state on world-unload
             ContextMusicManager.SendContextUpdate("Menu");
         }
     }

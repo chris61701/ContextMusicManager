@@ -125,6 +125,13 @@
     <Content Include="Config\**\*" Exclude="Config\Localization.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Embed the canonical default context.lua so a missing or corrupt on-disk copy
+         falls back to a tamper-proof baseline compiled into the DLL (ScriptHost tier 2).
+         The same file is also copied to Config/ (above) as the user-editable copy, so
+         there is exactly one source of truth. LogicalName keeps the resource id stable. -->
+    <EmbeddedResource Include="Config\context.lua">
+      <LogicalName>context.lua</LogicalName>
+    </EmbeddedResource>
     <Content Include="THIRD_PARTY_NOTICES.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
