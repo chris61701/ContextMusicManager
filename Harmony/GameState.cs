@@ -3,9 +3,9 @@ using System.Collections.Generic;
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
-    // GAME SNAPSHOT
+    // GAME STATE
     // ─────────────────────────────────────────────────────────────────────────
-    // A version-agnostic reading of everything the context decision logic needs,
+    // A version-agnostic snapshot of everything the context decision logic needs,
     // captured once per scan tick by ContextResolver.BuildSnapshot(). All of the
     // game-version forks (#if GV_A20 / GV_A21 / GV_V3) live in BuildSnapshot; from
     // here on the data is plain primitives, so the decision layer — and the Lua
@@ -26,7 +26,7 @@ namespace CMM
         public bool   IsTargetingPlayer;
     }
 
-    public sealed class GameSnapshot
+    public sealed class GameState
     {
         public float Now;                 // Time.realtimeSinceStartup — the script never reads engine time
         public bool  IsDay;

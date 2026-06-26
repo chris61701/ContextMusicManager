@@ -9,11 +9,11 @@ namespace CMM
     // SCRIPT HOST
     // ─────────────────────────────────────────────────────────────────────────
     // Hosts the external Lua decision script (Config/context.lua) via MoonSharp.
-    // BuildSnapshot() polls the game into a GameSnapshot; this turns that snapshot
-    // into the active context tokens by calling the script's resolve(snap, cfg).
+    // BuildSnapshot() polls the game into a GameState; this turns that snapshot
+    // into the active context tokens by calling the script's resolve(gameState, cfg).
     //
     // Contract (API v1):
-    //   resolve(snap, cfg) -> table   array of context-token strings (order = intent;
+    //   resolve(gameState, cfg) -> table   array of context-token strings (order = intent;
     //                                  the host dedups). Non-table / nil return ⇒ no
     //                                  contexts this tick (not an error).
     //   reset()                       optional; clears the script's cross-tick state.
@@ -29,7 +29,7 @@ namespace CMM
         const int SupportedApi = 1;
 
         static Script  _script;        // current good interpreter (null until first good load)
-        static Closure _resolveFn;     // resolve(snap, cfg); null ⇒ host disabled, use built-in path
+        static Closure _resolveFn;     // resolve(gameState, cfg); null ⇒ host disabled, use built-in path
         static Closure _resetFn;       // optional reset()
 
         static string   _scriptPath;
@@ -40,7 +40,7 @@ namespace CMM
 
         // Reused marshalling tables (resolve runs single-threaded on the scan tick),
         // and the last successful token set used as the runtime-error fallback.
-        static Table _snapTable;
+        static Table _gameStateTable;
         static Table _cfgTable;
         static readonly List<string> _lastGood = new List<string>();
 
@@ -101,7 +101,7 @@ namespace CMM
                 DynValue resolve = script.Globals.Get("resolve");
                 if (resolve.Type != DataType.Function)
                 {
-                    LogLoadError("context.lua defines no resolve(snap, cfg) function — keeping previous script.");
+                    LogLoadError("context.lua defines no resolve(gameState, cfg) function — keeping previous script.");
                     return;
                 }
 
@@ -110,7 +110,7 @@ namespace CMM
                 _resolveFn = resolve.Function;
                 DynValue reset = script.Globals.Get("reset");
                 _resetFn   = reset.Type == DataType.Function ? reset.Function : null;
-                _snapTable = new Table(script);
+                _gameStateTable = new Table(script);
                 _cfgTable  = new Table(script);
 
                 _lastLoadError = null;
@@ -129,18 +129,18 @@ namespace CMM
 
         // ── Resolve ───────────────────────────────────────────────────────────
 
-        // Runs resolve(snap, cfg) and returns the deduped, order-preserving token list.
+        // Runs resolve(gameState, cfg) and returns the deduped, order-preserving token list.
         // On any error returns the last good token set (empty before the first success),
         // so a faulty script degrades silently instead of throwing on the scan tick.
-        public static List<string> Resolve(GameSnapshot snap)
+        public static List<string> Resolve(GameState gameState)
         {
-            if (_resolveFn == null || snap == null) return new List<string>();
+            if (_resolveFn == null || gameState == null) return new List<string>();
 
             try
             {
-                MarshalSnapshot(snap);
+                MarshalSnapshot(gameState);
                 MarshalConfig();
-                DynValue result = _script.Call(_resolveFn, _snapTable, _cfgTable);
+                DynValue result = _script.Call(_resolveFn, _gameStateTable, _cfgTable);
 
                 var tokens = new List<string>();
                 if (result.Type == DataType.Table)
@@ -206,13 +206,13 @@ namespace CMM
             return DynValue.NewBoolean(hit);
         }
 
-        // cmm.count(snap, filter) -> number : counts snap.enemies passing the filter
+        // cmm.count(gameState, filter) -> number : counts gameState.enemies passing the filter
         // table { targetingPlayer = bool, alert = bool, within = number }.
         static DynValue Cmm_Count(ScriptExecutionContext ctx, CallbackArguments args)
         {
-            Table snapT = args.Count > 0 && args[0].Type == DataType.Table ? args[0].Table : null;
-            if (snapT == null) return DynValue.NewNumber(0);
-            DynValue enemiesDv = snapT.Get("enemies");
+            Table gameStateT = args.Count > 0 && args[0].Type == DataType.Table ? args[0].Table : null;
+            if (gameStateT == null) return DynValue.NewNumber(0);
+            DynValue enemiesDv = gameStateT.Get("enemies");
             if (enemiesDv.Type != DataType.Table) return DynValue.NewNumber(0);
 
             Table filt = args.Count > 1 && args[1].Type == DataType.Table ? args[1].Table : null;
@@ -242,31 +242,31 @@ namespace CMM
             return DynValue.NewBoolean(c != null && ContextMusicManager.ContextHasFiles(c));
         }
 
-        // ── Marshalling: GameSnapshot / CMMConfig → reused Lua tables ──────────
+        // ── Marshalling: GameState / CMMConfig → reused Lua tables ──────────
 
-        static void MarshalSnapshot(GameSnapshot s)
+        static void MarshalSnapshot(GameState gameState)
         {
-            Table t = _snapTable;
-            t["now"]         = s.Now;
-            t["isDay"]       = s.IsDay;
-            t["isBloodMoon"] = s.IsBloodMoon;
-            t["healthPct"]   = s.HealthPct;
-            t["isSwimming"]  = s.IsSwimming;
-            t["isPanicked"]  = s.IsPanicked;
-            t["vehicleType"] = s.VehicleType;   // null ⇒ Lua nil
-            t["traderName"]  = s.TraderName;
-            t["biome"]       = s.Biome;
-            t["nearHome"]    = s.NearHome;
-            t["inPoi"]       = s.InPoi;
-            t["poiName"]     = s.PoiName;
-            t["poiTier"]     = s.PoiTier;
-            t["poiEnemiesRemaining"] = s.PoiEnemiesRemaining;
+            Table t = _gameStateTable;
+            t["now"]         = gameState.Now;
+            t["isDay"]       = gameState.IsDay;
+            t["isBloodMoon"] = gameState.IsBloodMoon;
+            t["healthPct"]   = gameState.HealthPct;
+            t["isSwimming"]  = gameState.IsSwimming;
+            t["isPanicked"]  = gameState.IsPanicked;
+            t["vehicleType"] = gameState.VehicleType;   // null ⇒ Lua nil
+            t["traderName"]  = gameState.TraderName;
+            t["biome"]       = gameState.Biome;
+            t["nearHome"]    = gameState.NearHome;
+            t["inPoi"]       = gameState.InPoi;
+            t["poiName"]     = gameState.PoiName;
+            t["poiTier"]     = gameState.PoiTier;
+            t["poiEnemiesRemaining"] = gameState.PoiEnemiesRemaining;
 
             // Fresh enemies array each tick — the count varies, and the per-enemy
             // tables are tiny; building them is well within the sub-Hz scan budget.
             Table enemies = new Table(_script);
             int i = 1;
-            foreach (var e in s.Enemies)
+            foreach (var e in gameState.Enemies)
             {
                 Table er = new Table(_script);
                 er["className"]         = e.ClassName;   // null ⇒ Lua nil

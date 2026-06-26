@@ -131,7 +131,7 @@
     <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\ContextMusicManager.cs" />
     <Compile Include="Harmony\DataStructures.cs" />
-    <Compile Include="Harmony\GameSnapshot.cs" />
+    <Compile Include="Harmony\GameState.cs" />
     <Compile Include="Harmony\CMMConfig.cs" />
     <Compile Include="Harmony\NAudioDecoder.cs" />
     <Compile Include="Harmony\LoudnessAnalyzer.cs" />

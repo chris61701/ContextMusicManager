@@ -8,7 +8,7 @@ namespace CMM
     // CONTEXT RESOLVER
     // ─────────────────────────────────────────────────────────────────────────
     // Two stages:
-    //   BuildSnapshot()  — polls the game into a version-agnostic GameSnapshot.
+    //   BuildSnapshot()  — polls the game into a version-agnostic GameState.
     //                      ALL game-version forks (#if GV_*) live here.
     //   ResolveContext() — turns the snapshot into the active context tokens.
     //                      Pure decision logic; touches no raw game types. This is
@@ -40,10 +40,10 @@ namespace CMM
         static string lastPoI = "None";
 
         // Reused snapshot + buffers. ResolveContext runs once per scan tick on the
-        // main thread (never re-entrant), so a single shared GameSnapshot, the
+        // main thread (never re-entrant), so a single shared GameState, the
         // entity scratch list, and a pool of EnemyInfo objects let the whole
         // per-tick poll run without allocating after warmup.
-        static readonly GameSnapshot _snapshot = new GameSnapshot();
+        static readonly GameState _gameState = new GameState();
         static readonly List<Entity> _entityScratch = new List<Entity>();
         static readonly List<EnemyInfo> _enemyPool = new List<EnemyInfo>();
 
@@ -101,30 +101,30 @@ namespace CMM
 #endif
 
         // ─────────────────────────────────────────────────────────────────────
-        // STAGE 1 — POLL: game state → version-agnostic GameSnapshot
+        // STAGE 1 — POLL: game state → version-agnostic GameState
         // ─────────────────────────────────────────────────────────────────────
         // Every #if GV_* fork lives in this method. Returns null when the world or
         // primary player isn't available yet; callers treat that as "no contexts".
-        public static GameSnapshot BuildSnapshot()
+        public static GameState BuildSnapshot()
         {
             var world = GameManager.Instance?.World;
             var player = world?.GetPrimaryPlayer();
             if (world == null || player == null) return null;
             var localPlayer = player as EntityPlayerLocal;
 
-            var snap = _snapshot;
-            snap.Now   = Time.realtimeSinceStartup;
-            snap.IsDay = world.IsDaytime();
+            var gameState = _gameState;
+            gameState.Now   = Time.realtimeSinceStartup;
+            gameState.IsDay = world.IsDaytime();
             // World.isEventBloodMoon is public in 2.6/3.0 but private in A20/A21; the
             // Alphas fall back to the player's public EntityAlive.IsBloodMoon flag, which
             // is set while a blood moon is active.
-            snap.IsBloodMoon =
+            gameState.IsBloodMoon =
 #if GV_A20 || GV_A21
                 player.IsBloodMoon;
 #else
                 world.isEventBloodMoon;
 #endif
-            snap.HealthPct = player.Health / (float)player.GetMaxHealth();
+            gameState.HealthPct = player.Health / (float)player.GetMaxHealth();
 
             // Swimming: in deep enough water to swim (not mere shallow wading). The
             // 8s WarmUp dwell on the context keeps brief dips from interrupting music.
@@ -133,22 +133,22 @@ namespace CMM
             // inWaterPercent > 0.4f covers waist-deep+; the game's own speed-reduction
             // starts at 0.3f, so 0.4f safely clears shallow ankle/knee wading.
 #if GV_A20
-            snap.IsSwimming = player.isSwimming || player.inWaterPercent > 0.4f;
+            gameState.IsSwimming = player.isSwimming || player.inWaterPercent > 0.4f;
 #else
-            snap.IsSwimming = player.IsSwimming();
+            gameState.IsSwimming = player.IsSwimming();
 #endif
 
-            snap.IsPanicked = localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked;
+            gameState.IsPanicked = localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked;
 
             // Vehicle: store the lowercased type name; the token mapping is a decision.
-            snap.VehicleType = player.AttachedToEntity is EntityVehicle vehicle
+            gameState.VehicleType = player.AttachedToEntity is EntityVehicle vehicle
                 ? vehicle.GetType().Name.ToLower()
                 : null;
 
             // Trader detection: mirror the game's actual check — player must be inside the
             // prefab's protect bounds AND the trader must be open (daytime). TraderName is
             // left null unless both hold; "" means open but unnamed (still → generic Trader).
-            snap.TraderName = null;
+            gameState.TraderName = null;
             TraderArea traderArea = world.GetTraderAreaAt(player.GetBlockPosition());
             if (traderArea != null)
             {
@@ -161,7 +161,7 @@ namespace CMM
                     FindTraderForArea(world, traderArea);
 #endif
                 if (traderEntity?.TraderInfo?.IsOpen == true)
-                    snap.TraderName = traderEntity.EntityName?.ToLower() ?? "";
+                    gameState.TraderName = traderEntity.EntityName?.ToLower() ?? "";
             }
 
             // Biome: store the raw name. null when the chunk at the player's position
@@ -170,7 +170,7 @@ namespace CMM
             // non-null empty) means the chunk is loaded but the name is unrecognized,
             // which still yields the generic Ambient base — matching the old behavior.
             var biome = world.GetBiome((int)player.position.x, (int)player.position.z);
-            snap.Biome = biome != null ? (biome.m_sBiomeName ?? "") : null;
+            gameState.Biome = biome != null ? (biome.m_sBiomeName ?? "") : null;
 
             // ── Enemy scan ────────────────────────────────────────────────────
             // Range-gate ALL combat/tension counts here so the decision layer never
@@ -179,7 +179,7 @@ namespace CMM
             // this loop runs, which causes InvalidOperationException on the live list.
             // EnemyInfo instances are drawn from a pool so refilling Enemies each tick
             // doesn't allocate.
-            snap.Enemies.Clear();
+            gameState.Enemies.Clear();
             _entityScratch.Clear();
             _entityScratch.AddRange(world.Entities.list);
             int used = 0;
@@ -205,12 +205,12 @@ namespace CMM
                     info.Distance          = dist;
                     info.IsAlert           = alert;
                     info.IsTargetingPlayer = targeting;
-                    snap.Enemies.Add(info);
+                    gameState.Enemies.Add(info);
                 }
             }
 
             // ── Home ──────────────────────────────────────────────────────────
-            snap.NearHome = false;
+            gameState.NearHome = false;
             if (localPlayer != null)
             {
                 // persistentPlayerData is null on the entity for the entire first session of a
@@ -242,15 +242,15 @@ namespace CMM
                             }
                         }
                     }
-                    snap.NearHome = nearHome;
+                    gameState.NearHome = nearHome;
                 }
             }
 
             // ── POI ───────────────────────────────────────────────────────────
-            snap.InPoi = false;
-            snap.PoiName = "None";
-            snap.PoiTier = 0;
-            snap.PoiEnemiesRemaining = 0;
+            gameState.InPoi = false;
+            gameState.PoiName = "None";
+            gameState.PoiTier = 0;
+            gameState.PoiEnemiesRemaining = 0;
             PrefabInstance prefab = world?.GetPOIAtPosition(player.position);
             if (prefab != null)
             {
@@ -278,13 +278,13 @@ namespace CMM
                             $"volumes={totalVolumes} cleared={clearedVolumes} excluded={excludedVolumes} remaining={enemiesRemainingInPoi} " +
                             $"wasInfested={wasInfested} lastPoI={lastPoI}");
 
-                snap.InPoi = true;
-                snap.PoiName = currentPoI;
-                snap.PoiTier = tier;
-                snap.PoiEnemiesRemaining = enemiesRemainingInPoi;
+                gameState.InPoi = true;
+                gameState.PoiName = currentPoI;
+                gameState.PoiTier = tier;
+                gameState.PoiEnemiesRemaining = enemiesRemainingInPoi;
             }
 
-            return snap;
+            return gameState;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -293,13 +293,13 @@ namespace CMM
         public static List<string> ResolveContext()
         {
             //Stopwatch sw = Stopwatch.StartNew();
-            var snap = BuildSnapshot();
-            if (snap == null) return new List<string>();
+            var gameState = BuildSnapshot();
+            if (gameState == null) return new List<string>();
 
             var activeContexts = new List<string>();
-            bool isDay = snap.IsDay;
-            bool isBloodmoon = snap.IsBloodMoon;
-            float healthPct = snap.HealthPct;
+            bool isDay = gameState.IsDay;
+            bool isBloodmoon = gameState.IsBloodMoon;
+            float healthPct = gameState.HealthPct;
 
             // Derive the combat/tension counts (and weighted threat score) from the
             // snapshot's range-filtered enemy list. The per-enemy class-name scoring is
@@ -308,7 +308,7 @@ namespace CMM
             bool useThreatScore = threatCfg != null && threatCfg.IsConfigured;
             float threatScore = 0f;
             int enemyAggroCount = 0, enemyAlertCount = 0, enemiesNearby = 0;
-            foreach (var e in snap.Enemies)
+            foreach (var e in gameState.Enemies)
             {
                 enemiesNearby++;
                 if (e.IsAlert)
@@ -322,11 +322,11 @@ namespace CMM
                 }
             }
 
-            if (snap.IsSwimming) activeContexts.Add("Swimming");
+            if (gameState.IsSwimming) activeContexts.Add("Swimming");
 
-            if (snap.VehicleType != null)
+            if (gameState.VehicleType != null)
             {
-                string vn = snap.VehicleType;
+                string vn = gameState.VehicleType;
                 activeContexts.Add("Vehicle");
                 if (vn.Contains("gyrocopter")) activeContexts.Add("Vehicle_Gyrocopter");
                 else if (vn.Contains("bicycle")) activeContexts.Add("Vehicle_Bicycle");
@@ -335,9 +335,9 @@ namespace CMM
                 else if (vn.Contains("jeep")) activeContexts.Add("Vehicle_4x4");
             }
 
-            if (snap.TraderName != null)
+            if (gameState.TraderName != null)
             {
-                string n = snap.TraderName;
+                string n = gameState.TraderName;
                 string specific = null;
                 if (n.Contains("jen")) specific = "Trader_Jen";
                 else if (n.Contains("rekt")) specific = "Trader_Rekt";
@@ -348,13 +348,13 @@ namespace CMM
             }
 
             // Map the raw biome name to a token ONCE. Both the combat block (biome-specific
-            // combat music) and the ambient block at the end consume it. snap.Biome is null
+            // combat music) and the ambient block at the end consume it. gameState.Biome is null
             // when the player's chunk isn't streamed in; biomeToken stays "" in that case,
             // so combat falls back to the plain tier and the ambient block is skipped.
             string biomeToken = "";
-            if (snap.Biome != null)
+            if (gameState.Biome != null)
             {
-                switch (snap.Biome)
+                switch (gameState.Biome)
                 {
                     case "pine_forest":  biomeToken = "Forest"; break;
                     case "desert":       biomeToken = "Desert"; break;
@@ -383,7 +383,7 @@ namespace CMM
                 }
             }
 
-            float now = snap.Now;
+            float now = gameState.Now;
             bool inCombat = false;
 
             // The combat tier is held by lastAggroTime — not the instantaneous count/score —
@@ -438,7 +438,7 @@ namespace CMM
                 // all the way to Combat_Boss. Boss stays reserved for an actual high threat
                 // score. Gated by PanickedBridgeAllowed(): only when we have no combat music
                 // of our own, so this stays a pure vanilla-fallback bridge (see its note).
-                if (!inCombat && PanickedBridgeAllowed() && snap.IsPanicked)
+                if (!inCombat && PanickedBridgeAllowed() && gameState.IsPanicked)
                 {
                     int bridgeTier = threatCfg.Tiers.FindIndex(t => t.Context == "Combat_High");
                     // No tier literally named Combat_High: fall back to the second-from-top
@@ -494,7 +494,7 @@ namespace CMM
                 // detection range and criteria differ from ours, so we mirror it here.
                 // Gated by PanickedBridgeAllowed(): only when we have no combat music of
                 // our own, so this stays a pure vanilla-fallback bridge (see its note).
-                if (!inCombat && PanickedBridgeAllowed() && snap.IsPanicked)
+                if (!inCombat && PanickedBridgeAllowed() && gameState.IsPanicked)
                 {
                     combatState = "High";
                     lastAggroTime = now;   // treat as live aggro so it sustains through the cooldown tail
@@ -522,13 +522,13 @@ namespace CMM
 
             if (enemiesNearby >= DangerThreshold && enemyAlertCount >= DangerThreshold && !inCombat) activeContexts.Add("Tension");
 
-            if (snap.NearHome) activeContexts.Add(isDay ? "Home" : "Home_Night");
+            if (gameState.NearHome) activeContexts.Add(isDay ? "Home" : "Home_Night");
 
-            if (snap.InPoi)
+            if (gameState.InPoi)
             {
-                string currentPoI = snap.PoiName;
-                int tier = snap.PoiTier;
-                int enemiesRemainingInPoi = snap.PoiEnemiesRemaining;
+                string currentPoI = gameState.PoiName;
+                int tier = gameState.PoiTier;
+                int enemiesRemainingInPoi = gameState.PoiEnemiesRemaining;
                 // Only tiers 0–5 have dedicated contexts; anything else falls back to the
                 // tier-less POI / POI_Infested base context.
                 string tierSuffix = (tier >= 0 && tier <= 5) ? "_T" + tier : "";
@@ -551,14 +551,14 @@ namespace CMM
                 wasInfested = false;
             }
 
-            // Guard on the biome being known: snap.Biome is null when the chunk at the
+            // Guard on the biome being known: gameState.Biome is null when the chunk at the
             // player's position isn't loaded yet (e.g. immediately after a debug teleport
             // in A20 before destination chunks stream in). Falling through to "Ambient" in
             // that case would lock in the wrong generic Ambient_Night context for as long as
             // chunks stay unloaded, because the scan loop keeps refreshing it. Skipping the
             // ambient block entirely when the biome is unknown lets the current music continue
             // until the next scan tick when chunks are ready.
-            if (snap.Biome != null)
+            if (gameState.Biome != null)
             {
                 // biomeToken is "" for an unknown biome name, which yields the generic
                 // "Ambient" base — the same fallback the old default: case produced.
