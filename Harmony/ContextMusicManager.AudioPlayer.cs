@@ -86,6 +86,16 @@ namespace CMM
         private static bool _scheduleHandledTransition = false;
         public static bool _gameIsLoading = false;
 
+        // Reused-channel residual quick-fade. When a new context interrupts an
+        // in-flight crossfade, the channel we repurpose for the incoming priority
+        // track may still be playing an audible leftover (the half-arrived previous
+        // track, frozen at whatever volume it reached when its crossfade coroutine
+        // was stopped). Instantly zeroing it clicks. If that residual is above the
+        // threshold we ramp it to silence over this (very short) window first so the
+        // incoming music always fades in cleanly; below it the instant cut is inaudible.
+        private const float ResidualFadeDuration  = 0.12f;
+        private const float ResidualFadeThreshold = 0.1f;
+
         // ── Playback position (version-independent) ───────────────────────────
         // AudioSource.time is unreliable for streaming AudioClip.Create clips on
         // older Unity: A20 (Unity 2020.3) reports ~0 for PCM-callback clips, so the
@@ -416,6 +426,28 @@ namespace CMM
             // borrowed clip plays as a continuous bed. This also suppresses the
             // track-end and next-clip scheduling below (there is no "next" file).
             bool loopThis = ctx.Loop || useGameClip;
+
+            // Quick-silence any audible residual still on the channel we're reusing so
+            // the incoming priority track fades in over silence instead of replacing a
+            // click. This only fires after an interrupted crossfade left the reused
+            // channel playing at a real volume; in the normal idle case the channel is
+            // not playing (volume already 0), so this is skipped and behaviour is
+            // unchanged. The new clip is not assigned until below, so this ramps the
+            // leftover track itself. unscaledDeltaTime so it still progresses if paused.
+            if (incoming.isPlaying && incoming.volume > ResidualFadeThreshold)
+            {
+                float residualStart = incoming.volume;
+                float residualElapsed = 0f;
+                while (residualElapsed < ResidualFadeDuration)
+                {
+                    if (transitionId != _transitionId) yield break;
+                    residualElapsed += Time.unscaledDeltaTime;
+                    incoming.volume = Mathf.Lerp(residualStart, 0f,
+                        Mathf.Clamp01(residualElapsed / ResidualFadeDuration));
+                    yield return null;
+                }
+            }
+
             incoming.loop = loopThis;
             incoming.volume = 0f;
 

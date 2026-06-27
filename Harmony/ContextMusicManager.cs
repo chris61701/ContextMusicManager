@@ -286,6 +286,11 @@ namespace CMM
                 yield return new WaitForSeconds(ContextScanCooldown);
                 if (!inGame || playerIsDead) continue;
 
+                // GC instrumentation: bracket the per-tick resolve + change-detection work
+                // below (no yields in this window, so the main-thread heap delta is CMM's
+                // own allocation). Reported and reset by StalenessCheckLoop.
+                long scanAllocBefore = GC.GetTotalMemory(false);
+
                 List<string> activeContexts = ContextResolver.ResolveContext();
 
                 // Compute which of the active contexts are currently playable AND what
@@ -310,6 +315,24 @@ namespace CMM
                 // Also re-evaluate if currentContext drifted to Silence/null from an external
                 // event (PlayOnce ended, load failed, folder emptied) without the active set changing.
                 bool currentIsStuck = currentContext == null || currentContext.Context == "Silence";
+                // Convergence safety net. currentContext names a real audio context but
+                // nothing is audible and NO transition machinery is in flight — a prior
+                // transition was interrupted or its load failed and stranded us in silence
+                // (a burst of interrupting contexts is the usual cause). The name-difference
+                // check below would miss this whenever the stranded context still equals the
+                // top context, so detect it here and force a re-assert. All four coroutines
+                // must be null: if any is live, a normal transition/track-flip is already
+                // recovering and re-triggering would race it.
+                bool currentAudioDead = currentContext != null
+                    && currentContext.Context != "Silence"
+                    && currentContext.Context != "Vanilla"
+                    && !vanillaIsActive
+                    && _activeMusicCoroutine == null
+                    && _crossFadeCoroutine == null
+                    && _trackEndCoroutine == null
+                    && _nextCacheCoroutine == null
+                    && (ActiveChannel == null || !ActiveChannel.isPlaying)
+                    && (InactiveChannel == null || !InactiveChannel.isPlaying);
                 // Also keep running if any stack entry is absent from activeContexts but hasn't
                 // hit the 1.5s eviction threshold yet — without this the early-continue fires
                 // on the second scan and the RemoveAll eviction check never runs again.
@@ -323,7 +346,15 @@ namespace CMM
                 // early-out below swallows the promotion and the context never starts.
                 bool warmingJustCleared = _hadWarmingContexts && !hasWarmingContexts;
                 _hadWarmingContexts = hasWarmingContexts;
-                if (!namesChanged && !playabilityChanged && !currentIsStuck && !vanillaIsActive && !hasPendingEvictions && !hasWarmingContexts && !warmingJustCleared) continue;
+
+                // Record this tick's allocation (the resolve + gate work above runs every
+                // tick whether or not we end up transitioning). Drop negative samples — a GC
+                // fired inside the window, so the delta is meaningless there.
+                long scanAllocDelta = GC.GetTotalMemory(false) - scanAllocBefore;
+                if (scanAllocDelta > 0) _scanAllocBytes += scanAllocDelta;
+                _scanAllocTicks++;
+
+                if (!namesChanged && !playabilityChanged && !currentIsStuck && !currentAudioDead && !vanillaIsActive && !hasPendingEvictions && !hasWarmingContexts && !warmingJustCleared) continue;
 
                 _previousActiveContexts.Clear();
                 foreach (string c in activeContexts) _previousActiveContexts.Add(c);
@@ -384,7 +415,10 @@ namespace CMM
                     // Guard: never interrupt a PlayOnce context with something
                     // of equal or lower priority. The null-clear is intentionally
                     // AFTER this check so the guard is re-evaluated every tick.
-                    if (currentContext != null && currentContext.PlayOnce)
+                    // ...unless a PlayOnce is still audibly playing: never interrupt it with
+                    // something of equal or lower priority. A STRANDED (silent) PlayOnce has
+                    // nothing left to protect, so the guard is skipped when audio is dead.
+                    if (currentContext != null && currentContext.PlayOnce && !currentAudioDead)
                     {
                         Contexts top = GetContext(topContext);
                         if (top == null || top.Priority <= currentContext.Priority)
@@ -393,8 +427,27 @@ namespace CMM
                     _pendingContext = null; // only clear when we're actually transitioning
                     SendContextUpdate(topContext, 0);
                 }
+                else if (currentAudioDead)
+                {
+                    // topContext == currentContext.Context, but it is silent and idle with no
+                    // transition in flight — re-assert it so the priority music actually
+                    // starts. SendContextUpdate treats this as a reload-of-current (it bypasses
+                    // the priority gate), so the silent strand is recovered.
+                    CMMConfig.D($"[CMM] Convergence: {currentContext.Context} stranded silent — re-asserting {topContext}.");
+                    _pendingContext = null;
+                    SendContextUpdate(topContext, 0);
+                }
             }
         }
+
+        // GC instrumentation (debug). Per-tick allocation of ContextScanLoop's resolve +
+        // change-detection section — the dominant steady-state allocator (~90% of CMM's
+        // churn) — accumulated between StalenessCheckLoop reports so CMM's GC contribution
+        // can be estimated live in-game. These are main-thread GetTotalMemory deltas, i.e.
+        // an estimate: a GC firing mid-window understates that sample (negatives dropped),
+        // and a concurrent background-thread allocation can slightly inflate it.
+        private static long _scanAllocBytes = 0;
+        private static int  _scanAllocTicks = 0;
 
         // FIX: Log cache state only when something has actually changed,
         // not unconditionally every 5 seconds.
@@ -404,12 +457,23 @@ namespace CMM
         {
             while (true)
             {
-                long gcBefore = GC.GetTotalMemory(false);
                 yield return new WaitForSeconds(StalenessCheckInterval);
-                long gcAfter = GC.GetTotalMemory(false);
-                long collected = gcBefore - gcAfter;
-                if (collected > 1024 * 1024)
-                    CMMConfig.D($"[CMM PERF] GC collected {collected / 1024f:F0} KB between staleness checks");
+
+                // GC contribution estimate. _scanAllocBytes holds the per-tick allocation of
+                // ContextScanLoop's resolve+gate section (the dominant steady-state source)
+                // accumulated since the last report; convert to a rate so it can be weighed
+                // against the game's own churn (typically hundreds of KB–MB/s), then reset.
+                if (_scanAllocTicks > 0)
+                {
+                    float scanKB = _scanAllocBytes / 1024f;
+                    float bytesPerTick = (float)_scanAllocBytes / _scanAllocTicks;
+                    float kbPerSec = scanKB / StalenessCheckInterval;
+                    CMMConfig.D($"[CMM PERF] Scan churn: {scanKB:F1} KB / {_scanAllocTicks} ticks " +
+                                $"= {bytesPerTick:F0} B/tick, ~{kbPerSec:F1} KB/s " +
+                                $"(process heap {GC.GetTotalMemory(false) / 1048576f:F1} MB)");
+                    _scanAllocBytes = 0;
+                    _scanAllocTicks = 0;
+                }
 
                 if (!inGame) continue;
 

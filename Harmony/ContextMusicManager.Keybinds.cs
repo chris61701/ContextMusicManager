@@ -23,7 +23,7 @@ namespace CMM
         // ── Volume popup state ─────────────────────────────────────────────────
         // Shown for VolumePopupHoldSeconds after the last volume key press, then it
         // fades out. Set by TrimCurrentTrack, drawn by DrawVolumePopup.
-        private const float VolumePopupHoldSeconds = 3f;
+        private const float VolumePopupHoldSeconds = 4f;
         private static float  _volPopupUntil = -1f;
         private static string _volPopupTrack = null;
         private static float  _volPopupTrim  = -1f;    // <0 = not measured yet; else 0.1..1.0
@@ -208,7 +208,7 @@ namespace CMM
             // During the fade-out, a "saved" confirmation fills the box (the trim is
             // persisted to Cache/loudness.xml by the debounced save loop). Only for a
             // real adjustment, not the "measuring" state.
-            if (remaining < 0.6f && _volPopupTrim >= 0f)
+            if (remaining < 2.0f && _volPopupTrim >= 0f)
             {
                 EnsureSavedFontSize(bw - 28f);
                 GUI.Label(new Rect(bx, by, bw, bh), SavedText, _popupSavedStyle);
