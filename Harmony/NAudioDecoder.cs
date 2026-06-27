@@ -32,6 +32,17 @@ namespace CMM
 
     public static class NAudioDecoder
     {
+        // ── Audio-thread heartbeat ────────────────────────────────────────────
+        // Incremented (by sample count) every time Unity's PCMReaderCallback pulls
+        // from one of our streaming clips. The audio thread only invokes these
+        // callbacks while it is actively playing the clip, so a per-tick DELTA on
+        // this counter is the ground truth for "is sound actually being produced",
+        // independent of what AudioSource.volume/isPlaying claim. Read by the
+        // DiagnosticLoop to distinguish a stalled engine (delta == 0 while
+        // isPlaying) from a downstream mute (delta > 0 but inaudible). Volatile +
+        // unguarded: an exact value isn't needed, only whether it's moving.
+        public static long PcmHeartbeat;
+
         private static readonly HashSet<string> _naudioExts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -319,44 +330,31 @@ namespace CMM
             }
 
             private int _seekCount = 0;
-            // Set before Play() to intercept Unity's PCMSetPositionCallback(0)
-            // that fires when Play() starts. The first position-0 seek is redirected
-            // to this frame so the very first DSP buffer fill reads from the resume
-            // point rather than the beginning of the track.
-            private long _pendingInitialFrame = -1;
-            // Armed by SeekBeforePlay, disarmed by the first PCMSetPositionCallback(0).
-            // Keeps the interceptor alive even if PCMReaderCallback fires first, which
-            // was the root cause of the brief position-0 play on Opus resumes.
+            // Armed by SeekBeforePlay, disarmed by ClearInitialSeekIntercept once the
+            // resume's explicit time-set has committed. While armed, SeekToSampleLocked
+            // ignores Unity's redundant post-Play PCMSetPositionCallback(s) so they can't
+            // re-open the stream mid-file and strand it at premature EOS (see the comment
+            // there). Survives the PCMReaderCallback-fires-first race because the reader is
+            // never moved off the SeekBeforePlay position while armed.
             private bool _interceptNextSeek = false;
             // One-shot flag: log end-of-stream once per decoder session (reset on reopen)
             // so the audio thread doesn't spam the log on every buffer fill after EOS.
             private volatile bool _eosLogged = false;
 
-            public void SetInitialPosition(long sampleFrame)
-            {
-                lock (_lock) _pendingInitialFrame = sampleFrame;
-            }
-
-            // Disarm the PCMSetPositionCallback(0) interceptor once the resume seek
-            // has been committed (e.g. by an explicit AudioSource.time set that already
-            // positioned the reader). Without this the interceptor stays armed and a
-            // later loop restart's SetPosition(0) would be wrongly redirected to the
-            // stale resume frame instead of restarting at 0.
+            // Disarm the post-Play seek interceptor once the resume seek has been committed
+            // (the explicit AudioSource.time set already positioned the reader). Without this
+            // the interceptor stays armed and a later loop restart's SetPosition(0) would be
+            // wrongly swallowed instead of restarting at 0.
             public void ClearInitialSeekIntercept()
             {
-                lock (_lock)
-                {
-                    _interceptNextSeek = false;
-                    _pendingInitialFrame = -1;
-                }
+                lock (_lock) _interceptNextSeek = false;
             }
 
             // Pre-seek to targetFrame from byte 0 via decode-and-discard.
             // Call BEFORE AudioSource.Play() on the main or a background thread.
             // This bypasses PrependStream entirely — correct for any seek distance
-            // regardless of Ogg sequence-number continuity.  Also arms the
-            // SetInitialPosition interceptor as a safety net for platforms where
-            // Unity does fire PCMSetPositionCallback(0) from Play().
+            // regardless of Ogg sequence-number continuity.  Also arms the post-Play
+            // seek interceptor so Unity's redundant position callbacks are ignored.
             public void SeekBeforePlay(long targetFrame)
             {
                 lock (_lock)
@@ -364,7 +362,6 @@ namespace CMM
                     OpenStreamAtByte(0);
                     if (targetFrame > 0)
                         DiscardSamplesLocked(targetFrame * _format.Channels);
-                    _pendingInitialFrame = targetFrame;
                     _interceptNextSeek = true;
                 }
             }
@@ -372,18 +369,33 @@ namespace CMM
             // ── Seeking ───────────────────────────────────────────────────────
             private void SeekToSampleLocked(long targetFrame)
             {
-                // Intercept the PCMSetPositionCallback(0) Unity fires on Play().
-                // _interceptNextSeek is armed by SeekBeforePlay and stays armed
-                // until the first PCMSetPositionCallback(0) arrives, regardless of
-                // whether PCMReaderCallback has already fired.  This prevents the
-                // race where ReadFloats fires first, disarmed the old flag, and then
-                // PCMSetPositionCallback resets to frame 0 at audible volume.
-                if (targetFrame == 0)
+                // Intercept the PCMSetPositionCallback(s) Unity fires right after Play().
+                // SeekBeforePlay has ALREADY positioned the reader at _pendingInitialFrame
+                // via the reliable from-byte-0 decode-discard path, so every position
+                // callback that arrives while the interceptor is armed is redundant.
+                // Honoring one would re-run the seek through the mid-file OpenStreamAtByte
+                // PrependStream path, whose OpusOggReadStream yields a prematurely-EOS
+                // stream (ReadFloats then returns 0 forever → permanent silence with
+                // isPlaying=true). So IGNORE armed callbacks entirely and leave the reader
+                // exactly where it is. Stays armed across MULTIPLE callbacks until the
+                // resume's explicit time-set commits (ClearInitialSeekIntercept) — A20's
+                // stale AudioSource.time fires an extra callback at the PREVIOUS resume frame
+                // here (e.g. 8.0s when resuming to 17.2s), which is what made the silent
+                // strand reproducible there.
+                //
+                // We do NOT touch the reader: by the time the time-set callback arrives the
+                // audio thread has usually read a few DSP buffers, so _samplePos has drifted
+                // a few ms PAST the pre-seek frame — that is correct forward playback, not an
+                // error. Re-seeking back (the old "defensive" reopen) decoded the whole
+                // prefix from byte 0 synchronously ON THE MAIN THREAD (the time-set fires the
+                // callback inline), which both stuttered the resume and replayed already-
+                // delivered samples. Doing nothing is both correct and free.
+                if (_interceptNextSeek)
                 {
-                    if (_interceptNextSeek && _pendingInitialFrame > 0)
-                        targetFrame = _pendingInitialFrame;
-                    _interceptNextSeek = false;
-                    _pendingInitialFrame = -1;
+                    _seekCount++;
+                    CMMConfig.D($"[CMM] OpusSeek #{_seekCount}: intercepted callback " +
+                                $"frame={targetFrame} → held at reader pos {_samplePos} ({_samplePos / 48000f:F2}s)");
+                    return;
                 }
 
                 _seekCount++;
@@ -1059,6 +1071,7 @@ namespace CMM
                         int filled = directSrc.ReadFloats(data, 0, data.Length);
                         if (filled < data.Length)
                             Array.Clear(data, filled, data.Length - filled);
+                        PcmHeartbeat += filled;
                         ProfEnd(t0, "PCMRead_Opus", 1f);
                     },
                     (int newPosition) =>
@@ -1087,6 +1100,7 @@ namespace CMM
                             int read = src.Read(data, 0, data.Length);
                             if (read < data.Length)
                                 Array.Clear(data, read, data.Length - read);
+                            PcmHeartbeat += read;
                         }
                         catch
                         {
@@ -1241,6 +1255,7 @@ namespace CMM
                     int toCopy = Math.Min(data.Length, samples.Length - srcStart);
                     if (toCopy > 0) Array.Copy(samples, srcStart, data, 0, toCopy);
                     if (toCopy < data.Length) Array.Clear(data, toCopy, data.Length - toCopy);
+                    if (toCopy > 0) PcmHeartbeat += toCopy;
                     cursor += data.Length / channels;
                 },
                 (int newPosition) =>

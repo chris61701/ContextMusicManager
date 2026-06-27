@@ -1178,6 +1178,7 @@ namespace CMM
 
         private IEnumerator DiagnosticLoop()
         {
+            long lastHeartbeat = NAudioDecoder.PcmHeartbeat;
             while (true)
             {
                 yield return new WaitForSeconds(3f);
@@ -1198,6 +1199,37 @@ namespace CMM
                         $" | primaryVol={CMM_Primary_Channel?.volume:F2}" +
                         $" | secondaryVol={CMM_Secondary_Channel?.volume:F2}" +
                         $" | stack=[{stack}]");
+
+                // ── Output-audibility self-check ──────────────────────────────
+                // Distinguishes "CMM commands audio" from "audio is actually
+                // produced and routed to an audible listener". pcmDelta is the
+                // ground truth: the audio thread only pulls samples while it's
+                // really playing the streaming clip. pcmDelta==0 while
+                // isPlaying=true ⇒ the engine stopped pumping (clip/listener
+                // problem); pcmDelta>0 with reported silence ⇒ samples flow but a
+                // listener/bus is muting them. (Full-decode/native clips — e.g. the
+                // menu — never call managed PCM callbacks, so pcmDelta stays 0 for
+                // those by design.)
+                long hb = NAudioDecoder.PcmHeartbeat;
+                long pcmDelta = hb - lastHeartbeat;
+                lastHeartbeat = hb;
+
+                AudioSource ch = ActiveChannel;
+                var listener = FindObjectOfType<AudioListener>();
+                string mixerGroup = ch?.outputAudioMixerGroup != null
+                    ? ch.outputAudioMixerGroup.name : "null";
+
+                CMMConfig.D($"[CMM AUDIBLE] pcmDelta={pcmDelta}" +
+                        $" | listenerVol={AudioListener.volume:F2}" +
+                        $" | listenerPaused={AudioListener.pause}" +
+                        $" | listener={(listener != null ? listener.name : "NONE")}" +
+                        $" | activeIsPlaying={ch?.isPlaying}" +
+                        $" | activeMute={ch?.mute}" +
+                        $" | activeVol={ch?.volume:F2}" +
+                        $" | spatialBlend={ch?.spatialBlend:F2}" +
+                        $" | hasClip={ch?.clip != null}" +
+                        $" | clipLoad={ch?.clip?.loadState}" +
+                        $" | mixerGroup={mixerGroup}");
             }
         }
     }

@@ -41,10 +41,21 @@ namespace CMM
     {
         public static DynamicMusic.Conductor CachedInstance;
         static bool firstMessageLogged = false;
+        // Cache the last section enum so we only pay the (allocating, reflection-backed)
+        // enum ToString() when it actually changes — this runs every frame on the
+        // Conductor's hot Update path, and the string is only read by the 3s diag log.
+        static MusicUtils.Enums.SectionType _lastSectionType;
+        static bool _sectionTypeInit;
         static bool Prefix(DynamicMusic.Conductor __instance)
         {
             CachedInstance = __instance;
-            ContextMusicManager.LastKnownGameSection = __instance.CurrentSectionType.ToString();
+            var section = __instance.CurrentSectionType;
+            if (!_sectionTypeInit || section != _lastSectionType)
+            {
+                _sectionTypeInit = true;
+                _lastSectionType = section;
+                ContextMusicManager.LastKnownGameSection = section.ToString();
+            }
 
             if (MusicStates.DefaultMusicEnabled || ContextMusicManager.vanillaIsActive) return true;
             if (!firstMessageLogged) { CMMConfig.D("[CMM] Dynamic Music System ticks muted!"); firstMessageLogged = true; }

@@ -508,9 +508,9 @@ namespace CMM
             // is still 0 at this point (the crossfade ramps it up), so any one-frame
             // correction burst is silent.
             incoming.time = safeStart;
-            // On a resume the reader was pre-seeked to safeStart and the SetInitialPosition
+            // On a resume the reader was pre-seeked to safeStart and the post-Play seek
             // interceptor armed; disarm it now the explicit time-set has committed the
-            // position, so a later loop restart's SetPosition(0) isn't redirected to it.
+            // position, so a later loop restart's SetPosition(0) isn't swallowed.
             if (safeStart > 0f && cache.Current.Reader is NAudioDecoder.SeekableOpusReader flushedRdr)
                 flushedRdr.ClearInitialSeekIntercept();
             CMMConfig.D($"[CMM] Pinned time: requested={safeStart:F3}s actual={incoming.time:F3}s isPlaying={incoming.isPlaying}");
@@ -1280,7 +1280,7 @@ namespace CMM
                     .ToArray();
                 cache.directorySnapshot = files;
             }
-            else
+            else if (_invalidFiles.Count > 0)
             {
                 files = files.Where(f => !_invalidFiles.Contains(f)).ToArray();
             }
