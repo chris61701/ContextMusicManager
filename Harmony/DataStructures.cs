@@ -104,7 +104,19 @@ namespace CMM
         public TrackSlot Next;
         public float resumePosition;
         public float lastLeftTime = -1f;
+        // The file most recently LOADED into the cache for this context. Advances to
+        // the next track as soon as it is preloaded (≈10s before the current track
+        // ends, or immediately on a skip) — so it is NOT necessarily the audible file.
+        // Used for next-track avoidance, loudness measurement, and previous-track memory.
         public string lastPlayedFile;
+        // The file actually AUDIBLE on the active channel right now (set when PlayFromCache
+        // commits the clip). Volume/normalization keys off this, not lastPlayedFile, so the
+        // upcoming track's gain is never applied to the track still playing. See PlayFromCache.
+        public string playingFile;
+        // The track that played immediately before lastPlayedFile in this context.
+        // One-deep (no full history) — drives the "previous track" keybind, which
+        // toggles between the two. Captured in LoadNextClip on every advance.
+        public string previousPlayedFile;
         public int sequentialIndex;
         public string[] directorySnapshot;
         public bool nextClipLoading;

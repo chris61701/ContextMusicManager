@@ -150,6 +150,7 @@
     <Compile Include="Harmony\ContextMusicManager.AudioPlayer.cs" />
     <Compile Include="Harmony\ContextMusicManager.VanillaClips.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
+    <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />
     <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Content Include="ModInfo.xml">

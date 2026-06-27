@@ -154,8 +154,10 @@ namespace CMM
         }
 
         // Adjust the manual trim for the track currently at this path, in linear
-        // steps (the keybind passes ±0.05). No-op if the track is unmeasured.
-        // Returns the new trim, or -1 when there is nothing to adjust.
+        // steps (the keybind passes ±0.1 by default). No-op if the track is unmeasured.
+        // Returns the new trim, or -1 when there is nothing to adjust. Trim is a pure
+        // ATTENUATION: 1.0 (the normalized level) is the ceiling, so the keys can only
+        // turn a track down (to 0.1) — never above its normalized loudness.
         public static float AdjustUserTrim(string absolutePath, float delta)
         {
             string key = ToRelKey(absolutePath);
@@ -163,33 +165,41 @@ namespace CMM
             if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return -1f;
 
             float t = m.UserTrim + delta;
-            if (t < 0.05f) t = 0.05f;
-            if (t > 4f) t = 4f;
+            if (t < 0.1f) t = 0.1f;
+            if (t > 1f) t = 1f;
             m.UserTrim = t;
             _dirty = true;
             return t;
         }
 
         // ── Path key normalization ─────────────────────────────────────────────
-        // Relative to MusicDirectory, '/'-separated, lowercased (Windows FS is
-        // case-insensitive). Files outside the music dir return null (not cached).
+        // Files under MusicDirectory key by their '/'-separated, lowercased relative
+        // path. A context may also point at an ABSOLUTE folder outside the music dir
+        // (settings.xml absolute context path) — those key by their full normalized
+        // path so loudness/userTrim still work for external folders. A full-path key
+        // (drive letter / leading slash) never collides with a relative one.
         public static string ToRelKey(string absolutePath)
         {
             if (string.IsNullOrEmpty(absolutePath)) return null;
-            string root = ContextMusicManager.MusicDirectory;
-            if (string.IsNullOrEmpty(root)) return null;
 
             string full;
             try { full = Path.GetFullPath(absolutePath); }
             catch { return null; }
-            string fullRoot = Path.GetFullPath(root);
 
-            if (full.Length <= fullRoot.Length ||
-                !full.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
-                return null;
+            string root = ContextMusicManager.MusicDirectory;
+            if (!string.IsNullOrEmpty(root))
+            {
+                string fullRoot = Path.GetFullPath(root);
+                if (full.Length > fullRoot.Length &&
+                    full.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    string rel = full.Substring(fullRoot.Length).TrimStart('\\', '/');
+                    return rel.Replace('\\', '/').ToLowerInvariant();
+                }
+            }
 
-            string rel = full.Substring(fullRoot.Length).TrimStart('\\', '/');
-            return rel.Replace('\\', '/').ToLowerInvariant();
+            // Outside the music dir (absolute-path context): key by the full path.
+            return full.Replace('\\', '/').ToLowerInvariant();
         }
 
         // ── FNV-1a 64-bit content hash ─────────────────────────────────────────

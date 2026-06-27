@@ -5,7 +5,9 @@
 
   Attributes:
     name      - unique identifier (used in logs and fallback references)
-    path      - subfolder under /Music  (empty = sentinel, no audio)
+    path      - subfolder under /Music, OR an absolute folder path anywhere on disk
+                (e.g. path="D:\MyMusic\Ambient")  (empty = sentinel, no audio).
+                Absolute-path folders still get loudness normalization + per-track volume.
     fallback  - what to try when this context has no files:
                   Stack             = check remaining active contexts by priority
                   VanillaIfDMS      = vanilla when Dynamic Music is on, else Stack

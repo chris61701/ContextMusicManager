@@ -110,6 +110,27 @@
   <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
   <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
 
+  <!-- ── Playback keybinds ───────────────────────────────────────────────
+       Live controls for whatever music is playing (menu or in-game):
+         Next / Prev track  – skip within the current context's folder. "Prev"
+                              steps back to the one track it remembers (one-deep),
+                              if that file still exists; otherwise it picks a new one.
+         Volume up / down   – nudges the CURRENT track's per-track volume trim
+                              (saved in Cache/loudness.xml, persists across sessions).
+                              Only audible while LoudnessNormalizationEnabled is true.
+       Keys use Unity KeyCode names (RightArrow, LeftArrow, F7, Keypad6, ...).
+       By default all four require Ctrl+Alt held so they don't collide with game or
+       chat input; set the Require flags false for bare-key bindings. -->
+  <KeybindsEnabled>true</KeybindsEnabled>
+  <KeybindRequireCtrl>true</KeybindRequireCtrl>
+  <KeybindRequireAlt>true</KeybindRequireAlt>
+  <KeyNextTrack>RightArrow</KeyNextTrack>
+  <KeyPrevTrack>LeftArrow</KeyPrevTrack>
+  <KeyVolumeUp>UpArrow</KeyVolumeUp>
+  <KeyVolumeDown>DownArrow</KeyVolumeDown>
+  <!-- Per-press change to the current track's volume trim (linear factor). -->
+  <UserTrimStep>0.1</UserTrimStep>
+
   <!-- Set to false to silence verbose [CMM] console output.
        Log.Warning and Log.Error always emit regardless of this flag. -->
   <DebugLogging>false</DebugLogging>

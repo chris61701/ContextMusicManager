@@ -66,6 +66,22 @@ namespace CMM
         // an unconfigured instance reports IsConfigured = false and the legacy path runs.
         public static CombatThreatConfig CombatThreat = new CombatThreatConfig();
 
+        // ── Playback keybinds (Config/settings.xml) ────────────────────────────
+        // Live controls for whatever music is actually playing (menu or in-game).
+        // Gated behind Ctrl+Alt by default so they don't collide with game/chat
+        // input; clear the RequireCtrl/RequireAlt flags for bare-key bindings.
+        public static bool KeybindsEnabled = true;
+        public static bool KeybindRequireCtrl = true;
+        public static bool KeybindRequireAlt = true;
+        public static KeyCode KeyNextTrack  = KeyCode.RightArrow;
+        public static KeyCode KeyPrevTrack  = KeyCode.LeftArrow;
+        public static KeyCode KeyVolumeUp   = KeyCode.UpArrow;
+        public static KeyCode KeyVolumeDown = KeyCode.DownArrow;
+        // Per-press change to the current track's manual volume trim (linear factor),
+        // persisted per-track in Cache/loudness.xml. Folded into the loudness gain, so
+        // it only takes audible effect when LoudnessNormalizationEnabled is true.
+        public static float UserTrimStep = 0.1f;
+
         // Set to false in Config/settings.xml to silence verbose console output.
         // Log.Warning and Log.Error always emit regardless of this flag.
         public static bool DebugLogging = true;

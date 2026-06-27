@@ -65,6 +65,15 @@ namespace CMM
                 ContextMusicManager.TrackEndPollInterval        = ReadFloat(root, "TrackEndPollInterval",        ContextMusicManager.TrackEndPollInterval);
                 ContextMusicManager.GlobalTrackOrder            = ReadEnum<TrackOrderMode>(root, "GlobalTrackOrder", ContextMusicManager.GlobalTrackOrder);
 
+                CMMConfig.KeybindsEnabled    = ReadBool(root, "KeybindsEnabled",    CMMConfig.KeybindsEnabled);
+                CMMConfig.KeybindRequireCtrl = ReadBool(root, "KeybindRequireCtrl", CMMConfig.KeybindRequireCtrl);
+                CMMConfig.KeybindRequireAlt  = ReadBool(root, "KeybindRequireAlt",  CMMConfig.KeybindRequireAlt);
+                CMMConfig.KeyNextTrack  = ReadEnum<UnityEngine.KeyCode>(root, "KeyNextTrack",  CMMConfig.KeyNextTrack);
+                CMMConfig.KeyPrevTrack  = ReadEnum<UnityEngine.KeyCode>(root, "KeyPrevTrack",  CMMConfig.KeyPrevTrack);
+                CMMConfig.KeyVolumeUp   = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeUp",   CMMConfig.KeyVolumeUp);
+                CMMConfig.KeyVolumeDown = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeDown", CMMConfig.KeyVolumeDown);
+                CMMConfig.UserTrimStep  = ReadFloat(root, "UserTrimStep", CMMConfig.UserTrimStep);
+
                 CMMConfig.D("[CMM] Config/settings.xml loaded.");
             }
             catch (Exception ex)

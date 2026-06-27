@@ -21,7 +21,10 @@ namespace CMM
         private GUIStyle _hudHeaderStyle;
         private Texture2D _hudBgTex;
 
-        private void Update()
+        // Called from the unified Update() in ContextMusicManager.Keybinds.cs (a
+        // MonoBehaviour may declare Update() only once, so the HUD toggle lives here
+        // as a helper rather than its own Update). Compiled only with the HUD.
+        private void HandleDebugHudToggle()
         {
             // Numpad 8 toggles the HUD. Cheap per-frame check, no allocation.
             if (Input.GetKeyDown(KeyCode.Keypad8))
@@ -31,7 +34,9 @@ namespace CMM
             }
         }
 
-        private void OnGUI()
+        // Drawn from the unified OnGUI() in ContextMusicManager.Keybinds.cs (a
+        // MonoBehaviour may declare OnGUI() only once). Compiled only with the HUD.
+        private void DrawDebugHud()
         {
             if (!_threatHudVisible || !inGame || playerIsDead) return;
 

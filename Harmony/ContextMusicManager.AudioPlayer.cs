@@ -501,6 +501,14 @@ namespace CMM
             if (!inGame && !cache.Current.Borrowed)
                 FadeOutMenuVanillaIfAudible();
 
+            // The incoming clip is now committed to the active channel, so THIS is the
+            // file actually audible. Volume keys off playingFile, not lastPlayedFile:
+            // lastPlayedFile advances to the next track the moment its preload runs
+            // (≈10s before this one ends, or immediately on a skip), and applying that
+            // upcoming track's normalization gain to the still-playing track would
+            // swell/duck it before the crossfade. Borrowed vanilla beds have no file.
+            cache.playingFile = (useGameClip || cache.Current.Borrowed) ? null : cache.lastPlayedFile;
+
             // ── Crossfade ────────────────────────────────────────────────────
             float targetVolume = GetContextVolume(contextName);
 
@@ -586,10 +594,12 @@ namespace CMM
         {
             Contexts ctx = contextName != null ? GetContext(contextName) : null;
             float vol = CMMConfig.GetVolume(inGame, ctx?.VolumeOverride ?? -1f);
+            // playingFile (the audible track), NOT lastPlayedFile (which has already
+            // advanced to the preloaded next track during the transition lead window).
             if (contextName != null
                 && cacheMap.TryGetValue(contextName, out ContextCache cache)
-                && cache.lastPlayedFile != null)
-                vol *= LoudnessStore.GetTrackGain(cache.lastPlayedFile);
+                && cache.playingFile != null)
+                vol *= LoudnessStore.GetTrackGain(cache.playingFile);
             return vol;
         }
 
@@ -716,7 +726,7 @@ namespace CMM
                     // what UpdateVolume now scales.
                     if (ActiveChannelContext != null
                         && cacheMap.TryGetValue(ActiveChannelContext, out ContextCache cc)
-                        && string.Equals(cc.lastPlayedFile, path, StringComparison.OrdinalIgnoreCase))
+                        && string.Equals(cc.playingFile, path, StringComparison.OrdinalIgnoreCase))
                         UpdateVolume();
                 }
             }
@@ -1130,6 +1140,64 @@ namespace CMM
             if (filePath == null)
             { CMMConfig.D($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
 
+            string clipName = Path.GetFileNameWithoutExtension(filePath);
+
+            // Menu (and PreloadCacheEnabled) get a fully-decoded clip on EVERY track, not
+            // just the first — native non-streaming for Menu so the audio thread never
+            // runs managed decode code and the menu can't stutter while a world loads.
+            // This mirrors the initial load in PreloadContextCore so the "menu is fully
+            // buffered" guarantee holds across the whole menu sequence: without it, only
+            // the opening menu track was native and track #2+ streamed (decoding on the
+            // audio thread), which hitched during the load screen.
+            if (CMMConfig.PreloadCacheEnabled || contextName == "Menu")
+            {
+                byte[] rawBytes = null;
+                bool ioOk = false;
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try { rawBytes = File.ReadAllBytes(filePath); } catch { }
+                    ioOk = true;
+                });
+                while (!ioOk) yield return null;
+
+                DecodedAudio decoded = null;
+                if (rawBytes != null)
+                {
+                    bool decodeOk = false;
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        try { decoded = NAudioDecoder.DecodeFileFromBytes(rawBytes, filePath); } catch { }
+                        decodeOk = true;
+                    });
+                    while (!decodeOk) yield return null;
+                }
+
+                if (decoded == null)
+                {
+                    Log.Error($"[CMM] LoadNextClip: full decode failed for {Path.GetFileName(filePath)}");
+                    yield break;
+                }
+
+                bool isMenu = contextName == "Menu";
+                AudioClip fullClip = isMenu
+                    ? NAudioDecoder.CreateNonStreamingClip(decoded, clipName)
+                    : NAudioDecoder.CreateStreamingClip(decoded, clipName);
+                if (fullClip == null) yield break;
+
+                if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
+                cache.Next.Clip = fullClip;
+                cache.Next.Reader = null;
+                // Menu: native buffer owns the samples now; drop the managed copy. Other
+                // full-decode contexts keep it — CreateStreamingClip's callback reads from it.
+                if (isMenu) { decoded.Samples = null; decoded = null; }
+                cache.Next.Decoded = decoded;
+                cache.previousPlayedFile = cache.lastPlayedFile;
+                cache.lastPlayedFile = filePath;
+                CMMConfig.D($"[CMM] Next clip ready (full decode{(isMenu ? "/native" : "")}) for {contextName}: {Path.GetFileName(filePath)}");
+                yield break;
+            }
+
+            // ── Streaming path (default, in-game contexts) ─────────────────────
             {
                 WaveStream reader = null;
                 yield return StartCoroutine(OpenReaderAsync(filePath, r => reader = r));
@@ -1140,14 +1208,14 @@ namespace CMM
                     yield break;
                 }
 
-                AudioClip clip = NAudioDecoder.CreateStreamingClipFromReader(
-                    reader, Path.GetFileNameWithoutExtension(filePath));
+                AudioClip clip = NAudioDecoder.CreateStreamingClipFromReader(reader, clipName);
 
                 if (clip == null) { reader?.Dispose(); yield break; }
 
                 if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
                 cache.Next.Clip   = clip;
                 cache.Next.Reader = reader;
+                cache.previousPlayedFile = cache.lastPlayedFile;
                 cache.lastPlayedFile = filePath;
                 CMMConfig.D($"[CMM] Next clip ready (streaming) for {contextName}: {Path.GetFileName(filePath)}");
             }
@@ -1158,6 +1226,15 @@ namespace CMM
         {
             Contexts ctx = GetContext(contextName);
             if (ctx == null) return null;
+
+            // Contexts with no folder (path="" — Vanilla, Silence) have no custom
+            // music. Without this guard, Path.Combine(MusicDirectory, "") resolves to
+            // the MUSIC ROOT, so any loose files a user left in the root get enumerated
+            // and played — most visibly when Menu falls back to Vanilla and ends up
+            // playing a stray root track instead of the menu's own folder. The presence
+            // scans and FileWatchLoop already skip empty-path contexts; this is the last
+            // enumeration site (the fallback pick) that didn't.
+            if (string.IsNullOrEmpty(ctx.Path)) return null;
 
             ContextCache cache = cacheMap[contextName];
 
