@@ -6,6 +6,22 @@ All notable changes to Context Music Manager are documented here.
 
 ### Added
 
+- **Context resolution is now an editable Lua script.** The decision logic that maps the
+  game state to a music context lives in `Config/context.lua` instead of being baked into
+  the DLL, so the whole policy — priorities, the weighted combat-threat model, day/night and
+  biome rules — is open for modders to edit, hot-reloaded the moment the file is saved. The
+  script runs in a hard sandbox (no file/OS access) via an embedded MoonSharp interpreter and
+  sees a version-agnostic `gameState` snapshot plus your `settings.xml` tunables through the
+  documented `resolve(gameState, cfg)` API (`Config/context.api.md`). A pristine copy of the
+  default script is embedded in the assembly and used automatically if the on-disk
+  `context.lua` is missing or fails to compile, so a broken edit can never take down audio —
+  delete the file to restore the default. The shipped `context.lua` reproduces the previous
+  built-in behaviour token-for-token.
+- **Playback and per-track volume keybinds.** Skip to the next/previous track and nudge the
+  current track's volume up/down with `Ctrl+Alt+Arrows` (rebindable in `settings.xml`), with
+  a transient on-screen popup showing the track and its level. The manual per-track trim
+  (`userTrim`) layers on top of loudness normalization and is saved to `Cache/loudness.xml`,
+  so a track you've turned down stays down across sessions.
 - **Loudness normalization (EBU R128).** Each track is measured once for its integrated
   loudness (LUFS) and played back at a per-track gain, so quiet and loud tracks sit at a
   consistent perceived level instead of jumping in volume between tracks. Measurements are
@@ -19,6 +35,14 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **Exit to the main menu now fades the music out** over ~5 seconds before releasing audio
+  caches, instead of cutting it off abruptly.
+- **Moved-while-playing tracks are detected reliably on any filesystem.** The file watcher
+  now pings the single playing file directly (an O(1) existence check) rather than trusting
+  the music folder's modification time, which exFAT/FAT/SD cards, some network shares, and
+  junctions don't reliably update when a file is moved out. When the playing file disappears
+  it is trimmed from the in-memory snapshot and hot-swapped for another track that still
+  exists, keeping detection O(1) so it scales to very large libraries on slow media.
 - **POI infested→cleared handoff is now continuous.** All POI contexts (infested and
   non-infested) share `warmgroup="poi"`, so when the last sleeper dies the non-infested POI
   context inherits the group's warm-up start instead of restarting its own dwell. Ambient no
@@ -26,6 +50,15 @@ All notable changes to Context Music Manager are documented here.
 
 ### Fixed
 
+- **Music could get stranded in silence after a burst of interrupting contexts.** If a
+  transition was cut off (or its load failed) while no further context change followed, the
+  named context could be left "playing" with nothing audible and no transition in flight. A
+  convergence check now detects this exact state and re-asserts the top context so the music
+  actually starts.
+- **Click when a new context interrupted an in-progress crossfade.** Repurposing a channel
+  that was still playing an audible leftover from a half-finished crossfade caused a click as
+  it was zeroed. The residual is now ramped to silence over a brief window first, so the
+  incoming track always fades in cleanly.
 - **`POI_Cleared` stinger could be buried under lingering combat.** Clearing a POI means you
   were just fighting, so combat contexts (generic and biome) are still on the stack during
   the brief eviction window. `POI_Cleared` priority moved from 55 to 91 so the one-shot
