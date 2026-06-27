@@ -26,7 +26,7 @@ intent (earlier = higher); the host dedups. Returning a non-table or `nil` means
 "no contexts this tick" (not an error). Tokens that don't exist in `contexts.xml`
 are simply ignored.
 
-**State across ticks:** keep it in a `local` table (e.g. `local S = {...}`). It
+**State across ticks:** keep it in a `local` table (e.g. `local memory = {...}`). It
 persists between calls; `reset()` is your hook to clear it when a world unloads.
 
 ## `gameState` (read-only, rebuilt each tick)

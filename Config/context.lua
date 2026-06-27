@@ -12,25 +12,37 @@
 -- syntax error keeps the previously loaded script, and a runtime error falls back to
 -- the last good result. Errors are reported (with line numbers) to the game log.
 --
+-- HOW THIS FILE IS LAID OUT:
+--   • "TUNING" section below  — the knobs most people want: which game things map to
+--     which music, and how hard each enemy hits the combat meter. Safe to edit.
+--   • "INTERNALS" section     — the stateful logic that turns those knobs into context
+--     tokens each tick. You usually don't need to touch it.
+--
 -- Full field/helper reference: Config/context.api.md
 -- ============================================================================
 
 API_VERSION = 1
 
--- ── Cross-tick state (persists between ticks; cleared by reset() on world-unload) ──
--- tier 0 = not in combat; 1..#COMBAT_TIERS = combat intensity (only climbs mid-fight).
-local S = { tier = 0, lastAggro = 0, biome = "", wasInfested = false, lastPoi = "None" }
+-- ════════════════════════════════════════════════════════════════════════════
+-- TUNING — edit these
+-- ════════════════════════════════════════════════════════════════════════════
 
--- ── Weighted combat threat model ────────────────────────────────────────────
--- score = Σ over enemies targeting you of (type weight × state multiplier); the summed
--- score selects the highest COMBAT_TIER whose minScore it meets. Matching is
--- longest-substring-wins against the lowercased entity class name (e.g. "zombieDireWolf"
--- matches "direwolf" 4.5, not "wolf"). Weights are calibrated so a standard walker ≈ 1.0.
-local COMBAT_TIERS = {                 -- ascending intensity; list index = tier
+-- ── Combat intensity tiers ──────────────────────────────────────────────────
+-- Each tick we add up a "threat score" from the enemies targeting you (see the
+-- weight tables below), then pick the highest tier whose `minScore` that total
+-- reaches. The chosen tier's `context` is emitted (e.g. "Combat_High").
+-- Listed in ascending intensity; raise/lower a minScore to make a tier easier or
+-- harder to reach. Weights are calibrated so a standard walker zombie ≈ 1.0.
+local COMBAT_TIERS = {                 -- ascending intensity; list index = tier number
   { context = "Combat_Low",  minScore = 0.5 },
   { context = "Combat_High", minScore = 6   },
   { context = "Combat_Boss", minScore = 18  },
 }
+
+-- How much each enemy contributes to the threat score. Matching is
+-- longest-substring-wins against the lowercased entity class name — e.g.
+-- "zombieDireWolf" matches "direwolf" (4.5), not "wolf" (2.0). Anything not
+-- listed scores DEFAULT_WEIGHT. Add your own rows for modded enemies.
 local DEFAULT_WEIGHT = 1.0
 local TYPE_WEIGHTS = {                 -- class-name substring → weight
   { "crawler", 0.6 }, { "spider", 1.3 }, { "dog", 1.4 }, { "vulture", 1.4 },
@@ -38,11 +50,16 @@ local TYPE_WEIGHTS = {                 -- class-name substring → weight
   { "cop", 3.5 }, { "wight", 3.5 }, { "mutated", 3.5 }, { "bear", 4.0 },
   { "direwolf", 4.5 }, { "demolition", 8.0 }, { "grace", 10.0 },
 }
-local STATE_MULTS = {                  -- class-name substring → multiplier (on top of weight)
+
+-- Multiplier applied on top of an enemy's weight for its variant (a feral bear
+-- counts as bear × 1.5). Same longest-substring matching as above.
+local STATE_MULTS = {                  -- class-name substring → multiplier
   { "feral", 1.5 }, { "radiated", 2.0 }, { "charged", 2.75 }, { "infernal", 3.25 },
 }
 
 -- ── Raw game strings → context tokens ───────────────────────────────────────
+-- Left side = what the game reports (lowercased); right side = the context name
+-- CMM looks up in contexts.xml. Add or rename freely to match your own folders.
 local BIOMES = { pine_forest = "Forest", desert = "Desert",
                  burnt_forest = "Burnt_Forest", snow = "Snow", wasteland = "Wasteland" }
 local VEHICLES = { gyrocopter = "Vehicle_Gyrocopter", bicycle = "Vehicle_Bicycle",
@@ -51,52 +68,66 @@ local VEHICLES = { gyrocopter = "Vehicle_Gyrocopter", bicycle = "Vehicle_Bicycle
 local TRADERS = { jen = "Trader_Jen", rekt = "Trader_Rekt", bob = "Trader_Bob",
                   hugh = "Trader_Hugh", joel = "Trader_Joel" }
 
--- ── Helpers ─────────────────────────────────────────────────────────────────
-local function add(ctx, token) ctx[#ctx + 1] = token end   -- host dedups; insertion order = intent
+-- ════════════════════════════════════════════════════════════════════════════
+-- INTERNALS — you usually don't need to edit below here
+-- ════════════════════════════════════════════════════════════════════════════
 
--- Longest-substring-wins lookup over a { {substr, value}, ... } list. cn must be lowercase.
-local function bestMatch(cn, list, default)
-  local val, bestLen = default, -1
-  for _, kv in ipairs(list) do
-    if #kv[1] > bestLen and string.find(cn, kv[1], 1, true) then val, bestLen = kv[2], #kv[1] end
+-- ── Cross-tick memory (persists between ticks; cleared by reset() on world-unload) ──
+-- Distinct from `gameState`, which is rebuilt fresh every tick. This is the small
+-- amount of history the combat/POI logic has to remember on its own.
+-- tier 0 = not in combat; 1..#COMBAT_TIERS = combat intensity (only climbs mid-fight).
+local memory = { tier = 0, lastAggro = 0, biome = "", wasInfested = false, lastPoi = "None" }
+
+-- Append a token. The host dedups, so insertion order just expresses intent (earlier = higher).
+local function add(list, token) list[#list + 1] = token end
+
+-- Longest-substring-wins lookup over a { {substr, value}, ... } list. `lowerName`
+-- must already be lowercased. Returns `default` when nothing matches.
+local function bestMatch(lowerName, list, default)
+  local value, bestLen = default, -1
+  for _, entry in ipairs(list) do
+    if #entry[1] > bestLen and string.find(lowerName, entry[1], 1, true) then
+      value, bestLen = entry[2], #entry[1]
+    end
   end
-  return val
+  return value
 end
 
+-- One enemy's threat contribution: its type weight × its variant multiplier.
 local function scoreEnemy(className)
   if not className or className == "" then return DEFAULT_WEIGHT end
-  local cn = string.lower(className)
-  return bestMatch(cn, TYPE_WEIGHTS, DEFAULT_WEIGHT) * bestMatch(cn, STATE_MULTS, 1.0)
+  local lower = string.lower(className)
+  return bestMatch(lower, TYPE_WEIGHTS, DEFAULT_WEIGHT) * bestMatch(lower, STATE_MULTS, 1.0)
 end
 
 -- Highest tier whose minScore the score meets; 0 = below the lowest band (not in combat).
 local function tierForScore(score)
-  local t = 0
+  local tier = 0
   for i = 1, #COMBAT_TIERS do
-    if score >= COMBAT_TIERS[i].minScore then t = i else break end
+    if score >= COMBAT_TIERS[i].minScore then tier = i else break end
   end
-  return t
+  return tier
 end
 
 -- Emits the active combat tier plus its biome variant (e.g. Combat_High + Combat_High_Desert),
--- using the biome latched at encounter start (S.biome), not the live biome.
-local function addCombatTier(ctx, tier)
+-- using the biome latched at encounter start (memory.biome), not the live biome.
+local function addCombatTier(list, tier)
   local name = COMBAT_TIERS[tier].context
-  add(ctx, name)
-  if S.biome ~= "" then add(ctx, name .. "_" .. S.biome) end
+  add(list, name)
+  if memory.biome ~= "" then add(list, name .. "_" .. memory.biome) end
 end
 
 -- ── Entry point: called once per scan tick ──────────────────────────────────
 function resolve(gameState, cfg)
-  local ctx = {}
+  local active = {}
   local now = gameState.now
 
-  if gameState.isSwimming then add(ctx, "Swimming") end
+  if gameState.isSwimming then add(active, "Swimming") end
 
   if gameState.vehicleType then
-    add(ctx, "Vehicle")
+    add(active, "Vehicle")
     for key, token in pairs(VEHICLES) do
-      if cmm.has(gameState.vehicleType, key) then add(ctx, token); break end
+      if cmm.has(gameState.vehicleType, key) then add(active, token); break end
     end
   end
 
@@ -106,36 +137,36 @@ function resolve(gameState, cfg)
     for key, token in pairs(TRADERS) do
       if cmm.has(gameState.traderName, key) then specific = token; break end
     end
-    add(ctx, specific or "Trader")
+    add(active, specific or "Trader")
   end
 
-  local biomeTok = (gameState.biome and BIOMES[gameState.biome]) or ""
+  local biomeToken = (gameState.biome and BIOMES[gameState.biome]) or ""
 
   -- ── Combat: weighted threat + held tier ───────────────────────────────────
   local score = 0
   for _, e in ipairs(gameState.enemies) do
     if e.isTargetingPlayer then score = score + scoreEnemy(e.className) end
   end
-  local instant   = tierForScore(score)
-  local hadLapsed = (now - S.lastAggro) > cfg.combatExitDelay
+  local instantTier  = tierForScore(score)
+  local windowLapsed = (now - memory.lastAggro) > cfg.combatExitDelay
 
-  if instant > 0 then
+  if instantTier > 0 then
     -- (Re)latch the biome on a fresh encounter or a re-engage after the active window
     -- lapsed; otherwise back-fill it if it wasn't known on the opening tick.
-    if S.tier == 0 or hadLapsed then S.biome = biomeTok
-    elseif S.biome == ""        then S.biome = biomeTok end
-    S.lastAggro = now
+    if memory.tier == 0 or windowLapsed then memory.biome = biomeToken
+    elseif memory.biome == ""           then memory.biome = biomeToken end
+    memory.lastAggro = now
   end
-  if instant > S.tier then S.tier = instant end             -- climb only; never steps down mid-fight
+  if instantTier > memory.tier then memory.tier = instantTier end   -- climb only; never steps down mid-fight
 
-  local sinceAggro = now - S.lastAggro
+  local sinceAggro = now - memory.lastAggro
   local inCombat = false
-  if sinceAggro <= cfg.combatExitDelay and S.tier > 0 then
-    addCombatTier(ctx, S.tier)
-    if gameState.isBloodMoon then add(ctx, "Blood_Moon_Combat") end
+  if sinceAggro <= cfg.combatExitDelay and memory.tier > 0 then
+    addCombatTier(active, memory.tier)
+    if gameState.isBloodMoon then add(active, "Blood_Moon_Combat") end
     inCombat = true
   elseif sinceAggro > cfg.combatCooldown then
-    S.tier, S.biome = 0, ""                                  -- encounter over — forget tier + biome
+    memory.tier, memory.biome = 0, ""                               -- encounter over — forget tier + biome
   end
 
   -- Vanilla Panicked bridge: only when we ship NO combat music of our own, escalate to
@@ -147,56 +178,56 @@ function resolve(gameState, cfg)
       if COMBAT_TIERS[i].context == "Combat_High" then bridge = i; break end
     end
     if bridge == 0 then bridge = math.max(#COMBAT_TIERS - 1, 1) end   -- second-from-top, never the top
-    if bridge > S.tier then S.tier = bridge end
-    S.lastAggro = now
-    addCombatTier(ctx, S.tier)
-    if gameState.isBloodMoon then add(ctx, "Blood_Moon_Combat") end
+    if bridge > memory.tier then memory.tier = bridge end
+    memory.lastAggro = now
+    addCombatTier(active, memory.tier)
+    if gameState.isBloodMoon then add(active, "Blood_Moon_Combat") end
     inCombat = true
   end
 
   -- ── Tension / low-health ──────────────────────────────────────────────────
-  if inCombat and gameState.healthPct < cfg.healthDangerPct then add(ctx, "Low_Health_Panic") end
+  if inCombat and gameState.healthPct < cfg.healthDangerPct then add(active, "Low_Health_Panic") end
   if not inCombat
      and cmm.count(gameState, {}) >= 1
      and cmm.count(gameState, { alert = true }) >= 1 then
-    add(ctx, "Tension")
+    add(active, "Tension")
   end
 
   -- ── Home ──────────────────────────────────────────────────────────────────
-  if gameState.nearHome then add(ctx, gameState.isDay and "Home" or "Home_Night") end
+  if gameState.nearHome then add(active, gameState.isDay and "Home" or "Home_Night") end
 
   -- ── Points of Interest ────────────────────────────────────────────────────
   if gameState.inPoi then
     local tier = gameState.poiTier
     local suffix = (tier >= 0 and tier <= 5) and ("_T" .. tier) or ""
     if gameState.poiEnemiesRemaining > 0 then
-      S.wasInfested = true
-      add(ctx, "POI_Infested" .. suffix)
+      memory.wasInfested = true
+      add(active, "POI_Infested" .. suffix)
     else
-      if S.wasInfested and gameState.poiName == S.lastPoi then add(ctx, "POI_Cleared") end
-      S.wasInfested = false
-      add(ctx, "POI" .. suffix)
+      if memory.wasInfested and gameState.poiName == memory.lastPoi then add(active, "POI_Cleared") end
+      memory.wasInfested = false
+      add(active, "POI" .. suffix)
     end
-    S.lastPoi = gameState.poiName
+    memory.lastPoi = gameState.poiName
   else
-    S.wasInfested = false
+    memory.wasInfested = false
   end
 
   -- ── Ambient (skipped while the biome chunk isn't loaded: gameState.biome == nil) ──
   if gameState.biome then
-    local base = (biomeTok ~= "") and ("Ambient_" .. biomeTok) or "Ambient"
+    local base = (biomeToken ~= "") and ("Ambient_" .. biomeToken) or "Ambient"
     if gameState.isDay then
-      add(ctx, base)
+      add(active, base)
     else
-      add(ctx, base .. "_Night")
-      add(ctx, base)
+      add(active, base .. "_Night")
+      add(active, base)
     end
   end
 
-  return ctx
+  return active
 end
 
 -- Cleared on world-unload (mirrors ContextResolver.resetValues(): combat tier + biome).
 function reset()
-  S.tier, S.biome = 0, ""
+  memory.tier, memory.biome = 0, ""
 end
