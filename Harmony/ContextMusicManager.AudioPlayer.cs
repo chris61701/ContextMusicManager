@@ -937,11 +937,29 @@ namespace CMM
 
         // True once at least one context folder has been enumerated, so an empty
         // prewarm queue can be read as "goal met" rather than "snapshots not ready".
+        //
+        // This must require EVERY configured context (one with a music folder) to be
+        // enumerated, NOT merely one of them. The playing context (Menu) gets its
+        // snapshot immediately via PickNextFile, long before the background presence
+        // scan enumerates the rest; an "any snapshot" test would therefore report
+        // ready while most contexts are still null. Since BuildMenuPrewarmQueue skips
+        // null-snapshot contexts (`snap == null → continue`), the prescan would then
+        // latch _menuPrescanComplete with only the Menu track measured and never
+        // revisit the contexts whose snapshots arrived later — leaving loudness.xml
+        // with one track from the Menu context instead of one from every context.
+        // Empty-path contexts (Vanilla, Silence) have no folder and are excluded; a
+        // missing folder still yields a non-null (empty) snapshot once scanned.
         private static bool SnapshotsReady()
         {
-            foreach (var cache in cacheMap.Values)
-                if (cache.directorySnapshot != null) return true;
-            return false;
+            foreach (var ctx in contexts.Values)
+            {
+                if (string.IsNullOrEmpty(ctx.Path)) continue;
+                // Not in cacheMap → BuildMenuPrewarmQueue can't measure it anyway, so
+                // don't block completion on it (that would stall the prescan forever).
+                if (!cacheMap.TryGetValue(ctx.Context, out var cache)) continue;
+                if (cache.directorySnapshot == null) return false;
+            }
+            return true;
         }
 
         // Stores one finished prescan slot's result (main thread) and frees the slot.
