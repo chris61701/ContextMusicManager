@@ -2,14 +2,16 @@
 <CMMSettings>
 
   <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
-  <VolumeModifier>1.0</VolumeModifier>
+  <VolumeModifier>0.75</VolumeModifier>
 
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back
        at a per-track gain so quiet and loud tracks sit at a consistent perceived
        level. Measurements are cached in Cache/loudness.xml (keyed by file content,
-       so renames/moves keep their value). The first time a track is needed it is
-       measured up-front; a background sweep pre-measures the rest.
+       so renames/moves keep their value). A track is measured on demand the first
+       time it's needed (plus a look-ahead of the current context's next track); on
+       the menu, one track per context is pre-measured so each context has a ready,
+       normalized track the first time it's switched to.
          LoudnessTargetLufs  – reference level. Sits below 0 so most corrections are
                                attenuations; AudioSource volume can't exceed 1.0, so
                                very quiet tracks boost only as far as VolumeModifier
@@ -19,44 +21,6 @@
   <LoudnessNormalizationEnabled>true</LoudnessNormalizationEnabled>
   <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
   <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
-
-  <!-- ── What gets scanned, and when ─────────────────────────────────────
-       LoudnessMenuPrescan (on by default): on the menu, measure ONE track per context
-         (plus a second for the context currently playing) so every context has a ready,
-         normalized track the first time it's switched to. Bounded — not the whole
-         library. Runs in parallel with a progress bar. Set false to rely purely on
-         on-demand scanning.
-       LoudnessProactiveScan (off by default): also sweep EVERY remaining track in the
-         background while in-game, so there's zero first-play delay even deep into a
-         context's playlist — at the cost of background CPU. With it off, past the menu
-         prewarm CMM scans on demand only: the track about to play, plus a look-ahead of
-         the current context's next track. A context you keep playing fills in over time;
-         contexts you never enter are never scanned beyond their one prewarmed track.
-       LoudnessMenuPrescanThreads: worker threads for the menu prewarm; 0 = auto
-         (CPU cores − 2, clamped 1..8). Lower it if the menu feels sluggish on a weak CPU.
-       Either way each track is only ever measured once (cached in Cache/loudness.xml). -->
-  <LoudnessMenuPrescan>true</LoudnessMenuPrescan>
-  <LoudnessProactiveScan>false</LoudnessProactiveScan>
-  <LoudnessMenuPrescanThreads>0</LoudnessMenuPrescanThreads>
-
-  <!-- ── Adaptive frame-time throttle (in-game background sweep) ──────────
-       The in-game sweep decodes on a low-priority worker; this makes it back off
-       automatically when the main thread's frame time climbs, so a measurement
-       never causes a visible hitch. Self-tuning: no sleep while frames are healthy,
-       progressively more as they degrade past the target. Only the in-game sweep is
-       throttled (the menu prescan and the just-before-play measure are not).
-         TargetFrameMs – frame-time budget (ms). Under it the sweep runs flat-out;
-                         over it the worker sleeps proportionally. ~22ms ≈ 45fps.
-                         Raise = faster sweep / more hitch risk; lower = gentler.
-         Gain/MaxRatio – how hard, and how far, the sleep ramps once over budget:
-                         ratio = min(overBudget/target * Gain, MaxRatio).
-         MaxSleepMs    – ceiling on a single between-chunk sleep.
-       Watch [CMM PERF] Throttle log lines (DebugLogging) to see frame~/slept. -->
-  <LoudnessAdaptiveThrottle>true</LoudnessAdaptiveThrottle>
-  <LoudnessThrottleTargetFrameMs>22.0</LoudnessThrottleTargetFrameMs>
-  <LoudnessThrottleGain>2.0</LoudnessThrottleGain>
-  <LoudnessThrottleMaxRatio>8.0</LoudnessThrottleMaxRatio>
-  <LoudnessThrottleMaxSleepMs>50.0</LoudnessThrottleMaxSleepMs>
 
   <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
        Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
@@ -172,5 +136,15 @@
   <!-- Set to false to silence verbose [CMM] console output.
        Log.Warning and Log.Error always emit regardless of this flag. -->
   <DebugLogging>false</DebugLogging>
+
+    <!-- ── Perf instrumentation (see CMMPerf) ─────────────────────────────
+       When true, the context-change hot path is timed per phase. Each scan tick
+       times the poll/resolve/gate; each transition logs a "[CMM PERF] TX" wall +
+       GC line; any synchronous span over PerfSpikeMs logs a "SPIKE" line the
+       instant it happens, and StalenessCheckLoop dumps rolling per-phase stats.
+       Leave off for normal play; turn on to diagnose stutters. -->
+  <PerfTiming>false</PerfTiming>
+  <!-- Log a SPIKE line for any single synchronous span at/over this many ms. -->
+  <PerfSpikeMs>1.5</PerfSpikeMs>
 
 </CMMSettings>

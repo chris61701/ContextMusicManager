@@ -14,6 +14,13 @@ namespace CMM
     {
         public void InitMod(Mod __instance)
         {
+            // NOTE: MoonSharp.Interpreter.dll MUST ship in the mod ROOT, not a subfolder.
+            // The game discovers this IModApi by scanning every type in the assembly
+            // (Mod.InitModCode → IsAssignableFrom over GetTypes()), which eagerly LOADS
+            // each type — including CMM.ScriptHost, whose `_script` field is a MoonSharp
+            // type. That load resolves MoonSharp.Interpreter BEFORE this method ever runs,
+            // so an AppDomain.AssemblyResolve handler installed here would be too late. The
+            // game auto-LoadFrom's every root *.dll before that scan, so root just works.
             var harmony = new Harmony("com.velasha.contextmusicmanager");
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             ContextMusicManager.Init(__instance.Path);

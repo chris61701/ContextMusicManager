@@ -30,49 +30,13 @@ namespace CMM
         // Attenuation is uncapped. userTrim is applied on top and clamped separately.
         public static float LoudnessMaxBoostDb = 12f;
 
-        // ── Loudness full-library sweep (proactive) ────────────────────────────
-        // Extends background scanning to the ENTIRE library while in-game, on top of the
-        // per-context menu prewarm below. OFF by default: past the one-track-per-context
-        // prewarm, CMM scans on demand — the track about to play (block-before-play) plus
-        // a look-ahead of the CURRENT context's exact next track, measured during the
-        // preload lead window (ScheduleNextCacheLoad) — so it only measures music you're
-        // actually about to hear. Turn ON to also warm every
-        // remaining track in the background, eliminating even the brief first-play delay
-        // deep into a context's playlist, at the cost of background CPU. Either way each
-        // track is only ever measured once (cached in Cache/loudness.xml).
-        public static bool LoudnessProactiveScan = false;
-
-        // ── Loudness menu prewarm ──────────────────────────────────────────────
-        // On by default. While on the menu, measure ONE track per context (plus a second
-        // for the context currently playing) so every context has a ready, normalized
-        // track the first time it's switched to. This is bounded — not the whole library
-        // (that's LoudnessProactiveScan above). Runs in PARALLEL with an on-screen
-        // progress bar. Set false to skip it and rely purely on the on-demand paths.
-        public static bool LoudnessMenuPrescan = true;
-        // Worker threads the prescan uses. 0 = auto (ProcessorCount − 2, clamped
-        // 1..8). Lower it if the menu feels sluggish on a weak CPU during the burst.
-        public static int LoudnessMenuPrescanThreads = 0;
-
-        // ── Loudness adaptive frame-time throttle ──────────────────────────────
-        // The in-game background sweep decodes on a BelowNormal worker; this lets
-        // it back off automatically when the main thread's frame time climbs, so a
-        // measurement never causes a visible hitch. Self-tuning: no sleep while
-        // frames are healthy, progressively more as they degrade past the target.
-        // See LoudnessThrottle. Only the serial in-game sweep is throttled — the
-        // menu prescan (no gameplay to stutter) and the block-before-play path (an
-        // awaited track start we don't want to delay further) run unthrottled.
-        public static bool LoudnessAdaptiveThrottle = true;
-        // Frame-time budget (ms). Frames under this run the sweep flat-out; over
-        // it the worker sleeps proportionally. Default ~22 ms (~45 fps) leaves
-        // headroom above a 30 fps floor. Raise to throttle later (faster sweep,
-        // more hitch risk); lower to throttle sooner (gentler, slower sweep).
-        public static float LoudnessThrottleTargetFrameMs = 22f;
-        // Sleep response once over budget:
-        //   ratio = min(overBudgetMs / target * Gain, MaxRatio)
-        //   sleep = min(chunkWorkMs * ratio, MaxSleepMs)
-        public static float LoudnessThrottleGain = 2f;
-        public static float LoudnessThrottleMaxRatio = 8f;
-        public static float LoudnessThrottleMaxSleepMs = 50f;
+        // Loudness scanning model: a track is measured on demand the first time it's
+        // needed — the track about to play (block-before-play) plus a look-ahead of the
+        // CURRENT context's exact next track, measured during the preload lead window
+        // (ScheduleNextCacheLoad) — so it only measures music about to be heard. On the
+        // menu, one track per context is pre-measured (the bounded prewarm in
+        // MenuPrescanDrain) so every context has a ready, normalized track for its first
+        // play. Each track is only ever measured once (cached in Cache/loudness.xml).
 
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
@@ -131,5 +95,12 @@ namespace CMM
         // Log.Warning and Log.Error always emit regardless of this flag.
         public static bool DebugLogging = true;
         public static void D(string msg) { if (DebugLogging) Log.Out(msg); }
+
+        // ── Perf instrumentation (see CMMPerf) ─────────────────────────────────
+        // Off by default. When on, the context-change hot path is timed per-phase,
+        // each transition logs a wall + GC line, and any synchronous span over
+        // PerfSpikeMs logs a SPIKE line the instant it happens.
+        public static bool  PerfTiming = false;
+        public static float PerfSpikeMs = 1.5f;
     }
 }

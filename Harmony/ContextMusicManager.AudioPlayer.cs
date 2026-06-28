@@ -7,7 +7,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using UnityEngine;
-using NAudio.Wave;
 
 namespace CMM
 {
@@ -46,12 +45,12 @@ namespace CMM
         // live streaming FileStream handle. Drained by DestroyPendingClipAndAudio().
         private static readonly Queue<TrackSlot> _pendingDisposals = new Queue<TrackSlot>();
 
-        // Background loudness sweep state. _loudnessQueue holds files awaiting a
+        // Menu-prewarm loudness state. _loudnessQueue holds files awaiting a
         // measurement; _loudnessProcessed marks files resolved this session (measured,
         // confirmed current, or skipped) so we don't re-stat/re-measure them. Both are
-        // main-thread only, like LoudnessStore. Plain FIFO: it now only carries the
-        // whole-library proactive backlog (RefillLoudnessQueue); on-demand next-track
-        // measurement goes straight through EnsureLoudnessMeasured, not this queue.
+        // main-thread only, like LoudnessStore. Plain FIFO: it carries only the bounded
+        // menu prewarm set (BuildMenuPrewarmQueue); on-demand next-track measurement
+        // goes straight through EnsureLoudnessMeasured, not this queue.
         private static readonly LinkedList<string> _loudnessQueue = new LinkedList<string>();
         private static string LoudnessDequeue()
         {
@@ -74,24 +73,27 @@ namespace CMM
         // off-thread; once the snapshots exist the next Refill can pre-warm them.
         private static bool _loudnessSnapshotsRequested;
 
-        // ── Menu prewarm prescan (CMMConfig.LoudnessMenuPrescan) ──────────────
-        // When on, the menu measures a BOUNDED prewarm set — one track per context,
-        // plus a second for the context currently playing — on a pool of worker
-        // threads, surfacing a progress bar, then stops. The point is that every
-        // context has a normalized track ready for its first play without scanning
-        // the whole library on the menu; the rest is left to the in-game throttled
-        // sweep. All orchestration here (queue, store, progress) stays on the
-        // main-thread coroutine — only the decode runs on the workers, each with its
-        // OWN scratch (the shared _sweepScratch is single-thread-only). Drawn by
-        // DrawLoudnessPrescan().
-        private static volatile bool _prescanActive;   // controls the progress bar
-        private static int _prescanDone;               // measured this prescan pass
-        private static int _prescanTotal;              // done + in-flight + queued
+        // ── Menu prewarm prescan ──────────────────────────────────────────────
+        // On the menu, measure a BOUNDED prewarm set — one track per context, plus a
+        // second for the context currently playing — on a pool of worker threads, then
+        // stop. The point is that every context has a normalized track ready for its
+        // first play without scanning the whole library on the menu; the rest is left
+        // to the on-demand look-ahead (EnsureLoudnessMeasured / ScheduleNextCacheLoad).
+        // All orchestration here (queue, store, bookkeeping) stays on the main-thread
+        // coroutine — only the decode runs on the workers, each with its OWN scratch.
         // Set once the bounded menu prewarm goal is met (one track per context plus
-        // a second for the playing context); stops the menu scanner. The in-game
-        // throttled sweep is unaffected and measures the rest of the library lazily.
+        // a second for the playing context); stops the menu scanner.
         private static bool _menuPrescanComplete;
-        private static NAudioDecoder.MeasureScratch[] _prescanScratch;
+        private static AudioDecoder.MeasureScratch[] _prescanScratch;
+        // Per-context start offset for the prewarm scan, chosen once per SESSION (process)
+        // and reused for every BuildMenuPrewarmQueue call. The offset is random so the one
+        // track we prewarm per context differs from launch to launch (coverage spreads
+        // across startups), but it MUST be stable within a session: BuildMenuPrewarmQueue
+        // doubles as the completion gate, so re-randomizing each call would keep landing on
+        // a different unmeasured track and never let the bounded goal read as "met" — it
+        // would drain the whole library instead of one track per context.
+        private static readonly Dictionary<string, int> _prewarmStartOffset =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         // One concurrent measurement slot for the parallel prescan.
         private struct PrescanSlot
@@ -193,7 +195,7 @@ namespace CMM
 
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try { reader = NAudioDecoder.OpenStreamingReader(filePath); }
+                try { reader = AudioDecoder.OpenStreamingReader(filePath); }
                 catch { }
                 finished = true;
             });
@@ -209,7 +211,7 @@ namespace CMM
         // ── Validation ────────────────────────────────────────────────────────
         private IEnumerator ValidateFile(string filePath, Action<bool> callback)
         {
-            if (!NAudioDecoder.IsSupported(filePath)) { callback(false); yield break; }
+            if (!AudioDecoder.IsSupported(filePath)) { callback(false); yield break; }
 
             {
                 Stopwatch sw = Stopwatch.StartNew();
@@ -217,7 +219,7 @@ namespace CMM
                 bool finished = false;
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    valid = NAudioDecoder.QuickValidate(filePath);
+                    valid = AudioDecoder.QuickValidate(filePath);
                     finished = true;
                 });
                 while (!finished) yield return null;
@@ -306,6 +308,7 @@ namespace CMM
                             ScheduleNextCacheLoad(contextName, remaining, transitionId));
                     }
 
+                    CMMPerf.EndTransition();
                     _activeMusicCoroutine = null;
                     yield break;
                 }
@@ -442,6 +445,7 @@ namespace CMM
             // that crossfades out gracefully; the quiet leftover we evict is barely
             // audible. In the normal case InactiveChannel is idle (not playing, volume 0),
             // so this reduces to the old behaviour exactly.
+            var _setupPerf = CMMPerf.Measure(CMMPerf.Phase.TxChannelSetup);
             string activeCtxName = ActiveChannelContext;
             string inactiveCtxName = InactiveChannelContext;
             AudioSource incoming, outgoing;
@@ -463,6 +467,7 @@ namespace CMM
                 previousActiveContext = activeCtxName;
             }
             float outgoingStartVol = outgoing.volume;
+            _setupPerf.Dispose();
 
             float clipLen = cache.Current.Clip.length;
             float safeStart = clipLen > 0.02f
@@ -503,7 +508,7 @@ namespace CMM
                 CMMConfig.D($"[CMM] Seek to {safeStart:F2}s for {contextName} " +
                         $"(clip={clipLen:F1}s, streaming={cache.Current.Reader != null})");
 
-                if (cache.Current.Reader is NAudioDecoder.SeekableOpusReader opusRdr)
+                if (cache.Current.Reader is IFloatPcmSource opusRdr)
                 {
                     // Unity does NOT call PCMSetPositionCallback(0) on Play() — it
                     // just starts invoking PCMReaderCallback from wherever the reader
@@ -512,7 +517,10 @@ namespace CMM
                     // Seek by opening from byte 0 + decode-discard (no PrependStream,
                     // no Ogg sequence-number assumptions).  Done on a background thread
                     // to avoid blocking the main thread for long tracks.
-                    long resumeFrame = (long)(safeStart * 48000f);
+                    // Use the reader's OWN sample rate: Opus is always 48k, but native
+                    // FLAC (also IFloatPcmSource) preserves its source rate (e.g. 44.1k).
+                    int rdrRate = cache.Current.Reader.WaveFormat.SampleRate;
+                    long resumeFrame = (long)(safeStart * rdrRate);
                     bool[] seekDone = { false };
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
@@ -537,6 +545,13 @@ namespace CMM
                 }
             }
 
+            // The clip assign + Play() + time-set below run synchronously on the main
+            // thread. The time-set fires the streaming clip's SetPosition callback, but on
+            // a resume the reader pre-seeked (SeekBeforePlay) and armed its one-shot
+            // intercept, so that callback is swallowed instead of repeating the decode-scan
+            // here — what used to be a 70–192ms main-thread hitch for AAC resumes. Timed as
+            // one span (no yields inside).
+            var _commitPerf = CMMPerf.Measure(CMMPerf.Phase.TxClipCommit);
             incoming.clip = cache.Current.Clip;
             CMMConfig.D($"[CMM] Clip assigned: samples={incoming.clip.samples} ch={incoming.clip.channels} len={incoming.clip.length:F2}s");
 
@@ -549,18 +564,19 @@ namespace CMM
             // END of CrossFade/FadeToSilence) keeps its playhead live, and assigning a
             // new clip does not reliably zero it on every Unity version. On A21 this
             // made a first-play track begin mid-song at the leaving track's offset.
-            // Writing time here also forces Unity to flush the streaming clip's primed
-            // DSP buffer and re-request from `safeStart` (for Opus resumes this discards
-            // the frame-0 samples Unity primed before the pre-seek ran). incoming.volume
-            // is still 0 at this point (the crossfade ramps it up), so any one-frame
-            // correction burst is silent.
+            // Writing time also flushes Unity's primed DSP buffer and updates
+            // AudioSource.time to `safeStart`; the reader itself stays where SeekBeforePlay
+            // put it (the redundant reader re-seek is intercepted). incoming.volume is still
+            // 0 at this point (the crossfade ramps it up), so any one-frame correction burst
+            // is silent.
             incoming.time = safeStart;
             // On a resume the reader was pre-seeked to safeStart and the post-Play seek
             // interceptor armed; disarm it now the explicit time-set has committed the
             // position, so a later loop restart's SetPosition(0) isn't swallowed.
-            if (safeStart > 0f && cache.Current.Reader is NAudioDecoder.SeekableOpusReader flushedRdr)
+            if (safeStart > 0f && cache.Current.Reader is IFloatPcmSource flushedRdr)
                 flushedRdr.ClearInitialSeekIntercept();
             CMMConfig.D($"[CMM] Pinned time: requested={safeStart:F3}s actual={incoming.time:F3}s isPlaying={incoming.isPlaying}");
+            _commitPerf.Dispose();
 
             // incoming becomes the active channel. Derive the flag from the concrete
             // channel identity (not a blind toggle): after the quieter-channel selection
@@ -644,6 +660,7 @@ namespace CMM
                 // exact file it pre-picks — see there.)
             }
 
+            CMMPerf.EndTransition();
             _activeMusicCoroutine = null;
         }
 
@@ -723,7 +740,7 @@ namespace CMM
         // delayed by one (low-priority) decode pass. That delay is intentional — see
         // StartMeasure: we favor a smooth frame rate over an instant start, so an
         // unscanned track waits to begin rather than stuttering the game as it scans.
-        private IEnumerator EnsureLoudnessMeasured(string filePath)
+        private IEnumerator EnsureLoudnessMeasured(string filePath, bool useScratch = false)
         {
             if (!CMMConfig.LoudnessNormalizationEnabled || string.IsNullOrEmpty(filePath)) yield break;
 
@@ -739,11 +756,24 @@ namespace CMM
             if (!ok) yield break;
             if (LoudnessStore.HasCurrent(filePath, size, mtime)) yield break;
 
-            // Block path allocates per file (no shared scratch) — it's rare and may run
-            // concurrently with the sweep, which owns the single reusable buffer.
-            MeasureHandle h = StartMeasure(filePath, null);
+            // Look-ahead prefetch (useScratch) borrows the serial _lookAheadScratch so the
+            // common per-transition measurement allocates nothing on the LOH; it's lent out
+            // only while free, so two concurrent look-aheads never share it. The block-before-
+            // play and stinger paths pass useScratch=false and allocate per file (rare).
+            // Coroutines are single-threaded, so this check-and-set needs no lock.
+            AudioDecoder.MeasureScratch scratch = null;
+            bool heldScratch = false;
+            if (useScratch && !_lookAheadScratchBusy)
+            {
+                _lookAheadScratchBusy = true;
+                heldScratch = true;
+                scratch = _lookAheadScratch;
+            }
+
+            MeasureHandle h = StartMeasure(filePath, scratch);
             while (!h.Done) yield return null;
-            _loudnessInFlight.Remove(filePath);
+            ClearInFlight(filePath, h);
+            if (heldScratch) _lookAheadScratchBusy = false;
             TrackLoudness res = h.Result;
 
             _loudnessProcessed.Add(filePath);
@@ -754,110 +784,41 @@ namespace CMM
             }
         }
 
-        // ── Loudness: background sweep ────────────────────────────────────────
-        // Walks every context's file snapshot and measures any track without a
-        // current entry, one file per tick on a background thread, so most tracks are
-        // already normalized by the time they first play (making the block path above
-        // rarely fire). Paused while the game is loading or a crossfade is in flight so
-        // it never competes with playback.
+        // ── Loudness: menu prewarm driver ────────────────────────────────────
+        // Drives the bounded menu prewarm: while on the menu (not in-game, not loading,
+        // not crossfading) it runs MenuPrescanDrain until the per-context prewarm goal is
+        // met, then idles. Everything else is measured on demand by EnsureLoudnessMeasured
+        // / the look-ahead, so there is no whole-library background sweep.
         private IEnumerator LoudnessSweepLoop()
         {
             yield return new WaitForSeconds(LoudnessSweepStartDelay);
 
             while (true)
             {
-                // Menu prewarm (default on): while on the menu, measure a BOUNDED set —
-                // one track per context + a second for the playing one — on a worker pool
-                // with a progress bar, then stop (_menuPrescanComplete). This guarantees
-                // every context has a ready, normalized track the first time it's switched
-                // to. It is NOT the full-library sweep (that's the proactive opt-in below);
-                // the rest of each context is filled in on demand by the look-ahead.
-                if (CMMConfig.LoudnessNormalizationEnabled && CMMConfig.LoudnessMenuPrescan
+                // Menu prewarm: while on the menu, measure a BOUNDED set — one track per
+                // context + a second for the playing one — on a worker pool, then stop
+                // (_menuPrescanComplete). This guarantees every context has a ready,
+                // normalized track the first time it's switched to. The rest of each
+                // context is filled in on demand by the look-ahead (EnsureLoudnessMeasured
+                // / ScheduleNextCacheLoad), so nothing is measured beyond what's about to
+                // be heard.
+                if (CMMConfig.LoudnessNormalizationEnabled
                     && !_menuPrescanComplete
                     && !inGame && !_gameIsLoading && _crossFadeCoroutine == null)
                 {
                     yield return StartCoroutine(MenuPrescanDrain());
                 }
 
-                // Consumer: drain the queue one file per tick on the BelowNormal worker,
-                // backing off via the adaptive frame-time throttle (see LoudnessThrottle).
-                // The queue is now fed ONLY by the whole-library RefillLoudnessQueue below,
-                // and so only when LoudnessProactiveScan is enabled. On-demand next-track
-                // measurement no longer routes through here — ScheduleNextCacheLoad measures
-                // its exact pick directly via EnsureLoudnessMeasured.
                 yield return new WaitForSeconds(inGame ? LoudnessSweepInGameInterval : LoudnessSweepInterval);
-                if (!CMMConfig.LoudnessNormalizationEnabled) continue;
-                if (_gameIsLoading || _crossFadeCoroutine != null) continue;
-
-                // Whole-library backlog only under the proactive opt-in. On demand we never
-                // refill — the queue holds only what the look-ahead prefetch put there.
-                if (CMMConfig.LoudnessProactiveScan)
-                {
-                    if (_loudnessQueue.Count == 0) RefillLoudnessQueue();
-                    if (_loudnessQueue.Count == 0)
-                    {
-                        // Nothing to pre-warm — on the menu the context snapshots usually
-                        // aren't built yet. Trigger a one-shot off-thread presence rebuild
-                        // so every folder is enumerated; the next Refill picks them up.
-                        if (!_loudnessSnapshotsRequested)
-                        {
-                            _loudnessSnapshotsRequested = true;
-                            _contextsWithFilesDirty = true;
-                        }
-                    }
-                }
-                if (_loudnessQueue.Count == 0) continue;
-
-                string path = LoudnessDequeue();
-                if (string.IsNullOrEmpty(path) || _loudnessProcessed.Contains(path)) continue;
-                if (_invalidFiles.Contains(path)) { _loudnessProcessed.Add(path); continue; }
-
-                long size = 0, mtime = 0;
-                bool ok = true;
-                try
-                {
-                    var fi = new FileInfo(path);
-                    if (!fi.Exists) ok = false;
-                    else { size = fi.Length; mtime = fi.LastWriteTimeUtc.Ticks; }
-                }
-                catch { ok = false; }
-                if (!ok) { _loudnessProcessed.Add(path); continue; }
-
-                if (LoudnessStore.HasCurrent(path, size, mtime)) { _loudnessProcessed.Add(path); continue; }
-
-                // Sweep is serial, so it reuses one buffer (no per-file LOH allocation).
-                // Throttled: this is the in-game background path the adaptive frame-time
-                // back-off exists for (the block/prescan paths pass throttle=false).
-                MeasureHandle h = StartMeasure(path, _sweepScratch, throttle: true);
-                while (!h.Done) yield return null;
-                _loudnessInFlight.Remove(path);
-                TrackLoudness res = h.Result;
-
-                _loudnessProcessed.Add(path);
-                if (res.Ok)
-                {
-                    LoudnessStore.Store(path, res.Size, mtime, res.Hash, res.Lufs, res.Peak);
-                    CMMConfig.D($"[CMM] Loudness swept {Path.GetFileName(path)}: {res.Lufs:F1} LUFS (peak {res.Peak:F3})");
-                    // If we just measured the track that's currently playing, refresh
-                    // the live channel volume so the normalization takes effect now.
-                    // Gate on ActiveChannelContext (the track actually audible), matching
-                    // what UpdateVolume now scales.
-                    if (ActiveChannelContext != null
-                        && cacheMap.TryGetValue(ActiveChannelContext, out ContextCache cc)
-                        && string.Equals(cc.playingFile, path, StringComparison.OrdinalIgnoreCase))
-                        UpdateVolume();
-                }
             }
         }
 
-        // ── Optional: parallel menu prescan ───────────────────────────────────
-        // Measures every unmeasured track up-front while on the menu, keeping up to
-        // `width` decodes in flight on a worker pool. All queue/store/progress
-        // bookkeeping stays on this (main-thread) coroutine — no locking needed —
-        // while only MeasureLoudness runs on the workers, each with its OWN scratch
-        // (the shared serial _sweepScratch is single-thread-only). Runs until the
-        // library is fully measured or a game starts loading, then lets in-flight
-        // slots finish (so no work is lost) and hides the progress bar.
+        // ── Parallel menu prescan ─────────────────────────────────────────────
+        // Measures the bounded menu prewarm set up-front while on the menu, keeping up to
+        // `width` decodes in flight on a worker pool. All queue/store bookkeeping stays on
+        // this (main-thread) coroutine — no locking needed — while only MeasureLoudness runs
+        // on the workers, each with its OWN scratch. Runs until the bounded set is measured
+        // or a game starts loading, then lets in-flight slots finish (so no work is lost).
         private IEnumerator MenuPrescanDrain()
         {
             int width = PrescanThreadCount();
@@ -865,7 +826,7 @@ namespace CMM
             var slots = new PrescanSlot[width];
 
             // Make sure every context folder has been enumerated so there's a work set
-            // to consider (same one-shot the serial sweep uses).
+            // to consider.
             if (!_loudnessSnapshotsRequested)
             {
                 _loudnessSnapshotsRequested = true;
@@ -873,8 +834,7 @@ namespace CMM
             }
 
             // Bounded prewarm set: one track per context + a second for the playing
-            // context. Unlike the in-game sweep this never refills with the rest of the
-            // library — that's the whole point.
+            // context. It never refills with the rest of the library — that's the point.
             if (BuildMenuPrewarmQueue() == 0)
             {
                 // Nothing queued: either snapshots aren't ready yet (retry next tick)
@@ -883,7 +843,7 @@ namespace CMM
                 yield break;
             }
 
-            while (CMMConfig.LoudnessNormalizationEnabled && CMMConfig.LoudnessMenuPrescan
+            while (CMMConfig.LoudnessNormalizationEnabled
                    && !inGame && !_gameIsLoading && _crossFadeCoroutine == null)
             {
                 // Fill any idle slots from the bounded queue (no refill once drained).
@@ -896,13 +856,11 @@ namespace CMM
                     slots[i].Path = path;
                     slots[i].Mtime = mtime;
                     slots[i].Handle = StartMeasure(path, _prescanScratch[i]);
-                    _prescanActive = true;
                     busy++;
                 }
 
                 if (busy == 0) break;   // bounded set drained
 
-                UpdatePrescanTotal(busy);
                 yield return null;
 
                 // Harvest finished slots.
@@ -918,10 +876,6 @@ namespace CMM
                 while (!slots[i].Handle.Done) yield return null;
                 ApplyPrescanResult(ref slots[i]);
             }
-
-            _prescanActive = false;
-            _prescanDone = 0;
-            _prescanTotal = 0;
 
             // If the bounded set is now fully measured, stop the menu scanner; a game
             // loading mid-drain just leaves the flag clear so we resume on next menu.
@@ -954,9 +908,15 @@ namespace CMM
                 // Start the scan at a RANDOM offset (wrapping) rather than always snap[0],
                 // so the one track we prewarm per context differs from session to session
                 // instead of forever measuring the same first file. Coverage then spreads
-                // across the library over repeated startups.
+                // across the library over repeated startups. The offset is cached per
+                // context for the whole session: this method is also the completion gate,
+                // so re-rolling it each call would never let the bounded goal read as met.
                 int n = snap.Length;
-                int start = n > 1 ? UnityEngine.Random.Range(0, n) : 0;
+                if (!_prewarmStartOffset.TryGetValue(ctxName, out int start))
+                {
+                    start = n > 1 ? UnityEngine.Random.Range(0, n) : 0;
+                    _prewarmStartOffset[ctxName] = start;
+                }
                 for (int k = 0; k < n; k++)
                 {
                     if (taken >= want) break;
@@ -987,7 +947,7 @@ namespace CMM
         // Stores one finished prescan slot's result (main thread) and frees the slot.
         private void ApplyPrescanResult(ref PrescanSlot slot)
         {
-            _loudnessInFlight.Remove(slot.Path);
+            ClearInFlight(slot.Path, slot.Handle);
             _loudnessProcessed.Add(slot.Path);
             TrackLoudness res = slot.Handle.Result;
             if (res.Ok)
@@ -999,7 +959,6 @@ namespace CMM
                     && string.Equals(cc.playingFile, slot.Path, StringComparison.OrdinalIgnoreCase))
                     UpdateVolume();
             }
-            _prescanDone++;
             slot = default;
         }
 
@@ -1034,29 +993,16 @@ namespace CMM
             return false;
         }
 
-        // Worker count for the prescan: configured value, or auto = cores − 2, clamped 1..8.
+        // Worker count for the prescan: auto = cores − 2, clamped 1..8.
         private static int PrescanThreadCount()
-        {
-            int n = CMMConfig.LoudnessMenuPrescanThreads;
-            if (n <= 0) n = Environment.ProcessorCount - 2;
-            return Mathf.Clamp(n, 1, 8);
-        }
+            => Mathf.Clamp(Environment.ProcessorCount - 2, 1, 8);
 
         private static void EnsurePrescanScratch(int width)
         {
             if (_prescanScratch != null && _prescanScratch.Length >= width) return;
-            _prescanScratch = new NAudioDecoder.MeasureScratch[width];
+            _prescanScratch = new AudioDecoder.MeasureScratch[width];
             for (int i = 0; i < width; i++)
-                _prescanScratch[i] = new NAudioDecoder.MeasureScratch();
-        }
-
-        // Progress denominator for the bounded menu prewarm: measured so far + in
-        // flight + still queued. The set is enqueued up front and only drains, so this
-        // is stable; the monotonic guard absorbs queue entries skipped as already-measured.
-        private void UpdatePrescanTotal(int busy)
-        {
-            int total = _prescanDone + busy + _loudnessQueue.Count;
-            if (total > _prescanTotal) _prescanTotal = total;
+                _prescanScratch[i] = new AudioDecoder.MeasureScratch();
         }
 
         // ── Loudness: background measurement worker ───────────────────────────
@@ -1068,32 +1014,39 @@ namespace CMM
         // Lowering the priority lets the OS scheduler keep the game smooth and just
         // stretches measurement out a little under load.
         //
-        // BelowNormal is used for BOTH callers — the background sweep AND the
-        // block-before-play path (EnsureLoudnessMeasured), which awaits this before an
-        // unscanned track starts. That is a deliberate tradeoff: a smooth frame rate
-        // is preferred over a fast track start, so we accept that an unscanned track
-        // takes a little longer to begin rather than risk hitching the game while it's
-        // measured. (Do NOT bump the block path to Normal/AboveNormal to shave the
-        // start delay — that reintroduces the stutter this is here to avoid.)
+        // BelowNormal is used for ALL callers — the menu prewarm AND the block-before-play
+        // path (EnsureLoudnessMeasured), which awaits this before an unscanned track starts.
+        // That is a deliberate tradeoff: a smooth frame rate is preferred over a fast track
+        // start, so we accept that an unscanned track takes a little longer to begin rather
+        // than risk hitching the game while it's measured. (Do NOT bump the block path to
+        // Normal/AboveNormal to shave the start delay — that reintroduces the stutter this is
+        // here to avoid.)
         //
-        // `scratch`, when supplied (the sweep), gives MeasureLoudness a reused buffer so it
-        // allocates nothing on the LOH — the fix for the in-game GC stutter. Only the sweep
-        // passes one, because its measurements are strictly serial (it awaits each before
-        // starting the next); the block path passes null and allocates per file (rare).
+        // `scratch`, when supplied, gives MeasureLoudness a reused buffer so it allocates
+        // nothing on the LOH — the fix for the in-game GC stutter. Two callers pass one: the
+        // menu prewarm (per-worker _prescanScratch) and the look-ahead prefetch
+        // (_lookAheadScratch); each owns a distinct buffer and serializes its own use, so no
+        // buffer is ever touched by two decodes at once. The block-before-play and stinger
+        // paths pass null and allocate per file (rare).
         //
         // De-duplicated by path: a second request for a file already being measured joins
-        // the existing handle instead of spawning a competing decode. The caller removes
-        // the entry from _loudnessInFlight once it has consumed the result.
-        private static MeasureHandle StartMeasure(string path, NAudioDecoder.MeasureScratch scratch, bool throttle = false)
+        // the existing handle instead of spawning a competing decode — INCLUDING a handle
+        // that has just finished (Done) but whose consumer hasn't run ClearInFlight yet.
+        // (Joining only when !Done left a one-frame window where a Done-but-not-yet-removed
+        // handle was skipped, spawning a duplicate decode and then having the consumer's
+        // blind Remove delete the *newer* handle — the exact double-decode this map exists
+        // to prevent.) Removal is the consumer's job via ClearInFlight, which deletes the
+        // entry only if it is still this same handle.
+        private static MeasureHandle StartMeasure(string path, AudioDecoder.MeasureScratch scratch)
         {
-            if (_loudnessInFlight.TryGetValue(path, out MeasureHandle existing) && !existing.Done)
+            if (_loudnessInFlight.TryGetValue(path, out MeasureHandle existing))
                 return existing;
 
             var h = new MeasureHandle();
             _loudnessInFlight[path] = h;
             var t = new Thread(() =>
             {
-                try { h.Result = NAudioDecoder.MeasureLoudness(path, scratch, throttle); } catch { }
+                try { h.Result = AudioDecoder.MeasureLoudness(path, scratch); } catch { }
                 h.Done = true;
             })
             {
@@ -1105,53 +1058,29 @@ namespace CMM
             return h;
         }
 
-        // Reused by the (serial) sweep so each measurement allocates nothing on the LOH.
-        private static readonly NAudioDecoder.MeasureScratch _sweepScratch =
-            new NAudioDecoder.MeasureScratch();
+        // Removes the in-flight entry for `path` only if it is still `h`. A consumer that
+        // JOINED an existing handle (StartMeasure dedup) — or whose own handle was already
+        // replaced — must not delete a newer measurement started for the same path. Called
+        // on the main-thread coroutine, like every other _loudnessInFlight access.
+        private static void ClearInFlight(string path, MeasureHandle h)
+        {
+            if (_loudnessInFlight.TryGetValue(path, out MeasureHandle cur) && cur == h)
+                _loudnessInFlight.Remove(path);
+        }
+
+        // Reused by the look-ahead prefetch (ScheduleNextCacheLoad) so the common
+        // per-transition next-track measurement doesn't allocate a whole-file byte[] on the
+        // LOH every track change. It is lent out only when free (_lookAheadScratchBusy), so it
+        // is never touched by two decodes at once. A look-ahead that finds it busy falls back
+        // to per-file allocation for that one call.
+        private static readonly AudioDecoder.MeasureScratch _lookAheadScratch =
+            new AudioDecoder.MeasureScratch();
+        private static bool _lookAheadScratchBusy;
 
         private sealed class MeasureHandle
         {
             public volatile bool Done;
             public TrackLoudness Result;
-        }
-
-        // Enqueues every snapshot file not already resolved this session, BREADTH-FIRST
-        // across contexts so each context gets a measured track as soon as possible (the
-        // menu pre-warm goal). Priority contexts — Menu and the baseline Ambient
-        // exploration music, i.e. the first things actually heard — are placed first, then
-        // the round-robin interleaves one file per context per round so coverage spreads
-        // wide before it deepens. Pure in-memory (no disk); the per-file stat happens only
-        // when a file is dequeued.
-        private static void RefillLoudnessQueue()
-        {
-            // One pending-file list per context, priority contexts first. OrderBy is a
-            // stable sort, so within each partition the existing cacheMap order is kept.
-            var lists = new List<List<string>>();
-            foreach (string ctxName in cacheMap.Keys.OrderByDescending(IsPriorityContext))
-            {
-                if (!cacheMap.TryGetValue(ctxName, out ContextCache cache)) continue;
-                string[] snap = cache.directorySnapshot;
-                if (snap == null) continue;
-
-                List<string> pending = null;
-                foreach (string f in snap)
-                    if (!_loudnessProcessed.Contains(f) && !_loudnessInFlight.ContainsKey(f)
-                        && !_invalidFiles.Contains(f))
-                        (pending ?? (pending = new List<string>())).Add(f);
-                if (pending != null) lists.Add(pending);
-            }
-            if (lists.Count == 0) return;
-
-            // Round-robin: round r takes file[r] of every context that still has one. A
-            // file shared by two contexts is enqueued once (HasCurrent would skip the dupe
-            // anyway, but this avoids the wasted dequeue).
-            int max = 0;
-            foreach (var l in lists) if (l.Count > max) max = l.Count;
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            for (int round = 0; round < max; round++)
-                foreach (var l in lists)
-                    if (round < l.Count && seen.Add(l[round]))
-                        LoudnessEnqueue(l[round]);
         }
 
         // Contexts whose first track the player is most likely to hear first, so the
@@ -1473,7 +1402,7 @@ namespace CMM
             // next track starts without a measurement stall.
             string prePickedFile = PickNextFile(contextName, avoidFile: avoidForPick);
             if (prePickedFile != null)
-                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(prePickedFile));
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(prePickedFile, useScratch: true));
 
             // File-size heuristic for decode-lead estimate.
             // For the streaming path this is almost always negligible (just a
@@ -1588,7 +1517,7 @@ namespace CMM
                     bool decodeOk = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
-                        try { decoded = NAudioDecoder.DecodeFileFromBytes(rawBytes, filePath); } catch { }
+                        try { decoded = AudioDecoder.DecodeFileFromBytes(rawBytes, filePath); } catch { }
                         decodeOk = true;
                     });
                     while (!decodeOk) yield return null;
@@ -1602,8 +1531,8 @@ namespace CMM
 
                 bool isMenu = contextName == "Menu";
                 AudioClip fullClip = isMenu
-                    ? NAudioDecoder.CreateNonStreamingClip(decoded, clipName)
-                    : NAudioDecoder.CreateStreamingClip(decoded, clipName);
+                    ? AudioDecoder.CreateNonStreamingClip(decoded, clipName)
+                    : AudioDecoder.CreateStreamingClip(decoded, clipName);
                 if (fullClip == null) yield break;
 
                 if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
@@ -1630,7 +1559,7 @@ namespace CMM
                     yield break;
                 }
 
-                AudioClip clip = NAudioDecoder.CreateStreamingClipFromReader(reader, clipName);
+                AudioClip clip = AudioDecoder.CreateStreamingClipFromReader(reader, clipName);
 
                 if (clip == null) { reader?.Dispose(); yield break; }
 
@@ -1674,7 +1603,7 @@ namespace CMM
                 string dir = Path.Combine(MusicDirectory, ctx.Path);
                 if (!Directory.Exists(dir)) return null;
                 files = Directory.GetFiles(dir)
-                    .Where(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f))
+                    .Where(f => AudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f))
                     .ToArray();
                 cache.directorySnapshot = files;
             }
@@ -1822,7 +1751,7 @@ namespace CMM
                 if (string.IsNullOrEmpty(ctx.Path)) continue;
                 string d = Path.Combine(MusicDirectory, ctx.Path);
                 if (!Directory.Exists(d)) continue;
-                if (Directory.GetFiles(d).Any(f => NAudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
+                if (Directory.GetFiles(d).Any(f => AudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
                     _contextsWithFiles.Add(ctx.Context);
             }
             _contextsWithFilesDirty = false;
@@ -1881,7 +1810,7 @@ namespace CMM
                         foreach (var pair in toScan)
                         {
                             results[pair.Key] = Directory.Exists(pair.Value)
-                                ? Directory.GetFiles(pair.Value).Where(f => NAudioDecoder.IsSupported(f)).ToArray()
+                                ? Directory.GetFiles(pair.Value).Where(f => AudioDecoder.IsSupported(f)).ToArray()
                                 : new string[0];
                         }
                     }

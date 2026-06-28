@@ -15,7 +15,7 @@
          binding redirects from the host .exe's config — a ContextMusicManager.dll.config
          is ignored at runtime, so don't generate one. -->
     <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
-    <!-- Don't copy reference-related files (e.g. NAudio.*.xml doc files) to the output dir.
+    <!-- Don't copy reference-related files (e.g. dependency .xml doc files) to the output dir.
          Content items like ModInfo.xml are unaffected. -->
     <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
     <GamePath>..\..\..\..\Steam\steamapps\common\7 Days To Die</GamePath>
@@ -135,15 +135,32 @@
     <Content Include="THIRD_PARTY_NOTICES.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Native decode shim (libopusfile + stb_vorbis + dr_flac/mp3/wav behind a thin C ABI).
+         Deployed next to the mod DLL; NativeOpus.Preload(ModPath) LoadLibrary's it by full
+         path at init. Windows x64 today; per-OS builds (.dylib/.so) added here later.
+         REQUIRED for ALL formats — there is no managed fallback; a missing binary
+         means no audio plays. -->
+    <Content Include="CMM_Decoder\dist\CMM_Decoder.dll">
+      <!-- MUST live in a SUBFOLDER, not the mod root: the game's Mod.LoadAssemblies()
+           does GetFiles(modRoot) (top-dir only) and Assembly.LoadFrom()s every *.dll it
+           finds. A native DLL at the root throws "Invalid Image" and aborts the WHOLE mod
+           load. GetFiles isn't recursive, so Libs\ is never scanned. The Link path
+           places it at OutputPath\Libs\CMM_Decoder.dll; Preload LoadLibrary's it by full
+           path from there. -->
+      <Link>Libs\CMM_Decoder.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\ContextMusicManager.cs" />
     <Compile Include="Harmony\DataStructures.cs" />
     <Compile Include="Harmony\GameState.cs" />
     <Compile Include="Harmony\CMMConfig.cs" />
-    <Compile Include="Harmony\NAudioDecoder.cs" />
+    <Compile Include="Harmony\CMMPerf.cs" />
+    <Compile Include="Harmony\AudioDecoder.cs" />
+    <Compile Include="Harmony\NativeAudio.cs" />
+    <Compile Include="Harmony\WaveShim.cs" />
     <Compile Include="Harmony\LoudnessAnalyzer.cs" />
     <Compile Include="Harmony\LoudnessStore.cs" />
-    <Compile Include="Harmony\LoudnessThrottle.cs" />
     <Compile Include="Harmony\R128SelfTest.cs" />
     <Compile Include="Harmony\ContextResolver.cs" />
     <Compile Include="Harmony\ScriptHost.cs" />
@@ -152,7 +169,6 @@
     <Compile Include="Harmony\ContextMusicManager.VanillaClips.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
     <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />
-    <Compile Include="Harmony\ContextMusicManager.PrescanHud.cs" />
     <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Content Include="ModInfo.xml">
@@ -170,102 +186,35 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="Concentus, Version=2.2.2.0, Culture=neutral, PublicKeyToken=2f7fb9b49ffdfe20, processorArchitecture=MSIL">
-      <HintPath>packages\Concentus.2.2.2\lib\net452\Concentus.dll</HintPath>
-    </Reference>
-    <Reference Include="Concentus.Oggfile, Version=1.0.7.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>packages\Concentus.Oggfile.1.0.7\lib\net452\Concentus.Oggfile.dll</HintPath>
-    </Reference>
+    <!-- ALL managed audio decoders removed (NAudio + Concentus/CSCore/NVorbis):
+         every format now decodes natively in CMM_Decoder.dll (libopusfile /
+         stb_vorbis / dr_flac / dr_mp3 / dr_wav), and the WaveStream/WaveFormat
+         base types live in-repo (Harmony/WaveShim.cs). -->
     <Reference Include="LogLibrary">
       <HintPath>$(GameManagedDir)\LogLibrary.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Reference Include="Microsoft.Win32.Registry, Version=4.1.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\Microsoft.Win32.Registry.4.7.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
     <!-- MoonSharp: pure-managed Lua interpreter hosting the external context.lua
          decision script (see ScriptHost). net40-client build for Unity/Mono; copied
-         to output (no Private=False) so it ships with the mod. -->
+         to the mod ROOT (no Private=False) so it ships with the mod. It MUST stay at
+         root, NOT Libs\: the game discovers our IModApi by scanning/loading every type
+         (Mod.InitModCode → IsAssignableFrom over GetTypes()), which loads ScriptHost
+         whose `_script` field is a MoonSharp type — resolving MoonSharp before any of
+         our code runs, so no AssemblyResolve hook can be early enough (see HarmonyPatches). -->
     <Reference Include="MoonSharp.Interpreter">
       <HintPath>packages\MoonSharp.2.0.0\lib\net40-client\MoonSharp.Interpreter.dll</HintPath>
     </Reference>
-    <Reference Include="NAudio, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.2.3.0\lib\net472\NAudio.dll</HintPath>
-    </Reference>
-    <Reference Include="NAudio.Asio, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.Asio.2.3.0\lib\netstandard2.0\NAudio.Asio.dll</HintPath>
-    </Reference>
-    <Reference Include="NAudio.Core, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.Core.2.3.0\lib\netstandard2.0\NAudio.Core.dll</HintPath>
-    </Reference>
-    <!--
-    <Reference Include="NAudio.Flac, Version=2.0.1.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>packages\BunLabs.NAudio.Flac.2.0.1\lib\netstandard2.0\NAudio.Flac.dll</HintPath>
-    </Reference>
-    -->
-    <!-- CSCore provides FLAC decoding (FlacFile) without Span<T>, working across all
-         Unity/Mono versions including A21 where BunLabs.NAudio.Flac hard-crashed the JIT. -->
-    <Reference Include="CSCore, Version=1.2.1.2, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>packages\CSCore.1.2.1.2\lib\net35-client\CSCore.dll</HintPath>
-    </Reference>
-    <Reference Include="NAudio.Midi, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.Midi.2.3.0\lib\netstandard2.0\NAudio.Midi.dll</HintPath>
-    </Reference>
-    <Reference Include="NAudio.Vorbis, Version=1.5.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.Vorbis.1.5.0\lib\netstandard2.0\NAudio.Vorbis.dll</HintPath>
-    </Reference>
-    <Reference Include="NAudio.Wasapi, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.Wasapi.2.3.0\lib\netstandard2.0\NAudio.Wasapi.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="NAudio.WinForms, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.WinForms.2.3.0\lib\net472\NAudio.WinForms.dll</HintPath>
-    </Reference>
-    <Reference Include="NAudio.WinMM, Version=2.3.0.0, Culture=neutral, PublicKeyToken=e279aa5131008a41, processorArchitecture=MSIL">
-      <HintPath>packages\NAudio.WinMM.2.3.0\lib\netstandard2.0\NAudio.WinMM.dll</HintPath>
-    </Reference>
-    <Reference Include="NVorbis, Version=0.10.4.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>packages\NVorbis.0.10.4\lib\net45\NVorbis.dll</HintPath>
-    </Reference>
+    <!-- NAudio (all 8 sub-assemblies) and its transitive deps REMOVED. Assembly-ref
+         analysis of the built ContextMusicManager.dll/MoonSharp.Interpreter.dll showed
+         NONE of the old NuGet shims (System.Memory/Buffers/Numerics.Vectors/
+         Runtime.CompilerServices.Unsafe/Resources.Extensions/Security.*/ValueTuple,
+         Microsoft.Win32.Registry) are referenced — they were pure NAudio leftovers.
+         ValueTuple resolves from mscorlib (net48 type-forwarding). -->
     <Reference Include="System">
       <Private>False</Private>
     </Reference>
     <Reference Include="System.Xml">
       <Private>False</Private>
-    </Reference>
-    <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.Memory, Version=4.0.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Memory.4.6.2\lib\net462\System.Memory.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.Numerics" />
-    <Reference Include="System.Numerics.Vectors, Version=4.1.6.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.Resources.Extensions, Version=8.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.Resources.Extensions.8.0.0\lib\net462\System.Resources.Extensions.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.Runtime.CompilerServices.Unsafe, Version=6.0.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.Security.AccessControl, Version=4.1.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\System.Security.AccessControl.4.7.0\lib\net461\System.Security.AccessControl.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.Security.Principal.Windows, Version=4.1.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>packages\System.Security.Principal.Windows.4.7.0\lib\net461\System.Security.Principal.Windows.dll</HintPath>
-      <Private>True</Private>
-    </Reference>
-    <Reference Include="System.ValueTuple, Version=4.0.3.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>packages\System.ValueTuple.4.5.0\lib\net47\System.ValueTuple.dll</HintPath>
-      <Private>True</Private>
     </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(GameManagedDir)\UnityEngine.dll</HintPath>
@@ -328,38 +277,6 @@
     </ItemGroup>
     <Delete Condition="'$(Configuration)' == 'Debug'" Files="@(_StaleArtifacts)" />
   </Target>
-  <Target Name="AfterBuild" Condition=" '$(Configuration)' != 'CI' ">
-    <!-- ModInfo.xml is authoritative: it ships verbatim (copied via the Content item
-         above), so its values are edited directly in the source file, not rewritten here. -->
-    <!-- Old-style projects don't auto-copy netstandard.dll the way SDK-style projects do,
-         so this Delete is a no-op in practice — kept as a safeguard in case the toolchain
-         ever starts producing it for non-A20 targets where it is not needed. -->
-    <Delete Condition="'$(GameVersionDefine)' != 'GV_A20'" Files="$(OutputPath)netstandard.dll" />
-  </Target>
-
-  <!-- A20 only: copy the runtime netstandard.dll type-forwarding shim into the mod folder.
-       A20 runs on Unity 2020.3 whose Mono has no netstandard.dll in Managed; without it
-       the netstandard2.0 NAudio sub-assemblies (NAudio.Core, NAudio.Vorbis, etc.) throw
-       ReflectionTypeLoadException and Harmony never patches.  All newer game targets ship
-       a Mono that handles netstandard2.0 natively, so they don't need this file.
-       This project is old-style (ToolsVersion 12.0) and does not auto-copy netstandard.dll
-       the way SDK-style projects do, so we copy it explicitly here.
-       Default source: dotnet CLI Build.Extensions (net461 variant, MIT licensed).
-       Override with -p:NetStandardShimDll=<path> when building with VS MSBuild. -->
-  <PropertyGroup Condition="'$(GameVersionDefine)' == 'GV_A20'">
-    <NetStandardShimDll Condition="'$(NetStandardShimDll)' == ''">$(MSBuildExtensionsPath)\Microsoft\Microsoft.NET.Build.Extensions\net461\lib\netstandard.dll</NetStandardShimDll>
-  </PropertyGroup>
-  <Target Name="CopyNetStandardShimForA20" AfterTargets="AfterBuild"
-          Condition="'$(GameVersionDefine)' == 'GV_A20' And '$(Configuration)' != 'CI'">
-    <Warning Condition="!Exists('$(NetStandardShimDll)')"
-             Text="[CMM] netstandard.dll shim not found at '$(NetStandardShimDll)'. A20 NAudio will fail to load. Override with -p:NetStandardShimDll=&lt;path&gt;." />
-    <Copy SourceFiles="$(NetStandardShimDll)" DestinationFolder="$(OutputPath)"
-          Condition="Exists('$(NetStandardShimDll)')"
-          SkipUnchangedFiles="true" />
-    <Message Condition="Exists('$(NetStandardShimDll)')" Importance="high"
-             Text="[CMM] Copied netstandard.dll shim for A20 from $(NetStandardShimDll)" />
-  </Target>
-
   <!-- A20 only: overwrite the deployed ModInfo.xml with the legacy nested-<ModInfo> format
        (A20 expects <xml> root wrapping a <ModInfo> element; the modern format flattens the
        fields directly under <xml>). Runs after the normal content copy. The Version is

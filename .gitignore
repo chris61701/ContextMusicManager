@@ -363,3 +363,10 @@ MigrationBackup/
 FodyWeavers.xsd
 # CMM build output (Release staging + packaged zips)
 /dist/
+
+# CMM_Decoder native build artifacts (CMake intermediates, test exes, static lib).
+# The shipped CMM_Decoder.dll under dist/ IS tracked; everything else here is regenerable.
+/CMM_Decoder/build/
+/CMM_Decoder/*.exe
+/CMM_Decoder/test_out.txt
+/CMM_Decoder/dist/*.a

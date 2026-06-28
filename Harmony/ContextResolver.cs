@@ -241,9 +241,12 @@ namespace CMM
         // resolver — there is no built-in C# decision path anymore.
         public static List<string> ResolveContext()
         {
-            var gameState = BuildSnapshot();
+            GameState gameState;
+            using (CMMPerf.Measure(CMMPerf.Phase.ScanPoll))
+                gameState = BuildSnapshot();
             if (gameState == null) return new List<string>();
-            return ScriptHost.Resolve(gameState);
+            using (CMMPerf.Measure(CMMPerf.Phase.ScanResolve))
+                return ScriptHost.Resolve(gameState);
         }
     }
 }

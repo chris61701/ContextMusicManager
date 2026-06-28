@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using UnityEngine;
-using NAudio.Wave;
 
 namespace CMM
 {
@@ -62,10 +61,10 @@ namespace CMM
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public static float PresenceScanInterval = 0.5f;
 
-        // ── Loudness sweep / save pacing ───────────────────────────────────────
+        // ── Loudness menu-prewarm / save pacing ────────────────────────────────
         public static float LoudnessSweepStartDelay = 8f;   // let startup settle first
-        public static float LoudnessSweepInterval = 0.25f;  // menu pre-warm: tiny yield between files, otherwise flat-out
-        public static float LoudnessSweepInGameInterval = 1f;  // in-game: small yield; GC fixed, so finish the one-time sweep fast
+        public static float LoudnessSweepInterval = 0.25f;  // menu: tiny yield between prewarm passes
+        public static float LoudnessSweepInGameInterval = 1f;  // in-game: idle tick (prewarm only runs on the menu)
         public static float LoudnessSaveDebounce = 5f;      // flush the cache if dirty
 
         // ── Init ──────────────────────────────────────────────────────────────
@@ -73,6 +72,12 @@ namespace CMM
         {
             ModPath = modPath;
             MusicDirectory = Path.Combine(modPath, "Music");
+
+            // Preload the native decode shim by full path BEFORE any decode runs — the
+            // Mods subfolder isn't on the OS native search path, so the later
+            // DllImport("CMM_Decoder") only resolves once the module is already in-process.
+            // Required for ALL formats (every codec decodes natively, no managed fallback).
+            NativeOpus.Preload(modPath);
 #if CMM_LOUDNESS_SELFTEST
             R128SelfTest.Run();
 #endif
@@ -119,7 +124,7 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.LoudnessSweepLoop());
             CMM_CoRoutines.StartCoroutine(Instance.LoudnessSaveLoop());
 
-            CMMConfig.D($"[CMM] Initialized! Decoder: NAudio | Preload: {CMMConfig.PreloadCacheEnabled}");
+            CMMConfig.D($"[CMM] Initialized! Decoder: CMM_Decoder (native) | Preload: {CMMConfig.PreloadCacheEnabled}");
         }
 
         public static void OnEnterGame()
@@ -263,6 +268,7 @@ namespace CMM
 
             int newId = ++_transitionId;
             _scheduleHandledTransition = false;
+            CMMPerf.BeginTransition(contextName);
             _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(Instance.PlayFromCache(contextName, false, newId));
         }
 
@@ -293,6 +299,10 @@ namespace CMM
                 long scanAllocBefore = GC.GetTotalMemory(false);
 
                 List<string> activeContexts = ContextResolver.ResolveContext();
+
+                // Time the synchronous change-detection gate (no yields here, so this is
+                // the steady-state per-tick cost that runs whether or not we transition).
+                var _gatePerf = CMMPerf.Measure(CMMPerf.Phase.ScanGate);
 
                 // Compute which of the active contexts are currently playable AND what
                 // they resolve to. We need to re-evaluate the stack when the active set,
@@ -355,6 +365,7 @@ namespace CMM
                 if (scanAllocDelta > 0) _scanAllocBytes += scanAllocDelta;
                 _scanAllocTicks++;
 
+                _gatePerf.Dispose();
                 if (!namesChanged && !playabilityChanged && !currentIsStuck && !currentAudioDead && !vanillaIsActive && !hasPendingEvictions && !hasWarmingContexts && !warmingJustCleared) continue;
 
                 _previousActiveContexts.Clear();
@@ -475,6 +486,9 @@ namespace CMM
                     _scanAllocBytes = 0;
                     _scanAllocTicks = 0;
                 }
+
+                // Per-phase timing rollup (poll/resolve/gate/transition), when PerfTiming is on.
+                CMMPerf.DumpAndReset();
 
                 if (!inGame) continue;
 
@@ -671,7 +685,7 @@ namespace CMM
                         if (Directory.Exists(dir))
                         {
                             var fis = new DirectoryInfo(dir).GetFiles()
-                                .Where(fi => NAudioDecoder.IsSupported(fi.FullName)).ToArray();
+                                .Where(fi => AudioDecoder.IsSupported(fi.FullName)).ToArray();
                             currentFiles = fis.Select(fi => fi.FullName).ToArray();
                             foreach (var fi in fis)
                             {
@@ -1121,7 +1135,7 @@ namespace CMM
                         bool decodeOk = false;
                         ThreadPool.QueueUserWorkItem(_ =>
                         {
-                            try { decoded = NAudioDecoder.DecodeFileFromBytes(rawBytes, filePath); }
+                            try { decoded = AudioDecoder.DecodeFileFromBytes(rawBytes, filePath); }
                             catch { }
                             decodeOk = true;
                         });
@@ -1143,8 +1157,8 @@ namespace CMM
                     // All other full-decode contexts keep the managed streaming path.
                     bool isMenu = contextName == "Menu";
                     AudioClip fullClip = isMenu
-                        ? NAudioDecoder.CreateNonStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath))
-                        : NAudioDecoder.CreateStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath));
+                        ? AudioDecoder.CreateNonStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath))
+                        : AudioDecoder.CreateStreamingClip(decoded, Path.GetFileNameWithoutExtension(filePath));
                     if (fullClip == null) yield break;
 
                     if (cache.Current.Clip != null && !cache.Current.Borrowed) Destroy(cache.Current.Clip);
@@ -1178,7 +1192,7 @@ namespace CMM
                         yield break;
                     }
 
-                    AudioClip clip = NAudioDecoder.CreateStreamingClipFromReader(
+                    AudioClip clip = AudioDecoder.CreateStreamingClipFromReader(
                         reader, Path.GetFileNameWithoutExtension(filePath));
 
                     if (clip == null)
@@ -1204,7 +1218,7 @@ namespace CMM
                     CMMConfig.D($"[CMM] Preloaded (streaming): {contextName} — " +
                             $"{Path.GetFileName(filePath)}" +
                             (lenSec > 0 ? $" ({lenSec:F1}s)" : "") +
-                            (NAudioDecoder.IsOpusFile(filePath) ? " [Opus/seekable]" : ""));
+                            (AudioDecoder.IsOpusFile(filePath) ? " [Opus/seekable]" : ""));
                 }
             }
         }
@@ -1224,7 +1238,7 @@ namespace CMM
 
         private IEnumerator DiagnosticLoop()
         {
-            long lastHeartbeat = NAudioDecoder.PcmHeartbeat;
+            long lastHeartbeat = AudioDecoder.PcmHeartbeat;
             while (true)
             {
                 yield return new WaitForSeconds(3f);
@@ -1256,7 +1270,7 @@ namespace CMM
                 // listener/bus is muting them. (Full-decode/native clips — e.g. the
                 // menu — never call managed PCM callbacks, so pcmDelta stays 0 for
                 // those by design.)
-                long hb = NAudioDecoder.PcmHeartbeat;
+                long hb = AudioDecoder.PcmHeartbeat;
                 long pcmDelta = hb - lastHeartbeat;
                 lastHeartbeat = hb;
 

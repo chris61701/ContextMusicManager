@@ -6,229 +6,7 @@ This mod ships with the following third-party libraries. Their licenses are
 reproduced in full below as required by their respective terms.
 
 ================================================================================
- 1. NAudio 2.3.0
-    NAudio.Core 2.3.0
-    NAudio.Vorbis 1.5.0
-    NAudio.WinMM 2.3.0
-    NAudio.Asio 2.3.0
-    NAudio.Midi 2.3.0
-    NAudio.Wasapi 2.3.0
-    NAudio.WinForms 2.3.0
-    https://github.com/naudio/NAudio
-================================================================================
-
-MIT License
-
-Copyright (c) 2020 Mark Heath
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
- 2. netstandard.dll (Microsoft.NET.Build.Extensions)
-    Shipped with Alpha 20 builds only: Unity 2020.3's Mono lacks this
-    type-forwarding shim, which is required for netstandard2.0 assemblies
-    (NAudio.Core et al.) to load.
-    https://github.com/dotnet/sdk
-================================================================================
-
-MIT License
-
-Copyright (c) .NET Foundation and Contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
- 3. NVorbis 0.10.4
-    https://github.com/NVorbis/NVorbis
-================================================================================
-
-MIT License
-
-Copyright (c) 2020 Andrew Ward
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
- 4. CSCore 1.2.1.2
-    https://github.com/filoe/cscore
-================================================================================
-
-MIT License
-
-Copyright (c) 2015 Florian
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
- 5. Concentus.Oggfile 1.0.7
-    https://github.com/lostromb/concentus.oggfile
-================================================================================
-
-Microsoft Public License (MS-PL)
-
-Copyright (c) Logan Stromberg, Andrew Ward
-
-This license governs use of the accompanying software. If you use the
-software, you accept this license. If you do not accept the license, do not
-use the software.
-
-1. Definitions
-
-The terms "reproduce," "reproduction," "derivative works," and "distribution"
-have the same meaning here as under U.S. copyright law. A "contribution" is
-the original software, or any additions or changes to the software. A
-"contributor" is any person that distributes its contribution under this
-license. "Licensed patents" are a contributor's patent claims that read
-directly on its contribution.
-
-2. Grant of Rights
-
-(A) Copyright Grant - Subject to the terms of this license, including the
-license conditions and limitations in section 3, each contributor grants you
-a non-exclusive, worldwide, royalty-free copyright license to reproduce its
-contribution, prepare derivative works of its contribution, and distribute
-its contribution or any derivative works that you create.
-
-(B) Patent Grant - Subject to the terms of this license, including the
-license conditions and limitations in section 3, each contributor grants you
-a non-exclusive, worldwide, royalty-free license under its licensed patents
-to make, have made, use, sell, offer for sale, import, and/or otherwise
-dispose of its contribution in the software or derivative works of the
-contribution in the software.
-
-3. Conditions and Limitations
-
-(A) No Trademark License - This license does not grant you rights to use any
-contributors' name, logo, or trademarks.
-
-(B) If you bring a patent claim against any contributor over patents that you
-claim are infringed by the software, your patent license from such contributor
-to the software ends automatically.
-
-(C) If you distribute any portion of the software, you must retain all
-copyright, patent, trademark, and attribution notices that are present in
-the software.
-
-(D) If you distribute any portion of the software in source code form, you
-may do so only under this license by including a complete copy of this license
-with your distribution. If you distribute any portion of the software in
-compiled or object code form, you may only do so under a license that complies
-with this license.
-
-(E) The software is licensed "as-is." You bear the risk of using it. The
-contributors give no express warranties, guarantees, or conditions. You may
-have additional consumer rights under your local laws which this license
-cannot change. To the extent permitted under your local laws, the contributors
-exclude the implied warranties of merchantability, fitness for a particular
-purpose and non-infringement.
-
-================================================================================
- 6. Concentus 2.2.2
-    https://github.com/lostromb/concentus
-================================================================================
-
-Copyright (c) 2001-2011 CSIRO
-Copyright (c) 2003-2013 Mark Borgerding
-Copyright (c) 2007-2008 INRIA
-Copyright (c) 2008      Thorvald Natvig
-Copyright (c) 2011-2013 Skype Limited
-Copyright (c) 2012      Xiph.Org Foundation
-Copyright (c) 2007-2011 Jean-Marc Valin
-Copyright (c) 2008-2013 Gregory Maxwell
-Copyright (c) 2010-2011 Timothy B. Terriberry
-Copyright (c) 2016      Logan Stromberg (C# port)
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice,
-   this list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its contributors
-   may be used to endorse or promote products derived from this software
-   without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-================================================================================
- 7. MoonSharp 2.0.0
+ 1. MoonSharp 2.0.0
     Hosts the external context.lua decision script.
     http://www.moonsharp.org/  —  https://github.com/moonsharp-devs/moonsharp
 ================================================================================
@@ -264,3 +42,233 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 MoonSharp additionally embeds portions of Lua 5.2 (Copyright (c) 1994-2015
 Lua.org, PUC-Rio) and KopiLua, both under the MIT license. See the MoonSharp
 LICENSE file at the project URL above for the complete combined text.
+
+================================================================================
+ 2. libopusfile, libopus, libogg  (Xiph.Org Foundation)
+    Compiled into the native CMM_Decoder.dll decode shim shipped with this mod.
+    https://github.com/xiph/opusfile
+    https://github.com/xiph/opus
+    https://github.com/xiph/ogg
+================================================================================
+
+Copyright (c) 1994-2024 Xiph.Org Foundation and contributors
+Copyright (c) 2001-2011 CSIRO
+Copyright (c) 2007-2011 Jean-Marc Valin
+Copyright (c) 2008-2013 Gregory Maxwell
+Copyright (c) 2010-2011 Timothy B. Terriberry
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+- Neither the name of the Xiph.Org Foundation nor the names of its contributors
+  may be used to endorse or promote products derived from this software without
+  specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE FOUNDATION OR CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+ 3. dr_flac, dr_mp3, dr_wav (David Reid / mackron)
+    FLAC / MP3 / WAV+AIFF decoders compiled into the native CMM_Decoder.dll shim.
+    https://github.com/mackron/dr_libs
+================================================================================
+
+The dr_libs (dr_flac, dr_mp3, dr_wav) are dual-licensed; this distribution uses
+them under the Unlicense (public domain). The author offers MIT-0 as an
+alternative.
+
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
+
+================================================================================
+ 4. stb_vorbis (Sean Barrett / nothings)  v1.22
+     Ogg Vorbis decoder compiled into the native CMM_Decoder.dll decode shim.
+     https://github.com/nothings/stb
+================================================================================
+
+stb_vorbis is dual-licensed; this distribution uses it under the public-domain
+dedication. The author offers the MIT license as an alternative.
+
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
+
+================================================================================
+ 5. The Fraunhofer FDK AAC Codec Library for Android  (Fraunhofer IIS)  v2.0.3
+    AAC-LC / HE-AAC decoder compiled into the native CMM_Decoder.dll shim.
+    Only the DECODER is used; only its referenced object code is linked.
+    https://github.com/mstorsjo/fdk-aac
+    Complete corresponding source is vendored in this repository under
+    CMM_Decoder/third_party/fdk-aac/ (per the source-availability requirement).
+    NOTE on patents: this license grants NO patent rights (see section 3). AAC is
+    an MPEG standard; patent claims, where they still apply, are the user's
+    responsibility — the same basis on which ffmpeg/Android ship this library.
+================================================================================
+
+Software License for The Fraunhofer FDK AAC Codec Library for Android
+
+© Copyright  1995 - 2018 Fraunhofer-Gesellschaft zur Förderung der angewandten
+Forschung e.V. All rights reserved.
+
+ 1.    INTRODUCTION
+The Fraunhofer FDK AAC Codec Library for Android ("FDK AAC Codec") is software
+that implements the MPEG Advanced Audio Coding ("AAC") encoding and decoding
+scheme for digital audio. This FDK AAC Codec software is intended to be used on
+a wide variety of Android devices.
+
+AAC's HE-AAC and HE-AAC v2 versions are regarded as today's most efficient
+general perceptual audio codecs. AAC-ELD is considered the best-performing
+full-bandwidth communications codec by independent studies and is widely
+deployed. AAC has been standardized by ISO and IEC as part of the MPEG
+specifications.
+
+Patent licenses for necessary patent claims for the FDK AAC Codec (including
+those of Fraunhofer) may be obtained through Via Licensing
+(www.vialicensing.com) or through the respective patent owners individually for
+the purpose of encoding or decoding bit streams in products that are compliant
+with the ISO/IEC MPEG audio standards. Please note that most manufacturers of
+Android devices already license these patent claims through Via Licensing or
+directly from the patent owners, and therefore FDK AAC Codec software may
+already be covered under those patent licenses when it is used for those
+licensed purposes only.
+
+Commercially-licensed AAC software libraries, including floating-point versions
+with enhanced sound quality, are also available from Fraunhofer. Users are
+encouraged to check the Fraunhofer website for additional applications
+information and documentation.
+
+2.    COPYRIGHT LICENSE
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted without payment of copyright license fees provided that you
+satisfy the following conditions:
+
+You must retain the complete text of this software license in redistributions of
+the FDK AAC Codec or your modifications thereto in source code form.
+
+You must retain the complete text of this software license in the documentation
+and/or other materials provided with redistributions of the FDK AAC Codec or
+your modifications thereto in binary form. You must make available free of
+charge copies of the complete source code of the FDK AAC Codec and your
+modifications thereto to recipients of copies in binary form.
+
+The name of Fraunhofer may not be used to endorse or promote products derived
+from this library without prior written permission.
+
+You may not charge copyright license fees for anyone to use, copy or distribute
+the FDK AAC Codec software or your modifications thereto.
+
+Your modified versions of the FDK AAC Codec must carry prominent notices stating
+that you changed the software and the date of any change. For modified versions
+of the FDK AAC Codec, the term "Fraunhofer FDK AAC Codec Library for Android"
+must be replaced by the term "Third-Party Modified Version of the Fraunhofer FDK
+AAC Codec Library for Android."
+
+3.    NO PATENT LICENSE
+
+NO EXPRESS OR IMPLIED LICENSES TO ANY PATENT CLAIMS, including without
+limitation the patents of Fraunhofer, ARE GRANTED BY THIS SOFTWARE LICENSE.
+Fraunhofer provides no warranty of patent non-infringement with respect to this
+software.
+
+You may use this FDK AAC Codec software or modifications thereto only for
+purposes that are authorized by appropriate patent licenses.
+
+4.    DISCLAIMER
+
+This FDK AAC Codec software is provided by Fraunhofer on behalf of the copyright
+holders and contributors "AS IS" and WITHOUT ANY EXPRESS OR IMPLIED WARRANTIES,
+including but not limited to the implied warranties of merchantability and
+fitness for a particular purpose. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE for any direct, indirect, incidental, special, exemplary,
+or consequential damages, including but not limited to procurement of substitute
+goods or services; loss of use, data, or profits, or business interruption,
+however caused and on any theory of liability, whether in contract, strict
+liability, or tort (including negligence), arising in any way out of the use of
+this software, even if advised of the possibility of such damage.
+
+5.    CONTACT INFORMATION
+
+Fraunhofer Institute for Integrated Circuits IIS
+Attention: Audio and Multimedia Departments - FDK AAC LL
+Am Wolfsmantel 33
+91058 Erlangen, Germany
+
+www.iis.fraunhofer.de/amm
+amm-info@iis.fraunhofer.de
+
+================================================================================
+ 6. minimp4 (Lieff)
+    Single-header MP4/M4A demuxer compiled into the native CMM_Decoder.dll shim;
+    used to locate and extract the AAC audio track (incl. the audio track of an
+    MP4 that also carries video). https://github.com/lieff/minimp4
+================================================================================
+
+minimp4 is released into the public domain under the Creative Commons CC0 1.0
+Universal dedication.
+
+To the greatest extent permitted by, but not in contravention of, applicable
+law, the author overtly, fully, permanently, irrevocably and unconditionally
+waives, abandons, and surrenders all of the author's Copyright and Related
+Rights and associated claims and causes of action in the work, for the benefit
+of each member of the public at large. The work is offered as-is and the author
+makes no representations or warranties of any kind concerning the work, express,
+implied, statutory or otherwise, including without limitation warranties of
+title, merchantability, fitness for a particular purpose, non-infringement, or
+the absence of latent or other defects. No trademark or patent rights held by
+the author are waived, abandoned, surrendered, licensed or otherwise affected.
+
+For the complete CC0 1.0 text, see
+<http://creativecommons.org/publicdomain/zero/1.0/>
