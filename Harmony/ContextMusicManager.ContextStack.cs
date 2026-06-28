@@ -188,6 +188,12 @@ namespace CMM
         }
 
         private static readonly HashSet<string> _invalidFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Validation cache: keys are "fullpath|size|mtimeTicks" of files that passed
+        // QuickValidate this session. Checked in FileWatchLoop before re-decoding a "new"
+        // file, so moving a folder's files out and back (same size+mtime) doesn't
+        // re-validate every one. Kept across removals on purpose; a changed file gets a
+        // new key and is re-checked. In-memory only (a fresh launch re-validates, though
+        // already-measured files short-circuit via LoudnessStore.IsMeasured).
         private static readonly HashSet<string> _validatedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Tracks all contexts currently open on the ResolvePlayableContext call stack.

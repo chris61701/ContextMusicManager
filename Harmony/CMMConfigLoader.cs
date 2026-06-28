@@ -36,6 +36,15 @@ namespace CMM
                 CMMConfig.LoudnessNormalizationEnabled = ReadBool (root, "LoudnessNormalizationEnabled", CMMConfig.LoudnessNormalizationEnabled);
                 CMMConfig.LoudnessTargetLufs           = ReadFloat(root, "LoudnessTargetLufs",           CMMConfig.LoudnessTargetLufs);
                 CMMConfig.LoudnessMaxBoostDb           = ReadFloat(root, "LoudnessMaxBoostDb",           CMMConfig.LoudnessMaxBoostDb);
+                CMMConfig.LoudnessProactiveScan        = ReadBool (root, "LoudnessProactiveScan",        CMMConfig.LoudnessProactiveScan);
+                CMMConfig.LoudnessMenuPrescan          = ReadBool (root, "LoudnessMenuPrescan",          CMMConfig.LoudnessMenuPrescan);
+                CMMConfig.LoudnessMenuPrescanThreads   = ReadInt  (root, "LoudnessMenuPrescanThreads",   CMMConfig.LoudnessMenuPrescanThreads);
+
+                CMMConfig.LoudnessAdaptiveThrottle     = ReadBool (root, "LoudnessAdaptiveThrottle",     CMMConfig.LoudnessAdaptiveThrottle);
+                CMMConfig.LoudnessThrottleTargetFrameMs = ReadFloat(root, "LoudnessThrottleTargetFrameMs", CMMConfig.LoudnessThrottleTargetFrameMs);
+                CMMConfig.LoudnessThrottleGain         = ReadFloat(root, "LoudnessThrottleGain",         CMMConfig.LoudnessThrottleGain);
+                CMMConfig.LoudnessThrottleMaxRatio     = ReadFloat(root, "LoudnessThrottleMaxRatio",     CMMConfig.LoudnessThrottleMaxRatio);
+                CMMConfig.LoudnessThrottleMaxSleepMs   = ReadFloat(root, "LoudnessThrottleMaxSleepMs",   CMMConfig.LoudnessThrottleMaxSleepMs);
 
                 CMMConfig.EnemyDetectRange                 = ReadFloat(root, "EnemyDetectRange",                 CMMConfig.EnemyDetectRange);
                 CMMConfig.HomeDetectRange                  = ReadFloat(root, "HomeDetectRange",                  CMMConfig.HomeDetectRange);

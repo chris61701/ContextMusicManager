@@ -143,6 +143,7 @@
     <Compile Include="Harmony\NAudioDecoder.cs" />
     <Compile Include="Harmony\LoudnessAnalyzer.cs" />
     <Compile Include="Harmony\LoudnessStore.cs" />
+    <Compile Include="Harmony\LoudnessThrottle.cs" />
     <Compile Include="Harmony\R128SelfTest.cs" />
     <Compile Include="Harmony\ContextResolver.cs" />
     <Compile Include="Harmony\ScriptHost.cs" />
@@ -151,6 +152,7 @@
     <Compile Include="Harmony\ContextMusicManager.VanillaClips.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
     <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />
+    <Compile Include="Harmony\ContextMusicManager.PrescanHud.cs" />
     <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Content Include="ModInfo.xml">

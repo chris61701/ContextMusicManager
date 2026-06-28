@@ -130,11 +130,17 @@ namespace CMM
             }
 
             public static OggPageIndex BuildFromBytes(byte[] data, string debugName = "")
+                => BuildFromBytes(data, data.Length, debugName);
+
+            // Length overload: `data` may be a REUSED buffer larger than the actual file
+            // (the loudness sweep pools one growable buffer to avoid per-file LOH churn),
+            // so only the first `length` bytes are the file.
+            public static OggPageIndex BuildFromBytes(byte[] data, int length, string debugName = "")
             {
                 // Reuses the exact same page-scanning logic as Build(filePath).
                 // We wrap the byte[] in a MemoryStream — MemoryStream.Read is just
                 // an Array.Copy internally, so this is as fast as a cached read.
-                using (var ms = new MemoryStream(data, writable: false))
+                using (var ms = new MemoryStream(data, 0, length, writable: false))
                 {
                     // (The implementation is identical to Build(); replace the
                     //  `new FileStream(...)` line with `ms` and remove the `using`
@@ -520,6 +526,12 @@ namespace CMM
             }
 
             public SeekableOpusReader(byte[] rawData, OggPageIndex index, string debugName = "")
+                : this(rawData, rawData.Length, index, debugName) { }
+
+            // Length overload: `rawData` may be a REUSED buffer larger than the file (the
+            // loudness sweep pools one growable buffer); only the first `length` bytes are
+            // the file content.
+            public SeekableOpusReader(byte[] rawData, int length, OggPageIndex index, string debugName = "")
             {
                 _filePath = debugName;
                 _index = index;
@@ -529,7 +541,7 @@ namespace CMM
                 // handle, so the original file can be overwritten/deleted immediately.
                 // The MemoryStream is stored in _fileStream (typed as Stream, not FileStream)
                 // — change the field type from FileStream to Stream.
-                _fileStream = new MemoryStream(rawData, writable: false);
+                _fileStream = new MemoryStream(rawData, 0, length, writable: false);
                 _decoder = OpusCodecFactory.CreateDecoder(48000, index.Channels);
                 OpenStreamAtByte(0);
             }
@@ -538,7 +550,6 @@ namespace CMM
             // Returns false at end of stream.
             private bool FillPacketBufferLocked()
             {
-                long t0 = Stopwatch.GetTimestamp();
                 if (_oggStream == null || !_oggStream.HasNextPacket)
                 {
                     if (!_eosLogged)
@@ -562,8 +573,6 @@ namespace CMM
 
                 _pcmBufStart = 0;
                 _pcmBufEnd = packet.Length;
-                float ms = (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
-                if (ms > 1f) CMMConfig.D($"[CMM PERF] OpusDecodePacket: {ms:F2}ms");
                 return true;
             }
 
@@ -776,8 +785,13 @@ namespace CMM
                 return OpenReader(filePath);
         }
         private static WaveStream OpenReaderFromMemory(byte[] raw, string ext, string filePath)
+            => OpenReaderFromMemory(raw, raw.Length, ext, filePath);
+
+        // Length overload: `raw` may be a REUSED buffer larger than the file (loudness
+        // sweep pooling); only the first `length` bytes are decoded.
+        private static WaveStream OpenReaderFromMemory(byte[] raw, int length, string ext, string filePath)
         {
-            var ms = new MemoryStream(raw, writable: false);
+            var ms = new MemoryStream(raw, 0, length, writable: false);
             try
             {
                 switch (ext)
@@ -857,11 +871,33 @@ namespace CMM
         // Called on a BACKGROUND thread (by the loudness sweep / block-before-play).
         // Pure measurement — touches no Unity main-thread state. The caller commits
         // the TrackLoudness into LoudnessStore on the main thread.
-        public static TrackLoudness MeasureLoudness(string filePath)
+        // `scratch`, when supplied (by the serial background sweep), provides a REUSED
+        // growable file buffer and sample buffer so a measurement allocates nothing on the
+        // Large Object Heap. This is the fix for the real cause of in-game stutter: the old
+        // per-file File.ReadAllBytes allocated a multi-MB LOH array every track, and on the
+        // ~2.6 GB in-game Mono heap the resulting Gen2 collections were stop-the-world frame
+        // hitches (throttling CPU did nothing — the allocations were identical). The scratch
+        // MUST be used single-threaded; the sweep guarantees that by awaiting each
+        // measurement before starting the next. Callers without a scratch (the rare
+        // block-before-play path) fall back to per-file allocation.
+        public static TrackLoudness MeasureLoudness(string filePath, MeasureScratch scratch = null, bool throttle = false)
         {
             var fail = new TrackLoudness { Ok = false };
 
+            // ── Step-0 instrumentation ────────────────────────────────────────
+            // Per-file wall-clock split (read / hash / index / decode+analyze) plus
+            // GC-collection deltas, so we can tell a CPU-bound (decode) sweep from an
+            // allocation-bound (whole-file buffer → LOH → GC) one. All gated behind
+            // CMMConfig.D (DebugLogging), so it's free in normal play. Stopwatch ticks
+            // → ms via the helper below.
+            long tStart = Stopwatch.GetTimestamp();
+            int gc0 = GC.CollectionCount(0);
+            int gc1 = GC.CollectionCount(1);
+            int gc2 = GC.CollectionCount(2);
+            float readMs = 0, hashMs = 0, indexMs = 0, analyzeMs = 0;
+
             byte[] raw;
+            int len;
             long size;
             try
             {
@@ -872,7 +908,22 @@ namespace CMM
                                 "— skipping normalization (plays at unity gain).");
                     return fail;
                 }
-                raw = File.ReadAllBytes(filePath);
+                len = (int)size;
+                long t = Stopwatch.GetTimestamp();
+                if (scratch != null)
+                {
+                    // Reuse (and grow once) a single buffer instead of allocating per file.
+                    if (scratch.FileBuf == null || scratch.FileBuf.Length < len)
+                        scratch.FileBuf = new byte[len];
+                    raw = scratch.FileBuf;
+                    using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
+                        ReadExact(fs, raw, len);
+                }
+                else
+                {
+                    raw = File.ReadAllBytes(filePath);
+                }
+                readMs = ElapsedMs(t);
             }
             catch (Exception ex)
             {
@@ -880,7 +931,10 @@ namespace CMM
                 return fail;
             }
 
-            string hash = LoudnessStore.HashBytes(raw, raw.Length);
+            long tHash = Stopwatch.GetTimestamp();
+            string hash = LoudnessStore.HashBytes(raw, len);
+            hashMs = ElapsedMs(tHash);
+
             string ext = Path.GetExtension(filePath).ToLower();
             bool isOpus = ext == ".opus" ||
                 ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(raw));
@@ -890,16 +944,20 @@ namespace CMM
             {
                 if (isOpus)
                 {
-                    OggPageIndex index = OggPageIndex.BuildFromBytes(raw, filePath);
-                    reader = new SeekableOpusReader(raw, index, filePath);
+                    long tIdx = Stopwatch.GetTimestamp();
+                    OggPageIndex index = OggPageIndex.BuildFromBytes(raw, len, filePath);
+                    reader = new SeekableOpusReader(raw, len, index, filePath);
+                    indexMs = ElapsedMs(tIdx);
                 }
                 else
                 {
-                    reader = OpenReaderFromMemory(raw, ext, filePath);
+                    reader = OpenReaderFromMemory(raw, len, ext, filePath);
                 }
                 if (reader == null) return fail;
 
-                LoudnessResult result = AnalyzeToEnd(reader, filePath);
+                long tAnalyze = Stopwatch.GetTimestamp();
+                LoudnessResult result = AnalyzeToEnd(reader, filePath, scratch, throttle);
+                analyzeMs = ElapsedMs(tAnalyze);
                 if (!result.Valid) return fail;
 
                 return new TrackLoudness
@@ -919,22 +977,78 @@ namespace CMM
             finally
             {
                 reader?.Dispose();
+
+                if (CMMConfig.DebugLogging)
+                {
+                    float totalMs = ElapsedMs(tStart);
+                    double mb = size / (1024.0 * 1024.0);
+                    // Decode throughput in MB of source/sec — the headline number for
+                    // ranking codecs (Opus/Concentus is expected to be the slowest).
+                    double mbps = analyzeMs > 0.01f ? mb / (analyzeMs / 1000.0) : 0;
+                    int dg0 = GC.CollectionCount(0) - gc0;
+                    int dg1 = GC.CollectionCount(1) - gc1;
+                    int dg2 = GC.CollectionCount(2) - gc2;
+                    string kind = isOpus ? "opus" : (ext.Length > 1 ? ext.Substring(1) : ext);
+                    CMMConfig.D(
+                        $"[CMM PERF] Loudness {Path.GetFileName(filePath)}: {mb:F1}MB {kind} | " +
+                        $"read={readMs:F0}ms hash={hashMs:F0}ms index={indexMs:F0}ms " +
+                        $"decode={analyzeMs:F0}ms total={totalMs:F0}ms " +
+                        $"({mbps:F1}MB/s) gc(g0+{dg0},g1+{dg1},g2+{dg2})");
+                }
             }
+        }
+
+        // Stopwatch-ticks → milliseconds since `t0`.
+        private static float ElapsedMs(long t0)
+            => (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
+
+        // Reads exactly `count` bytes from `s` into `buf` (or throws on a short read).
+        private static void ReadExact(Stream s, byte[] buf, int count)
+        {
+            int off = 0, r;
+            while (off < count && (r = s.Read(buf, off, count - off)) > 0) off += r;
+            if (off < count) throw new EndOfStreamException($"expected {count} bytes, got {off}");
+        }
+
+        // Reusable scratch for the loudness sweep so a measurement allocates nothing on the
+        // Large Object Heap (the in-game GC stutter fix). MUST be used single-threaded; the
+        // sweep guarantees that by awaiting each measurement before starting the next.
+        public sealed class MeasureScratch
+        {
+            public byte[] FileBuf;     // grows to the largest track seen, then reused
+            public float[] SampleBuf;  // reused decode buffer
         }
 
         // Pulls the whole stream through the R128 analyzer. Uses SeekableOpusReader's
         // ReadFloats fast path for Opus (it already outputs IEEE float), and the same
-        // PCM→float conversion as the clip factory for everything else.
-        private static LoudnessResult AnalyzeToEnd(WaveStream reader, string filePath)
+        // PCM→float conversion as the clip factory for everything else. Reuses
+        // scratch.SampleBuf when provided so the decode buffer isn't re-allocated per file.
+        private static LoudnessResult AnalyzeToEnd(WaveStream reader, string filePath, MeasureScratch scratch, bool throttle)
         {
-            var buf = new float[16384];
+            float[] buf = scratch?.SampleBuf;
+            if (buf == null)
+            {
+                buf = new float[16384];
+                if (scratch != null) scratch.SampleBuf = buf;
+            }
+
+            // Adaptive throttle accounting (only when enabled for this call): time
+            // each chunk's decode+analyze so LoudnessThrottle can scale its back-off
+            // to the work done, and tally the sleep for the per-file PERF log.
+            int sleptMs = 0, chunks = 0;
 
             if (reader is SeekableOpusReader opus)
             {
                 var analyzer = new R128Analyzer(reader.WaveFormat.SampleRate, reader.WaveFormat.Channels);
-                int n;
-                while ((n = opus.ReadFloats(buf, 0, buf.Length)) > 0)
+                while (true)
+                {
+                    long c = throttle ? Stopwatch.GetTimestamp() : 0;
+                    int n = opus.ReadFloats(buf, 0, buf.Length);
+                    if (n <= 0) break;
                     analyzer.Feed(buf, n);
+                    if (throttle) { sleptMs += LoudnessThrottle.ThrottleChunk(ElapsedMs(c)); chunks++; }
+                }
+                LogThrottle(throttle, filePath, sleptMs, chunks);
                 return analyzer.Finish();
             }
 
@@ -953,10 +1067,26 @@ namespace CMM
             }
 
             var analyzer2 = new R128Analyzer(src.WaveFormat.SampleRate, src.WaveFormat.Channels);
-            int read;
-            while ((read = src.Read(buf, 0, buf.Length)) > 0)
+            while (true)
+            {
+                long c = throttle ? Stopwatch.GetTimestamp() : 0;
+                int read = src.Read(buf, 0, buf.Length);
+                if (read <= 0) break;
                 analyzer2.Feed(buf, read);
+                if (throttle) { sleptMs += LoudnessThrottle.ThrottleChunk(ElapsedMs(c)); chunks++; }
+            }
+            LogThrottle(throttle, filePath, sleptMs, chunks);
             return analyzer2.Finish();
+        }
+
+        // Per-file throttle summary so the adaptive back-off is observable: the
+        // smoothed frame time it reacted to, plus how much it slept. Gated behind
+        // both the throttle flag and DebugLogging, so it's free in normal play.
+        private static void LogThrottle(bool throttle, string filePath, int sleptMs, int chunks)
+        {
+            if (!throttle || !CMMConfig.DebugLogging) return;
+            CMMConfig.D($"[CMM PERF] Throttle {Path.GetFileName(filePath)}: " +
+                        $"frame~{LoudnessThrottle.SmoothedFrameMs:F1}ms slept {sleptMs}ms over {chunks} chunks");
         }
 
         // ── PCM → float converter ─────────────────────────────────────────────
@@ -1067,12 +1197,10 @@ namespace CMM
                 return AudioClip.Create(name, totalSamples, channels, sampleRate, true,
                     (float[] data) =>
                     {
-                        var t0 = ProfStart();
                         int filled = directSrc.ReadFloats(data, 0, data.Length);
                         if (filled < data.Length)
                             Array.Clear(data, filled, data.Length - filled);
                         PcmHeartbeat += filled;
-                        ProfEnd(t0, "PCMRead_Opus", 1f);
                     },
                     (int newPosition) =>
                     {

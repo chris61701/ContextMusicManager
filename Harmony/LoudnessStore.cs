@@ -81,6 +81,20 @@ namespace CMM
             return ComputeGain(m);
         }
 
+        // Cheap, NO-I/O "do we already hold a usable measurement for this path?" check,
+        // used by the track selector's prefer-measured bias. Unlike HasCurrent it does
+        // NOT re-stat the file (no size/mtime compare) — a possibly-stale measurement is
+        // fine for *selection* (the sweep re-measures genuinely changed files), and this
+        // runs on the play hot path, so it must stay allocation- and disk-free.
+        public static bool IsMeasured(string absolutePath)
+        {
+            string key = ToRelKey(absolutePath);
+            if (key == null) return false;
+            if (!_byPath.TryGetValue(key, out PathRecord pr)) return false;
+            if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return false;
+            return m.MetricVersion == MetricVersion;
+        }
+
         private static float ComputeGain(Measurement m)
         {
             double gainDb = CMMConfig.LoudnessTargetLufs - m.Lufs;

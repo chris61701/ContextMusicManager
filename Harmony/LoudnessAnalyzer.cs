@@ -82,9 +82,15 @@ namespace CMM
 
         // Sliding history of the last few completed sub-blocks' per-channel
         // squared sums. A 400 ms block = the most recent 4 sub-blocks; advancing
-        // one sub-block at a time gives the 75% overlap for free.
-        private readonly Queue<double[]> _subBlockHistory = new Queue<double[]>();
+        // one sub-block at a time gives the 75% overlap for free. Implemented as a
+        // pre-allocated ring buffer (not a Queue<double[]>) so closing a sub-block —
+        // which happens 10×/second of audio — allocates nothing. Steady-state churn
+        // here forced Mono's stop-the-world GC to run during the background sweep,
+        // hitching the game's main thread.
         private const int SubBlocksPerBlock = 4;     // 4 × 100 ms = 400 ms
+        private readonly double[][] _ring;           // [SubBlocksPerBlock][_channels]
+        private int _ringPos;                        // next slot to overwrite
+        private int _ringFilled;                     // slots written so far (caps at 4)
 
         // One weighted mean-square value (z) per completed 400 ms block, retained
         // for the two-stage gating done in Finish(). Linear, not dB.
@@ -114,6 +120,10 @@ namespace CMM
             }
 
             _subSumSq = new double[channels];
+
+            _ring = new double[SubBlocksPerBlock][];
+            for (int i = 0; i < SubBlocksPerBlock; i++)
+                _ring[i] = new double[channels];
         }
 
         // ── Feed interleaved float PCM ─────────────────────────────────────────
@@ -183,29 +193,31 @@ namespace CMM
         // ── Sub-block / block bookkeeping ──────────────────────────────────────
         private void CloseSubBlock()
         {
-            // Snapshot this sub-block's per-channel energy and push it into the
-            // sliding window; reuse nothing (small arrays, infrequent).
-            var snapshot = new double[_channels];
-            Array.Copy(_subSumSq, snapshot, _channels);
-            _subBlockHistory.Enqueue(snapshot);
+            // Copy this sub-block's per-channel energy into the next ring slot
+            // (overwriting the oldest once the ring is full), then reset the
+            // accumulator. No allocation — the ring slots are pre-sized in the ctor.
+            double[] slot = _ring[_ringPos];
+            Array.Copy(_subSumSq, slot, _channels);
+            _ringPos = (_ringPos + 1) % SubBlocksPerBlock;
+            if (_ringFilled < SubBlocksPerBlock) _ringFilled++;
+
             Array.Clear(_subSumSq, 0, _channels);
             _subFrames = 0;
 
-            if (_subBlockHistory.Count < SubBlocksPerBlock) return;
-            if (_subBlockHistory.Count > SubBlocksPerBlock) _subBlockHistory.Dequeue();
+            if (_ringFilled < SubBlocksPerBlock) return;
 
-            // Weighted mean square over the last 400 ms:
+            // Weighted mean square over the last 400 ms (all four ring slots; their
+            // order doesn't matter to the sum):
             //   z = Σ_ch G_ch · (Σ_subblocks sumSq_ch) / framesInBlock
             int framesInBlock = SubBlocksPerBlock * _samplesPerSubBlock;
             double z = 0;
-            int ch = 0;
-            var perChannel = new double[_channels];
-            foreach (var sub in _subBlockHistory)
-                for (ch = 0; ch < _channels; ch++)
-                    perChannel[ch] += sub[ch];
-
-            for (ch = 0; ch < _channels; ch++)
-                z += _channelWeights[ch] * (perChannel[ch] / framesInBlock);
+            for (int ch = 0; ch < _channels; ch++)
+            {
+                double perChannel = 0;
+                for (int s = 0; s < SubBlocksPerBlock; s++)
+                    perChannel += _ring[s][ch];
+                z += _channelWeights[ch] * (perChannel / framesInBlock);
+            }
 
             _blockEnergies.Add(z);
         }

@@ -64,7 +64,8 @@ namespace CMM
 
         // ── Loudness sweep / save pacing ───────────────────────────────────────
         public static float LoudnessSweepStartDelay = 8f;   // let startup settle first
-        public static float LoudnessSweepInterval = 1f;     // one file per tick, throttled
+        public static float LoudnessSweepInterval = 0.25f;  // menu pre-warm: tiny yield between files, otherwise flat-out
+        public static float LoudnessSweepInGameInterval = 1f;  // in-game: small yield; GC fixed, so finish the one-time sweep fast
         public static float LoudnessSaveDebounce = 5f;      // flush the cache if dirty
 
         // ── Init ──────────────────────────────────────────────────────────────
@@ -656,17 +657,32 @@ namespace CMM
                     bool scanDone = false;
                     string[] previousFiles = cache.directorySnapshot ?? new string[0];
 
+                    Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p
+                        : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+                    // Enumerate via DirectoryInfo so each file's size+mtime comes back WITH
+                    // the listing (Windows fills these from the directory scan — no extra
+                    // stat per file). Build a per-file validation key (path|size|mtime) for
+                    // the cache check below: a library moved out and back keeps the same
+                    // size+mtime, so it's accepted without re-decoding every file.
+                    var keyByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
-                        currentFiles = Directory.Exists(dir)
-                            ? Directory.GetFiles(dir).Where(f => NAudioDecoder.IsSupported(f)).ToArray()
-                            : new string[0];
+                        if (Directory.Exists(dir))
+                        {
+                            var fis = new DirectoryInfo(dir).GetFiles()
+                                .Where(fi => NAudioDecoder.IsSupported(fi.FullName)).ToArray();
+                            currentFiles = fis.Select(fi => fi.FullName).ToArray();
+                            foreach (var fi in fis)
+                            {
+                                string nk = norm(fi.FullName);
+                                keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                            }
+                        }
+                        else currentFiles = new string[0];
                         scanDone = true;
                     });
                     while (!scanDone) yield return null;
-
-                    Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p
-                        : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
                     var currentNorm = currentFiles.Select(norm).ToArray();
                     var previousNorm = previousFiles.Select(norm).ToArray();
@@ -687,15 +703,33 @@ namespace CMM
                     var removedFiles = previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).ToArray();
                     foreach (string removed in removedFiles)
                     {
-                        _validatedFiles.Remove(removed);
+                        // Keep the _validatedFiles entry: it's keyed by path|size|mtime, so
+                        // a file moved out and back hits the cache instead of re-validating.
+                        // A genuinely changed file gets a new key and is re-checked anyway.
                         _invalidFiles.Remove(removed);
                     }
 
                     var newFiles = currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).ToArray();
                     if (newFiles.Length > 0)
                     {
-                        CMMConfig.D($"[CMM] Validating {newFiles.Length} new file(s) in {contextName}...");
-                        foreach (string newFile in newFiles)
+                        // Skip files already known good — loudness-measured (fully decoded
+                        // once) or validated earlier this session at the same size+mtime —
+                        // so a library moved out and back isn't re-decoded file by file.
+                        // Only genuinely new/changed files pay the QuickValidate cost.
+                        var toValidate = new List<string>();
+                        foreach (string nf in newFiles)
+                        {
+                            bool cached = LoudnessStore.IsMeasured(nf)
+                                || (keyByPath.TryGetValue(nf, out string k) && _validatedFiles.Contains(k));
+                            if (cached) _invalidFiles.Remove(nf);
+                            else toValidate.Add(nf);
+                        }
+
+                        if (toValidate.Count > 0)
+                            CMMConfig.D($"[CMM] Validating {toValidate.Count} new file(s) in {contextName}" +
+                                        $" ({newFiles.Length - toValidate.Count} cached)...");
+
+                        foreach (string newFile in toValidate)
                         {
                             bool isValid = false;
                             yield return StartCoroutine(ValidateFile(newFile, result => isValid = result));
@@ -711,6 +745,8 @@ namespace CMM
                                 // copied in / locked the first time we saw it). Without this a
                                 // transiently-bad file stays excluded even after it's fine.
                                 _invalidFiles.Remove(newFile);
+                                // Remember it so a later move-out/move-back skips re-decoding.
+                                if (keyByPath.TryGetValue(newFile, out string vk)) _validatedFiles.Add(vk);
                             }
                         }
                         currentFiles = currentFiles.Where(f => !_invalidFiles.Contains(norm(f))).ToArray();
@@ -942,9 +978,9 @@ namespace CMM
             ContextCache cache = cacheMap[contextName];
             CMMConfig.D($"[CMM] Playing file gone (ping): {Path.GetFileName(goneFile)} in {contextName}");
 
-            // Drop the gone file from snapshot + presence + validation bookkeeping.
+            // Drop the gone file from snapshot + presence. Keep its _validatedFiles
+            // entry (keyed by path|size|mtime) so moving it back hits the cache.
             PruneMissingFromSnapshot(contextName, goneFile);
-            _validatedFiles.Remove(goneFile);
             _invalidFiles.Remove(goneFile);
 
             // Release the clip that was playing it.
@@ -1020,9 +1056,20 @@ namespace CMM
         private IEnumerator PreloadContextCore(string contextName, string avoidFile = null)
         {
             ContextCache cache = cacheMap[contextName];
+            Contexts ctx = GetContext(contextName);
             string filePath;
 
-            if (cache.lastPlayedFile != null && File.Exists(cache.lastPlayedFile)
+            // Steer a fresh pick away from the track this context last played, so a
+            // leave/return doesn't immediately repeat it (RandomNoRepeat across re-entry).
+            string avoid = avoidFile ?? cache.lastPlayedFile;
+
+            // Reuse the EXACT track we left only for resumable contexts — that's what makes
+            // "resume where you left off" work. For non-resumable contexts, reusing it
+            // replays the same track every time the context is briefly interrupted and
+            // re-entered (the Ambient "same track 4× in a row" bug), because the reuse
+            // short-circuits the random picker entirely. So pick fresh instead.
+            bool canResume = ctx?.CanBeResumed ?? false;
+            if (canResume && cache.lastPlayedFile != null && File.Exists(cache.lastPlayedFile)
                 && cache.lastPlayedFile != avoidFile
                 && !_invalidFiles.Contains(cache.lastPlayedFile))
                 filePath = cache.lastPlayedFile;
@@ -1030,15 +1077,14 @@ namespace CMM
             {
                 cache.resumePosition = 0f;
                 cache.lastPlayedFile = null;
-                filePath = PickNextFile(contextName, avoidFile: avoidFile);
+                filePath = PickNextFile(contextName, avoidFile: avoid);
             }
 
             if (filePath == null)
             {
-                Contexts ctx2 = GetContext(contextName);
-                string fallback = ctx2?.Fallback ?? "None";
+                string fallback = ctx?.Fallback ?? "None";
                 if (fallback != "None" && fallback != contextName)
-                    filePath = PickNextFile(fallback, avoidFile: null);
+                    filePath = PickNextFile(fallback, avoidFile: avoid);
                 if (filePath == null)
                 { CMMConfig.D($"[CMM] Preload: no files for {contextName}"); yield break; }
             }

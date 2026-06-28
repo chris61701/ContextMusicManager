@@ -34,6 +34,10 @@ namespace CMM
 
         private void Update()
         {
+            // Feed the background loudness sweep the main-thread frame time so it
+            // can throttle itself when we're dropping frames (see LoudnessThrottle).
+            LoudnessThrottle.SampleFrame(Time.unscaledDeltaTime);
+
             HandleMusicKeybinds();
 #if CMM_DEBUG_HUD
             HandleDebugHudToggle();
@@ -43,6 +47,7 @@ namespace CMM
         private void OnGUI()
         {
             DrawVolumePopup();
+            DrawLoudnessPrescan();
 #if CMM_DEBUG_HUD
             DrawDebugHud();
 #endif
