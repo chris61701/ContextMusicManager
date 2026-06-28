@@ -1572,6 +1572,132 @@ namespace CMM
             }
         }
 
+        // ── Subfolder recursion + subtree claiming ────────────────────────────
+        // Shared by every context-folder enumeration site (PickNextFile, the
+        // presence scans, and FileWatchLoop). Two independent concerns:
+        //
+        //   • REACH (IncludeSubfolders): a flat context lists only files directly in
+        //     its folder; a subfolders="true" context lists its whole subtree.
+        //   • OWNERSHIP (claiming): when a recursive context's subtree contains a
+        //     MORE-SPECIFIC child context's folder, those files belong to the child,
+        //     not the parent. Each track maps to exactly one context — the deepest
+        //     one whose Path is a prefix — so a recursive parent never double-counts
+        //     a child's library. Mirrors the resolver's "most-specific wins" rule.
+        private static readonly string[] _noClaimPrefixes = new string[0];
+
+        // One context's pre-resolved scan parameters, handed to the background
+        // PresenceScanLoop thread so it never touches the shared `contexts` dict.
+        private struct PresenceScanItem
+        {
+            public string Name;
+            public string Dir;
+            public SearchOption Option;
+            public string[] Claimed;
+        }
+
+        private static SearchOption SearchOptionFor(Contexts ctx) =>
+            ctx != null && ctx.IncludeSubfolders
+                ? SearchOption.AllDirectories
+                : SearchOption.TopDirectoryOnly;
+
+        // Absolute, separator-terminated folder prefixes of every OTHER context whose
+        // folder is nested strictly beneath this context's folder. A file under any of
+        // these is claimed by the deeper context and must be dropped from this one.
+        // Empty (the cheap, common case) unless this context recurses AND has at least
+        // one child context inside it — so non-recursive contexts pay nothing.
+        private static string[] GetClaimedSubtreePrefixes(string contextName)
+        {
+            Contexts self = GetContext(contextName);
+            if (self == null || string.IsNullOrEmpty(self.Path) || !self.IncludeSubfolders)
+                return _noClaimPrefixes;
+
+            string selfDir = NormalizedContextDir(self.Path);
+            if (selfDir == null) return _noClaimPrefixes;
+            string selfPrefix = selfDir + Path.DirectorySeparatorChar;
+
+            List<string> prefixes = null;
+            foreach (Contexts other in contexts.Values)
+            {
+                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
+                if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
+
+                string otherDir = NormalizedContextDir(other.Path);
+                if (otherDir == null) continue;
+                // Strictly nested beneath self (a context at the SAME folder is a
+                // pre-existing ambiguity claiming doesn't touch).
+                if (otherDir.Length > selfDir.Length &&
+                    otherDir.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    (prefixes ?? (prefixes = new List<string>()))
+                        .Add(otherDir + Path.DirectorySeparatorChar);
+                }
+            }
+            return prefixes == null ? _noClaimPrefixes : prefixes.ToArray();
+        }
+
+        // True if the file lives under a deeper context's folder (so this context must
+        // not enumerate it). Cheap no-op when there are no claim prefixes.
+        private static bool IsClaimedByDeeperContext(string file, string[] claimedPrefixes)
+        {
+            if (claimedPrefixes.Length == 0) return false;
+            string full;
+            try { full = Path.GetFullPath(file); }
+            catch { return false; }
+            foreach (string p in claimedPrefixes)
+                if (full.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // Folder-change signature for the FileWatchLoop mtime fast-path. A flat
+        // context is just the folder's own write time. A recursive context must also
+        // fold in every subdirectory's write time: adding or removing a file bumps
+        // its PARENT directory's mtime but not any ancestor's, so the root mtime
+        // alone would miss a change made two levels down. Walking directories (not
+        // files) keeps this far cheaper than a full recursive file enumeration.
+        private static DateTime ContextWriteSignatureUtc(string dir, bool includeSubfolders)
+        {
+            if (!Directory.Exists(dir)) return DateTime.MinValue;
+            DateTime t = Directory.GetLastWriteTimeUtc(dir);
+            if (includeSubfolders)
+            {
+                try
+                {
+                    foreach (string sub in Directory.GetDirectories(dir, "*", SearchOption.AllDirectories))
+                    {
+                        DateTime st = Directory.GetLastWriteTimeUtc(sub);
+                        if (st > t) t = st;
+                    }
+                }
+                catch { }
+            }
+            return t;
+        }
+
+        // Resolve a context Path (relative to MusicDirectory, or absolute) to a full,
+        // non-separator-terminated directory path for prefix comparisons. Null on error.
+        private static string NormalizedContextDir(string ctxPath)
+        {
+            try
+            {
+                return Path.GetFullPath(Path.Combine(MusicDirectory, ctxPath))
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch { return null; }
+        }
+
+        // Enumerate a context's eligible files: applies reach (flat vs recursive) and
+        // subtree claiming in one place so every caller stays consistent. Returns full
+        // paths of supported, non-blacklisted, non-claimed files.
+        private static string[] EnumerateContextFiles(Contexts ctx, string dir)
+        {
+            string[] claimed = GetClaimedSubtreePrefixes(ctx.Context);
+            return Directory.GetFiles(dir, "*", SearchOptionFor(ctx))
+                .Where(f => AudioDecoder.IsSupported(f)
+                            && !_invalidFiles.Contains(f)
+                            && !IsClaimedByDeeperContext(f, claimed))
+                .ToArray();
+        }
+
         // ── PickNextFile ──────────────────────────────────────────────────────
         // UNIFORM random selection over the whole eligible folder (RandomNoRepeat also
         // excludes avoidFile). There is deliberately NO bias toward already-measured
@@ -1602,9 +1728,7 @@ namespace CMM
             {
                 string dir = Path.Combine(MusicDirectory, ctx.Path);
                 if (!Directory.Exists(dir)) return null;
-                files = Directory.GetFiles(dir)
-                    .Where(f => AudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f))
-                    .ToArray();
+                files = EnumerateContextFiles(ctx, dir);
                 cache.directorySnapshot = files;
             }
             else if (_invalidFiles.Count > 0)
@@ -1751,7 +1875,7 @@ namespace CMM
                 if (string.IsNullOrEmpty(ctx.Path)) continue;
                 string d = Path.Combine(MusicDirectory, ctx.Path);
                 if (!Directory.Exists(d)) continue;
-                if (Directory.GetFiles(d).Any(f => AudioDecoder.IsSupported(f) && !_invalidFiles.Contains(f)))
+                if (EnumerateContextFiles(ctx, d).Length > 0)
                     _contextsWithFiles.Add(ctx.Context);
             }
             _contextsWithFilesDirty = false;
@@ -1790,13 +1914,22 @@ namespace CMM
                 }
                 else continue;
 
-                var toScan = new List<KeyValuePair<string, string>>(names.Count);
+                // Resolve directory, reach (flat/recursive) and claim prefixes here on
+                // the main thread — the background thread must never read the shared
+                // `contexts` dictionary. IsClaimedByDeeperContext (used below) only
+                // does path string math, so it is safe off-thread.
+                var toScan = new List<PresenceScanItem>(names.Count);
                 foreach (string name in names)
                 {
                     Contexts ctx = GetContext(name);
                     if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
-                    toScan.Add(new KeyValuePair<string, string>(
-                        name, Path.Combine(MusicDirectory, ctx.Path)));
+                    toScan.Add(new PresenceScanItem
+                    {
+                        Name    = name,
+                        Dir     = Path.Combine(MusicDirectory, ctx.Path),
+                        Option  = SearchOptionFor(ctx),
+                        Claimed = GetClaimedSubtreePrefixes(name),
+                    });
                 }
                 if (toScan.Count == 0) continue;
 
@@ -1807,10 +1940,13 @@ namespace CMM
                 {
                     try
                     {
-                        foreach (var pair in toScan)
+                        foreach (var item in toScan)
                         {
-                            results[pair.Key] = Directory.Exists(pair.Value)
-                                ? Directory.GetFiles(pair.Value).Where(f => AudioDecoder.IsSupported(f)).ToArray()
+                            results[item.Name] = Directory.Exists(item.Dir)
+                                ? Directory.GetFiles(item.Dir, "*", item.Option)
+                                    .Where(f => AudioDecoder.IsSupported(f)
+                                                && !IsClaimedByDeeperContext(f, item.Claimed))
+                                    .ToArray()
                                 : new string[0];
                         }
                     }

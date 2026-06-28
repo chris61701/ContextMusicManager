@@ -599,6 +599,11 @@ namespace CMM
                     if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
 
                     string dir = Path.Combine(MusicDirectory, ctx.Path);
+                    // Reach + ownership for this context, resolved here on the main
+                    // thread (claim prefixes read the shared `contexts` dict); the
+                    // background stat/scan closures below only use the captured copies.
+                    bool includeSub = ctx.IncludeSubfolders;
+                    string[] claimedPrefixes = GetClaimedSubtreePrefixes(contextName);
 
                     bool isActiveContext =
                         string.Equals(contextName, currentContext.Context, StringComparison.OrdinalIgnoreCase);
@@ -620,9 +625,7 @@ namespace CMM
                     {
                         try
                         {
-                            currentWriteTime = Directory.Exists(dir)
-                                  ? Directory.GetLastWriteTimeUtc(dir)
-                                  : DateTime.MinValue;
+                            currentWriteTime = ContextWriteSignatureUtc(dir, includeSub);
                             if (!string.IsNullOrEmpty(playingFile))
                                 playingFileGone = !File.Exists(playingFile);
                         }
@@ -684,8 +687,10 @@ namespace CMM
                     {
                         if (Directory.Exists(dir))
                         {
-                            var fis = new DirectoryInfo(dir).GetFiles()
-                                .Where(fi => AudioDecoder.IsSupported(fi.FullName)).ToArray();
+                            var fis = new DirectoryInfo(dir)
+                                .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+                                .Where(fi => AudioDecoder.IsSupported(fi.FullName)
+                                             && !IsClaimedByDeeperContext(fi.FullName, claimedPrefixes)).ToArray();
                             currentFiles = fis.Select(fi => fi.FullName).ToArray();
                             foreach (var fi in fis)
                             {

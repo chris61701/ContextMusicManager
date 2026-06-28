@@ -162,13 +162,20 @@ namespace CMM
         // its WarmUp from zero. Null/empty = not grouped (the default). See
         // ContextMusicManager.InheritedFirstSeen.
         public string WarmGroup { get; private set; }
+        // When true, this context's music pool includes tracks found in subfolders
+        // of its Path (recursive enumeration), not just files sitting directly in
+        // the folder. Default false = the historical flat, one-level behavior.
+        // Tracks living under a more-specific child context's folder are claimed by
+        // that child and excluded here, so each file belongs to exactly one context
+        // (see ContextMusicManager.GetClaimedSubtreePrefixes).
+        public bool IncludeSubfolders { get; private set; }
 
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
             bool loop = false, int cooldown = 5, int fadeInDuration = 3,
             bool bypassescooldown = false, bool caninterrupt = false,
             int priority = 0, bool playOnce = false, float volumeOverride = -1f,
-            int warmup = 0, string warmGroup = null)
+            int warmup = 0, string warmGroup = null, bool includeSubfolders = false)
         {
             Context = context;
             Path = path;
@@ -185,6 +192,7 @@ namespace CMM
             VolumeOverride = volumeOverride;
             WarmUp = warmup;
             WarmGroup = warmGroup;
+            IncludeSubfolders = includeSubfolders;
         }
     }
 }

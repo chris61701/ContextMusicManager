@@ -121,7 +121,8 @@ namespace CMM
                         playOnce:              BoolAttr(el, "once",     false),
                         volumeOverride:        FloatAttr(el, "volume",  -1f),
                         warmup:                IntAttr (el, "warmup",   0),
-                        warmGroup:             StrAttr (el, "warmgroup", null)
+                        warmGroup:             StrAttr (el, "warmgroup", null),
+                        includeSubfolders:     BoolAttr(el, "subfolders", false)
                     );
                 }
 

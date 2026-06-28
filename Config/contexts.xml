@@ -33,6 +33,11 @@
     once      - play to completion then automatically return to previous context
     volume    - per-context volume multiplier (0.0–1.0) that replaces the global
                 VolumeModifier for this context  (omit / negative = use global)
+    subfolders - look for music in this folder AND all of its subfolders (default:
+                false = only files sitting directly in the folder). If a subfolder is
+                itself another context's path, the tracks there belong to that more
+                specific context, not this one — so each track only ever plays in a
+                single context and you never get the same song double-counted.
 -->
 <Contexts>
 

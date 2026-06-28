@@ -35,10 +35,10 @@ namespace CMM
                      bool resume = true, int stale = 120, bool loop = false,
                      int cool = 5, int fadeintime = 5, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
-                     int warmup = 0, string warmgroup = null)
+                     int warmup = 0, string warmgroup = null, bool subfolders = false)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,
                                                  loop, cool, fadeintime, bypass, true, priority, once, volume,
-                                                 warmup, warmgroup);
+                                                 warmup, warmgroup, subfolders);
 
             Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
             Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90);
