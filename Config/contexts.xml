@@ -47,12 +47,12 @@
   <Context name="Spawn"            path="events/spawn"      resume="false" stale="0"  cool="3" fadeintime="1" bypass="true" priority="45" once="true" />
 
   <!-- ── Vehicles ───────────────────────────────────────────────────── -->
-  <Context name="Vehicle_Gyrocopter"  path="vehicle/gyrocopter"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="61" />
-  <Context name="Vehicle_Bicycle"     path="vehicle/bicycle"     fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="61" />
-  <Context name="Vehicle_Minibike"    path="vehicle/minibike"    fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="61" />
-  <Context name="Vehicle_Motorcycle"  path="vehicle/motorcycle"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="61" />
-  <Context name="Vehicle_4x4"         path="vehicle/4x4"         fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="61" />
-  <Context name="Vehicle"             path="vehicle"                                stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="60" />
+  <Context name="Vehicle_Gyrocopter"  path="vehicle/gyrocopter"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
+  <Context name="Vehicle_Bicycle"     path="vehicle/bicycle"     fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
+  <Context name="Vehicle_Minibike"    path="vehicle/minibike"    fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
+  <Context name="Vehicle_Motorcycle"  path="vehicle/motorcycle"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
+  <Context name="Vehicle_4x4"         path="vehicle/4x4"         fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
+  <Context name="Vehicle"             path="vehicle"                                stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="69" />
 
   <!-- ── Swimming ───────────────────────────────────────────────────── -->
   <!-- Player is in deep enough water to swim. 8s dwell so brief dips don't

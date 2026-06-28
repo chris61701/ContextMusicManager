@@ -43,13 +43,13 @@ namespace CMM
             Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
             Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90);
             Add("Blood_Moon_Combat",   "combat/blood_moon",     "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:71);
-            Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:1);
-            Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:1);
-            Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:1);
-            Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:1);
-            Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:61, warmup:1);
-            Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:60, warmup:2);
-            Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:55, once:true, volume:1.0f);
+            Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:69, warmup:1);
+            Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:91, once:true, volume:1.0f);
             // Three combat tiers. The combat/ root folder IS the base (Low) tier; _high and
             // _boss subfolders hold the escalations (underscore-prefixed so the top-level
             // directory scan never confuses them with the per-biome subfolders). Low bridges
@@ -88,20 +88,20 @@ namespace CMM
             Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home");
             Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10);
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10);
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", stale:60,                      priority:22, warmup:10);
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", stale:60,                      priority:22, warmup:10);
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", stale:60,                      priority:22, warmup:10);
-            Add("POI_Infested_T0",     "poi/infested/t0",       stale:60,                                      priority:21, warmup:10);
-            Add("POI_Infested",        "poi/infested",          stale:60,                                      priority:20, warmup:10);
-            Add("POI_T5",              "poi/t5",                "POI",        stale:60,                        priority:18, warmup:5);
-            Add("POI_T4",              "poi/t4",                "POI",        stale:60,                        priority:18, warmup:5);
-            Add("POI_T3",              "poi/t3",                "POI",        stale:60,                        priority:18, warmup:5);
-            Add("POI_T2",              "poi/t2",                "POI",        stale:60,                        priority:18, warmup:5);
-            Add("POI_T1",              "poi/t1",                "POI",        stale:60,                        priority:18, warmup:5);
-            Add("POI_T0",              "poi/t0",                stale:60,                                      priority:17, warmup:5);
-            Add("POI",                 "poi",                   stale:60,                                      priority:16, warmup:5);
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T0",     "poi/infested/t0",       stale:60,                                      priority:21, warmup:10, warmgroup:"poi");
+            Add("POI_Infested",        "poi/infested",          stale:60,                                      priority:20, warmup:10, warmgroup:"poi");
+            Add("POI_T5",              "poi/t5",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T4",              "poi/t4",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T3",              "poi/t3",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T2",              "poi/t2",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T1",              "poi/t1",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T0",              "poi/t0",                stale:60,                                      priority:17, warmup:5, warmgroup:"poi");
+            Add("POI",                 "poi",                   stale:60,                                      priority:16, warmup:5, warmgroup:"poi");
             Add("Ambient_Forest_Night",      "ambient/forest/_night",       "Ambient_Night",             priority:12);
             Add("Ambient_Forest",            "ambient/forest",              "Ambient",                   priority:11);
             Add("Ambient_Burnt_Forest_Night","ambient/burnt_forest/_night", "Ambient_Night",             priority:12);
