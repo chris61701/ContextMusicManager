@@ -16,16 +16,19 @@ namespace CMM
     // Numpad 8; hidden by default and purely diagnostic — it reads engine state and
     // never influences playback. Lines, top to bottom:
     //   Playing   audible context (+ "(fallback)" when we landed off the resolved
-    //             set), elapsed / total time of the current track
+    //             set), then "Time:" elapsed / total and "Codec:" decoded format
+    //             (plus "(Volume: NN%)" when the per-track trim is off its 100%
+    //             default). Time and Codec appear only while a real custom track is
+    //             audible — both are absent while riding a borrowed vanilla bed.
     //   Resolved  the tokens the Lua script last emitted; any with NO files are red
     //   Fallback  the chain the resolver walked to reach the playing context —
     //             shown ONLY when a fallback actually happened; empty links are red
     //   File      the audible file (name + extension)
-    //   Path      relative to the Music dir, or the absolute path when the context
-    //             was configured with an absolute folder
-    //   Codec     decoded format, plus "Volume: NN%" only when the per-track trim
-    //             has been adjusted away from its 100% default
+    //   Path      the containing folder (no filename) — relative to the Music dir, or
+    //             the absolute folder when the context was configured with one
     //   Source    the active decision script (on-disk context.lua / embedded default)
+    //   Snapshots directory snapshots (every eligible file path per context) plus, on
+    //             the same line, the normalized (loudness-measured) files in memory
 
     public partial class ContextMusicManager
     {
@@ -108,14 +111,24 @@ namespace CMM
             // ── Build body ─────────────────────────────────────────────────────
             var lines = new List<string>();
 
-            // Playing: name (+ fallback marker) — elapsed / total.
+            // Playing: context (+ fallback marker) — Time elapsed / total — Codec.
+            // Time and Codec only apply to a real custom track (cache has a Clip and a
+            // playingFile); both are absent while riding a borrowed vanilla bed.
             string playLine = audible ?? "(none)";
             if (fellBack) playLine += "  (fallback)";
             float total = cache?.Current.Clip != null ? cache.Current.Clip.length : 0f;
             if (total > 0f)
             {
                 float elapsed = GetPlaybackPosition(ActiveChannel, cache);
-                playLine += $"  —  {Clock(elapsed)} / {Clock(total)}";
+                playLine += $"  —  Time: {Clock(elapsed)} / {Clock(total)}";
+            }
+            if (!string.IsNullOrEmpty(playingFile))
+            {
+                string codec = CodecLabel(playingFile);
+                float trim = LoudnessStore.GetUserTrim(playingFile);
+                if (Mathf.Abs(trim - 1f) > 0.001f)
+                    codec += $" (Volume: {trim * 100f:0}%)";
+                playLine += $"  —  Codec: {codec}";
             }
             lines.Add(Row("Playing:", playLine));
 
@@ -133,25 +146,21 @@ namespace CMM
                     lines.Add(Row("Fallback:", string.Join(" → ", trace.Select(ColorToken))));
             }
 
-            // File / Path / Codec only make sense while a real custom track is audible.
+            // File / Path only make sense while a real custom track is audible.
             if (!string.IsNullOrEmpty(playingFile))
             {
                 lines.Add(Row("File:", Path.GetFileName(playingFile)));
                 lines.Add(Row("Path:", DisplayPath(audible, playingFile)));
-
-                string codecLine = CodecLabel(playingFile);
-                float trim = LoudnessStore.GetUserTrim(playingFile);
-                if (Mathf.Abs(trim - 1f) > 0.001f)
-                    codecLine += $"  —  Volume: {trim * 100f:0}%";
-                lines.Add(Row("Codec:", codecLine));
             }
 
             lines.Add(Row("Source:", source));
 
-            // Memory diagnostics: normalized (loudness-measured) files held in memory,
-            // and the directory snapshots (every eligible file path per context).
-            lines.Add(Row("Normalized: ", $"{_hudNormCount} files  —  {FmtBytes(_hudNormBytes)}"));
-            lines.Add(Row("Snapshots: ", $"{_hudSnapFiles} files  —  {FmtBytes(_hudSnapBytes)}"));
+            // Memory diagnostics on one line: the directory snapshots (every eligible
+            // file path per context) plus the normalized (loudness-measured) files held
+            // in memory.
+            lines.Add(Row("Snapshots: ",
+                $"{_hudSnapFiles} files  —  {FmtBytes(_hudSnapBytes)}"
+                + $"  —  Normalized: {_hudNormCount} files  —  {FmtBytes(_hudNormBytes)}"));
 
             string body = string.Join("\n", lines);
 
@@ -220,22 +229,25 @@ namespace CMM
         private static string ColorToken(string ctx) =>
             ContextHasFiles(ctx) ? ctx : $"<color={HudRed}>{ctx}</color>";
 
-        // Relative to the Music dir for the common case; the full absolute path when
+        // The containing folder only (filename is shown on its own File line).
+        // Relative to the Music dir for the common case; the full absolute folder when
         // the context was configured to point at an absolute folder.
         private static string DisplayPath(string contextName, string absoluteFile)
         {
+            string absoluteDir = Path.GetDirectoryName(absoluteFile) ?? absoluteFile;
+
             Contexts ctx = GetContext(contextName);
             bool rooted = ctx != null && !string.IsNullOrEmpty(ctx.Path) && Path.IsPathRooted(ctx.Path);
-            if (rooted) return absoluteFile;
+            if (rooted) return absoluteDir;
             try
             {
-                string full = Path.GetFullPath(absoluteFile);
+                string full = Path.GetFullPath(absoluteDir);
                 string baseDir = Path.GetFullPath(MusicDirectory);
                 if (full.StartsWith(baseDir, StringComparison.OrdinalIgnoreCase))
                     return full.Substring(baseDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             }
             catch { }
-            return absoluteFile;
+            return absoluteDir;
         }
 
         // Decoded format for the extension. Ogg is sniffed (Vorbis vs Opus), so the

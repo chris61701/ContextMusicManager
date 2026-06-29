@@ -391,10 +391,14 @@ namespace CMM
             // float and has its own ReadFloats fast path — no PCM conversion needed.
             int totalSamples = (int)(reader.Length / (channels * 4L));
 
+            using (CMMPerf.Measure(CMMPerf.Phase.ClipCreate))
             return AudioClip.Create(name, totalSamples, channels, sampleRate, true,
                 (float[] data) =>
                 {
+                    // Time the on-demand decode+disk read; this runs on the AUDIO thread.
+                    long _t0 = Stopwatch.GetTimestamp();
                     int filled = directSrc.ReadFloats(data, 0, data.Length);
+                    CMMPerf.PcmCallback(Stopwatch.GetTimestamp() - _t0);
                     if (filled < data.Length)
                         Array.Clear(data, filled, data.Length - filled);
                     PcmHeartbeat += filled;
@@ -487,15 +491,18 @@ namespace CMM
             int totalSamples = samples.Length / channels;
             int cursor = 0;
 
+            using (CMMPerf.Measure(CMMPerf.Phase.ClipCreate))
             return AudioClip.Create(name, totalSamples, channels, frequency, true,
                 (float[] data) =>
                 {
+                    long _t0 = Stopwatch.GetTimestamp();
                     int srcStart = cursor * channels;
                     int toCopy = Math.Min(data.Length, samples.Length - srcStart);
                     if (toCopy > 0) Array.Copy(samples, srcStart, data, 0, toCopy);
                     if (toCopy < data.Length) Array.Clear(data, toCopy, data.Length - toCopy);
                     if (toCopy > 0) PcmHeartbeat += toCopy;
                     cursor += data.Length / channels;
+                    CMMPerf.PcmCallback(Stopwatch.GetTimestamp() - _t0);
                 },
                 (int newPosition) =>
                 {
@@ -510,9 +517,12 @@ namespace CMM
         {
             if (audio?.Samples == null || audio.Samples.Length == 0) return null;
             int totalSamples = audio.Samples.Length / audio.Channels;
-            var clip = AudioClip.Create(name, totalSamples, audio.Channels, audio.Frequency, false);
-            clip.SetData(audio.Samples, 0);
-            return clip;
+            using (CMMPerf.Measure(CMMPerf.Phase.ClipCreate))
+            {
+                var clip = AudioClip.Create(name, totalSamples, audio.Channels, audio.Frequency, false);
+                clip.SetData(audio.Samples, 0);   // full PCM upload — main-thread native cost
+                return clip;
+            }
         }
 
         // ── Quick validate ────────────────────────────────────────────────────

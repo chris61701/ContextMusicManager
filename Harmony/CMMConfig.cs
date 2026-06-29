@@ -102,5 +102,13 @@ namespace CMM
         // PerfSpikeMs logs a SPIKE line the instant it happens.
         public static bool  PerfTiming = false;
         public static float PerfSpikeMs = 1.5f;
+        // Per-frame stutter watchdog (CMMPerf.FrameTick). The threshold is RELATIVE to
+        // the device's own rolling baseline frame time, because on a 30 fps machine an
+        // absolute ms cut-off just logs the baseline framerate. A frame is flagged when
+        // it exceeds baseline × PerfFrameSpikeFactor AND clears PerfFrameSpikeFloorMs
+        // (the floor stops fast machines flagging trivial wobble as a "2× spike").
+        // Only consulted when PerfTiming is on.
+        public static float PerfFrameSpikeFactor = 2.5f;
+        public static float PerfFrameSpikeFloorMs = 50f;
     }
 }

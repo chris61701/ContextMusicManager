@@ -146,5 +146,14 @@
   <PerfTiming>false</PerfTiming>
   <!-- Log a SPIKE line for any single synchronous span at/over this many ms. -->
   <PerfSpikeMs>1.5</PerfSpikeMs>
+  <!-- Per-frame stutter watchdog. A frame is flagged in a "[CMM PERF] STUTTER" line
+       (GC gen0/1/2 delta, transition in flight, live coroutine count) when it runs
+       longer than the device's rolling baseline × PerfFrameSpikeFactor AND clears
+       PerfFrameSpikeFloorMs. RELATIVE to baseline because on a 30 fps machine an
+       absolute cut-off just logs the normal framerate. A stutter that is always
+       tx=idle with GC=0 is NOT caused by this mod. Factor 2.5 / floor 50 ms is a
+       good start; lower the factor to ~2 to be more sensitive. -->
+  <PerfFrameSpikeFactor>2.5</PerfFrameSpikeFactor>
+  <PerfFrameSpikeFloorMs>50</PerfFrameSpikeFloorMs>
 
 </CMMSettings>

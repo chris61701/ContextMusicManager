@@ -44,6 +44,25 @@ namespace CMM
         private static Coroutine _vanillaFadeInCoroutine = null;
         private static Coroutine _menuVanillaFadeCoroutine = null;
 
+        // Live count of CMM's music coroutines, for the per-frame stutter watchdog
+        // (CMMPerf.FrameTick). A rising number during combat churn means crossfades/
+        // watchers are piling up faster than they finish — a sustained-stutter suspect.
+        internal static int LiveMusicCoroutineCount
+        {
+            get
+            {
+                int n = 0;
+                if (_activeMusicCoroutine    != null) n++;
+                if (_nextCacheCoroutine      != null) n++;
+                if (_trackEndCoroutine       != null) n++;
+                if (_crossFadeCoroutine      != null) n++;
+                if (_cooldownCoroutine       != null) n++;
+                if (_vanillaFadeInCoroutine  != null) n++;
+                if (_menuVanillaFadeCoroutine != null) n++;
+                return n;
+            }
+        }
+
         public static TrackOrderMode GlobalTrackOrder = TrackOrderMode.RandomNoRepeat;
         public static float ContextScanCooldown = 0.5f;
         public static float StalenessCheckInterval = 5f;

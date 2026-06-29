@@ -34,6 +34,10 @@ namespace CMM
 
         private void Update()
         {
+            // Per-frame stutter watchdog (no-op unless PerfTiming is on). Runs first so
+            // it times the full frame-to-frame gap, including everything below it.
+            CMMPerf.FrameTick(LiveMusicCoroutineCount);
+
             HandleMusicKeybinds();
 #if CMM_DEBUG_HUD
             HandleDebugHudToggle();
@@ -125,7 +129,26 @@ namespace CMM
             yield return StartCoroutine(LoadNextClip(contextName, forcedFile));
             if (cache.Next.Clip == null)
             {
-                CMMConfig.D($"[CMM] Skip: no clip loaded for {contextName}.");
+                // Nothing loadable — the folder emptied out (or every remaining pick is
+                // unreadable) while the user was skipping. We already stopped the driver
+                // coroutines above, but the OLD clip is still playing on ActiveChannel.
+                // Leaving it there is the "moved everything out but the previous song kept
+                // playing" bug, so fade the stale track out and re-resolve to whatever is
+                // now valid (another context / vanilla / silence). FadeToSilence is required
+                // even though the resolver may already read Vanilla: SendContextUpdate
+                // ("Vanilla") early-returns when vanilla is already active and would never
+                // silence our channel.
+                CMMConfig.D($"[CMM] Skip: no clip loaded for {contextName} — fading out and re-resolving.");
+                if (cache.Current.Clip != null) StagePendingDisposal(cache.Current);
+                cache.Current = default;
+                FadeToSilence();
+
+                _pendingContext = null;
+                if (!inGame)
+                    SendContextUpdate(currentContext?.Context ?? "Menu");
+                else
+                    SendContextUpdate(GetTopContext() ?? "Ambient");
+
                 _skipInProgress = false;
                 yield break;
             }

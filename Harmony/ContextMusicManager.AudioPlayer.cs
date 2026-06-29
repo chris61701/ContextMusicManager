@@ -665,11 +665,18 @@ namespace CMM
 
         private static void DestroyPendingClipAndAudio()
         {
-            while (_pendingDisposals.Count > 0)
+            if (_pendingDisposals.Count == 0) return;
+            // Destroy() frees the clip's native audio buffer on the main thread — for a
+            // non-streaming (full-PCM) clip that can be a multi-MB free and a real hitch.
+            // Timed so a frame stutter caused by clip teardown is attributable.
+            using (CMMPerf.Measure(CMMPerf.Phase.ClipDestroy))
             {
-                TrackSlot slot = _pendingDisposals.Dequeue();
-                if (slot.Clip != null) Destroy(slot.Clip);
-                slot.Release();
+                while (_pendingDisposals.Count > 0)
+                {
+                    TrackSlot slot = _pendingDisposals.Dequeue();
+                    if (slot.Clip != null) Destroy(slot.Clip);
+                    slot.Release();
+                }
             }
         }
 
@@ -1573,92 +1580,121 @@ namespace CMM
         private IEnumerator LoadNextClip(string contextName, string prePickedFile = null)
         {
             ContextCache cache = cacheMap[contextName];
-            string avoid = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat
-                              ? cache.lastPlayedFile : null;
-            string filePath = prePickedFile ?? PickNextFile(contextName, avoidFile: avoid);
 
-            if (filePath == null)
-            { CMMConfig.D($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
-
-            string clipName = Path.GetFileNameWithoutExtension(filePath);
-
-            // Menu (and PreloadCacheEnabled) get a fully-decoded clip on EVERY track, not
-            // just the first — native non-streaming for Menu so the audio thread never
-            // runs managed decode code and the menu can't stutter while a world loads.
-            // This mirrors the initial load in PreloadContextCore so the "menu is fully
-            // buffered" guarantee holds across the whole menu sequence: without it, only
-            // the opening menu track was native and track #2+ streamed (decoding on the
-            // audio thread), which hitched during the load screen.
-            if (CMMConfig.PreloadCacheEnabled || contextName == "Menu")
+            // A single pick can be unloadable for reasons that DON'T mean "give up": the
+            // file was moved out from under us, or it's a freshly dropped-in track still
+            // being written/locked (a partial read decodes to garbage). Bailing after one
+            // failure strands a skip/advance on Vanilla even though other valid files
+            // remain — so mark/prune the bad pick (mirroring the Preload + HotSwap paths)
+            // and try another candidate, up to a small bound. Only the FIRST attempt
+            // honors the caller's pre-picked file; once it fails we must pick fresh.
+            const int maxAttempts = 8;
+            string failedFile = null;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
-                byte[] rawBytes = null;
-                bool ioOk = false;
-                ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    try { rawBytes = File.ReadAllBytes(filePath); } catch { }
-                    ioOk = true;
-                });
-                while (!ioOk) yield return null;
+                string avoid = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat
+                                  ? cache.lastPlayedFile : null;
+                string filePath = (attempt == 0 && prePickedFile != null)
+                                      ? prePickedFile
+                                      : PickNextFile(contextName, avoidFile: failedFile ?? avoid);
 
-                DecodedAudio decoded = null;
-                if (rawBytes != null)
+                if (filePath == null)
+                { CMMConfig.D($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
+
+                string clipName = Path.GetFileNameWithoutExtension(filePath);
+
+                // Menu (and PreloadCacheEnabled) get a fully-decoded clip on EVERY track, not
+                // just the first — native non-streaming for Menu so the audio thread never
+                // runs managed decode code and the menu can't stutter while a world loads.
+                // This mirrors the initial load in PreloadContextCore so the "menu is fully
+                // buffered" guarantee holds across the whole menu sequence: without it, only
+                // the opening menu track was native and track #2+ streamed (decoding on the
+                // audio thread), which hitched during the load screen.
+                if (CMMConfig.PreloadCacheEnabled || contextName == "Menu")
                 {
-                    bool decodeOk = false;
+                    byte[] rawBytes = null;
+                    bool ioOk = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
-                        try { decoded = AudioDecoder.DecodeFileFromBytes(rawBytes, filePath); } catch { }
-                        decodeOk = true;
+                        try { rawBytes = File.ReadAllBytes(filePath); } catch { }
+                        ioOk = true;
                     });
-                    while (!decodeOk) yield return null;
-                }
+                    while (!ioOk) yield return null;
 
-                if (decoded == null)
-                {
-                    Log.Error($"[CMM] LoadNextClip: full decode failed for {Path.GetFileName(filePath)}");
+                    DecodedAudio decoded = null;
+                    if (rawBytes != null)
+                    {
+                        bool decodeOk = false;
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            try { decoded = AudioDecoder.DecodeFileFromBytes(rawBytes, filePath); } catch { }
+                            decodeOk = true;
+                        });
+                        while (!decodeOk) yield return null;
+                    }
+
+                    if (decoded == null)
+                    {
+                        // Distinguish moved-out (transient) from genuinely corrupt, exactly
+                        // like PreloadContextCore, then prune/refresh so PickNextFile stops
+                        // re-selecting this same file on the retry.
+                        MarkInvalidIfCorrupt(filePath, $"LoadNextClip: full decode failed for {contextName}");
+                        if (!File.Exists(filePath)) PruneMissingFromSnapshot(contextName, filePath);
+                        else                        InvalidateContextFileCache(contextName);
+                        failedFile = filePath;
+                        continue;
+                    }
+
+                    bool isMenu = contextName == "Menu";
+                    AudioClip fullClip = isMenu
+                        ? AudioDecoder.CreateNonStreamingClip(decoded, clipName)
+                        : AudioDecoder.CreateStreamingClip(decoded, clipName);
+                    if (fullClip == null) { failedFile = filePath; continue; }
+
+                    if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
+                    cache.Next.Clip = fullClip;
+                    cache.Next.Reader = null;
+                    // Menu: native buffer owns the samples now; drop the managed copy. Other
+                    // full-decode contexts keep it — CreateStreamingClip's callback reads from it.
+                    if (isMenu) { decoded.Samples = null; decoded = null; }
+                    cache.Next.Decoded = decoded;
+                    cache.previousPlayedFile = cache.lastPlayedFile;
+                    cache.lastPlayedFile = filePath;
+                    CMMConfig.D($"[CMM] Next clip ready (full decode{(isMenu ? "/native" : "")}) for {contextName}: {Path.GetFileName(filePath)}");
                     yield break;
                 }
 
-                bool isMenu = contextName == "Menu";
-                AudioClip fullClip = isMenu
-                    ? AudioDecoder.CreateNonStreamingClip(decoded, clipName)
-                    : AudioDecoder.CreateStreamingClip(decoded, clipName);
-                if (fullClip == null) yield break;
-
-                if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
-                cache.Next.Clip = fullClip;
-                cache.Next.Reader = null;
-                // Menu: native buffer owns the samples now; drop the managed copy. Other
-                // full-decode contexts keep it — CreateStreamingClip's callback reads from it.
-                if (isMenu) { decoded.Samples = null; decoded = null; }
-                cache.Next.Decoded = decoded;
-                cache.previousPlayedFile = cache.lastPlayedFile;
-                cache.lastPlayedFile = filePath;
-                CMMConfig.D($"[CMM] Next clip ready (full decode{(isMenu ? "/native" : "")}) for {contextName}: {Path.GetFileName(filePath)}");
-                yield break;
-            }
-
-            // ── Streaming path (default, in-game contexts) ─────────────────────
-            {
-                WaveStream reader = null;
-                yield return StartCoroutine(OpenReaderAsync(filePath, r => reader = r));
-
-                if (reader == null)
+                // ── Streaming path (default, in-game contexts) ─────────────────────
                 {
-                    Log.Error($"[CMM] LoadNextClip: failed to open {Path.GetFileName(filePath)}");
+                    WaveStream reader = null;
+                    yield return StartCoroutine(OpenReaderAsync(filePath, r => reader = r));
+
+                    if (reader == null)
+                    {
+                        // OpenReaderAsync already blacklisted (corrupt) or skipped (transient);
+                        // drop a genuinely-missing pick from the snapshot so the retry doesn't
+                        // re-select it, then try another candidate.
+                        if (!File.Exists(filePath)) PruneMissingFromSnapshot(contextName, filePath);
+                        else                        InvalidateContextFileCache(contextName);
+                        failedFile = filePath;
+                        continue;
+                    }
+
+                    AudioClip clip = AudioDecoder.CreateStreamingClipFromReader(reader, clipName);
+
+                    if (clip == null) { reader?.Dispose(); failedFile = filePath; continue; }
+
+                    if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
+                    cache.Next.Clip   = clip;
+                    cache.Next.Reader = reader;
+                    cache.previousPlayedFile = cache.lastPlayedFile;
+                    cache.lastPlayedFile = filePath;
+                    CMMConfig.D($"[CMM] Next clip ready (streaming) for {contextName}: {Path.GetFileName(filePath)}");
                     yield break;
                 }
-
-                AudioClip clip = AudioDecoder.CreateStreamingClipFromReader(reader, clipName);
-
-                if (clip == null) { reader?.Dispose(); yield break; }
-
-                if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
-                cache.Next.Clip   = clip;
-                cache.Next.Reader = reader;
-                cache.previousPlayedFile = cache.lastPlayedFile;
-                cache.lastPlayedFile = filePath;
-                CMMConfig.D($"[CMM] Next clip ready (streaming) for {contextName}: {Path.GetFileName(filePath)}");
             }
+
+            CMMConfig.D($"[CMM] LoadNextClip: no decodable file for {contextName} after {maxAttempts} attempts.");
         }
 
         // ── Subfolder recursion + subtree claiming ────────────────────────────

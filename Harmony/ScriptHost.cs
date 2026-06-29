@@ -201,21 +201,30 @@ namespace CMM
 
             try
             {
-                MarshalSnapshot(gameState);
-                MarshalConfig();
-                DynValue result = _script.Call(_resolveFn, _gameStateTable, _cfgTable);
+                // Our marshalling (per-tick table builds — the per-enemy table alloc) and
+                // MoonSharp's own call+walk are timed/allocated separately so the perf dump
+                // shows which half of "resolve" generates the garbage.
+                using (CMMPerf.Measure(CMMPerf.Phase.ScanMarshal))
+                {
+                    MarshalSnapshot(gameState);
+                    MarshalConfig();
+                }
 
                 var tokens = new List<string>();
-                if (result.Type == DataType.Table)
+                using (CMMPerf.Measure(CMMPerf.Phase.ScanLuaCall))
                 {
-                    Table t = result.Table;
-                    // Dense array 1..n; stop at the first hole, ignore non-strings, dedup.
-                    for (int i = 1; ; i++)
+                    DynValue result = _script.Call(_resolveFn, _gameStateTable, _cfgTable);
+                    if (result.Type == DataType.Table)
                     {
-                        DynValue v = t.Get(i);
-                        if (v.Type == DataType.Nil) break;
-                        if (v.Type == DataType.String && !tokens.Contains(v.String))
-                            tokens.Add(v.String);
+                        Table t = result.Table;
+                        // Dense array 1..n; stop at the first hole, ignore non-strings, dedup.
+                        for (int i = 1; ; i++)
+                        {
+                            DynValue v = t.Get(i);
+                            if (v.Type == DataType.Nil) break;
+                            if (v.Type == DataType.String && !tokens.Contains(v.String))
+                                tokens.Add(v.String);
+                        }
                     }
                 }
 

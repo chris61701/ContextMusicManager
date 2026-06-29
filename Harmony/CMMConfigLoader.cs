@@ -76,6 +76,8 @@ namespace CMM
 
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);
+                CMMConfig.PerfFrameSpikeFactor = ReadFloat(root, "PerfFrameSpikeFactor", CMMConfig.PerfFrameSpikeFactor);
+                CMMConfig.PerfFrameSpikeFloorMs = ReadFloat(root, "PerfFrameSpikeFloorMs", CMMConfig.PerfFrameSpikeFloorMs);
 
                 CMMConfig.D("[CMM] Config/settings.xml loaded.");
             }

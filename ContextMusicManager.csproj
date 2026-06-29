@@ -380,14 +380,17 @@
     <Copy SourceFiles="@(_DebugCfg)"
           DestinationFiles="@(_DebugCfg->'$(OutputPath)Config\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="false" />
-    <!-- Then point at the personal library and enable verbose logging for testing.
-         The committed settings.xml keeps the release values (Music / DebugLogging=false). -->
+    <!-- Then point at the personal library and enable verbose logging + perf timing for
+         testing. The committed settings.xml keeps the release values (Music /
+         DebugLogging=false / PerfTiming=false). -->
     <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
              Query="/CMMSettings/MusicPath" Value="$(DebugMusicPath)" />
     <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
              Query="/CMMSettings/DebugLogging" Value="true" />
+    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
+             Query="/CMMSettings/PerfTiming" Value="true" />
     <Message Importance="high"
-             Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true" />
+             Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true" />
   </Target>
 
   <!-- Release only: zip the staged mod as
