@@ -1,0 +1,149 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<CMMSettings>
+  <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
+  <VolumeModifier>1.0</VolumeModifier>
+  <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
+       When enabled, each track is measured once (integrated LUFS) and played back
+       at a per-track gain so quiet and loud tracks sit at a consistent perceived
+       level. Measurements are cached in Cache/loudness.xml (keyed by file content,
+       so renames/moves keep their value). A track is measured on demand the first
+       time it's needed (plus a look-ahead of the current context's next track); on
+       the menu, one track per context is pre-measured so each context has a ready,
+       normalized track the first time it's switched to.
+         LoudnessTargetLufs  – reference level. Sits below 0 so most corrections are
+                               attenuations; AudioSource volume can't exceed 1.0, so
+                               very quiet tracks boost only as far as VolumeModifier
+                               leaves headroom (≈2× at the 0.5 default).
+         LoudnessMaxBoostDb  – cap on how much a quiet track may be boosted (dB).
+                               Attenuation is uncapped. -->
+  <LoudnessNormalizationEnabled>true</LoudnessNormalizationEnabled>
+  <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
+  <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
+  <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
+       Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
+       Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
+  <MusicPath>J:\7D2D_Custom_Music</MusicPath>
+  <!-- Fade between outgoing and incoming context instead of cutting immediately -->
+  <CrossfadeEnabled>true</CrossfadeEnabled>
+  <CrossFadeDuration>2.0</CrossFadeDuration>
+  <!-- Fade duration when a track ends naturally and transitions to the next -->
+  <TrackTransitionFadeDuration>6.0</TrackTransitionFadeDuration>
+  <!-- Start loading the next clip this many seconds before the current one ends -->
+  <TrackTransitionPreloadLead>10.0</TrackTransitionPreloadLead>
+  <!-- How often to scan for active context changes (seconds) -->
+  <ContextScanCooldown>0.5</ContextScanCooldown>
+  <!-- How often to check whether cached context data is stale (seconds) -->
+  <StalenessCheckInterval>5.0</StalenessCheckInterval>
+  <!-- How often to poll for natural track-end detection (seconds) -->
+  <TrackEndPollInterval>0.25</TrackEndPollInterval>
+  <!-- Track pick order within a context folder: Random, RandomNoRepeat, Sequential -->
+  <GlobalTrackOrder>RandomNoRepeat</GlobalTrackOrder>
+  <!-- ── Context detection tuning ───────────────────────────────────────
+       Max distance (game units) an enemy is counted toward combat/tension state. -->
+  <EnemyDetectRange>30</EnemyDetectRange>
+  <!-- Distance (game units) from your bedroll or land claim that counts as "home". -->
+  <HomeDetectRange>70</HomeDetectRange>
+  <!-- Health fraction (0.0–1.0) below which combat escalates to Low_Health_Panic. -->
+  <PlayerHealthDangerThresholdPercent>0.30</PlayerHealthDangerThresholdPercent>
+  <!-- CombatExitDelay: with no nearby aggro for this many seconds, stop playing combat
+       music. CombatCooldown: how long after that the encounter's tier stays remembered —
+       re-aggro within this window resumes the latched intensity instead of restarting at
+       the bottom tier; past it the next fight starts fresh. -->
+  <CombatExitDelay>2.0</CombatExitDelay>
+  <CombatCooldown>10.0</CombatCooldown>
+  <!-- ── Weighted combat threat ─────────────────────────────────────────
+       When enabled, combat intensity is chosen by SCORING the enemies that are
+       targeting you rather than just counting them. Each such enemy contributes
+       (type weight × state multiplier); the summed score selects the highest Tier
+       whose minScore it meets. Tier "context" names must exist in contexts.xml.
+
+       Matching is longest-substring-wins against the entity's class name, e.g.
+       "zombieDireWolf" → matches "direwolf" (4.5), not "wolf"; "zombieBoeFeral"
+       → no type key, so defaultWeight (1.0), × state "feral" (1.5). Weights are
+       calibrated to V1 health/damage: a standard walker ≈ 1.0.
+
+       Set enabled="false" to fall back to the simple thresholds above. -->
+  <CombatThreat enabled="true" defaultWeight="1.0">
+    <!-- Type weights -->
+    <Enemy match="crawler" weight="0.6" />
+    <Enemy match="spider" weight="1.3" />
+    <Enemy match="dog" weight="1.4" />
+    <Enemy match="vulture" weight="1.4" />
+    <Enemy match="coyote" weight="1.5" />
+    <Enemy match="wolf" weight="2.0" />
+    <Enemy match="mountainlion" weight="3.0" />
+    <Enemy match="screamer" weight="3.5" />
+    <!-- summons hordes -->
+    <Enemy match="cop" weight="3.5" />
+    <!-- ranged vomit + corpse explosion -->
+    <Enemy match="wight" weight="3.5" />
+    <Enemy match="mutated" weight="3.5" />
+    <Enemy match="bear" weight="4.0" />
+    <!-- AoE, huge HP -->
+    <Enemy match="direwolf" weight="4.5" />
+    <!-- 60 melee, very fast -->
+    <Enemy match="demolition" weight="8.0" />
+    <!-- detonates -->
+    <Enemy match="grace" weight="10.0" />
+    <!-- boss -->
+    <!-- State multipliers, applied on top of the type weight. Charged hits hardest
+         (60 melee), Infernal is tankiest; Radiated reuses the Feral hand (20 dmg)
+         but adds regeneration, so it sits between. -->
+    <State match="feral" multiplier="1.5" />
+    <State match="radiated" multiplier="2.0" />
+    <State match="charged" multiplier="2.75" />
+    <State match="infernal" multiplier="3.25" />
+    <!-- Score → combat tier (any order; sorted ascending on load). Highest met wins.
+         minScore is a float, so fractional thresholds are allowed (e.g. 0.5 lets a
+         single sub-1.0-weight enemy such as a crawler still open the Low tier). -->
+    <Tier context="Combat_Low" minScore="0.5" />
+    <Tier context="Combat_High" minScore="6" />
+    <Tier context="Combat_Boss" minScore="18" />
+  </CombatThreat>
+  <!-- Number of player-targeting enemies required to trigger combat music.
+       Used ONLY when <CombatThreat> below is disabled or has no tiers.
+       Combat_Low fires at or above the Low threshold, Combat_High at or above the High threshold. -->
+  <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
+  <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
+  <!-- ── Playback keybinds ───────────────────────────────────────────────
+       Live controls for whatever music is playing (menu or in-game):
+         Next / Prev track  – skip within the current context's folder. "Prev"
+                              steps back to the one track it remembers (one-deep),
+                              if that file still exists; otherwise it picks a new one.
+         Volume up / down   – nudges the CURRENT track's per-track volume trim
+                              (saved in Cache/loudness.xml, persists across sessions).
+                              Only audible while LoudnessNormalizationEnabled is true.
+       Keys use Unity KeyCode names (RightArrow, LeftArrow, F7, Keypad6, ...).
+       By default all four require Ctrl+Alt held so they don't collide with game or
+       chat input; set the Require flags false for bare-key bindings. -->
+  <KeybindsEnabled>true</KeybindsEnabled>
+  <KeybindRequireCtrl>true</KeybindRequireCtrl>
+  <KeybindRequireAlt>true</KeybindRequireAlt>
+  <KeyNextTrack>RightArrow</KeyNextTrack>
+  <KeyPrevTrack>LeftArrow</KeyPrevTrack>
+  <KeyVolumeUp>UpArrow</KeyVolumeUp>
+  <KeyVolumeDown>DownArrow</KeyVolumeDown>
+  <!-- Per-press change to the current track's volume trim (linear factor). -->
+  <UserTrimStep>0.1</UserTrimStep>
+  <!-- Set to false to silence verbose [CMM] console output.
+       Log.Warning and Log.Error always emit regardless of this flag. -->
+  <DebugLogging>true</DebugLogging>
+  <!-- ── Perf instrumentation (see CMMPerf) ─────────────────────────────
+       When true, the context-change hot path is timed per phase. Each scan tick
+       times the poll/resolve/gate; each transition logs a "[CMM PERF] TX" wall +
+       GC line; any synchronous span over PerfSpikeMs logs a "SPIKE" line the
+       instant it happens, and StalenessCheckLoop dumps rolling per-phase stats.
+       Leave off for normal play; turn on to diagnose stutters. -->
+  <PerfTiming>true</PerfTiming>
+  <!-- Log a SPIKE line for any single synchronous span at/over this many ms. -->
+  <PerfSpikeMs>1.5</PerfSpikeMs>
+  <!-- Per-frame stutter watchdog. A frame is flagged in a "[CMM PERF] STUTTER" line
+       (GC gen0/1/2 delta, transition in flight, live coroutine count) when it runs
+       longer than the device's rolling baseline × PerfFrameSpikeFactor AND clears
+       PerfFrameSpikeFloorMs. RELATIVE to baseline because on a 30 fps machine an
+       absolute cut-off just logs the normal framerate. A stutter that is always
+       tx=idle with GC=0 is NOT caused by this mod. Factor 2.5 / floor 50 ms is a
+       good start; lower the factor to ~2 to be more sensitive. -->
+  <PerfFrameSpikeFactor>2.5</PerfFrameSpikeFactor>
+  <PerfFrameSpikeFloorMs>50</PerfFrameSpikeFloorMs>
+</CMMSettings>
