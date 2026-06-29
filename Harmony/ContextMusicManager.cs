@@ -1199,6 +1199,22 @@ namespace CMM
             }
         }
 
+        // Picks a snapshot entry that still exists on disk, pruning any that have also been
+        // moved out (each miss is one cheap stat — never a folder walk). Returns null when the
+        // snapshot holds no surviving file. Shared by the hot-swap fast path and its post-rescan
+        // retry so the pick-and-verify loop lives in one place.
+        private string PickExistingReplacement(string contextName, string goneFile)
+        {
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                string pick = PickNextFile(contextName, avoidFile: goneFile);
+                if (pick == null) return null;                       // nothing left
+                if (File.Exists(pick)) return pick;
+                PruneMissingFromSnapshot(contextName, pick);         // also gone — drop and retry
+            }
+            return null;
+        }
+
         // ── Hot-swap when the playing file is moved/deleted out from under us ───
         // Driven by FileWatchLoop's cheap File.Exists ping, NOT a folder walk, so it
         // stays O(1) in folder size. Trims the gone file from the in-memory snapshot,
@@ -1225,14 +1241,7 @@ namespace CMM
 
             // Pick a replacement that still exists, pruning any that have also been
             // moved out. Each miss is one cheap stat — never a folder walk.
-            string replacement = null;
-            for (int attempt = 0; attempt < 8; attempt++)
-            {
-                string pick = PickNextFile(contextName, avoidFile: goneFile);
-                if (pick == null) break;                       // nothing left
-                if (File.Exists(pick)) { replacement = pick; break; }
-                PruneMissingFromSnapshot(contextName, pick);   // also gone — drop and retry
-            }
+            string replacement = PickExistingReplacement(contextName, goneFile);
 
             // The snapshot yielded no surviving replacement — but it may be STALE. A swap
             // that removes the playing file AND adds a new one in the same poll window
@@ -1264,13 +1273,7 @@ namespace CMM
                         cache.directorySnapshot = fresh;
                         InvalidateContextFileCache(contextName);
                         CMMConfig.D($"[CMM] Hot-swap: fresh scan found {fresh.Length} file(s) in {contextName} after removal.");
-                        for (int attempt = 0; attempt < 8; attempt++)
-                        {
-                            string pick = PickNextFile(contextName, avoidFile: goneFile);
-                            if (pick == null) break;
-                            if (File.Exists(pick)) { replacement = pick; break; }
-                            PruneMissingFromSnapshot(contextName, pick);
-                        }
+                        replacement = PickExistingReplacement(contextName, goneFile);
                     }
                 }
             }

@@ -192,7 +192,6 @@ namespace CMM
             {
                 buf = Marshal.AllocHGlobal(new IntPtr(size));
                 byte[] chunk = new byte[64 * 1024];   // 64 KB < 85 KB LOH threshold → Gen0
-                byte[] head = null;                   // first bytes, for Opus-in-Ogg detection
                 long off = 0;
                 // Share read+write+delete so copying the file in never blocks another process
                 // (or the user) from moving/deleting it even during this brief read.
@@ -204,17 +203,15 @@ namespace CMM
                     while (off < size &&
                            (n = fs.Read(chunk, 0, (int)Math.Min(chunk.Length, size - off))) > 0)
                     {
-                        if (head == null)
-                        {
-                            head = new byte[Math.Min(n, 64)];
-                            Array.Copy(chunk, head, head.Length);
-                        }
                         Marshal.Copy(chunk, 0, new IntPtr(buf.ToInt64() + off), n);
                         off += n;
                     }
                 }
                 if (off <= 0) return null;
-                // The FileStream is closed now — no handle survives. Open from the buffer.
+                // The FileStream is closed now — no handle survives. Pull the first few bytes
+                // back out of the native buffer for Opus-in-Ogg detection, then open from it.
+                byte[] head = new byte[(int)Math.Min(off, 64)];
+                Marshal.Copy(buf, head, 0, head.Length);
                 string ext = Path.GetExtension(filePath).ToLower();
                 return OpenNativeReaderFromPtr(buf, off, ext, head);
             }
@@ -238,18 +235,17 @@ namespace CMM
         {
             bool isOpus = ext == ".opus" ||
                 ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(head));
-            if (isOpus)                              return new NativeOggOpusReader(data, length);
-            if (ext == ".flac")                      return new NativeFlacReader(data, length);
-            if (ext == ".ogg" || ext == ".oga")      return new NativeVorbisReader(data, length);
-            if (ext == ".mp3")                       return new NativeMp3Reader(data, length);
-            if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
-                                                     return new NativeWavReader(data, length);
-            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
-                ext == ".m4v" || ext == ".3gp")
-                                                     return new NativeAacReader(data, length);
-            if (ext == ".mkv" || ext == ".webm")     return new NativeContainerReader(data, length);
-            Log.Warning($"[CMM] No native reader for extension '{ext}'");
-            return null;
+            switch (ClassifyReader(ext, isOpus))
+            {
+                case ReaderKind.Opus:      return new NativeOggOpusReader(data, length);
+                case ReaderKind.Flac:      return new NativeFlacReader(data, length);
+                case ReaderKind.Vorbis:    return new NativeVorbisReader(data, length);
+                case ReaderKind.Mp3:       return new NativeMp3Reader(data, length);
+                case ReaderKind.Wav:       return new NativeWavReader(data, length);
+                case ReaderKind.Aac:       return new NativeAacReader(data, length);
+                case ReaderKind.Container: return new NativeContainerReader(data, length);
+                default:                   return WarnNoReader(ext);
+            }
         }
 
         // Opens a native reader for any supported format directly from a file path
@@ -259,18 +255,17 @@ namespace CMM
             string ext = System.IO.Path.GetExtension(filePath).ToLower();
             bool isOpus = ext == ".opus" ||
                 ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath));
-            if (isOpus)                              return new NativeOggOpusReader(filePath);
-            if (ext == ".flac")                      return new NativeFlacReader(filePath);
-            if (ext == ".ogg" || ext == ".oga")      return new NativeVorbisReader(filePath);
-            if (ext == ".mp3")                       return new NativeMp3Reader(filePath);
-            if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
-                                                     return new NativeWavReader(filePath);
-            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
-                ext == ".m4v" || ext == ".3gp")
-                                                     return new NativeAacReader(filePath);
-            if (ext == ".mkv" || ext == ".webm")     return new NativeContainerReader(filePath);
-            Log.Warning($"[CMM] No native reader for extension '{ext}'");
-            return null;
+            switch (ClassifyReader(ext, isOpus))
+            {
+                case ReaderKind.Opus:      return new NativeOggOpusReader(filePath);
+                case ReaderKind.Flac:      return new NativeFlacReader(filePath);
+                case ReaderKind.Vorbis:    return new NativeVorbisReader(filePath);
+                case ReaderKind.Mp3:       return new NativeMp3Reader(filePath);
+                case ReaderKind.Wav:       return new NativeWavReader(filePath);
+                case ReaderKind.Aac:       return new NativeAacReader(filePath);
+                case ReaderKind.Container: return new NativeContainerReader(filePath);
+                default:                   return WarnNoReader(ext);
+            }
         }
 
         // Opens a native reader for any supported format from an in-memory buffer.
@@ -280,16 +275,41 @@ namespace CMM
         {
             bool isOpus = ext == ".opus" ||
                 ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(raw));
-            if (isOpus)                              return new NativeOggOpusReader(raw, length);
-            if (ext == ".flac")                      return new NativeFlacReader(raw, length);
-            if (ext == ".ogg" || ext == ".oga")      return new NativeVorbisReader(raw, length);
-            if (ext == ".mp3")                       return new NativeMp3Reader(raw, length);
+            switch (ClassifyReader(ext, isOpus))
+            {
+                case ReaderKind.Opus:      return new NativeOggOpusReader(raw, length);
+                case ReaderKind.Flac:      return new NativeFlacReader(raw, length);
+                case ReaderKind.Vorbis:    return new NativeVorbisReader(raw, length);
+                case ReaderKind.Mp3:       return new NativeMp3Reader(raw, length);
+                case ReaderKind.Wav:       return new NativeWavReader(raw, length);
+                case ReaderKind.Aac:       return new NativeAacReader(raw, length);
+                case ReaderKind.Container: return new NativeContainerReader(raw, length);
+                default:                   return WarnNoReader(ext);
+            }
+        }
+
+        private enum ReaderKind { Unknown, Opus, Flac, Vorbis, Mp3, Wav, Aac, Container }
+
+        // Single source of truth for the extension → native-reader-family mapping, shared by
+        // the path / byte[] / IntPtr open methods above (which differ only in the buffer they
+        // hand the chosen reader). `isOpus` is the caller's header sniff for the shared
+        // .ogg/.oga case, which the extension alone can't disambiguate from Vorbis.
+        private static ReaderKind ClassifyReader(string ext, bool isOpus)
+        {
+            if (isOpus)                          return ReaderKind.Opus;
+            if (ext == ".flac")                  return ReaderKind.Flac;
+            if (ext == ".ogg" || ext == ".oga")  return ReaderKind.Vorbis;
+            if (ext == ".mp3")                   return ReaderKind.Mp3;
             if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
-                                                     return new NativeWavReader(raw, length);
+                                                 return ReaderKind.Wav;
             if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
-                ext == ".m4v" || ext == ".3gp")
-                                                     return new NativeAacReader(raw, length);
-            if (ext == ".mkv" || ext == ".webm")     return new NativeContainerReader(raw, length);
+                ext == ".m4v" || ext == ".3gp")  return ReaderKind.Aac;
+            if (ext == ".mkv" || ext == ".webm") return ReaderKind.Container;
+            return ReaderKind.Unknown;
+        }
+
+        private static WaveStream WarnNoReader(string ext)
+        {
             Log.Warning($"[CMM] No native reader for extension '{ext}'");
             return null;
         }
