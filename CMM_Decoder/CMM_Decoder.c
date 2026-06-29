@@ -16,13 +16,45 @@
   #define CMM_FTELL(f)     ftello((f))
 #endif
 
-/* Open a file by wide path. _wfopen keeps non-ASCII music paths working on
- * Windows (bare fopen is ANSI); on POSIX we down-convert (future Linux build). */
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#endif
+
+/* Open a file by wide path.
+ *
+ * Windows: we MUST pass FILE_SHARE_DELETE so the user can move / rename / delete
+ * the track that is currently streaming. A playback reader holds this FILE* open
+ * for the WHOLE duration of the track, and neither the CRT's _wfopen nor _wfsopen
+ * (whose share flags top out at _SH_DENYNO = FILE_SHARE_READ|FILE_SHARE_WRITE)
+ * grant delete-sharing — so the file stays locked against deletion/rename for as
+ * long as it plays. That broke hot-swapping music in/out of the context folders
+ * while the game runs (the user's move/delete fails at the OS level, leaving the
+ * folder in a state the file-watcher then mis-reads). CreateFileW lets us request
+ * all three share bits; we wrap the HANDLE in a CRT FILE* via _open_osfhandle +
+ * _wfdopen so every decoder's existing fread/fseek/ftell callbacks keep working
+ * unchanged. (A file deleted while open keeps streaming from the still-valid
+ * handle until the reader is disposed — exactly what we want: the playing track
+ * finishes or is hot-swapped out, instead of blocking the user's edit.)
+ *
+ * _wfopen keeps non-ASCII music paths working (bare fopen is ANSI); on POSIX we
+ * down-convert (future Linux build) — unlink there already allows delete-while-open. */
 static FILE* cmm_open_path(const wchar_t* path)
 {
     if (!path) return NULL;
 #ifdef _WIN32
-    return _wfopen(path, L"rb");
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    /* On success the fd (and later the FILE*) OWNS the handle: closing the FILE*
+     * via fclose closes the underlying handle. Don't CloseHandle(h) after this. */
+    int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
+    if (fd == -1) { CloseHandle(h); return NULL; }
+    FILE* fp = _wfdopen(fd, L"rb");
+    if (!fp) { _close(fd); return NULL; }   /* _close also closes the handle */
+    return fp;
 #else
     char buf[4096];
     if (wcstombs(buf, path, sizeof(buf)) == (size_t)-1) return NULL;

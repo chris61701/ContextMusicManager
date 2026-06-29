@@ -87,6 +87,12 @@ namespace CMM
         internal static extern IntPtr cmm_opus_open_memory(byte[] data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged
+        // pointer so they never touch the GC heap (see AudioDecoder.OpenBufferedReader).
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_opus_open_memory")]
+        internal static extern IntPtr cmm_opus_open_memory_ptr(IntPtr data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
         // Large-file path: decode straight from disk (wide path → _wfopen native-side).
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern IntPtr cmm_opus_open_file(string path,
@@ -131,6 +137,11 @@ namespace CMM
         internal static extern IntPtr cmm_flac_open_memory(byte[] data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged pointer.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_flac_open_memory")]
+        internal static extern IntPtr cmm_flac_open_memory_ptr(IntPtr data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern IntPtr cmm_flac_open_file(string path,
             out int channels, out int sampleRate, out long totalFrames, out int err);
@@ -155,6 +166,11 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr cmm_vorbis_open_memory(byte[] data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged pointer.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_vorbis_open_memory")]
+        internal static extern IntPtr cmm_vorbis_open_memory_ptr(IntPtr data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -183,6 +199,11 @@ namespace CMM
         internal static extern IntPtr cmm_mp3_open_memory(byte[] data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged pointer.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_mp3_open_memory")]
+        internal static extern IntPtr cmm_mp3_open_memory_ptr(IntPtr data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern IntPtr cmm_mp3_open_file(string path,
             out int channels, out int sampleRate, out long totalFrames, out int err);
@@ -207,6 +228,11 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr cmm_wav_open_memory(byte[] data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged pointer.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_wav_open_memory")]
+        internal static extern IntPtr cmm_wav_open_memory_ptr(IntPtr data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -235,6 +261,11 @@ namespace CMM
         internal static extern IntPtr cmm_aac_open_memory(byte[] data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged pointer.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_aac_open_memory")]
+        internal static extern IntPtr cmm_aac_open_memory_ptr(IntPtr data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
         internal static extern IntPtr cmm_aac_open_file(string path,
             out int channels, out int sampleRate, out long totalFrames, out int err);
@@ -261,6 +292,11 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr cmm_container_open_memory(byte[] data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
+        // Buffered-playback path: same native export, file bytes passed as an unmanaged pointer.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "cmm_container_open_memory")]
+        internal static extern IntPtr cmm_container_open_memory_ptr(IntPtr data, long len,
             out int channels, out int sampleRate, out long totalFrames, out int err);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -300,6 +336,16 @@ namespace CMM
                 out _channels, out int sampleRate, out _totalFrames, out int err);
             if (_handle == IntPtr.Zero)
                 throw new InvalidOperationException($"cmm_vorbis_open_memory failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies them.
+        public NativeVorbisReader(IntPtr data, long length)
+        {
+            _handle = NativeVorbis.cmm_vorbis_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_vorbis_open_memory(ptr) failed (err={err})");
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 
@@ -421,6 +467,16 @@ namespace CMM
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies them.
+        public NativeFlacReader(IntPtr data, long length)
+        {
+            _handle = NativeFlac.cmm_flac_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_flac_open_memory(ptr) failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
         // Large-file path: decode straight from disk (no full-file buffer).
         public NativeFlacReader(string filePath)
         {
@@ -535,6 +591,17 @@ namespace CMM
                 out _channels, out int sampleRate, out _totalFrames, out int err);
             if (_handle == IntPtr.Zero)
                 throw new InvalidOperationException($"cmm_opus_open_memory failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies
+        // them (cmm_*_open_memory), so the caller frees the buffer right after construction.
+        public NativeOggOpusReader(IntPtr data, long length)
+        {
+            _handle = NativeOpus.cmm_opus_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_opus_open_memory(ptr) failed (err={err})");
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 
@@ -658,6 +725,16 @@ namespace CMM
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies them.
+        public NativeMp3Reader(IntPtr data, long length)
+        {
+            _handle = NativeMp3.cmm_mp3_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_mp3_open_memory(ptr) failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
         // Large-file path: decode straight from disk (no full-file buffer).
         public NativeMp3Reader(string filePath)
         {
@@ -772,6 +849,16 @@ namespace CMM
                 out _channels, out int sampleRate, out _totalFrames, out int err);
             if (_handle == IntPtr.Zero)
                 throw new InvalidOperationException($"cmm_wav_open_memory failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies them.
+        public NativeWavReader(IntPtr data, long length)
+        {
+            _handle = NativeWav.cmm_wav_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_wav_open_memory(ptr) failed (err={err})");
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 
@@ -895,6 +982,16 @@ namespace CMM
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies them.
+        public NativeAacReader(IntPtr data, long length)
+        {
+            _handle = NativeAac.cmm_aac_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_aac_open_memory(ptr) failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
         // Large-file path: decode straight from disk (MP4 streams via the demuxer;
         // raw ADTS is read whole native-side).
         public NativeAacReader(string filePath)
@@ -1013,6 +1110,16 @@ namespace CMM
                 out _channels, out int sampleRate, out _totalFrames, out int err);
             if (_handle == IntPtr.Zero)
                 throw new InvalidOperationException($"cmm_container_open_memory failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
+        // Buffered playback: file bytes in a native (off-GC-heap) buffer; the decoder copies them.
+        public NativeContainerReader(IntPtr data, long length)
+        {
+            _handle = NativeContainer.cmm_container_open_memory_ptr(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_container_open_memory(ptr) failed (err={err})");
             _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
         }
 

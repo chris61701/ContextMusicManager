@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using UnityEngine;
 
@@ -144,10 +145,111 @@ namespace CMM
             // FILE* instead of a RAM copy, so the audio thread does the disk reads. At ~90
             // MB/s sequential vs ~0.02–0.1 MB/s playback the read head stays far ahead, and
             // the OS read-ahead/page cache covers it; only post-seek (resume/loop) pays one
-            // cold seek. If that ever underruns on the SD card, re-introduce a buffer we own
-            // in NATIVE memory (Marshal.AllocHGlobal → cmm_*_open_memory) rather than a
-            // managed array — never bring back File.ReadAllBytes here.
+            // cold seek.
+            //
+            // BUFFERED OPEN (default): read the whole file into a NATIVE buffer, hand it to
+            // the decoder (which copies it into its own private buffer — see cmm_*_open_memory),
+            // and CLOSE the file handle immediately. A streamed-from-disk reader holds the file
+            // open for the WHOLE track, which on Windows pins not just the file but its PARENT
+            // FOLDER (no share flag lets a folder be moved/renamed/deleted while a file inside
+            // is open). Buffering up front means nothing — file or folder — is locked while the
+            // track plays, so the user can freely reorganise the music folders mid-playback.
+            // The buffer lives in NATIVE (AllocHGlobal) memory the GC never scans, read in via a
+            // small reused Gen0 chunk, so there is NO managed Large-Object-Heap allocation — the
+            // exact thing the comment above warns against (never File.ReadAllBytes here).
+            //
+            // Files larger than HotSwapMaxFileSizeBytes are NOT buffered (that would mean a
+            // 100 MB+ native allocation held for the whole song): they fall back to streaming
+            // from an open FILE* below. That one file stays open while it plays — its folder is
+            // pinned for the song's duration — but it is the rare case, and the file itself is
+            // still movable (FILE_SHARE_DELETE); only its parent folder is held.
+            try
+            {
+                long size = new FileInfo(filePath).Length;
+                if (size > 0 && size <= CMMConfig.HotSwapMaxFileSizeBytes)
+                {
+                    WaveStream buffered = OpenBufferedReader(filePath, size);
+                    if (buffered != null) return buffered;
+                    // Buffering failed (alloc/read/decode) — fall through to streaming.
+                }
+            }
+            catch { /* stat failed — fall through to streaming from disk */ }
+
             return OpenNativeReader(filePath);
+        }
+
+        // Reads the whole file into a native (off-GC-heap) buffer and opens the matching
+        // native reader from it, leaving NO file handle open (so neither the file nor its
+        // folder is locked while the track plays). The file streams in through a small reused
+        // 64 KB Gen0 chunk — no managed Large-Object-Heap allocation — and the decoder makes
+        // its own private copy of the bytes (cmm_*_open_memory), so our buffer is freed the
+        // instant the reader is constructed. Returns null on any failure so OpenStreamingReader
+        // falls back to streaming-from-disk. Runs on the same background thread as the caller.
+        private static WaveStream OpenBufferedReader(string filePath, long size)
+        {
+            IntPtr buf = IntPtr.Zero;
+            try
+            {
+                buf = Marshal.AllocHGlobal(new IntPtr(size));
+                byte[] chunk = new byte[64 * 1024];   // 64 KB < 85 KB LOH threshold → Gen0
+                byte[] head = null;                   // first bytes, for Opus-in-Ogg detection
+                long off = 0;
+                // Share read+write+delete so copying the file in never blocks another process
+                // (or the user) from moving/deleting it even during this brief read.
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read,
+                                               FileShare.ReadWrite | FileShare.Delete, 64 * 1024,
+                                               FileOptions.SequentialScan))
+                {
+                    int n;
+                    while (off < size &&
+                           (n = fs.Read(chunk, 0, (int)Math.Min(chunk.Length, size - off))) > 0)
+                    {
+                        if (head == null)
+                        {
+                            head = new byte[Math.Min(n, 64)];
+                            Array.Copy(chunk, head, head.Length);
+                        }
+                        Marshal.Copy(chunk, 0, new IntPtr(buf.ToInt64() + off), n);
+                        off += n;
+                    }
+                }
+                if (off <= 0) return null;
+                // The FileStream is closed now — no handle survives. Open from the buffer.
+                string ext = Path.GetExtension(filePath).ToLower();
+                return OpenNativeReaderFromPtr(buf, off, ext, head);
+            }
+            catch (Exception ex)
+            {
+                CMMConfig.D($"[CMM] Buffered open failed for {Path.GetFileName(filePath)}: {ex.Message}; streaming instead.");
+                return null;
+            }
+            finally
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+            }
+        }
+
+        // Opens a native reader for any supported format from a native memory buffer (pointer
+        // + length). Mirrors OpenNativeReaderFromMemory but takes an unmanaged pointer so the
+        // file bytes never touch the GC heap. `head` is the first few bytes, used only to tell
+        // Opus-in-Ogg from Vorbis-in-Ogg. The decoder copies the buffer, so the caller owns and
+        // frees `data`. Returns null for unknown extensions.
+        private static WaveStream OpenNativeReaderFromPtr(IntPtr data, long length, string ext, byte[] head)
+        {
+            bool isOpus = ext == ".opus" ||
+                ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(head));
+            if (isOpus)                              return new NativeOggOpusReader(data, length);
+            if (ext == ".flac")                      return new NativeFlacReader(data, length);
+            if (ext == ".ogg" || ext == ".oga")      return new NativeVorbisReader(data, length);
+            if (ext == ".mp3")                       return new NativeMp3Reader(data, length);
+            if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
+                                                     return new NativeWavReader(data, length);
+            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
+                ext == ".m4v" || ext == ".3gp")
+                                                     return new NativeAacReader(data, length);
+            if (ext == ".mkv" || ext == ".webm")     return new NativeContainerReader(data, length);
+            Log.Warning($"[CMM] No native reader for extension '{ext}'");
+            return null;
         }
 
         // Opens a native reader for any supported format directly from a file path

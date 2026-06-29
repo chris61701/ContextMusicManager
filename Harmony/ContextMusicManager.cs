@@ -561,6 +561,12 @@ namespace CMM
             const float BlacklistRetryInterval = 30f;
             float lastBlacklistRetry = -BlacklistRetryInterval;
 
+            // How recently (seconds) a folder must have been written for us to distrust an
+            // unchanged directory write-time and force a reconciling enumeration anyway.
+            // Covers a couple of 2s poll intervals plus the 2s FAT/exFAT stamp resolution,
+            // so a swap that collides with the previous stamp value is still caught.
+            const float SignatureFreshnessWindow = 6f;
+
             while (true)
             {
                 yield return new WaitForSeconds(2f);
@@ -694,7 +700,22 @@ namespace CMM
                     // below lets us skip the folder walk entirely.
                     bool activeNeedsScan = isActiveContext && (playingFileGone || cache.Current.Borrowed);
 
-                    if (!activeNeedsScan && !neverScanned && !previouslyEmpty
+                    // A coarse directory write-time (FAT/exFAT = 2s resolution — the SD-card
+                    // case this loop already worries about elsewhere; some network shares are
+                    // worse) can stamp a JUST-changed folder with the SAME value it had a moment
+                    // ago, so `currentWriteTime == knownTime` is NOT proof of "no change" while
+                    // the user is actively swapping files in/out: an add or remove that lands in
+                    // the same resolution tick is hidden. (previouslyEmpty only patches the
+                    // empty→filled corner.) If the signature timestamp is within a few poll
+                    // intervals of now, the folder was touched recently enough that a same-valued
+                    // stamp may be masking a change — force the enumeration to reconcile. Cheap:
+                    // no extra IO (we already have currentWriteTime), and it self-limits to the
+                    // brief window after an edit, settling back to the stamp shortcut once the
+                    // folder goes quiet for SignatureFreshnessWindow seconds.
+                    bool recentlyTouched = currentWriteTime != DateTime.MinValue
+                        && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(SignatureFreshnessWindow);
+
+                    if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
                         && currentWriteTime == knownTime && !blacklistRetryDue) continue;
                     lastWriteTimes[contextName] = currentWriteTime;
 
@@ -1211,6 +1232,47 @@ namespace CMM
                 if (pick == null) break;                       // nothing left
                 if (File.Exists(pick)) { replacement = pick; break; }
                 PruneMissingFromSnapshot(contextName, pick);   // also gone — drop and retry
+            }
+
+            // The snapshot yielded no surviving replacement — but it may be STALE. A swap
+            // that removes the playing file AND adds a new one in the same poll window
+            // leaves the new file undiscovered, because this O(1) fast path never walks the
+            // folder. Before surrendering to the vanilla bed, do ONE fresh enumeration to
+            // pick up such adds, so an add+remove swaps STRAIGHT to the new track instead of
+            // flickering through vanilla for a poll cycle (the "vanilla plays while custom
+            // files exist" symptom). Only reached once the snapshot is empty of survivors,
+            // so the folder is small here and the walk is cheap; large folders always find a
+            // replacement above and never get here. Off the main thread to be safe.
+            if (replacement == null)
+            {
+                Contexts ictx = GetContext(contextName);
+                if (ictx != null && !string.IsNullOrEmpty(ictx.Path))
+                {
+                    string dir = Path.Combine(MusicDirectory, ictx.Path);
+                    string[] fresh = null;
+                    bool scanDone = false;
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        try { if (Directory.Exists(dir)) fresh = EnumerateContextFiles(ictx, dir); }
+                        catch { }
+                        finally { scanDone = true; }
+                    });
+                    while (!scanDone) yield return null;
+
+                    if (fresh != null && fresh.Length > 0)
+                    {
+                        cache.directorySnapshot = fresh;
+                        InvalidateContextFileCache(contextName);
+                        CMMConfig.D($"[CMM] Hot-swap: fresh scan found {fresh.Length} file(s) in {contextName} after removal.");
+                        for (int attempt = 0; attempt < 8; attempt++)
+                        {
+                            string pick = PickNextFile(contextName, avoidFile: goneFile);
+                            if (pick == null) break;
+                            if (File.Exists(pick)) { replacement = pick; break; }
+                            PruneMissingFromSnapshot(contextName, pick);
+                        }
+                    }
+                }
             }
 
             if (replacement != null)
