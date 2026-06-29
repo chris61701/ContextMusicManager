@@ -1956,9 +1956,9 @@ namespace CMM
                 bool done = false;
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    try
+                    foreach (var item in toScan)
                     {
-                        foreach (var item in toScan)
+                        try
                         {
                             results[item.Name] = Directory.Exists(item.Dir)
                                 ? Directory.GetFiles(item.Dir, "*", item.Option)
@@ -1967,8 +1967,15 @@ namespace CMM
                                     .ToArray()
                                 : new string[0];
                         }
+                        // One unreadable folder (ACL, removed media, or an over-long path
+                        // under a recursive subfolders="true" context) must not strand every
+                        // LATER context in this scan: a single swallowed throw would leave
+                        // their snapshots null, and SnapshotsReady — which now requires ALL
+                        // contexts enumerated — could then never latch. Give the bad folder
+                        // an empty (non-null) snapshot so it reads as "no files" and recovers
+                        // on a later tick.
+                        catch { results[item.Name] = new string[0]; }
                     }
-                    catch { }
                     done = true;
                 });
                 while (!done) yield return null;

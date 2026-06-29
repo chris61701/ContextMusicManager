@@ -685,21 +685,32 @@ namespace CMM
                     var keyByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
-                        if (Directory.Exists(dir))
+                        try
                         {
-                            var fis = new DirectoryInfo(dir)
-                                .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
-                                .Where(fi => AudioDecoder.IsSupported(fi.FullName)
-                                             && !IsClaimedByDeeperContext(fi.FullName, claimedPrefixes)).ToArray();
-                            currentFiles = fis.Select(fi => fi.FullName).ToArray();
-                            foreach (var fi in fis)
+                            if (Directory.Exists(dir))
                             {
-                                string nk = norm(fi.FullName);
-                                keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                                var fis = new DirectoryInfo(dir)
+                                    .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+                                    .Where(fi => AudioDecoder.IsSupported(fi.FullName)
+                                                 && !IsClaimedByDeeperContext(fi.FullName, claimedPrefixes)).ToArray();
+                                currentFiles = fis.Select(fi => fi.FullName).ToArray();
+                                foreach (var fi in fis)
+                                {
+                                    string nk = norm(fi.FullName);
+                                    keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                                }
                             }
+                            else currentFiles = new string[0];
                         }
-                        else currentFiles = new string[0];
-                        scanDone = true;
+                        // A throw mid-enumeration (an unreadable subdir or an over-MAX_PATH
+                        // path under a recursive subfolders="true" context, removed media, or
+                        // the folder vanishing after the Exists check) must not leave
+                        // currentFiles null with scanDone never set: the `while (!scanDone)`
+                        // driver below would then spin forever and kill FileWatchLoop for the
+                        // rest of the session. Fall back to the previous snapshot so this tick
+                        // reads as "no change" and we retry on the next sweep.
+                        catch { currentFiles = previousFiles; }
+                        finally { scanDone = true; }
                     });
                     while (!scanDone) yield return null;
 
