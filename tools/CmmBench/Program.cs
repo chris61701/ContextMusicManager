@@ -24,7 +24,7 @@ using CMM;
 
 internal static class Program
 {
-    static readonly string[] Exts = { ".mp3", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aiff", ".aif", ".flac", ".m4a", ".mp4", ".aac" };
+    static readonly string[] Exts = { ".mp3", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aiff", ".aif", ".flac", ".m4a", ".mp4", ".aac", ".m4v", ".3gp", ".mkv", ".webm" };
 
     static int Main(string[] args)
     {
@@ -35,7 +35,7 @@ internal static class Program
         AppDomain.MonitoringIsEnabled = true;
 
         int repeats = 5;
-        bool verbose = false, benchOpen = false, useScratch = true, verifyFileOpen = false;
+        bool verbose = false, benchOpen = false, useScratch = true, verifyFileOpen = false, cold = false;
         var inputs = new List<string>();
 
         for (int i = 0; i < args.Length; i++)
@@ -47,6 +47,7 @@ internal static class Program
                 case "--open": benchOpen = true; break;
                 case "--no-scratch": useScratch = false; break;
                 case "--verify-fileopen": verifyFileOpen = true; break;
+                case "--cold": cold = true; break;
                 case "-h": case "--help": Usage(); return 0;
                 default: inputs.Add(args[i]); break;
             }
@@ -56,6 +57,7 @@ internal static class Program
 
         var files = CollectFiles(inputs);
         if (verifyFileOpen) return VerifyFileOpen(files);
+        if (cold) return RunCold(files, repeats);
         if (files.Count == 0) { Console.WriteLine("No supported audio files found."); return 1; }
 
         Console.WriteLine($"CmmBench — {files.Count} file(s), {repeats} timed repeat(s) each, " +
@@ -205,7 +207,11 @@ internal static class Program
                 case ".aif":        mem = new NativeWavReader(raw, raw.Length);     fil = new NativeWavReader(f);     break;
                 case ".m4a":
                 case ".mp4":
-                case ".aac":        mem = new NativeAacReader(raw, raw.Length);     fil = new NativeAacReader(f);     break;
+                case ".aac":
+                case ".m4v":
+                case ".3gp":        mem = new NativeAacReader(raw, raw.Length);     fil = new NativeAacReader(f);     break;
+                case ".mkv":
+                case ".webm":       mem = new NativeContainerReader(raw, raw.Length); fil = new NativeContainerReader(f); break;
                 default: Console.WriteLine($"  SKIP (not native): {Path.GetFileName(f)}"); continue;
             }
 
@@ -237,6 +243,79 @@ internal static class Program
         return (frames, peak);
     }
 
+    // ── Cold-load benchmark ───────────────────────────────────────────────────
+    // The default run warms the OS file cache (the warmup pass), so its timings are
+    // decode-from-RAM. This mode instead reads every file CACHE-BYPASSED
+    // (FILE_FLAG_NO_BUFFERING) so the bytes come off the physical device — the true
+    // "load this track cold" cost on slow media (SD card / J:). Splits the cost into
+    // the device READ (size / device MB/s) and the cache-independent DECODE (CPU), and
+    // reports their sum — the full-decode preload path (Menu / PreloadCacheEnabled)
+    // pays read+decode; streaming formats only read headers at open and page the rest
+    // on the audio thread, so for them the read column is the upper bound, not the
+    // transition cost.
+    static int RunCold(List<string> files, int repeats)
+    {
+        var supported = files.Where(AudioDecoder.IsSupported).ToList();
+        if (supported.Count == 0) { Console.WriteLine("No supported audio files found."); return 1; }
+
+        Console.WriteLine($"CmmBench --cold — {supported.Count} file(s), cache BYPASSED (FILE_FLAG_NO_BUFFERING), " +
+                          $"{repeats} repeat(s) each\n");
+        Console.WriteLine($"  {"file",-44} {"ext",-5} {"MB",6}  {"read",8} {"MB/s",7}  {"decode",9}  {"total",9}");
+
+        var rows = new List<ColdRow>();
+        foreach (string f in supported)
+        {
+            double mb = new FileInfo(f).Length / 1024.0 / 1024.0;
+            var readMs = new double[repeats];
+            var decMs = new double[repeats];
+            bool ok = true;
+            for (int r = 0; r < repeats; r++)
+            {
+                byte[] bytes;
+                try { (bytes, readMs[r]) = CmmBench.ColdRead.Read(f); }
+                catch (Exception ex) { Console.WriteLine($"  COLD-READ ERR {Path.GetFileName(f)}: {ex.Message}"); ok = false; break; }
+
+                long t = Stopwatch.GetTimestamp();
+                var decoded = AudioDecoder.DecodeFileFromBytes(bytes, f);
+                decMs[r] = Ms(t);
+                if (decoded == null) { Console.WriteLine($"  DECODE ERR {Path.GetFileName(f)}"); ok = false; break; }
+            }
+            if (!ok) continue;
+
+            var row = new ColdRow
+            {
+                Ext = Path.GetExtension(f).ToLowerInvariant(),
+                MB = mb,
+                ReadMs = readMs.Average(),
+                DecodeMs = decMs.Average(),
+            };
+            rows.Add(row);
+            Console.WriteLine($"  {Path.GetFileName(f),-44} {row.Ext,-5} {mb,6:F1}  " +
+                              $"{row.ReadMs,7:F1}ms {mb / (row.ReadMs / 1000.0),6:F1}  " +
+                              $"{row.DecodeMs,8:F1}ms  {row.ReadMs + row.DecodeMs,8:F1}ms");
+        }
+
+        if (rows.Count == 0) { Console.WriteLine("\n(no files measured)"); return 1; }
+
+        Console.WriteLine("\n── Cold load by format ────────────────────────────────────────────────");
+        foreach (var g in rows.GroupBy(r => r.Ext).OrderBy(g => g.Key))
+        {
+            double mb = g.Sum(r => r.MB), readMs = g.Sum(r => r.ReadMs), decMs = g.Sum(r => r.DecodeMs);
+            Console.WriteLine($"  {g.Key,-6} n={g.Count(),-3} " +
+                              $"read {mb / (readMs / 1000.0),6:F1} MB/s  " +
+                              $"avg read {readMs / g.Count(),7:F1}ms  decode {decMs / g.Count(),7:F1}ms  " +
+                              $"total {(readMs + decMs) / g.Count(),7:F1}ms");
+        }
+
+        double allMb = rows.Sum(r => r.MB), allRead = rows.Sum(r => r.ReadMs);
+        var totals = rows.Select(r => r.ReadMs + r.DecodeMs).OrderBy(x => x).ToArray();
+        Console.WriteLine($"\n  DEVICE cold read: {allMb / (allRead / 1000.0):F1} MB/s over {allMb:F0} MB" +
+                          $"   ·   cold-load total p50 {Pct(totals, 50):F1}ms  p95 {Pct(totals, 95):F1}ms  max {totals.Last():F1}ms");
+        return 0;
+    }
+
+    sealed class ColdRow { public string Ext; public double MB, ReadMs, DecodeMs; }
+
     static void Usage()
     {
         Console.WriteLine(
@@ -246,7 +325,8 @@ internal static class Program
             "  -n <count>     timed repeats per file (default 5; +1 warmup)\n" +
             "  -v             verbose per-file read/hash/index/decode split\n" +
             "  --open         also benchmark OpenStreamingReader (transition open latency)\n" +
-            "  --no-scratch   don't reuse the MeasureScratch buffer (shows per-file LOH cost)\n");
+            "  --no-scratch   don't reuse the MeasureScratch buffer (shows per-file LOH cost)\n" +
+            "  --cold         cache-bypassed cold read + decode (true load-from-disk cost on slow media)\n");
     }
 
     sealed class Sample

@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmSession — synthetic long-gameplay-session benchmark (Arena C).
+
+       Compresses hours of play into seconds through the REAL decision pipeline to
+       surface slow-accumulation problems (GC pressure, managed-heap drift) that a
+       single in-game hitch (Arena A / CMMPerf) or a one-shot decode (Arena B /
+       CmmBench) can't show. It LINKS the actual decision + decode source (no copy
+       to drift) — ScriptHost (Lua via MoonSharp) + the decoder stack — and PORTS
+       the Unity-coupled selection layer in Engine.cs (cited per-block), exactly as
+       CmmScanTest ports the enumeration layer.
+
+         Run via dotnet run on tools/CmmSession in Release; see Program.cs for flags.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmSession</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- The linked decoder is platform-specific (native CMM_Decoder.dll, Windows x64). -->
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!-- The mod's real source, linked so the bench can never drift from shipped code.
+       Decision layer (ScriptHost + GameState + data model) and decode stack. -->
+  <ItemGroup>
+    <Compile Include="..\..\Harmony\DataStructures.cs"  Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\GameState.cs"        Link="linked\GameState.cs" />
+    <Compile Include="..\..\Harmony\ScriptHost.cs"       Link="linked\ScriptHost.cs" />
+    <Compile Include="..\..\Harmony\AudioDecoder.cs"     Link="linked\AudioDecoder.cs" />
+    <Compile Include="..\..\Harmony\NativeAudio.cs"      Link="linked\NativeAudio.cs" />
+    <Compile Include="..\..\Harmony\WaveShim.cs"         Link="linked\WaveShim.cs" />
+    <Compile Include="..\..\Harmony\LoudnessAnalyzer.cs" Link="linked\LoudnessAnalyzer.cs" />
+  </ItemGroup>
+
+  <!-- MoonSharp: pure-managed Lua interpreter hosting context.lua (same DLL the mod ships). -->
+  <ItemGroup>
+    <Reference Include="MoonSharp.Interpreter">
+      <HintPath>..\..\packages\MoonSharp.2.0.0\lib\net40-client\MoonSharp.Interpreter.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Canonical default context.lua, embedded under the same logical name the mod uses,
+       so ScriptHost.LoadEmbedded() has a baseline if the on-disk Config copy is absent. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\Config\context.lua">
+      <LogicalName>context.lua</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- Native decode shim — copied next to the exe so DllImport("CMM_Decoder") resolves. -->
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

@@ -5,7 +5,7 @@ namespace CMM
 {
     public static class CMMConfig
     {
-        public static float VolumeModifier = 0.5f;
+        public static float VolumeModifier = 1.0f;
         // A non-negative volumeOverride replaces the global VolumeModifier for this
         // call (used by contexts that set their own volume, e.g. POI_Cleared).
         public static float GetVolume(bool inGame, float volumeOverride = -1f)

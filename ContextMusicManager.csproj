@@ -166,6 +166,8 @@
     <Compile Include="Harmony\ScriptHost.cs" />
     <Compile Include="Harmony\ContextMusicManager.ContextStack.cs" />
     <Compile Include="Harmony\ContextMusicManager.AudioPlayer.cs" />
+    <Compile Include="Harmony\ContextMusicManager.Crawler.cs" />
+    <Compile Include="Harmony\CmmConsoleCmd.cs" />
     <Compile Include="Harmony\ContextMusicManager.VanillaClips.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
     <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />

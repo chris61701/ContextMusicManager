@@ -41,31 +41,31 @@
 -->
 <Contexts>
 
-  <!-- ── Events ─────────────────────────────────────────────────────── -->
-  <Context name="Death"            path="events/death"      resume="false" stale="0"  cool="3" fadeintime="1" bypass="true" priority="100" once="true" />
-  <Context name="Low_Health_Panic" path="events/low_health"                stale="30" cool="5" fadeintime="2" bypass="true" priority="90" />
-  <Context name="Spawn"            path="events/spawn"      resume="false" stale="0"  cool="3" fadeintime="1" bypass="true" priority="45" once="true" />
+  <!-- ── Events ────────────────────────────────── -->
+  <Context name="Death"                      path="events/death"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="1" warmup="0"  warmgroup=""     bypass="true"  priority="100" once="true"  volume="-1" />
+  <Context name="Low_Health_Panic"           path="events/low_health"           subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="90"  once="false" volume="-1" />
+  <Context name="Spawn"                      path="events/spawn"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="1" warmup="0"  warmgroup=""     bypass="true"  priority="45"  once="true"  volume="-1" />
 
-  <!-- ── Vehicles ───────────────────────────────────────────────────── -->
-  <Context name="Vehicle_Gyrocopter"  path="vehicle/gyrocopter"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
-  <Context name="Vehicle_Bicycle"     path="vehicle/bicycle"     fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
-  <Context name="Vehicle_Minibike"    path="vehicle/minibike"    fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
-  <Context name="Vehicle_Motorcycle"  path="vehicle/motorcycle"  fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
-  <Context name="Vehicle_4x4"         path="vehicle/4x4"         fallback="Vehicle" stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="70" />
-  <Context name="Vehicle"             path="vehicle"                                stale="30" cool="5" fadeintime="3" warmup="1" bypass="true" priority="69" />
+  <!-- ── Vehicles ─────────────────────────────── -->
+  <Context name="Vehicle_Gyrocopter"         path="vehicle/gyrocopter"          subfolders="false" fallback="Vehicle"           resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="70"  once="false" volume="-1" />
+  <Context name="Vehicle_Bicycle"            path="vehicle/bicycle"             subfolders="false" fallback="Vehicle"           resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="70"  once="false" volume="-1" />
+  <Context name="Vehicle_Minibike"           path="vehicle/minibike"            subfolders="false" fallback="Vehicle"           resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="70"  once="false" volume="-1" />
+  <Context name="Vehicle_Motorcycle"         path="vehicle/motorcycle"          subfolders="false" fallback="Vehicle"           resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="70"  once="false" volume="-1" />
+  <Context name="Vehicle_4x4"                path="vehicle/4x4"                 subfolders="false" fallback="Vehicle"           resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="70"  once="false" volume="-1" />
+  <Context name="Vehicle"                    path="vehicle"                     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="69"  once="false" volume="-1" />
 
-  <!-- ── Swimming ───────────────────────────────────────────────────── -->
+  <!-- ── Swimming ─────────────────────────────── -->
   <!-- Player is in deep enough water to swim. 8s dwell so brief dips don't
        interrupt; falls back to the stack so exploration music resumes on exit. -->
-  <Context name="Swimming" path="swimming" priority="23" warmup="5" />
+  <Context name="Swimming"                   path="swimming"                    subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup=""     bypass="false" priority="23"  once="false" volume="-1" />
 
-  <!-- ── Points of Interest ─────────────────────────────────────────── -->
+  <!-- ── Points of Interest ───────────────────── -->
   <!-- POI_Cleared fires once when the last sleeper in a POI is killed. Priority must
        outrank lingering combat: clearing a POI means you were just fighting, so combat
        (generic 50-52 AND biome 60-62) is still on the stack during the brief eviction
        window. At 91 the stinger wins over all combat tiers, Blood_Moon (71), and
        Low_Health_Panic (90); only Death (100) supersedes it. -->
-  <Context name="POI_Cleared" path="events/poi_cleared"       stale="60"           bypass="true" priority="91" once="true" volume="1.0" />
+  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="1.0" />
 
   <!-- Infested and non-infested POI contexts share warmgroup="poi" so the clear handoff
        (POI_Infested_Tn -> POI_Tn) is continuous: the joining non-infested context inherits
@@ -74,24 +74,24 @@
        fades. Each context still uses its own warmup value. -->
 
   <!-- Infested: playing while sleeper volumes still hold live enemies. -->
-  <Context name="POI_Infested_T5" path="poi/infested/t5" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
-  <Context name="POI_Infested_T4" path="poi/infested/t4" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
-  <Context name="POI_Infested_T3" path="poi/infested/t3" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
-  <Context name="POI_Infested_T2" path="poi/infested/t2" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
-  <Context name="POI_Infested_T1" path="poi/infested/t1" fallback="POI_Infested" stale="60" priority="22" warmup="10" warmgroup="poi" />
-  <Context name="POI_Infested_T0" path="poi/infested/t0"                         stale="60" priority="21" warmup="10" warmgroup="poi" />
-  <Context name="POI_Infested"    path="poi/infested"                            stale="60" priority="20" warmup="10" warmgroup="poi" />
+  <Context name="POI_Infested_T5"            path="poi/infested/t5"             subfolders="false" fallback="POI_Infested"      resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="22"  once="false" volume="-1" />
+  <Context name="POI_Infested_T4"            path="poi/infested/t4"             subfolders="false" fallback="POI_Infested"      resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="22"  once="false" volume="-1" />
+  <Context name="POI_Infested_T3"            path="poi/infested/t3"             subfolders="false" fallback="POI_Infested"      resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="22"  once="false" volume="-1" />
+  <Context name="POI_Infested_T2"            path="poi/infested/t2"             subfolders="false" fallback="POI_Infested"      resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="22"  once="false" volume="-1" />
+  <Context name="POI_Infested_T1"            path="poi/infested/t1"             subfolders="false" fallback="POI_Infested"      resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="22"  once="false" volume="-1" />
+  <Context name="POI_Infested_T0"            path="poi/infested/t0"             subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="21"  once="false" volume="-1" />
+  <Context name="POI_Infested"               path="poi/infested"                subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="10" warmgroup="poi"  bypass="false" priority="20"  once="false" volume="-1" />
 
   <!-- Non-infested: inside a POI with no live sleepers (cleared or never infested). -->
-  <Context name="POI_T5" path="poi/t5" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
-  <Context name="POI_T4" path="poi/t4" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
-  <Context name="POI_T3" path="poi/t3" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
-  <Context name="POI_T2" path="poi/t2" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
-  <Context name="POI_T1" path="poi/t1" fallback="POI" stale="60" priority="18" warmup="5" warmgroup="poi" />
-  <Context name="POI_T0" path="poi/t0"                stale="60" priority="17" warmup="5" warmgroup="poi" />
-  <Context name="POI"    path="poi"                   stale="60" priority="16" warmup="5" warmgroup="poi" />
+  <Context name="POI_T5"                     path="poi/t5"                      subfolders="false" fallback="POI"               resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="18"  once="false" volume="-1" />
+  <Context name="POI_T4"                     path="poi/t4"                      subfolders="false" fallback="POI"               resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="18"  once="false" volume="-1" />
+  <Context name="POI_T3"                     path="poi/t3"                      subfolders="false" fallback="POI"               resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="18"  once="false" volume="-1" />
+  <Context name="POI_T2"                     path="poi/t2"                      subfolders="false" fallback="POI"               resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="18"  once="false" volume="-1" />
+  <Context name="POI_T1"                     path="poi/t1"                      subfolders="false" fallback="POI"               resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="18"  once="false" volume="-1" />
+  <Context name="POI_T0"                     path="poi/t0"                      subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="17"  once="false" volume="-1" />
+  <Context name="POI"                        path="poi"                         subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="16"  once="false" volume="-1" />
 
-  <!-- ── Combat ─────────────────────────────────────────────────────── -->
+  <!-- ── Combat ──────────────────────────────────── -->
   <!-- Three combat tiers selected by the <CombatThreat> model in settings.xml. The
        combat/ root folder IS the base (low) tier; the escalations live in its _high and
        _boss subfolders, underscore-prefixed so the directory scan never confuses them with
@@ -99,10 +99,10 @@
        music (when DMS is on and the game threat is Panicked). Folder scanning is top-level
        only, so combat/ (Low) does NOT pick up files sitting in _high / _boss / <biome>. -->
   <!-- Blood_Moon_Combat: combat during a blood moon night (highest combat priority). -->
-  <Context name="Blood_Moon_Combat" path="combat/blood_moon" fallback="Combat_Boss"  stale="20" cool="3" fadeintime="3" bypass="true" priority="71" />
-  <Context name="Combat_Boss" path="combat/_boss" fallback="Combat_High"       stale="20" cool="3" fadeintime="3" bypass="true" priority="52" />
-  <Context name="Combat_High" path="combat/_high" fallback="Combat_Low"        stale="20" cool="3" fadeintime="3" bypass="true" priority="51" />
-  <Context name="Combat_Low"  path="combat"       fallback="VanillaIfPanicked" stale="20" cool="3" fadeintime="3" bypass="true" priority="50" />
+  <Context name="Blood_Moon_Combat"          path="combat/blood_moon"           subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="71"  once="false" volume="-1" />
+  <Context name="Combat_Boss"                path="combat/_boss"                subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="52"  once="false" volume="-1" />
+  <Context name="Combat_High"                path="combat/_high"                subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="51"  once="false" volume="-1" />
+  <Context name="Combat_Low"                 path="combat"                      subfolders="false" fallback="VanillaIfPanicked" resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="50"  once="false" volume="-1" />
 
   <!-- Biome-specific combat tiers. Each biome gets a combat/<biome> folder that mirrors
        the generic layout: the biome folder root is that biome's low tier, with _high and
@@ -115,44 +115,44 @@
        Blood_Moon_Combat stays generic (no biome split). Empty folders are intentional:
        ship only the biome/tier combinations you have music for. -->
   <!-- Burnt forest -->
-  <Context name="Combat_Boss_Burnt_Forest"  path="combat/burnt_forest/_boss"  fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
-  <Context name="Combat_High_Burnt_Forest"  path="combat/burnt_forest/_high"  fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
-  <Context name="Combat_Low_Burnt_Forest"   path="combat/burnt_forest"        fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <Context name="Combat_Boss_Burnt_Forest"   path="combat/burnt_forest/_boss"   subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="62"  once="false" volume="-1" />
+  <Context name="Combat_High_Burnt_Forest"   path="combat/burnt_forest/_high"   subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="61"  once="false" volume="-1" />
+  <Context name="Combat_Low_Burnt_Forest"    path="combat/burnt_forest"         subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="60"  once="false" volume="-1" />
   <!-- Desert -->
-  <Context name="Combat_Boss_Desert"        path="combat/desert/_boss"        fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
-  <Context name="Combat_High_Desert"        path="combat/desert/_high"        fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
-  <Context name="Combat_Low_Desert"         path="combat/desert"              fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <Context name="Combat_Boss_Desert"         path="combat/desert/_boss"         subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="62"  once="false" volume="-1" />
+  <Context name="Combat_High_Desert"         path="combat/desert/_high"         subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="61"  once="false" volume="-1" />
+  <Context name="Combat_Low_Desert"          path="combat/desert"               subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="60"  once="false" volume="-1" />
   <!-- Forest -->
-  <Context name="Combat_Boss_Forest"        path="combat/forest/_boss"        fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
-  <Context name="Combat_High_Forest"        path="combat/forest/_high"        fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
-  <Context name="Combat_Low_Forest"         path="combat/forest"              fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <Context name="Combat_Boss_Forest"         path="combat/forest/_boss"         subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="62"  once="false" volume="-1" />
+  <Context name="Combat_High_Forest"         path="combat/forest/_high"         subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="61"  once="false" volume="-1" />
+  <Context name="Combat_Low_Forest"          path="combat/forest"               subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="60"  once="false" volume="-1" />
   <!-- Snow -->
-  <Context name="Combat_Boss_Snow"          path="combat/snow/_boss"          fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
-  <Context name="Combat_High_Snow"          path="combat/snow/_high"          fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
-  <Context name="Combat_Low_Snow"           path="combat/snow"                fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <Context name="Combat_Boss_Snow"           path="combat/snow/_boss"           subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="62"  once="false" volume="-1" />
+  <Context name="Combat_High_Snow"           path="combat/snow/_high"           subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="61"  once="false" volume="-1" />
+  <Context name="Combat_Low_Snow"            path="combat/snow"                 subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="60"  once="false" volume="-1" />
   <!-- Wasteland -->
-  <Context name="Combat_Boss_Wasteland"     path="combat/wasteland/_boss"     fallback="Combat_Boss" stale="20" cool="3" fadeintime="3" bypass="true" priority="62" />
-  <Context name="Combat_High_Wasteland"     path="combat/wasteland/_high"     fallback="Combat_High" stale="20" cool="3" fadeintime="3" bypass="true" priority="61" />
-  <Context name="Combat_Low_Wasteland"      path="combat/wasteland"           fallback="Combat_Low"  stale="20" cool="3" fadeintime="3" bypass="true" priority="60" />
+  <Context name="Combat_Boss_Wasteland"      path="combat/wasteland/_boss"      subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="62"  once="false" volume="-1" />
+  <Context name="Combat_High_Wasteland"      path="combat/wasteland/_high"      subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="61"  once="false" volume="-1" />
+  <Context name="Combat_Low_Wasteland"       path="combat/wasteland"            subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="60"  once="false" volume="-1" />
 
-  <!-- ── Tension ────────────────────────────────────────────────────── -->
-  <Context name="Tension" path="tension" stale="30" priority="30" warmup="2" />
+  <!-- ── Tension ─────────────────────────────────── -->
+  <Context name="Tension"                    path="tension"                     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="2"  warmgroup=""     bypass="false" priority="30"  once="false" volume="-1" />
 
-  <!-- ── Traders ────────────────────────────────────────────────────── -->
-  <Context name="Trader_Joel" path="trader/joel" fallback="Trader" priority="26" warmup="3" />
-  <Context name="Trader_Jen"  path="trader/jen"  fallback="Trader" priority="26" warmup="3" />
-  <Context name="Trader_Rekt" path="trader/rekt" fallback="Trader" priority="26" warmup="3" />
-  <Context name="Trader_Bob"  path="trader/bob"  fallback="Trader" priority="26" warmup="3" />
-  <Context name="Trader_Hugh" path="trader/hugh" fallback="Trader" priority="26" warmup="3" />
-  <Context name="Trader"      path="trader"      fallback="VanillaIfDMS" priority="25" warmup="3" />
+  <!-- ── Traders ─────────────────────────────────── -->
+  <Context name="Trader_Joel"                path="trader/joel"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
+  <Context name="Trader_Jen"                 path="trader/jen"                  subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
+  <Context name="Trader_Rekt"                path="trader/rekt"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
+  <Context name="Trader_Bob"                 path="trader/bob"                  subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
+  <Context name="Trader_Hugh"                path="trader/hugh"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
+  <Context name="Trader"                     path="trader"                      subfolders="false" fallback="VanillaIfDMS"      resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="25"  once="false" volume="-1" />
 
-  <!-- ── Home ───────────────────────────────────────────────────────── -->
+  <!-- ── Home ──────────────────────────────────────── -->
   <!-- Home plays by day (and is the default); Home_Night provides night-exclusive
        tracks and falls back to Home when it has no files. -->
-  <Context name="Home_Night" path="home/night" fallback="Home" priority="15" warmup="5" warmgroup="home" />
-  <Context name="Home"       path="home"                       priority="15" warmup="5" warmgroup="home" />
+  <Context name="Home_Night"                 path="home/night"                  subfolders="false" fallback="Home"              resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="home" bypass="false" priority="15"  once="false" volume="-1" />
+  <Context name="Home"                       path="home"                        subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="home" bypass="false" priority="15"  once="false" volume="-1" />
 
-  <!-- ── Ambient ────────────────────────────────────────────────────── -->
+  <!-- ── Ambient ─────────────────────────────────── -->
   <!-- The biome base plays by day (and is the everyday default); each biome's
        optional _Night context (in a _night subfolder) provides night-exclusive tracks.
        Night fallback order: biome _Night -> generic Ambient_Night -> (Stack) the biome's
@@ -160,24 +160,24 @@
        also puts the biome day context on the stack at night, and Ambient_Night falls back
        to Stack to find it. Biome _Night is priority 12 (above the day context, 11) so the
        night theme wins whenever it has tracks. -->
-  <Context name="Ambient_Forest_Night"      path="ambient/forest/_night"       fallback="Ambient_Night"        priority="12" />
-  <Context name="Ambient_Forest"            path="ambient/forest"              fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Burnt_Forest_Night" path="ambient/burnt_forest/_night" fallback="Ambient_Night"        priority="12" />
-  <Context name="Ambient_Burnt_Forest"      path="ambient/burnt_forest"        fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Desert_Night"      path="ambient/desert/_night"       fallback="Ambient_Night"        priority="12" />
-  <Context name="Ambient_Desert"            path="ambient/desert"              fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Snow_Night"        path="ambient/snow/_night"         fallback="Ambient_Night"        priority="12" />
-  <Context name="Ambient_Snow"              path="ambient/snow"                fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Wasteland_Night"   path="ambient/wasteland/_night"    fallback="Ambient_Night"        priority="12" />
-  <Context name="Ambient_Wasteland"         path="ambient/wasteland"           fallback="Ambient"              priority="11" />
-  <Context name="Ambient_Night"             path="ambient/_night"              fallback="Stack"                priority="11" />
-  <Context name="Ambient"                   path="ambient"                    fallback="VanillaIfDMS" fadeintime="4" priority="10" />
+  <Context name="Ambient_Forest_Night"       path="ambient/forest/_night"       subfolders="false" fallback="Ambient_Night"     resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="12"  once="false" volume="-1" />
+  <Context name="Ambient_Forest"             path="ambient/forest"              subfolders="false" fallback="Ambient"           resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
+  <Context name="Ambient_Burnt_Forest_Night" path="ambient/burnt_forest/_night" subfolders="false" fallback="Ambient_Night"     resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="12"  once="false" volume="-1" />
+  <Context name="Ambient_Burnt_Forest"       path="ambient/burnt_forest"        subfolders="false" fallback="Ambient"           resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
+  <Context name="Ambient_Desert_Night"       path="ambient/desert/_night"       subfolders="false" fallback="Ambient_Night"     resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="12"  once="false" volume="-1" />
+  <Context name="Ambient_Desert"             path="ambient/desert"              subfolders="false" fallback="Ambient"           resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
+  <Context name="Ambient_Snow_Night"         path="ambient/snow/_night"         subfolders="false" fallback="Ambient_Night"     resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="12"  once="false" volume="-1" />
+  <Context name="Ambient_Snow"               path="ambient/snow"                subfolders="false" fallback="Ambient"           resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
+  <Context name="Ambient_Wasteland_Night"    path="ambient/wasteland/_night"    subfolders="false" fallback="Ambient_Night"     resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="12"  once="false" volume="-1" />
+  <Context name="Ambient_Wasteland"          path="ambient/wasteland"           subfolders="false" fallback="Ambient"           resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
+  <Context name="Ambient_Night"              path="ambient/_night"              subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
+  <Context name="Ambient"                    path="ambient"                     subfolders="false" fallback="VanillaIfDMS"      resume="true"  stale="120" loop="false" cool="5" fadeintime="4" warmup="0"  warmgroup=""     bypass="false" priority="10"  once="false" volume="-1" />
 
-  <!-- ── Menu ───────────────────────────────────────────────────────── -->
-  <Context name="Menu" path="menu" fallback="Vanilla" resume="false" stale="0" cool="5" fadeintime="2" bypass="true" priority="0" />
+  <!-- ── Menu ──────────────────────────────────────── -->
+  <Context name="Menu"                       path="menu"                        subfolders="false" fallback="Vanilla"           resume="false" stale="0"   loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="0"   once="false" volume="-1" />
 
-  <!-- ── Sentinels — required, do not remove ────────────────────────── -->
-  <Context name="Silence" path="" fallback="Silence" resume="false" stale="0" cool="0" fadeintime="0" bypass="true" priority="0" />
-  <Context name="Vanilla" path="" fallback="Vanilla" resume="false" stale="0" cool="0" fadeintime="0" bypass="true" priority="-1" />
+  <!-- ── Sentinels — required, do not remove ────────── -->
+  <Context name="Silence"                    path=""                            subfolders="false" fallback="Silence"           resume="false" stale="0"   loop="false" cool="0" fadeintime="0" warmup="0"  warmgroup=""     bypass="true"  priority="0"   once="false" volume="-1" />
+  <Context name="Vanilla"                    path=""                            subfolders="false" fallback="Vanilla"           resume="false" stale="0"   loop="false" cool="0" fadeintime="0" warmup="0"  warmgroup=""     bypass="true"  priority="-1"  once="false" volume="-1" />
 
 </Contexts>

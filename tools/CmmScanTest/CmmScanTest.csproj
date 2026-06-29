@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmScanTest — standalone test for the context folder-enumeration layer:
+       subfolder recursion + subtree claiming, and the two scan-loop
+       exception-handling fixes (FileWatchLoop scanDone / PresenceScanLoop
+       per-item isolation).
+
+       The methods under test live in the Unity-coupled ContextMusicManager
+       partial class (MonoBehaviour + coroutines), so they can't be linked
+       directly the way CmmBench links the decoder. Instead this harness:
+         • LINKS the real Contexts / WaveStream types (DataStructures.cs,
+           WaveShim.cs) so the data model can't drift, and
+         • COPIES the pure path helpers VERBATIM from
+           ContextMusicManager.AudioPlayer.cs (cited in Program.cs), so it
+           exercises the shipped algorithm, not a paraphrase.
+
+       Run via dotnet run on tools/CmmScanTest, optionally passing a music dir
+       (defaults to J:\7D2D_Custom_Music; it is only ever READ).
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmScanTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!-- Real types, linked so the model can't drift from shipped code. -->
+  <ItemGroup>
+    <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\WaveShim.cs"        Link="linked\WaveShim.cs" />
+  </ItemGroup>
+
+  <!-- contexts.xml parsing (XDocument) — not in the SDK-style net48 default set. -->
+  <ItemGroup>
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+
+</Project>

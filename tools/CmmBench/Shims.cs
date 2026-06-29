@@ -35,7 +35,7 @@ namespace CMM
         public int Frequency;
     }
 
-    // Only HashBytes is referenced by the decoder; copied verbatim from the real
+    // HashBytes + HashFile are referenced by the decoder; copied verbatim from the real
     // LoudnessStore (FNV-1a) so the hash step's cost is represented faithfully.
     internal static class LoudnessStore
     {
@@ -49,6 +49,32 @@ namespace CMM
                 h ^= data[i];
                 h *= prime;
             }
+            h ^= (ulong)length;
+            h *= prime;
+            return h.ToString("x16");
+        }
+
+        public static string HashFile(string path)
+        {
+            const ulong offset = 14695981039346656037UL;
+            const ulong prime = 1099511628211UL;
+            ulong h = offset;
+            long length = 0;
+            try
+            {
+                var buf = new byte[65536];
+                using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open,
+                    System.IO.FileAccess.Read, System.IO.FileShare.Read, buf.Length, System.IO.FileOptions.SequentialScan))
+                {
+                    int n;
+                    while ((n = fs.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        for (int i = 0; i < n; i++) { h ^= buf[i]; h *= prime; }
+                        length += n;
+                    }
+                }
+            }
+            catch { return null; }
             h ^= (ulong)length;
             h *= prime;
             return h.ToString("x16");

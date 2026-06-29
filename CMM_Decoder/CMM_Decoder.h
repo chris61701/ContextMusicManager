@@ -39,8 +39,10 @@ typedef struct cmm_decoder cmm_decoder;
  * side checks this on load so a mismatched DLL fails loudly instead of crashing.
  *   v1: Opus.   v2: + FLAC.   v3: + Vorbis.   v4: + open_file (large-file path).
  *   v5: + MP3 (dr_mp3) and WAV/AIFF (dr_wav) — the last managed-decoder holdouts.
- *   v6: + AAC (fdk-aac + minimp4) — AAC-LC / HE-AAC in MP4/M4A or raw ADTS. */
-#define CMM_DECODER_ABI 6
+ *   v6: + AAC (fdk-aac + minimp4) — AAC-LC / HE-AAC in MP4/M4A or raw ADTS.
+ *   v7: + container (Matroska/WebM) — demux one audio track and remux it into an
+ *        existing backend (Opus/Vorbis→Ogg, AAC→ADTS, MP3 raw, FLAC native). */
+#define CMM_DECODER_ABI 7
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -194,6 +196,31 @@ CMM_API int cmm_aac_seek(cmm_decoder* d, long long frame);
 
 /* Free the decoder and the copied source buffer. NULL-safe. */
 CMM_API void cmm_aac_close(cmm_decoder* d);
+
+/* ── Container (Matroska / WebM) ──────────────────────────────────────────
+ * Demux ONE audio track from a .mkv/.webm and losslessly remux it into a
+ * stream an existing backend opens (Opus/Vorbis → Ogg, AAC → ADTS, MP3 raw,
+ * FLAC native), then decode through that backend. The whole track is demuxed
+ * once at open, so the file open streams a large movie from disk without
+ * buffering the video; the in-memory open is for small files / the loudness
+ * sweep. Same handle/lifetime contract as the other backends — use the handle
+ * only through the cmm_container_* family. Returns NULL if the file is not
+ * Matroska/WebM, has no audio track, or uses an unsupported audio codec. */
+CMM_API cmm_decoder* cmm_container_open_memory(const unsigned char* data, long long len,
+                                               int* channels, int* sampleRate,
+                                               long long* totalFrames, int* err);
+CMM_API cmm_decoder* cmm_container_open_file(const wchar_t* path, int* channels,
+                                             int* sampleRate, long long* totalFrames, int* err);
+
+/* Decode up to `maxFrames` frames (per channel) of interleaved float PCM into
+ * `out` (>= maxFrames*channels floats). Returns frames written: 0 at EOF. */
+CMM_API int cmm_container_read_float(cmm_decoder* d, float* out, int maxFrames);
+
+/* Seek to absolute frame `frame` (per channel). Returns 0 on success, <0 on error. */
+CMM_API int cmm_container_seek(cmm_decoder* d, long long frame);
+
+/* Free the decoder (and the inner backend it owns). NULL-safe. */
+CMM_API void cmm_container_close(cmm_decoder* d);
 
 #ifdef __cplusplus
 }

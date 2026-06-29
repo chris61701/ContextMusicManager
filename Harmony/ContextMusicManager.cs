@@ -118,6 +118,7 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.StalenessCheckLoop());
             CMM_CoRoutines.StartCoroutine(Instance.FileWatchLoop());
             CMM_CoRoutines.StartCoroutine(Instance.PresenceScanLoop());
+            CMM_CoRoutines.StartCoroutine(Instance.RecursiveCrawlLoop());
             CMM_CoRoutines.StartCoroutine(Instance.ConfigWatchLoop());
             CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
             CMM_CoRoutines.StartCoroutine(Instance.DiagnosticLoop());
@@ -617,6 +618,31 @@ namespace CMM
                     // a full enumeration only happens once the ping shows it gone.
                     string playingFile = isActiveContext ? cache.lastPlayedFile : null;
 
+                    // ── RECURSIVE: owned by RecursiveCrawlLoop ──────────────────────
+                    // Subfolder contexts can span thousands of folders; walking the whole
+                    // tree for a change signature every 2s (the fast path below) is O(folders)
+                    // and does not scale. The crawler does that work incrementally off-tick.
+                    // Here we keep ONLY the O(1) ping of the active context's playing file so
+                    // a deleted current track still hot-swaps instantly; all other adds/removes
+                    // are reconciled by the crawler.
+                    if (includeSub)
+                    {
+                        if (isActiveContext && !string.IsNullOrEmpty(playingFile) && !cache.Current.Borrowed)
+                        {
+                            bool goneR = false, pingDoneR = false;
+                            string pf = playingFile;
+                            ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                try { goneR = !File.Exists(pf); } catch { }
+                                pingDoneR = true;
+                            });
+                            while (!pingDoneR) yield return null;
+                            if (goneR)
+                                yield return StartCoroutine(HotSwapFromMissingPlayingFile(contextName, pf));
+                        }
+                        continue;
+                    }
+
                     // ── FAST PATH: single stat (+ one ping for the active context) ──────
                     DateTime currentWriteTime = DateTime.MinValue;
                     bool playingFileGone = false;
@@ -971,6 +997,15 @@ namespace CMM
                 {
                     contextsTime = newContextsTime;
                     CMMConfig.D("[CMM] Config/contexts.xml changed — reloading.");
+
+                    // Snapshot each context's source (folder + recursion) BEFORE the
+                    // reload swaps the dict, so we can tell which contexts had their
+                    // Path repointed. A surviving context whose folder moved keeps the
+                    // same name, so none of the add/remove handling below fires for it.
+                    var oldSources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in contexts)
+                        oldSources[kv.Key] = $"{kv.Value?.Path}|{kv.Value?.IncludeSubfolders}";
+
                     CMMConfigLoader.LoadContexts(ModPath);
 
                     // Ensure new contexts have cache entries.
@@ -988,6 +1023,133 @@ namespace CMM
                         currentContext = GetContext("Silence");
                         ++_transitionId;
                         FadeToSilence();
+                    }
+
+                    // A context whose folder (or recursion flag) was repointed still
+                    // carries a snapshot + lastPlayedFile + (if it's the one playing) a
+                    // live clip from its OLD directory. Forget that stale state so the new
+                    // folder is used from here on, and collect the repointed contexts so we
+                    // can refresh their presence and recover playback below.
+                    string activeName = currentContext?.Context;
+                    var repointed = new List<PresenceScanItem>();
+                    foreach (var ctx in contexts.Values)
+                    {
+                        oldSources.TryGetValue(ctx.Context, out string oldSrc);
+                        string newSrc = $"{ctx.Path}|{ctx.IncludeSubfolders}";
+                        if (string.Equals(oldSrc, newSrc, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (cacheMap.TryGetValue(ctx.Context, out var movedCache))
+                        {
+                            movedCache.directorySnapshot = null;   // force fresh enumeration of the new folder
+                            movedCache.lastPlayedFile = null;      // old folder's track no longer belongs here
+                            movedCache.resumePosition = 0f;
+                            movedCache.lastLeftTime = -1f;
+                        }
+                        if (!string.IsNullOrEmpty(ctx.Path))
+                            repointed.Add(new PresenceScanItem
+                            {
+                                Name    = ctx.Context,
+                                Dir     = Path.Combine(MusicDirectory, ctx.Path),
+                                Option  = SearchOptionFor(ctx),
+                                Claimed = GetClaimedSubtreePrefixes(ctx.Context),
+                            });
+                    }
+
+                    if (repointed.Count > 0)
+                    {
+                        // Refresh presence + snapshot for the repointed contexts NOW
+                        // (enumerate the NEW folders off-thread, apply on the main thread)
+                        // rather than leaving it to PresenceScanLoop. That loop runs far more
+                        // often than FileWatchLoop, so it would refill the snapshot from the
+                        // new folder before either the recovery decision here or FileWatchLoop
+                        // could act on the change — stranding the swap on the next end-of-track
+                        // pick. Doing it synchronously makes the decision below deterministic.
+                        var results = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+                        bool scanDone = false;
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            foreach (var item in repointed)
+                            {
+                                try
+                                {
+                                    results[item.Name] = Directory.Exists(item.Dir)
+                                        ? Directory.GetFiles(item.Dir, "*", item.Option)
+                                            .Where(f => AudioDecoder.IsSupported(f)
+                                                        && !IsClaimedByDeeperContext(f, item.Claimed))
+                                            .ToArray()
+                                        : new string[0];
+                                }
+                                catch { results[item.Name] = new string[0]; }
+                            }
+                            scanDone = true;
+                        });
+                        while (!scanDone) yield return null;
+
+                        foreach (var kv in results)
+                        {
+                            if (cacheMap.TryGetValue(kv.Key, out var c)) c.directorySnapshot = kv.Value;
+                            bool has = kv.Value.Any(f => !_invalidFiles.Contains(f));
+                            if (has) _contextsWithFiles.Add(kv.Key);
+                            else _contextsWithFiles.Remove(kv.Key);
+                        }
+
+                        // ── Recover playback deterministically ───────────────────────
+                        // Neither ContextScanLoop nor FileWatchLoop reliably reacts here:
+                        // the playing context keeps the same name (so no add/remove fires),
+                        // and once a missing folder has dropped us to Vanilla, currentContext
+                        // is "Vanilla" — so the FileWatchLoop active-context reaction never
+                        // matches it either. Handle both cases inline.
+                        bool activeRepointed = activeName != null && results.ContainsKey(activeName)
+                                               && cacheMap.ContainsKey(activeName);
+
+                        if (activeRepointed)
+                        {
+                            // The context that's playing was repointed: crossfade to a track
+                            // from its new folder. Stop the old clip and stage it for disposal
+                            // so PreloadContext loads into a clean slot (mirrors FileWatchLoop's
+                            // lastPlayedMissing hot-swap; borrowed clips are dropped, not freed).
+                            var activeCache = cacheMap[activeName];
+                            CMMConfig.D($"[CMM] Active context {activeName} repointed — hot-swapping to new folder.");
+                            if (activeCache.Current.Clip != null)
+                            {
+                                StagePendingDisposal(activeCache.Current);
+                                activeCache.Current = default;
+                            }
+                            _pendingContext = null;
+                            yield return StartCoroutine(PreloadContext(activeName));
+
+                            if (activeCache.Current.Clip != null && !activeCache.Current.Borrowed)
+                            {
+                                currentContext = GetContext(activeName);
+                                TriggerMusic(activeName);
+                            }
+                            else if (inGame)
+                                SendContextUpdate(GetTopContext() ?? "Ambient", 0);  // new folder empty — fall back
+                            else
+                                SendContextUpdate(activeName);                        // menu — re-resolve its chain
+                        }
+                        else if (currentContext == null
+                                 || currentContext.Context == "Vanilla"
+                                 || currentContext.Context == "Silence")
+                        {
+                            // We're on a fallback (no custom music) because the active context
+                            // had no files; a repointed context has now come back with tracks.
+                            // Re-assert the top context so it reclaims playback from vanilla.
+                            if (inGame)
+                            {
+                                string top = GetTopContext();
+                                if (top != null && (currentContext == null || top != currentContext.Context))
+                                {
+                                    CMMConfig.D($"[CMM] Repointed folder repopulated — reclaiming with {top}.");
+                                    _pendingContext = null;
+                                    SendContextUpdate(top, 0);
+                                }
+                            }
+                            else if (results.ContainsKey("Menu"))
+                            {
+                                CMMConfig.D("[CMM] Menu folder repointed — re-triggering menu music.");
+                                SendContextUpdate("Menu");
+                            }
+                        }
                     }
 
                     // Re-evaluate in case priorities or fallbacks changed.
@@ -1107,7 +1269,16 @@ namespace CMM
             {
                 cache.resumePosition = 0f;
                 cache.lastPlayedFile = null;
-                filePath = PickNextFile(contextName, avoidFile: avoid);
+                // Fresh start: play the pre-staged, pre-measured pin so the track we begin is
+                // exactly the one we normalized — no just-in-time loudness stall on switch-in.
+                // Fall back to a fresh pick only if nothing was staged yet (staging hadn't run,
+                // or the pin's file went invalid). Either way the pin is consumed; the
+                // maintenance pass stages this context's next switch-in track once it goes idle.
+                string staged = cache.stagedFile;
+                cache.stagedFile = null;
+                filePath = (staged != null && !_invalidFiles.Contains(staged) && File.Exists(staged))
+                           ? staged
+                           : PickNextFile(contextName, avoidFile: avoid);
             }
 
             if (filePath == null)

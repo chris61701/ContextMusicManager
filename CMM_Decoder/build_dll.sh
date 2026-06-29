@@ -10,6 +10,13 @@
 #       that SEGVs on Windows x64; must be off. -mstackrealign keeps SSE happy.
 #   -static : DLL needs only KERNEL32/ADVAPI32/msvcrt (no libgcc/ssp to ship).
 #   -DOP_DISABLE_HTTP : opusfile without the HTTP/SSL stack.
+#   -DNDEBUG : MANDATORY. Compiles out assert(). dr_flac alone has 134 DRFLAC_ASSERTs
+#       (→ assert()); without NDEBUG a real-world file that trips ANY of them calls
+#       _wassert → abort() → the game hard-crashes (STATUS_FATAL_APP_EXIT 0x40000015,
+#       no managed stack — confirmed from a crash dump). Release decoders MUST ship
+#       with asserts off (the upstream-intended config); recoverable errors are already
+#       reported via return values, not assert. Covers dr_flac/mp3/wav, stb_vorbis,
+#       minimp4, opusfile (every TU compiled here).
 # ──────────────────────────────────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")"
@@ -33,6 +40,7 @@ INC=(
 
 SRC=(
   CMM_Decoder.c
+  matroska.c
   dr_flac_impl.c
   dr_mp3_impl.c
   dr_wav_impl.c
@@ -48,7 +56,7 @@ SRC=(
 # the link pulls libstdc++ — kept static so the DLL still ships standalone.
 mkdir -p dist
 "$GCC" -O2 -shared -o "$OUT" \
-  -DOP_DISABLE_HTTP \
+  -DOP_DISABLE_HTTP -DNDEBUG \
   "${INC[@]}" \
   "${SRC[@]}" \
   build/fdk-aac/libfdk-aac.a build/opus/libopus.a build/ogg/libogg.a \

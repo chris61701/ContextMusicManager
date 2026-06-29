@@ -23,6 +23,15 @@ namespace CMM
     // measurement (and its manual userTrim) for free; only a genuine content change
     // (size or mtime differs → recompute hash) forces a re-measure.
     //
+    // PERSISTENCE POLICY: the in-memory dictionaries hold every measurement seen this
+    // session, but loudness.xml is written ONLY for tracks carrying a manual volume
+    // override (UserTrim != 1.0 — see IsPersistWorthy). Pure auto-normalization values
+    // are no longer persisted: with native decoding the measure-on-demand path is cheap
+    // and only a couple of tracks per context are ever loaded at once, so recomputing on
+    // the fly each launch costs less than maintaining a large cache file. The manual
+    // trims, which the user can't reproduce by remeasuring, are the only thing worth
+    // keeping on disk.
+    //
     // THREADING: this store is MAIN-THREAD ONLY. Background measurement threads
     // compute (hash, lufs, peak) and hand the result back to the main thread, which
     // is the sole caller of Store()/GetTrackGain()/Save(). The "should I measure
@@ -95,6 +104,12 @@ namespace CMM
             return m.MetricVersion == MetricVersion;
         }
 
+        // A measurement is persisted to loudness.xml ONLY when it carries a manual
+        // volume override (UserTrim differs from the 1.0 neutral ceiling). Auto-only
+        // measurements live in memory for the session and are recomputed next launch.
+        private static bool IsPersistWorthy(Measurement m)
+            => m != null && Math.Abs(m.UserTrim - 1f) > 1e-4f;
+
         private static float ComputeGain(Measurement m)
         {
             double gainDb = CMMConfig.LoudnessTargetLufs - m.Lufs;
@@ -154,7 +169,10 @@ namespace CMM
             }
 
             _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks };
-            _dirty = true;
+            // Only a trimmed track's measurement reaches disk, so only flag the save
+            // when we just refreshed one (e.g. re-measuring a manually-trimmed file).
+            // Fresh auto-only measurements stay in memory and never dirty the cache.
+            if (IsPersistWorthy(m)) _dirty = true;
         }
 
         // Bind a path to an already-known hash (the copy/rename dedup case) without
@@ -162,9 +180,10 @@ namespace CMM
         public static void BindPath(string absolutePath, long size, long mtimeTicks, string hash)
         {
             string key = ToRelKey(absolutePath);
-            if (key == null || hash == null || !_byHash.ContainsKey(hash)) return;
+            if (key == null || hash == null || !_byHash.TryGetValue(hash, out Measurement m)) return;
             _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks };
-            _dirty = true;
+            // Persisted only if this hash carries a manual trim (see Save).
+            if (IsPersistWorthy(m)) _dirty = true;
         }
 
         // Adjust the manual trim for the track currently at this path, in linear
@@ -185,6 +204,89 @@ namespace CMM
             _dirty = true;
             return t;
         }
+
+        // Read-only lookup of the manual trim for the track at this path (no I/O, no
+        // mutation). Returns the stored UserTrim, or 1.0 (the neutral ceiling) when the
+        // track is unmeasured or carries no trim. Used by the debug HUD to show the
+        // trim only when it differs from the default.
+        public static float GetUserTrim(string absolutePath)
+        {
+            string key = ToRelKey(absolutePath);
+            if (key == null || !_byPath.TryGetValue(key, out PathRecord pr)) return 1f;
+            if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return 1f;
+            return m.UserTrim;
+        }
+
+        // ── Eviction (keep the in-memory store bounded to the working set) ──────
+        // Drop every measured PATH whose file is NOT in keepAbsolutePaths, and the
+        // hash-keyed Measurement it referenced once nothing else keeps it. This is how
+        // the store stays bounded to ~O(contexts) instead of accumulating one entry per
+        // track ever heard this session: the caller passes the live working set (each
+        // context's playing/last/previous/staged files, plus in-flight measurements),
+        // and everything else is reclaimed. Two invariants hold no matter what's passed:
+        //   • a manually-trimmed (persist-worthy) measurement is NEVER evicted — it's
+        //     user data and tiny; and
+        //   • a hash still referenced by a surviving path (a file shared by two contexts)
+        //     is never dropped.
+        // Anything evicted is re-measured via staging before it can be heard again, so
+        // this never introduces a play-time stall. Main-thread only, like the rest.
+        private static readonly HashSet<string> _retainKeep = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _retainLiveHashes = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly List<string> _retainDrop = new List<string>();
+        public static void RetainOnly(ICollection<string> keepAbsolutePaths)
+        {
+            _retainKeep.Clear();
+            foreach (string p in keepAbsolutePaths)
+            {
+                string k = ToRelKey(p);
+                if (k != null) _retainKeep.Add(k);
+            }
+
+            // Remove path records not in the keep set (trimmed ones are always kept).
+            _retainDrop.Clear();
+            foreach (var kv in _byPath)
+            {
+                if (_retainKeep.Contains(kv.Key)) continue;
+                if (_byHash.TryGetValue(kv.Value.Hash, out Measurement m) && IsPersistWorthy(m)) continue;
+                _retainDrop.Add(kv.Key);
+            }
+            foreach (string k in _retainDrop) _byPath.Remove(k);
+
+            // GC any hash no surviving path references and that carries no manual trim.
+            _retainLiveHashes.Clear();
+            foreach (var kv in _byPath) _retainLiveHashes.Add(kv.Value.Hash);
+            _retainDrop.Clear();
+            foreach (var kv in _byHash)
+            {
+                if (_retainLiveHashes.Contains(kv.Key) || IsPersistWorthy(kv.Value)) continue;
+                _retainDrop.Add(kv.Key);
+            }
+            foreach (string h in _retainDrop) _byHash.Remove(h);
+        }
+
+        // ── Diagnostics (debug HUD) ─────────────────────────────────────────────
+        // Number of distinct files that currently hold a loudness measurement in
+        // memory this session (path records), and the unique-by-content track count.
+        public static int MeasuredFileCount => _byPath.Count;
+        public static int MeasuredTrackCount => _byHash.Count;
+
+        // Approximate resident byte cost of the in-memory measurement cache. An
+        // estimate only — string payload plus a flat per-entry allowance for the
+        // dictionary slot and value; exact CLR layout is runtime-specific.
+        public static long EstimateMemoryBytes()
+        {
+            long bytes = 0;
+            // _byPath: rel-path key string + PathRecord (hash ref + two longs) + slot.
+            foreach (var kv in _byPath)
+                bytes += StringBytes(kv.Key) + 24 + 16;
+            // _byHash: 16-char hash key + Measurement object (two doubles, int, float).
+            foreach (var kv in _byHash)
+                bytes += StringBytes(kv.Key) + 40 + 16;
+            return bytes;
+        }
+
+        // UTF-16 payload (2 bytes/char) plus a fixed object-header + length allowance.
+        private static long StringBytes(string s) => s == null ? 0L : 26L + 2L * s.Length;
 
         // ── Path key normalization ─────────────────────────────────────────────
         // Files under MusicDirectory key by their '/'-separated, lowercased relative
@@ -231,6 +333,42 @@ namespace CMM
             }
             // Fold the byte length in too, so two files that hash-collide but differ
             // in size are still distinguished.
+            h ^= (ulong)length;
+            h *= prime;
+            return h.ToString("x16");
+        }
+
+        // Streaming twin of HashBytes: produces the BYTE-FOR-BYTE identical FNV-1a hash
+        // (same byte order, same trailing length fold) without ever holding the whole file
+        // in a managed array. MeasureLoudness uses this so a measurement no longer allocates
+        // a multi-MB Large-Object-Heap buffer per track — the stop-the-world Gen2 GC that
+        // hitched the game at transitions. The 64 KB read buffer is below the 85 KB LOH
+        // threshold, so it lives in Gen0 and collects for free. Returns null on I/O error.
+        public static string HashFile(string path)
+        {
+            const ulong offset = 14695981039346656037UL;
+            const ulong prime = 1099511628211UL;
+            ulong h = offset;
+            long length = 0;
+            try
+            {
+                var buf = new byte[65536];   // < 85 KB → Gen0, never LOH
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                               FileShare.Read, buf.Length, FileOptions.SequentialScan))
+                {
+                    int n;
+                    while ((n = fs.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        for (int i = 0; i < n; i++)
+                        {
+                            h ^= buf[i];
+                            h *= prime;
+                        }
+                        length += n;
+                    }
+                }
+            }
+            catch { return null; }
             h ^= (ulong)length;
             h *= prime;
             return h.ToString("x16");
@@ -298,6 +436,16 @@ namespace CMM
                     if (!_byHash.ContainsKey(kv.Value.Hash)) orphans.Add(kv.Key);
                 foreach (string k in orphans) _byPath.Remove(k);
 
+                // Migration: older builds persisted every measurement. If the file we
+                // just loaded carries any auto-only (untrimmed) entry, flag a rewrite so
+                // the next debounced save prunes it down to trim-only. The auto entries
+                // stay in memory for this session (they spare a re-measure); only the
+                // on-disk copy shrinks.
+                foreach (Measurement m in _byHash.Values)
+                {
+                    if (!IsPersistWorthy(m)) { _dirty = true; break; }
+                }
+
                 CMMConfig.D($"[CMM] Cache/loudness.xml loaded: {_byHash.Count} tracks, {_byPath.Count} paths.");
             }
             catch (Exception ex)
@@ -320,6 +468,7 @@ namespace CMM
                 Directory.CreateDirectory(Path.GetDirectoryName(_filePath));
 
                 string tmp = _filePath + ".tmp";
+                int persisted = 0;
                 // Write through XmlWriter straight to the file with explicit UTF-8 (no
                 // BOM) so the emitted <?xml encoding?> declaration matches the bytes on
                 // disk — a StringWriter would force a utf-16 declaration and break reload.
@@ -335,9 +484,13 @@ namespace CMM
                     w.WriteStartElement("Loudness");
                     w.WriteAttributeString("metricVersion", MetricVersion.ToString(CultureInfo.InvariantCulture));
 
+                    // Only manually-trimmed tracks are persisted; auto-only measurements
+                    // are session-scoped and recomputed on demand next launch.
                     foreach (var kv in _byHash)
                     {
                         Measurement m = kv.Value;
+                        if (!IsPersistWorthy(m)) continue;
+                        persisted++;
                         w.WriteStartElement("Track");
                         w.WriteAttributeString("hash", kv.Key);
                         w.WriteAttributeString("lufs", m.Lufs.ToString("F3", CultureInfo.InvariantCulture));
@@ -350,6 +503,10 @@ namespace CMM
                     foreach (var kv in _byPath)
                     {
                         PathRecord pr = kv.Value;
+                        // Drop path records for measurements we didn't persist, so the
+                        // file never references a hash that isn't in it.
+                        if (!_byHash.TryGetValue(pr.Hash, out Measurement pm) || !IsPersistWorthy(pm))
+                            continue;
                         w.WriteStartElement("Path");
                         w.WriteAttributeString("rel", kv.Key);
                         w.WriteAttributeString("hash", pr.Hash);
@@ -365,7 +522,7 @@ namespace CMM
                 if (File.Exists(_filePath)) File.Delete(_filePath);
                 File.Move(tmp, _filePath);
                 _dirty = false;
-                CMMConfig.D($"[CMM] Cache/loudness.xml saved: {_byHash.Count} tracks.");
+                CMMConfig.D($"[CMM] Cache/loudness.xml saved: {persisted} trimmed track(s).");
             }
             catch (Exception ex)
             {

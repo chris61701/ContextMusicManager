@@ -116,6 +116,12 @@ namespace CMM
         // One-deep (no full history) — drives the "previous track" keybind, which
         // toggles between the two. Captured in LoadNextClip on every advance.
         public string previousPlayedFile;
+        // The single track pinned to play the next time this context starts FRESH (a
+        // switch-in, not a resume). It is the ONLY track pre-measured for an inactive
+        // context, and PreloadContextCore consumes it so the track we start is exactly
+        // the one we normalized — no just-in-time loudness stall. null when not yet
+        // staged; kept measured by the loudness keep-set. See StageNextFile / PinStagedFile.
+        public string stagedFile;
         public int sequentialIndex;
         public string[] directorySnapshot;
         public bool nextClipLoading;

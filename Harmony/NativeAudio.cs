@@ -251,6 +251,34 @@ namespace CMM
         public static bool Available => NativeOpus.Available;
     }
 
+    // Matroska / WebM container backend (cmm_container_*). The native side demuxes
+    // one audio track and remuxes it into an existing codec backend (Opus/Vorbis →
+    // Ogg, AAC → ADTS, MP3 raw, FLAC native), so the managed surface is the same
+    // shape as the others — open → read_float → seek → close.
+    internal static class NativeContainer
+    {
+        const string Dll = "CMM_Decoder";
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr cmm_container_open_memory(byte[] data, long len,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
+        internal static extern IntPtr cmm_container_open_file(string path,
+            out int channels, out int sampleRate, out long totalFrames, out int err);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_container_read_float(IntPtr d, [Out] float[] outBuf, int maxFrames);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_container_seek(IntPtr d, long frame);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_container_close(IntPtr d);
+
+        public static bool Available => NativeOpus.Available;
+    }
+
     // Native-backed Vorbis WaveStream (stb_vorbis). Same shape as NativeFlacReader:
     // preserves the stream's native sample rate, implements IFloatPcmSource for the
     // direct-float fast path. SeekBeforePlay arms the one-shot intercept (see IFloatPcmSource).
@@ -956,6 +984,117 @@ namespace CMM
             lock (_lock)
             {
                 if (_handle != IntPtr.Zero) { NativeAac.cmm_aac_close(_handle); _handle = IntPtr.Zero; }
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    // Native-backed Matroska/WebM container WaveStream (cmm_container_*). Identical
+    // shape to NativeAacReader — the native side demuxes the audio track and remuxes
+    // it into an existing backend, exposing the same float/seek contract. The native
+    // rate is preserved (settled by the inner decoder's open). For codecs whose remux
+    // restarts-and-discards on seek (raw ADTS via the AAC backend) the native side
+    // handles it; Opus/Vorbis/FLAC seek precisely through their Ogg/native streams.
+    internal sealed class NativeContainerReader : WaveStream, IFloatPcmSource
+    {
+        readonly object _lock = new object();
+        IntPtr _handle;
+        readonly WaveFormat _format;
+        readonly int _channels;
+        readonly long _totalFrames;
+        long _posFrames;
+        bool _skipNextExternalSeek;
+        float[] _offsetScratch;
+        float[] _byteReadScratch;
+
+        public NativeContainerReader(byte[] data, int length)
+        {
+            _handle = NativeContainer.cmm_container_open_memory(data, length,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_container_open_memory failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
+        // Large-file path: the native demuxer streams the (possibly huge) movie from
+        // disk and remuxes only the audio track into memory.
+        public NativeContainerReader(string filePath)
+        {
+            _handle = NativeContainer.cmm_container_open_file(filePath,
+                out _channels, out int sampleRate, out _totalFrames, out int err);
+            if (_handle == IntPtr.Zero)
+                throw new InvalidOperationException($"cmm_container_open_file failed (err={err})");
+            _format = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, _channels);
+        }
+
+        public override WaveFormat WaveFormat => _format;
+        public override long Length => _totalFrames > 0 ? _totalFrames * _format.BlockAlign : 0;
+
+        public override long Position
+        {
+            get { lock (_lock) { return _posFrames * _format.BlockAlign; } }
+            set
+            {
+                lock (_lock)
+                {
+                    if (_handle == IntPtr.Zero || _format.BlockAlign <= 0) return;
+                    if (_skipNextExternalSeek) { _skipNextExternalSeek = false; return; }
+                    long frame = value / _format.BlockAlign;
+                    if (NativeContainer.cmm_container_seek(_handle, frame) == 0) _posFrames = frame;
+                }
+            }
+        }
+
+        public int ReadFloats(float[] data, int offset, int count)
+        {
+            lock (_lock)
+            {
+                if (_handle == IntPtr.Zero) return 0;
+                int frames = count / _channels;
+                if (frames <= 0) return 0;
+
+                int got;
+                if (offset == 0)
+                {
+                    got = NativeContainer.cmm_container_read_float(_handle, data, frames);
+                }
+                else
+                {
+                    if (_offsetScratch == null || _offsetScratch.Length < count)
+                        _offsetScratch = new float[count];
+                    got = NativeContainer.cmm_container_read_float(_handle, _offsetScratch, frames);
+                    if (got > 0) Array.Copy(_offsetScratch, 0, data, offset, got * _channels);
+                }
+
+                if (got <= 0) return 0;
+                _posFrames += got;
+                return got * _channels;
+            }
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int floatCount = count / 4;
+            if (_byteReadScratch == null || _byteReadScratch.Length < floatCount)
+                _byteReadScratch = new float[floatCount];
+            int filledFloats = ReadFloats(_byteReadScratch, 0, floatCount);
+            Buffer.BlockCopy(_byteReadScratch, 0, buffer, offset, filledFloats * 4);
+            return filledFloats * 4;
+        }
+
+        public void SeekBeforePlay(long targetFrame)
+        {
+            lock (_lock) { _skipNextExternalSeek = false; }
+            Position = targetFrame * _format.BlockAlign;
+            lock (_lock) { _skipNextExternalSeek = true; }
+        }
+        public void ClearInitialSeekIntercept() { lock (_lock) { _skipNextExternalSeek = false; } }
+
+        protected override void Dispose(bool disposing)
+        {
+            lock (_lock)
+            {
+                if (_handle != IntPtr.Zero) { NativeContainer.cmm_container_close(_handle); _handle = IntPtr.Zero; }
             }
             base.Dispose(disposing);
         }

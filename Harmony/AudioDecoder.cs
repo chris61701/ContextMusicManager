@@ -43,6 +43,14 @@ namespace CMM
             {
                 ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac",
                 ".m4a", ".mp4", ".aac",
+                // ISO-BMFF video containers — the same box structure minimp4 already walks
+                // for .mp4, so an AAC audio track inside one decodes via the AAC reader.
+                // (.mov is QuickTime-flavoured ISO-BMFF — esds nested in a 'wave' atom that
+                // minimp4 doesn't demux — so it's intentionally excluded for now.)
+                ".m4v", ".3gp",
+                // Matroska / WebM — demuxed + remuxed into an existing codec backend by
+                // the native container reader (NativeContainerReader / cmm_container_*).
+                ".mkv", ".webm",
             };
 
         public static bool IsSupported(string filePath)
@@ -121,56 +129,25 @@ namespace CMM
             if (!Thread.CurrentThread.IsBackground)
                 CMMConfig.D($"[CMM PERF] OpenStreamingReader called on main thread for {Path.GetFileName(filePath)}!");
 
-            byte[] raw = null;
-            try
-            {
-                long size = new FileInfo(filePath).Length;
-                if (size <= CMMConfig.HotSwapMaxFileSizeBytes)
-                    raw = File.ReadAllBytes(filePath);
-            }
-            catch (Exception ex)
-            {
-                Log.Warning($"[CMM] OpenStreamingReader: could not buffer {Path.GetFileName(filePath)}: {ex.Message}");
-            }
-
-            string ext = Path.GetExtension(filePath).ToLower();
-
-            // ← REPLACES the inline IsOpusOgg call in the if-condition below
-            bool isOpus = ext == ".opus" ||
-                ((ext == ".ogg" || ext == ".oga") &&
-                 (raw != null ? IsOpusOggBytes(raw) : IsOpusOgg(filePath)));
-
-            // Every format decodes natively in CMM_Decoder.dll (malloc memory the GC
-            // never scans — the big stutter win). Buffered files open from the
-            // in-memory bytes; files too large to buffer (raw == null) stream from disk
-            // via the native file-open path. CMM_Decoder is REQUIRED — there is no
-            // managed fallback (all decoders, including NAudio's, were removed).
-            if (isOpus)
-                return raw != null ? new NativeOggOpusReader(raw, raw.Length)
-                                   : new NativeOggOpusReader(filePath);
-
-            if (ext == ".flac")
-                return raw != null ? new NativeFlacReader(raw, raw.Length)
-                                   : new NativeFlacReader(filePath);
-
-            if (ext == ".ogg" || ext == ".oga")   // non-Opus Ogg = Vorbis (isOpus handled above)
-                return raw != null ? new NativeVorbisReader(raw, raw.Length)
-                                   : new NativeVorbisReader(filePath);
-
-            if (ext == ".mp3")
-                return raw != null ? new NativeMp3Reader(raw, raw.Length)
-                                   : new NativeMp3Reader(filePath);
-
-            if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
-                return raw != null ? new NativeWavReader(raw, raw.Length)   // dr_wav: both containers
-                                   : new NativeWavReader(filePath);
-
-            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac")   // fdk-aac: MP4/M4A + raw ADTS
-                return raw != null ? new NativeAacReader(raw, raw.Length)
-                                   : new NativeAacReader(filePath);
-
-            Log.Warning($"[CMM] No native reader for extension '{ext}'");
-            return null;
+            // Decode straight from the file via the native readers (CMM_Decoder.dll): the
+            // decoder streams from a native FILE* and keeps all working memory in native
+            // (malloc) heap the GC never scans. The old path here did File.ReadAllBytes —
+            // a multi-MB managed Large-Object-Heap buffer PER TRANSITION, whose Gen2
+            // collection is stop-the-world on the ~2.6 GB in-game Mono heap and hitched the
+            // game at every track change. Those bytes were only ever memcpy'd into the
+            // decoder's OWN native copy (cmm_*_open_memory: malloc + memcpy) and then thrown
+            // away, so opening natively removes the allocation with no change to what is
+            // decoded. Native seeking is reliable across all formats (the historical Opus
+            // resume-seek bug was in the retired managed decoder, not this path).
+            //
+            // Trade-off on slow removable media: playback now streams on demand from the
+            // FILE* instead of a RAM copy, so the audio thread does the disk reads. At ~90
+            // MB/s sequential vs ~0.02–0.1 MB/s playback the read head stays far ahead, and
+            // the OS read-ahead/page cache covers it; only post-seek (resume/loop) pays one
+            // cold seek. If that ever underruns on the SD card, re-introduce a buffer we own
+            // in NATIVE memory (Marshal.AllocHGlobal → cmm_*_open_memory) rather than a
+            // managed array — never bring back File.ReadAllBytes here.
+            return OpenNativeReader(filePath);
         }
 
         // Opens a native reader for any supported format directly from a file path
@@ -186,8 +163,10 @@ namespace CMM
             if (ext == ".mp3")                       return new NativeMp3Reader(filePath);
             if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
                                                      return new NativeWavReader(filePath);
-            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac")
+            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
+                ext == ".m4v" || ext == ".3gp")
                                                      return new NativeAacReader(filePath);
+            if (ext == ".mkv" || ext == ".webm")     return new NativeContainerReader(filePath);
             Log.Warning($"[CMM] No native reader for extension '{ext}'");
             return null;
         }
@@ -205,8 +184,10 @@ namespace CMM
             if (ext == ".mp3")                       return new NativeMp3Reader(raw, length);
             if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
                                                      return new NativeWavReader(raw, length);
-            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac")
+            if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
+                ext == ".m4v" || ext == ".3gp")
                                                      return new NativeAacReader(raw, length);
+            if (ext == ".mkv" || ext == ".webm")     return new NativeContainerReader(raw, length);
             Log.Warning($"[CMM] No native reader for extension '{ext}'");
             return null;
         }
@@ -242,11 +223,10 @@ namespace CMM
             int gc0 = GC.CollectionCount(0);
             int gc1 = GC.CollectionCount(1);
             int gc2 = GC.CollectionCount(2);
-            float readMs = 0, hashMs = 0, indexMs = 0, analyzeMs = 0;
+            float hashMs = 0, indexMs = 0, analyzeMs = 0;
 
-            byte[] raw;
-            int len;
             long size;
+            string ext = Path.GetExtension(filePath).ToLower();
             try
             {
                 size = new FileInfo(filePath).Length;
@@ -256,45 +236,38 @@ namespace CMM
                                 "— skipping normalization (plays at unity gain).");
                     return fail;
                 }
-                len = (int)size;
-                long t = Stopwatch.GetTimestamp();
-                if (scratch != null)
-                {
-                    // Reuse (and grow once) a single buffer instead of allocating per file.
-                    if (scratch.FileBuf == null || scratch.FileBuf.Length < len)
-                        scratch.FileBuf = new byte[len];
-                    raw = scratch.FileBuf;
-                    using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
-                        ReadExact(fs, raw, len);
-                }
-                else
-                {
-                    raw = File.ReadAllBytes(filePath);
-                }
-                readMs = ElapsedMs(t);
             }
             catch (Exception ex)
             {
-                Log.Warning($"[CMM] Loudness: could not read {Path.GetFileName(filePath)}: {ex.Message}");
+                Log.Warning($"[CMM] Loudness: could not stat {Path.GetFileName(filePath)}: {ex.Message}");
                 return fail;
             }
 
+            // Content hash via a STREAMING read (Gen0 64 KB buffer), NOT a whole-file
+            // managed array. The old File.ReadAllBytes here allocated a multi-MB Large-
+            // Object-Heap buffer per track; on the ~2.6 GB in-game Mono heap the resulting
+            // stop-the-world Gen2 collection was the frame hitch felt at every transition to
+            // an un-pre-measured track. HashFile yields the byte-identical hash without that
+            // allocation, and the decode below reads the file natively — so a measurement now
+            // allocates nothing on the LOH, on ANY caller path (block-before-play included).
             long tHash = Stopwatch.GetTimestamp();
-            string hash = LoudnessStore.HashBytes(raw, len);
+            string hash = LoudnessStore.HashFile(filePath);
             hashMs = ElapsedMs(tHash);
-
-            string ext = Path.GetExtension(filePath).ToLower();
-            bool isOpus = ext == ".opus" ||
-                ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(raw));
+            if (hash == null)
+            {
+                Log.Warning($"[CMM] Loudness: could not read {Path.GetFileName(filePath)} for hashing.");
+                return fail;
+            }
 
             WaveStream reader = null;
             try
             {
-                // Every format decodes in native memory (CMM_Decoder.dll) — the GC never
-                // scans it, which is the loudness-sweep stutter fix. isOpus already
-                // routes Opus-in-Ogg vs Vorbis correctly inside the helper.
+                // Decode straight from the file via the native readers (CMM_Decoder.dll):
+                // native memory the GC never scans, and no managed whole-file buffer. The OS
+                // page cache populated by the hash pass above usually serves this second read
+                // warm, so it is mostly CPU (decode), not a second cold disk hit.
                 long tIdx = Stopwatch.GetTimestamp();
-                reader = OpenNativeReaderFromMemory(raw, len, ext);
+                reader = OpenNativeReader(filePath);
                 indexMs = ElapsedMs(tIdx);
                 if (reader == null) return fail;
 
@@ -331,10 +304,11 @@ namespace CMM
                     int dg0 = GC.CollectionCount(0) - gc0;
                     int dg1 = GC.CollectionCount(1) - gc1;
                     int dg2 = GC.CollectionCount(2) - gc2;
-                    string kind = isOpus ? "opus" : (ext.Length > 1 ? ext.Substring(1) : ext);
+                    string kind = (ext == ".opus" || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath)))
+                        ? "opus" : (ext.Length > 1 ? ext.Substring(1) : ext);
                     CMMConfig.D(
                         $"[CMM PERF] Loudness {Path.GetFileName(filePath)}: {mb:F1}MB {kind} | " +
-                        $"read={readMs:F0}ms hash={hashMs:F0}ms index={indexMs:F0}ms " +
+                        $"hash+read={hashMs:F0}ms index={indexMs:F0}ms " +
                         $"decode={analyzeMs:F0}ms total={totalMs:F0}ms " +
                         $"({mbps:F1}MB/s) gc(g0+{dg0},g1+{dg1},g2+{dg2})");
                 }
@@ -345,20 +319,14 @@ namespace CMM
         private static float ElapsedMs(long t0)
             => (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
 
-        // Reads exactly `count` bytes from `s` into `buf` (or throws on a short read).
-        private static void ReadExact(Stream s, byte[] buf, int count)
-        {
-            int off = 0, r;
-            while (off < count && (r = s.Read(buf, off, count - off)) > 0) off += r;
-            if (off < count) throw new EndOfStreamException($"expected {count} bytes, got {off}");
-        }
-
-        // Reusable scratch for the loudness sweep so a measurement allocates nothing on the
-        // Large Object Heap (the in-game GC stutter fix). MUST be used single-threaded; the
-        // sweep guarantees that by awaiting each measurement before starting the next.
+        // Reusable scratch for the loudness sweep: the decode buffer is reused across files
+        // so a measurement allocates nothing on the heap per call. MUST be used single-
+        // threaded; each caller that passes one serializes its own use. (The whole-file
+        // FileBuf this used to carry is gone — MeasureLoudness now streams the hash and
+        // decodes natively from the path, so no multi-MB Large-Object-Heap buffer is ever
+        // allocated; see MeasureLoudness.)
         public sealed class MeasureScratch
         {
-            public byte[] FileBuf;     // grows to the largest track seen, then reused
             public float[] SampleBuf;  // reused decode buffer
         }
 

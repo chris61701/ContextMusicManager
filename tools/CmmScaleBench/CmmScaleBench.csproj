@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+       CmmScaleBench: folder-SCALE main-thread stall finder.
+
+       The other arenas measure the decision/decode pipeline against a real
+       library (CmmSession) or one decode (CmmBench). Neither answers the
+       question "what happens to the MAIN THREAD when every context folder holds
+       hundreds or thousands of tracks?", because CmmSession's Engine.cs PickFile
+       is a simplified rotor (not the shipped PickNextFile), and nothing
+       exercises the FileWatchLoop diff or the synchronous load-time presence
+       rebuild at scale.
+
+       This harness generates a synthetic library from the real
+       Config/contexts.xml and times the disk paths against it, then sweeps the
+       in-memory main-thread CPU hot paths across folder sizes (ms + allocation).
+
+       The algorithms under test are copied VERBATIM from
+       Harmony/ContextMusicManager.AudioPlayer.cs and ContextMusicManager.cs
+       (cited per-block in Program.cs), same convention as CmmScanTest.
+       See Program.cs for the run flags.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmScaleBench</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!-- Real types, linked so the data model can't drift from shipped code. -->
+  <ItemGroup>
+    <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\WaveShim.cs"        Link="linked\WaveShim.cs" />
+  </ItemGroup>
+
+  <!-- contexts.xml parsing (XDocument). -->
+  <ItemGroup>
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+
+</Project>

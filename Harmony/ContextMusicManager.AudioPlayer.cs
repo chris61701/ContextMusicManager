@@ -85,15 +85,6 @@ namespace CMM
         // a second for the playing context); stops the menu scanner.
         private static bool _menuPrescanComplete;
         private static AudioDecoder.MeasureScratch[] _prescanScratch;
-        // Per-context start offset for the prewarm scan, chosen once per SESSION (process)
-        // and reused for every BuildMenuPrewarmQueue call. The offset is random so the one
-        // track we prewarm per context differs from launch to launch (coverage spreads
-        // across startups), but it MUST be stable within a session: BuildMenuPrewarmQueue
-        // doubles as the completion gate, so re-randomizing each call would keep landing on
-        // a different unmeasured track and never let the bounded goal read as "met" — it
-        // would drain the whole library instead of one track per context.
-        private static readonly Dictionary<string, int> _prewarmStartOffset =
-            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         // One concurrent measurement slot for the parallel prescan.
         private struct PrescanSlot
@@ -784,6 +775,90 @@ namespace CMM
             }
         }
 
+        // ── Track staging (the unit that ties selection + prewarm + normalization) ─
+        // Each context keeps ONE pinned "staged" track (cache.stagedFile): the exact file
+        // it will play the next time it starts fresh, and the only file we pre-measure for
+        // it. Pinning the selection is what makes "a normalized track is ready when we
+        // switch to that context" literally true — without it the prewarm measured one
+        // random track while PickNextFile chose a different one, so switch-in still stalled.
+
+        // Pure selection half: ensure cache.stagedFile holds a valid pin, picking a fresh
+        // track ONLY when the slot is empty or its file went invalid. Idempotent — a context
+        // with a good pin is never re-picked, so repeated maintenance passes (and a brief
+        // leave/return) keep the same prepared track. No measurement side effect, so the menu
+        // prescan (which measures the pins itself) can call it without double-queuing. Static
+        // so BuildMenuPrewarmQueue can use it. Returns the pinned path, or null.
+        private static string PinStagedFile(string contextName)
+        {
+            if (!cacheMap.TryGetValue(contextName, out ContextCache cache)) return null;
+            string pin = cache.stagedFile;
+            if (pin != null && !_invalidFiles.Contains(pin)) return pin;
+            // Steer the fresh pick away from the track this context last played so a pin
+            // chosen right after a leave doesn't immediately repeat it (RandomNoRepeat).
+            pin = PickNextFile(contextName, avoidFile: cache.lastPlayedFile);
+            cache.stagedFile = pin;
+            return pin;
+        }
+
+        // Selection + measurement: pin the context's next-fresh track and kick a background
+        // loudness measure for it (unless it's already measured). The measure runs at
+        // BelowNormal priority, so this never hitches the frame. Used by the in-game
+        // maintenance pass; the menu prescan measures pins through its own worker pool.
+        private void StageNextFile(string contextName)
+        {
+            string pin = PinStagedFile(contextName);
+            if (pin != null && CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(pin))
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(pin, useScratch: true));
+        }
+
+        // Rule 1 maintenance: every context that is neither the active one nor parked on a
+        // live resume should have exactly one pinned, measured staged track ready for a
+        // stall-free switch-in. Idempotent (only picks/measures an empty or unmeasured pin),
+        // so it's cheap to run every tick. Resume-parked resumable contexts are skipped —
+        // returning to them resumes the kept track, so no new track is staged (rule 3); a
+        // context whose resume later goes stale gets pinned on the next pass.
+        private void EnsureStagedPins()
+        {
+            string active = ActiveChannelContext;
+            foreach (var kv in cacheMap)
+            {
+                string name = kv.Key;
+                if (string.Equals(name, active, StringComparison.OrdinalIgnoreCase)) continue;
+                Contexts ctx = GetContext(name);
+                if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;   // no folder → nothing to pin
+                ContextCache cache = kv.Value;
+                if (ctx.CanBeResumed && cache.resumePosition > 0f && cache.lastPlayedFile != null) continue;
+                StageNextFile(name);
+            }
+        }
+
+        // In-game loudness maintenance, run once per sweep tick: (1) keep every inactive
+        // context's staged pin fresh + measured (rule 1 / re-stage-on-leave), then (2) bound
+        // the in-memory store to the live working set — each context's playing/last/previous/
+        // staged files plus any in-flight measurement — reclaiming everything else. Together
+        // these keep the store at ~O(contexts) instead of growing one entry per track heard.
+        private static readonly List<string> _loudnessKeepScratch = new List<string>(64);
+        private void LoudnessMaintenanceTick()
+        {
+            if (!CMMConfig.LoudnessNormalizationEnabled) return;
+
+            EnsureStagedPins();
+
+            _loudnessKeepScratch.Clear();
+            foreach (var cache in cacheMap.Values)
+            {
+                if (cache.playingFile != null)      _loudnessKeepScratch.Add(cache.playingFile);
+                if (cache.lastPlayedFile != null)   _loudnessKeepScratch.Add(cache.lastPlayedFile);
+                if (cache.previousPlayedFile != null) _loudnessKeepScratch.Add(cache.previousPlayedFile);
+                if (cache.stagedFile != null)       _loudnessKeepScratch.Add(cache.stagedFile);
+            }
+            // Protect tracks mid-measure (their path isn't in a cache field yet) so a sweep
+            // can't evict a measurement the instant before its track is loaded.
+            foreach (var p in _loudnessInFlight.Keys) _loudnessKeepScratch.Add(p);
+
+            LoudnessStore.RetainOnly(_loudnessKeepScratch);
+        }
+
         // ── Loudness: menu prewarm driver ────────────────────────────────────
         // Drives the bounded menu prewarm: while on the menu (not in-game, not loading,
         // not crossfading) it runs MenuPrescanDrain until the per-context prewarm goal is
@@ -807,6 +882,13 @@ namespace CMM
                     && !inGame && !_gameIsLoading && _crossFadeCoroutine == null)
                 {
                     yield return StartCoroutine(MenuPrescanDrain());
+                }
+                else if (inGame)
+                {
+                    // In-game: no whole-library work — just keep every inactive context's
+                    // staged pin fresh + measured (rule 1 / re-stage-on-leave) and bound the
+                    // in-memory store to the live working set.
+                    LoudnessMaintenanceTick();
                 }
 
                 yield return new WaitForSeconds(inGame ? LoudnessSweepInGameInterval : LoudnessSweepInterval);
@@ -884,53 +966,30 @@ namespace CMM
             _loudnessQueue.Clear();
         }
 
-        // Builds the BOUNDED menu prewarm set into _loudnessQueue: the first
-        // still-unmeasured track of every context (so each gets one normalized track
-        // ready for its first play), plus a SECOND track for the context currently
-        // playing (the menu music) so it has a follow-up ready. An already-measured
-        // track counts toward a context's quota without re-queueing. Files shared by
-        // two contexts are queued once. Returns the number of files enqueued.
+        // Builds the BOUNDED menu prewarm set into _loudnessQueue: the staged pin of every
+        // context (the exact track its first switch-in will play), so each context has one
+        // normalized track ready before it's ever heard. PinStagedFile chooses the pin (a
+        // uniform-random pick, so coverage still spreads across sessions) and is idempotent,
+        // so an already-pinned context keeps its track. A pin that's already measured needs
+        // no work and counts as done; files shared by two contexts are queued once. Returns
+        // the number of files enqueued — 0 means every pin is measured (the completion gate).
         private static int BuildMenuPrewarmQueue()
         {
             _loudnessQueue.Clear();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            string playing = ActiveChannelContext;
 
             // Priority contexts (Menu, Ambient) first, so the things heard first warm first.
             foreach (string ctxName in cacheMap.Keys.OrderByDescending(IsPriorityContext))
             {
                 if (!cacheMap.TryGetValue(ctxName, out ContextCache cache)) continue;
-                string[] snap = cache.directorySnapshot;
-                if (snap == null) continue;
+                if (cache.directorySnapshot == null) continue;   // not enumerated yet → skip
 
-                int want = string.Equals(ctxName, playing, StringComparison.OrdinalIgnoreCase) ? 2 : 1;
-                int taken = 0;
-                // Start the scan at a RANDOM offset (wrapping) rather than always snap[0],
-                // so the one track we prewarm per context differs from session to session
-                // instead of forever measuring the same first file. Coverage then spreads
-                // across the library over repeated startups. The offset is cached per
-                // context for the whole session: this method is also the completion gate,
-                // so re-rolling it each call would never let the bounded goal read as met.
-                int n = snap.Length;
-                if (!_prewarmStartOffset.TryGetValue(ctxName, out int start))
-                {
-                    start = n > 1 ? UnityEngine.Random.Range(0, n) : 0;
-                    _prewarmStartOffset[ctxName] = start;
-                }
-                for (int k = 0; k < n; k++)
-                {
-                    if (taken >= want) break;
-                    string f = snap[(start + k) % n];
-                    // An already-measured track satisfies the quota — check this FIRST,
-                    // before the processed/in-flight skip, since a track measured this
-                    // session is in BOTH sets and must still count (else we'd keep
-                    // enqueuing the next unmeasured file per context and drain the whole
-                    // library — never reaching the bounded goal).
-                    if (LoudnessStore.IsMeasured(f)) { taken++; continue; }
-                    if (_loudnessProcessed.Contains(f) || _loudnessInFlight.ContainsKey(f)
-                        || _invalidFiles.Contains(f)) continue;
-                    if (seen.Add(f)) { LoudnessEnqueue(f); taken++; }
-                }
+                string pin = PinStagedFile(ctxName);
+                if (pin == null) continue;
+                if (LoudnessStore.IsMeasured(pin)) continue;     // already warm → goal met for it
+                if (_loudnessProcessed.Contains(pin) || _loudnessInFlight.ContainsKey(pin)
+                    || _invalidFiles.Contains(pin)) continue;
+                if (seen.Add(pin)) LoudnessEnqueue(pin);
             }
             return _loudnessQueue.Count;
         }
@@ -1414,13 +1473,18 @@ namespace CMM
 
             string avoidForPick = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat
                                    ? cache.lastPlayedFile : null;
-            // Within-context advance: uniform-random pick (see PickNextFile), then measure
-            // THIS exact file now — during the preload lead window (~10s before the track
-            // ends) — so the block-before-play in PlayFromCache is already satisfied and the
-            // next track starts without a measurement stall.
+            // Within-context advance: uniform-random pick (see PickNextFile). The loudness
+            // measurement of this file is deferred to the preload lead window below (just
+            // before LoadNextClip), NOT fired here at track START. Measuring here meant every
+            // brief visit to a resume-capable context — swap in, resume the same (already
+            // measured) track, swap straight back out — speculatively measured a fresh RANDOM
+            // next track that was never heard; and since auto measurements are retained for
+            // the session, each such visit permanently grew the in-memory store by one track.
+            // Past the waitBeforeLoad guard the measure only runs once we're committed to
+            // actually loading this next track, so a context left before its lead window adds
+            // nothing — a resume context keeps just its one prewarmed track (plus the genuine
+            // next track once we stay long enough to hear it).
             string prePickedFile = PickNextFile(contextName, avoidFile: avoidForPick);
-            if (prePickedFile != null)
-                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(prePickedFile, useScratch: true));
 
             // File-size heuristic for decode-lead estimate.
             // For the streaming path this is almost always negligible (just a
@@ -1446,6 +1510,13 @@ namespace CMM
 
             yield return new WaitForSeconds(waitBeforeLoad);
             if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
+
+            // Committed to this next track now (context still active, transition current):
+            // measure it here, in the lead window, so PlayFromCache's block-before-play is
+            // already satisfied and the track starts without a measurement stall — while a
+            // context we leave before this point never measures a track it won't play.
+            if (prePickedFile != null)
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(prePickedFile, useScratch: true));
 
             if (!cache.nextClipLoading && cache.Next.Clip == null)
             {
@@ -1891,6 +1962,11 @@ namespace CMM
             foreach (var ctx in contexts.Values)
             {
                 if (string.IsNullOrEmpty(ctx.Path)) continue;
+                // Recursive contexts are populated by RecursiveCrawlLoop's first sweep,
+                // not by a synchronous full walk here — that walk would freeze mod load
+                // on a tree with thousands of folders. Their presence flips on as soon
+                // as the crawler sees the first file (a short delay after load).
+                if (ctx.IncludeSubfolders) continue;
                 string d = Path.Combine(MusicDirectory, ctx.Path);
                 if (!Directory.Exists(d)) continue;
                 if (EnumerateContextFiles(ctx, d).Length > 0)
@@ -1941,6 +2017,9 @@ namespace CMM
                 {
                     Contexts ctx = GetContext(name);
                     if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
+                    // Recursive contexts are owned by RecursiveCrawlLoop — never re-walk
+                    // their whole tree here (that's the O(files) cost we're avoiding).
+                    if (ctx.IncludeSubfolders) continue;
                     toScan.Add(new PresenceScanItem
                     {
                         Name    = name,
