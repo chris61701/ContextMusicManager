@@ -299,7 +299,8 @@ namespace CMM
                 // ATOMICALLY (cmm_out_reset_gain): the callback drains the stale queue THEN snaps the
                 // gain, so a callback mid-drain can't emit those stale full-volume frames at the
                 // restored gain (the "hint of the previous track bleeds through" on restart).
-                if (_device != null && _outputGainTarget != 1f)
+                float reviveFrom = (_device != null && _outputGainTarget != 1f) ? _outputGainTarget : 1f;
+                if (reviveFrom != 1f)
                 {
                     _device.ResetGain(1f);
                     _outputGainTarget = 1f;
@@ -308,6 +309,13 @@ namespace CMM
                 bool stinger = duckOthersTo >= 0f;
                 foreach (var ev in _voices)        // fade OUT (or DUCK, for a stinger) whatever is audible
                 {
+                    // If we just snapped the output gain back to full while a menu→game fade was
+                    // still mid-ramp (a fast world load interrupting the 5s fade), the still-audible
+                    // outgoing voices would JUMP from (outputGain × voiceGain) up to (1 × voiceGain)
+                    // — an audible swell, then a fast drop. Fold the output attenuation we just
+                    // removed into each voice's own gain so its audible level is CONTINUOUS across
+                    // the revive; it then fades out from there over fadeSeconds with no swell.
+                    if (reviveFrom != 1f) ev.Gain *= reviveFrom;
                     float to = stinger ? duckOthersTo : 0f;
                     ev.TargetGain = to;
                     ev.GainStep   = ComputeStep(ev.Gain, to, fadeSeconds);
