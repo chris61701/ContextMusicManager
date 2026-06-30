@@ -781,244 +781,271 @@ namespace CMM
                         continue;
                     }
 
-                    // ── SLOW PATH: enumerate files ──────────────────────────────────
-                    string[] currentFiles = null;
-                    bool scanDone = false;
-                    string[] previousFiles = cache.directorySnapshot ?? new string[0];
+                    // ── SLOW PATH: enumerate, diff, validate, react ─────────────────
+                    // Body lives in ApplyFileWatchScan so the scheduler-driven path
+                    // (FileWatchTick) can Post the same reaction onto the main thread.
+                    yield return StartCoroutine(ApplyFileWatchScan(contextName, neverScanned));
+                }
+            }
+        }
 
-                    Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p
-                        : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        // ── File-watch slow-path reaction (MAIN THREAD) ─────────────────────
+        // Enumerates one non-recursive context's folder, diffs it against the cached
+        // snapshot, validates genuinely-new files and reacts (hot-swap / fall back /
+        // re-resolve) — all touching the lock-free contexts/cacheMap/currentContext, so
+        // it must run on the main thread. Driven by FileWatchLoop (the NativeScheduler-off
+        // fallback) or, off the frame loop, by FileWatchTick → MainThreadDispatcher.Post
+        // once the scheduler-thread stat probe decides this context needs a full scan.
+        // `neverScanned` carries the probe's first-scan verdict (the snapshot must be
+        // populated even when the folder write-time looks unchanged).
+        private IEnumerator ApplyFileWatchScan(string contextName, bool neverScanned)
+        {
+            ContextCache cache = cacheMap.TryGetValue(contextName, out var c) ? c : null;
+            if (cache == null) yield break;
+            Contexts ctx = GetContext(contextName);
+            if (ctx == null || string.IsNullOrEmpty(ctx.Path)) yield break;
+            if (currentContext == null) yield break;
 
-                    // Enumerate via DirectoryInfo so each file's size+mtime comes back WITH
-                    // the listing (Windows fills these from the directory scan — no extra
-                    // stat per file). Build a per-file validation key (path|size|mtime) for
-                    // the cache check below: a library moved out and back keeps the same
-                    // size+mtime, so it's accepted without re-decoding every file.
-                    var keyByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    ThreadPool.QueueUserWorkItem(_ =>
+            string dir = Path.Combine(MusicDirectory, ctx.Path);
+            bool includeSub = ctx.IncludeSubfolders;
+            string[] claimedPrefixes = GetClaimedSubtreePrefixes(contextName);
+
+            // ── SLOW PATH: enumerate files ──────────────────────────────────
+            string[] currentFiles = null;
+            bool scanDone = false;
+            string[] previousFiles = cache.directorySnapshot ?? new string[0];
+
+            Func<string, string> norm = p => string.IsNullOrEmpty(p) ? p
+                : Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            // Enumerate via DirectoryInfo so each file's size+mtime comes back WITH
+            // the listing (Windows fills these from the directory scan — no extra
+            // stat per file). Build a per-file validation key (path|size|mtime) for
+            // the cache check below: a library moved out and back keeps the same
+            // size+mtime, so it's accepted without re-decoding every file.
+            var keyByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    if (Directory.Exists(dir))
                     {
-                        try
+                        var fis = new DirectoryInfo(dir)
+                            .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+                            .Where(fi => AudioDecoder.IsSupported(fi.FullName)
+                                         && !IsClaimedByDeeperContext(fi.FullName, claimedPrefixes)).ToArray();
+                        currentFiles = fis.Select(fi => fi.FullName).ToArray();
+                        foreach (var fi in fis)
                         {
-                            if (Directory.Exists(dir))
-                            {
-                                var fis = new DirectoryInfo(dir)
-                                    .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
-                                    .Where(fi => AudioDecoder.IsSupported(fi.FullName)
-                                                 && !IsClaimedByDeeperContext(fi.FullName, claimedPrefixes)).ToArray();
-                                currentFiles = fis.Select(fi => fi.FullName).ToArray();
-                                foreach (var fi in fis)
-                                {
-                                    string nk = norm(fi.FullName);
-                                    keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
-                                }
-                            }
-                            else currentFiles = new string[0];
-                        }
-                        // A throw mid-enumeration (an unreadable subdir or an over-MAX_PATH
-                        // path under a recursive subfolders="true" context, removed media, or
-                        // the folder vanishing after the Exists check) must not leave
-                        // currentFiles null with scanDone never set: the `while (!scanDone)`
-                        // driver below would then spin forever and kill FileWatchLoop for the
-                        // rest of the session. Fall back to the previous snapshot so this tick
-                        // reads as "no change" and we retry on the next sweep.
-                        catch { currentFiles = previousFiles; }
-                        finally { scanDone = true; }
-                    });
-                    while (!scanDone) yield return null;
-
-                    var currentNorm = currentFiles.Select(norm).ToArray();
-                    var previousNorm = previousFiles.Select(norm).ToArray();
-
-                    bool filesActuallyChanged =
-                        currentNorm.Length != previousNorm.Length ||
-                        currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).Any() ||
-                        previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).Any();
-
-                    bool changed = neverScanned || filesActuallyChanged;
-                    if (!changed) continue;
-
-                    // Update the snapshot and invalidate the file-presence cache so
-                    // ResolvePlayableContext sees the new state immediately.
-                    cache.directorySnapshot = currentFiles;
-                    InvalidateContextFileCache(contextName);
-
-                    var removedFiles = previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).ToArray();
-                    foreach (string removed in removedFiles)
-                    {
-                        // Keep the _validatedFiles entry: it's keyed by path|size|mtime, so
-                        // a file moved out and back hits the cache instead of re-validating.
-                        // A genuinely changed file gets a new key and is re-checked anyway.
-                        _invalidFiles.Remove(removed);
-                    }
-
-                    var newFiles = currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).ToArray();
-                    if (newFiles.Length > 0)
-                    {
-                        // Skip files already known good — loudness-measured (fully decoded
-                        // once) or validated earlier this session at the same size+mtime —
-                        // so a library moved out and back isn't re-decoded file by file.
-                        // Only genuinely new/changed files pay the QuickValidate cost.
-                        var toValidate = new List<string>();
-                        foreach (string nf in newFiles)
-                        {
-                            bool cached = LoudnessStore.IsMeasured(nf)
-                                || (keyByPath.TryGetValue(nf, out string k) && _validatedFiles.Contains(k));
-                            if (cached) _invalidFiles.Remove(nf);
-                            else toValidate.Add(nf);
-                        }
-
-                        if (toValidate.Count > 0)
-                            CMMConfig.D($"[CMM] Validating {toValidate.Count} new file(s) in {contextName}" +
-                                        $" ({newFiles.Length - toValidate.Count} cached)...");
-
-                        foreach (string newFile in toValidate)
-                        {
-                            bool isValid = false;
-                            yield return StartCoroutine(ValidateFile(newFile, result => isValid = result));
-                            if (!isValid)
-                            {
-                                _invalidFiles.Add(newFile);
-                                Log.Warning($"[CMM] New file failed validation: {Path.GetFileName(newFile)}");
-                            }
-                            else
-                            {
-                                // Re-validation passed — clear any stale blacklist entry from
-                                // an earlier failed attempt (e.g. the file was still being
-                                // copied in / locked the first time we saw it). Without this a
-                                // transiently-bad file stays excluded even after it's fine.
-                                _invalidFiles.Remove(newFile);
-                                // Remember it so a later move-out/move-back skips re-decoding.
-                                if (keyByPath.TryGetValue(newFile, out string vk)) _validatedFiles.Add(vk);
-                            }
-                        }
-                        currentFiles = currentFiles.Where(f => !_invalidFiles.Contains(norm(f))).ToArray();
-                        currentNorm = currentFiles.Select(norm).ToArray();
-                        cache.directorySnapshot = currentFiles;
-                        // Re-invalidate after filtering out bad files.
-                        InvalidateContextFileCache(contextName);
-                    }
-
-                    // First scan populates lastWriteTimes but shouldn't react if
-                    // the snapshot already matched (e.g. preload already ran).
-                    if (!filesActuallyChanged) continue;
-
-                    CMMConfig.D($"[CMM] File change in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
-
-                    _previousPlayableContexts.Clear();
-                    // ── Only react immediately if this is the active context ─────────
-                    // For non-current contexts, the snapshot + cache invalidation above
-                    // is enough: ContextScanLoop will pick up the change on its next
-                    // tick and call SendContextUpdate if the top context has changed.
-                    // Exception: on the menu screen ContextScanLoop is skipped (!inGame),
-                    // so we must re-trigger Menu here when its files are restored.
-                    if (contextName != currentContext.Context)
-                    {
-                        if (!inGame && contextName == "Menu" && currentFiles.Length > 0)
-                        {
-                            // If _pendingContext was set to "Menu" by the silent-guard above
-                            // (to block BackgroundMusicMono.Play() re-triggers), clear it now
-                            // so files being added back can actually start the music.
-                            if (_pendingContext == contextName) _pendingContext = null;
-                            SendContextUpdate("Menu");
-                        }
-                        continue;
-                    }
-
-                    bool lastPlayedMissing = false;
-                    if (!string.IsNullOrEmpty(cache.lastPlayedFile))
-                    {
-                        string lastNorm = norm(cache.lastPlayedFile);
-                        if (!currentNorm.Any(f => string.Equals(f, lastNorm, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            CMMConfig.D($"[CMM] Currently-playing file removed: {Path.GetFileName(cache.lastPlayedFile)}");
-                            cache.lastPlayedFile = null;
-                            lastPlayedMissing = true;
+                            string nk = norm(fi.FullName);
+                            keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
                         }
                     }
+                    else currentFiles = new string[0];
+                }
+                // A throw mid-enumeration (an unreadable subdir or an over-MAX_PATH
+                // path under a recursive subfolders="true" context, removed media, or
+                // the folder vanishing after the Exists check) must not leave
+                // currentFiles null with scanDone never set: the `while (!scanDone)`
+                // driver below would then spin forever and kill FileWatchLoop for the
+                // rest of the session. Fall back to the previous snapshot so this tick
+                // reads as "no change" and we retry on the next sweep.
+                catch { currentFiles = previousFiles; }
+                finally { scanDone = true; }
+            });
+            while (!scanDone) yield return null;
 
-                    if (currentFiles.Length == 0)
+            var currentNorm = currentFiles.Select(norm).ToArray();
+            var previousNorm = previousFiles.Select(norm).ToArray();
+
+            bool filesActuallyChanged =
+                currentNorm.Length != previousNorm.Length ||
+                currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).Any() ||
+                previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).Any();
+
+            bool changed = neverScanned || filesActuallyChanged;
+            if (!changed) yield break;
+
+            // Update the snapshot and invalidate the file-presence cache so
+            // ResolvePlayableContext sees the new state immediately.
+            cache.directorySnapshot = currentFiles;
+            InvalidateContextFileCache(contextName);
+
+            var removedFiles = previousNorm.Except(currentNorm, StringComparer.OrdinalIgnoreCase).ToArray();
+            foreach (string removed in removedFiles)
+            {
+                // Keep the _validatedFiles entry: it's keyed by path|size|mtime, so
+                // a file moved out and back hits the cache instead of re-validating.
+                // A genuinely changed file gets a new key and is re-checked anyway.
+                _invalidFiles.Remove(removed);
+            }
+
+            var newFiles = currentNorm.Except(previousNorm, StringComparer.OrdinalIgnoreCase).ToArray();
+            if (newFiles.Length > 0)
+            {
+                // Skip files already known good — loudness-measured (fully decoded
+                // once) or validated earlier this session at the same size+mtime —
+                // so a library moved out and back isn't re-decoded file by file.
+                // Only genuinely new/changed files pay the QuickValidate cost.
+                var toValidate = new List<string>();
+                foreach (string nf in newFiles)
+                {
+                    bool cached = LoudnessStore.IsMeasured(nf)
+                        || (keyByPath.TryGetValue(nf, out string k) && _validatedFiles.Contains(k));
+                    if (cached) _invalidFiles.Remove(nf);
+                    else toValidate.Add(nf);
+                }
+
+                if (toValidate.Count > 0)
+                    CMMConfig.D($"[CMM] Validating {toValidate.Count} new file(s) in {contextName}" +
+                                $" ({newFiles.Length - toValidate.Count} cached)...");
+
+                foreach (string newFile in toValidate)
+                {
+                    bool isValid = false;
+                    yield return StartCoroutine(ValidateFile(newFile, result => isValid = result));
+                    if (!isValid)
                     {
-                        CMMConfig.D($"[CMM] {contextName} folder emptied, re-evaluating.");
-                        _pendingContext = null;
-                        // Native: the active context's voice is buffered in native memory, so
-                        // deleting its files does NOT stop it, and the re-resolve below isn't
-                        // guaranteed to tear it down (cooldown / priority early-returns, the
-                        // DMS-borrow path). Stop it explicitly so a hot-swap (remove → re-add)
-                        // can't leave the old buffered track overlapping the re-added one.
-                        StopNativeIfActive(CrossFadeDuration);
-                        if (currentContext.PlayOnce)
-                        {
-                            // PlayOnce events (Spawn/Death): don't wait for the fallback clip
-                            // to load before stopping — fade out immediately and let
-                            // ContextScanLoop re-evaluate the stack on its next tick.
-                            CMMConfig.D($"[CMM] PlayOnce {contextName} removed during playback — fading out immediately.");
-                            ++_transitionId;
-                            _pendingContext = null;
-                            currentContext = GetContext("Silence");
-                            FadeToSilence();
-                        }
-                        else if (!inGame)
-                        {
-                            // On the menu screen the context stack is empty, so GetTopContext()
-                            // can't surface the current context's fallback. Re-trigger the
-                            // current context itself so its OWN fallback chain resolves
-                            // (Menu -> Vanilla), handing the menu back to the game's music.
-                            SendContextUpdate(currentContext.Context);
-                        }
-                        else
-                        {
-                            string fallback = GetTopContext() ?? "Ambient";
-                            SendContextUpdate(fallback, 0);
-                        }
-                    }
-                    else if (lastPlayedMissing)
-                    {
-                        // Hot-swap: the custom file that was playing got removed but the
-                        // context still has surviving tracks. Stop the orphaned buffered
-                        // voice and re-trigger so the native mixer picks a fresh one.
-                        _pendingContext = null;
-                        if (ContextHasFiles(ctx.Context))
-                        {
-                            CMMConfig.D($"[CMM] Surviving tracks in {ctx.Context}, hot-swapping (native).");
-                            StopNativeIfActive(0.25f);
-                            currentContext = GetContext(ctx.Context);
-                            TriggerMusic(ctx.Context);
-                        }
-                        else
-                        {
-                            string fallback = GetTopContext() ?? "Ambient";
-                            SendContextUpdate(fallback, 0);
-                        }
+                        _invalidFiles.Add(newFile);
+                        Log.Warning($"[CMM] New file failed validation: {Path.GetFileName(newFile)}");
                     }
                     else
                     {
-                        // Files changed but the playing track is still present.
-                        // Re-evaluate the top context in case a higher-priority one
-                        // is now unblocked.
-                        // On the menu screen the context stack is always empty, so
-                        // GetTopContext() always returns "Ambient" — which has no
-                        // files and causes FadeToSilence(), killing the menu preload.
-                        if (!inGame) continue;
-                        string top = GetTopContext();
-                        // null = nothing playable + DMS off. Don't forward null into
-                        // GetContext/SendContextUpdate (Dictionary rejects a null key);
-                        // let ContextScanLoop fade to silence on its next tick.
-                        if (top == null) continue;
-                        if (top != currentContext.Context)
-                        {
-                            // Don't let the initial directory scan (neverScanned) or
-                            // a file-change event interrupt a PlayOnce context (Spawn/Death)
-                            // with something of lower or equal priority.
-                            if (currentContext != null && currentContext.PlayOnce)
-                            {
-                                Contexts topCtx = GetContext(top);
-                                if (topCtx == null || topCtx.Priority <= currentContext.Priority)
-                                    continue;
-                            }
-                            _pendingContext = null;
-                            SendContextUpdate(top, 0);
-                        }
+                        // Re-validation passed — clear any stale blacklist entry from
+                        // an earlier failed attempt (e.g. the file was still being
+                        // copied in / locked the first time we saw it). Without this a
+                        // transiently-bad file stays excluded even after it's fine.
+                        _invalidFiles.Remove(newFile);
+                        // Remember it so a later move-out/move-back skips re-decoding.
+                        if (keyByPath.TryGetValue(newFile, out string vk)) _validatedFiles.Add(vk);
                     }
+                }
+                currentFiles = currentFiles.Where(f => !_invalidFiles.Contains(norm(f))).ToArray();
+                currentNorm = currentFiles.Select(norm).ToArray();
+                cache.directorySnapshot = currentFiles;
+                // Re-invalidate after filtering out bad files.
+                InvalidateContextFileCache(contextName);
+            }
+
+            // First scan populates lastWriteTimes but shouldn't react if
+            // the snapshot already matched (e.g. preload already ran).
+            if (!filesActuallyChanged) yield break;
+
+            CMMConfig.D($"[CMM] File change in {contextName}: {previousFiles.Length} -> {currentFiles.Length} files");
+
+            _previousPlayableContexts.Clear();
+            // ── Only react immediately if this is the active context ─────────
+            // For non-current contexts, the snapshot + cache invalidation above
+            // is enough: ContextScanLoop will pick up the change on its next
+            // tick and call SendContextUpdate if the top context has changed.
+            // Exception: on the menu screen ContextScanLoop is skipped (!inGame),
+            // so we must re-trigger Menu here when its files are restored.
+            if (contextName != currentContext.Context)
+            {
+                if (!inGame && contextName == "Menu" && currentFiles.Length > 0)
+                {
+                    // If _pendingContext was set to "Menu" by the silent-guard above
+                    // (to block BackgroundMusicMono.Play() re-triggers), clear it now
+                    // so files being added back can actually start the music.
+                    if (_pendingContext == contextName) _pendingContext = null;
+                    SendContextUpdate("Menu");
+                }
+                yield break;
+            }
+
+            bool lastPlayedMissing = false;
+            if (!string.IsNullOrEmpty(cache.lastPlayedFile))
+            {
+                string lastNorm = norm(cache.lastPlayedFile);
+                if (!currentNorm.Any(f => string.Equals(f, lastNorm, StringComparison.OrdinalIgnoreCase)))
+                {
+                    CMMConfig.D($"[CMM] Currently-playing file removed: {Path.GetFileName(cache.lastPlayedFile)}");
+                    cache.lastPlayedFile = null;
+                    lastPlayedMissing = true;
+                }
+            }
+
+            if (currentFiles.Length == 0)
+            {
+                CMMConfig.D($"[CMM] {contextName} folder emptied, re-evaluating.");
+                _pendingContext = null;
+                // Native: the active context's voice is buffered in native memory, so
+                // deleting its files does NOT stop it, and the re-resolve below isn't
+                // guaranteed to tear it down (cooldown / priority early-returns, the
+                // DMS-borrow path). Stop it explicitly so a hot-swap (remove → re-add)
+                // can't leave the old buffered track overlapping the re-added one.
+                StopNativeIfActive(CrossFadeDuration);
+                if (currentContext.PlayOnce)
+                {
+                    // PlayOnce events (Spawn/Death): don't wait for the fallback clip
+                    // to load before stopping — fade out immediately and let
+                    // ContextScanLoop re-evaluate the stack on its next tick.
+                    CMMConfig.D($"[CMM] PlayOnce {contextName} removed during playback — fading out immediately.");
+                    ++_transitionId;
+                    _pendingContext = null;
+                    currentContext = GetContext("Silence");
+                    FadeToSilence();
+                }
+                else if (!inGame)
+                {
+                    // On the menu screen the context stack is empty, so GetTopContext()
+                    // can't surface the current context's fallback. Re-trigger the
+                    // current context itself so its OWN fallback chain resolves
+                    // (Menu -> Vanilla), handing the menu back to the game's music.
+                    SendContextUpdate(currentContext.Context);
+                }
+                else
+                {
+                    string fallback = GetTopContext() ?? "Ambient";
+                    SendContextUpdate(fallback, 0);
+                }
+            }
+            else if (lastPlayedMissing)
+            {
+                // Hot-swap: the custom file that was playing got removed but the
+                // context still has surviving tracks. Stop the orphaned buffered
+                // voice and re-trigger so the native mixer picks a fresh one.
+                _pendingContext = null;
+                if (ContextHasFiles(ctx.Context))
+                {
+                    CMMConfig.D($"[CMM] Surviving tracks in {ctx.Context}, hot-swapping (native).");
+                    StopNativeIfActive(0.25f);
+                    currentContext = GetContext(ctx.Context);
+                    TriggerMusic(ctx.Context);
+                }
+                else
+                {
+                    string fallback = GetTopContext() ?? "Ambient";
+                    SendContextUpdate(fallback, 0);
+                }
+            }
+            else
+            {
+                // Files changed but the playing track is still present.
+                // Re-evaluate the top context in case a higher-priority one
+                // is now unblocked.
+                // On the menu screen the context stack is always empty, so
+                // GetTopContext() always returns "Ambient" — which has no
+                // files and causes FadeToSilence(), killing the menu preload.
+                if (!inGame) yield break;
+                string top = GetTopContext();
+                // null = nothing playable + DMS off. Don't forward null into
+                // GetContext/SendContextUpdate (Dictionary rejects a null key);
+                // let ContextScanLoop fade to silence on its next tick.
+                if (top == null) yield break;
+                if (top != currentContext.Context)
+                {
+                    // Don't let the initial directory scan (neverScanned) or
+                    // a file-change event interrupt a PlayOnce context (Spawn/Death)
+                    // with something of lower or equal priority.
+                    if (currentContext != null && currentContext.PlayOnce)
+                    {
+                        Contexts topCtx = GetContext(top);
+                        if (topCtx == null || topCtx.Priority <= currentContext.Priority)
+                            yield break;
+                    }
+                    _pendingContext = null;
+                    SendContextUpdate(top, 0);
                 }
             }
         }
