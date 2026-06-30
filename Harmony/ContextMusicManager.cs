@@ -70,6 +70,9 @@ namespace CMM
         // Graceful, deliberate fade for the menu↔game boundary (entering a world, exiting
         // back to the menu) — intentionally longer than the in-game CrossFadeDuration.
         public const float MenuTransitionFade = 5f;
+        // Quick duck when the game pauses (ESC menu / inventory in single-player). Short so
+        // it feels instantaneous; see OnGamePauseChanged.
+        public const float PauseFadeDuration = 0.25f;
         // While true, the menu-screen BackgroundMusicMono auto-trigger does NOT start CMM's
         // menu music. Held during the game-exit fade so the menu music can't fade in until
         // the game music has fully faded out (set in FadeOutAndCleanup, cleared once silent).
@@ -137,7 +140,28 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
             CMM_CoRoutines.StartCoroutine(Instance.DiagnosticLoop());
             CMM_CoRoutines.StartCoroutine(Instance.LoudnessSweepLoop());
-            CMM_CoRoutines.StartCoroutine(Instance.LoudnessSaveLoop());
+
+            // Off-frame-loop control thread (experimental): pace + run the debounced loudness
+            // cache save on CmmScheduler instead of a coroutine, so the slow XML/file IO lands
+            // off Unity's main thread and keeps ticking through a main-thread freeze. The store
+            // snapshot still hops back to the main thread (MainThreadDispatcher.Send). When the
+            // flag is off, the original coroutine runs instead. CaptureMainThread tags THIS
+            // thread (Init runs on the main thread) so the dispatcher can detect self-calls.
+            MainThreadDispatcher.CaptureMainThread();
+            if (CMMConfig.NativeScheduler)
+            {
+                CmmScheduler.Every(LoudnessSaveDebounce, LoudnessSaveTick, "loudness-save");
+                // Track-end auto-advance, off the frame loop: the poll reads only thread-safe
+                // mixer/transition state and marshals the actual advance back to the main
+                // thread, so advancement survives a main-thread freeze. Replaces the per-track
+                // NativeTrackLoop coroutine (still used when the flag is off).
+                CmmScheduler.Every(TrackEndPollInterval, NativeAdvanceTick, "native-advance");
+                CmmScheduler.Start();
+            }
+            else
+            {
+                CMM_CoRoutines.StartCoroutine(Instance.LoudnessSaveLoop());
+            }
 
             // Follow OS audio-device changes (headset plugged/unplugged, default endpoint
             // switched). Unity re-targets its own audio automatically; the native mixer owns a
@@ -367,6 +391,7 @@ namespace CMM
                     && !vanillaIsActive
                     && _crossFadeCoroutine == null
                     && _trackEndCoroutine == null
+                    && !_advancePending          // an off-frame-loop advance is in flight (NativeScheduler)
                     && _nextCacheCoroutine == null
                     // The native mixer is the output; it's "busy" while a voice is live (or a
                     // start was just dispatched). A PlayOnce stinger / looping track starts no

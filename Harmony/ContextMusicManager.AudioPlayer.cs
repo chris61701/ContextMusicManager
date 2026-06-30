@@ -629,6 +629,8 @@ namespace CMM
                    || name.StartsWith("Ambient", StringComparison.OrdinalIgnoreCase));
 
         // ── Loudness: debounced cache save ────────────────────────────────────
+        // Coroutine fallback (NativeScheduler off): snapshot AND write both on the main
+        // thread, debounced by WaitForSeconds.
         private IEnumerator LoudnessSaveLoop()
         {
             while (true)
@@ -636,6 +638,24 @@ namespace CMM
                 yield return new WaitForSeconds(LoudnessSaveDebounce);
                 if (LoudnessStore.Dirty) LoudnessStore.Save();
             }
+        }
+
+        // Off-frame-loop twin of LoudnessSaveLoop, run by CmmScheduler when NativeScheduler
+        // is on — the first loop migrated off Unity's frame loop, and the proof of the
+        // scheduler + dispatcher pattern. The dirty CHECK is a thread-safe volatile read; the
+        // SNAPSHOT of the (main-thread-only) store is marshalled back via Send; then the slow
+        // XML serialize + file write run HERE, on the scheduler thread, off the frame loop.
+        // Send briefly blocks this thread for the (fast) snapshot — acceptable for a save,
+        // which is never time-critical. On write failure we re-flag dirty for a later retry.
+        internal static void LoudnessSaveTick()
+        {
+            if (!LoudnessStore.Dirty) return;
+
+            LoudnessStore.SaveSnapshot snap = null;
+            MainThreadDispatcher.Send(() => snap = LoudnessStore.SnapshotForSave());
+            if (snap == null) return;
+
+            if (!LoudnessStore.WriteSnapshot(snap)) LoudnessStore.MarkDirty();
         }
 
         // ── Crossfade ─────────────────────────────────────────────────────────
@@ -677,6 +697,25 @@ namespace CMM
             // the faded menu voice; the worker's commit lock guards an in-flight start.
             lock (_natCommitLock) { _nativeActiveContext = null; Interlocked.Exchange(ref _nativeVoiceId, 0); }
             CMMConfig.D($"[CMM] native: menu output fading out ({seconds:F1}s) for game start.");
+        }
+
+        // ── Game-pause duck ───────────────────────────────────────────────────
+        // When the game pauses (single-player ESC menu / inventory), Unity used to silence
+        // our AudioSource for free. The native mixer runs on its own miniaudio thread that
+        // Unity can't pause, so it would keep playing through the pause screen. Duck the
+        // CONSUMER-side output gain to 0 on pause and restore it on unpause: that ramp is
+        // applied in the audio callback in REAL time, so it works even though Time.timeScale
+        // is frozen (a producer-side / coroutine fade would be stuck for the whole pause).
+        // Edge-tracked so the per-frame pause-state postfix is a no-op outside transitions,
+        // and so we never restore a gain we didn't lower. Pause is forced false in MP and on
+        // the menu (GameManager.updatePauseState), so this only ever engages during SP play.
+        private static volatile bool _pauseDucked;
+        internal static void OnGamePauseChanged(bool paused)
+        {
+            if (paused == _pauseDucked) return;          // no edge — cheap per-frame guard
+            _pauseDucked = paused;
+            CmmMixer.Instance?.SetOutputGain(paused ? 0f : 1f, PauseFadeDuration);
+            CMMConfig.D($"[CMM] native: pause {(paused ? "duck" : "restore")} ({PauseFadeDuration:F2}s)");
         }
 
         // ── Vanilla fade-out ──────────────────────────────────────────────────
@@ -1209,9 +1248,7 @@ namespace CMM
 
                 // Re-arm auto-advance for the reclaimed voice (its prior loop was cancelled by
                 // the transitionId bump).
-                if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
-                if (!ctx.Loop && !ctx.PlayOnce)
-                    _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(NativeTrackLoop(contextName, transitionId));
+                ArmNativeAutoAdvance(contextName, transitionId, !ctx.Loop && !ctx.PlayOnce);
                 CMMPerf.EndTransition();
                 return;
             }
@@ -1318,11 +1355,95 @@ namespace CMM
                     $"{(duckTo >= 0f ? $", duck→{duckTo:F2}" : "")})");
 
             // ── Auto-advance (non-loop, non-stinger): crossfade to the next pick at end ──
-            if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
-            if (!loop && !ctx.PlayOnce)
-                _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(NativeTrackLoop(contextName, transitionId));
+            ArmNativeAutoAdvance(contextName, transitionId, !loop && !ctx.PlayOnce);
 
             CMMPerf.EndTransition();
+        }
+
+        // ── Auto-advance arming (frame-loop coroutine OR off-frame-loop scheduler poll) ──
+        // Whether the current track should auto-advance at end. Read on the scheduler thread
+        // (NativeAdvanceTick); written on the main thread (ArmNativeAutoAdvance). Loop and
+        // PlayOnce contexts never advance, so it stays false for them.
+        private static volatile bool _nativeAdvanceArmed;
+        // Single-flight latch: set by the poll when it posts an advance, cleared by the main
+        // thread once the advance is applied — stops a fast poll double-dispatching.
+        private static volatile bool _advancePending;
+
+        // Arm (or, for loop/PlayOnce, leave disarmed) auto-advance for the track just started
+        // in `contextName` under `transitionId`. NativeScheduler on → the singleton scheduler
+        // poll (NativeAdvanceTick) drives advancement off the frame loop; off → a per-track
+        // coroutine (NativeTrackLoop) on the frame loop, exactly as before. Centralizes both
+        // arm sites (fresh dispatch + reverse-fade reclaim).
+        private void ArmNativeAutoAdvance(string contextName, int transitionId, bool shouldAdvance)
+        {
+            if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
+            if (CMMConfig.NativeScheduler)
+            {
+                _advancePending = false;             // fresh track: no advance in flight
+                _nativeAdvanceArmed = shouldAdvance;
+                return;
+            }
+            _nativeAdvanceArmed = false;             // coroutine path owns advancement
+            if (shouldAdvance)
+                _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(NativeTrackLoop(contextName, transitionId));
+        }
+
+        // Off-frame-loop auto-advance: the singleton scheduler twin of NativeTrackLoop. Runs
+        // on CmmScheduler every TrackEndPollInterval when NativeScheduler is on, so track-end
+        // advancement survives a main-thread freeze (a world load/unload that stalls Unity's
+        // coroutines) instead of stalling with it. Everything it reads is thread-safe — the
+        // transition counter and active-context marker (volatile), the voice id (Interlocked),
+        // and the mixer's own locked TryGetState — so the POLL runs here; only the ADVANCE
+        // (++_transitionId + StartNativeContext, which mutate main-thread-only state) hops back
+        // to the main thread via MainThreadDispatcher.Post.
+        //
+        // Single-flight via _advancePending: once an advance is posted the poll stops until the
+        // main thread applies it, so a fast poll can't double-dispatch. The posted advance
+        // re-validates the transition id + active context on the main thread, so a real context
+        // switch that lands first simply turns it into a no-op. Frozen while paused (matches the
+        // old coroutine, whose WaitForSeconds stopped at timeScale 0) so the playlist doesn't
+        // burn through an AFK pause. Stop-to-silence paths null _nativeActiveContext, which
+        // gates this off without needing to touch every stop site.
+        internal static void NativeAdvanceTick()
+        {
+            if (!_nativeAdvanceArmed || _advancePending || _pauseDucked) return;
+
+            string ctx = _nativeActiveContext;
+            if (ctx == null) return;
+            long vid = Interlocked.Read(ref _nativeVoiceId);
+            if (vid == 0) return;                        // worker hasn't committed the voice yet
+
+            var mx = CmmMixer.Instance;
+            if (mx == null) return;
+
+            int tid = _transitionId;                     // capture for the main-thread re-validation
+            bool advance;
+            if (!mx.TryGetState(vid, out double posSec, out double lenSec, out bool active) || !active)
+                advance = true;                          // voice ended → advance now
+            else if (lenSec > 0)
+            {
+                // Cap the pre-roll lead to HALF the track length so a track shorter than the
+                // lead window isn't advanced the instant it starts (see NativeTrackLoop).
+                double lead = Math.Max(TrackTransitionFadeDuration, 0.5);
+                double effLead = Math.Min(lead, lenSec * 0.5);
+                advance = lenSec - posSec <= effLead;
+            }
+            else advance = false;                        // unknown length → wait for EOF (active=false)
+
+            if (!advance) return;
+
+            _advancePending = true;
+            MainThreadDispatcher.Post(() =>
+            {
+                // Main thread: advance only if nothing changed since the poll captured state.
+                if (tid == _transitionId
+                    && string.Equals(_nativeActiveContext, ctx, StringComparison.OrdinalIgnoreCase))
+                {
+                    int newId = ++_transitionId;
+                    Instance.StartNativeContext(ctx, true, newId, null);
+                }
+                _advancePending = false;
+            });
         }
 
         // Polls the active voice and, at the transition lead window (or once it has

@@ -159,6 +159,8 @@
     <Compile Include="Harmony\AudioDecoder.cs" />
     <Compile Include="Harmony\NativeAudio.cs" />
     <Compile Include="Harmony\CmmMixer.cs" />
+    <Compile Include="Harmony\CmmScheduler.cs" />
+    <Compile Include="Harmony\MainThreadDispatcher.cs" />
     <Compile Include="Harmony\WaveShim.cs" />
     <Compile Include="Harmony\LoudnessAnalyzer.cs" />
     <Compile Include="Harmony\LoudnessStore.cs" />

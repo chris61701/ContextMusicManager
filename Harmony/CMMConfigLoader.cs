@@ -78,6 +78,7 @@ namespace CMM
                 CMMConfig.NativeAudioOutput = ReadBool(root, "NativeAudioOutput", CMMConfig.NativeAudioOutput);
                 CMMConfig.NativeOutputRingMs = ReadInt (root, "NativeOutputRingMs", CMMConfig.NativeOutputRingMs);
                 CMMConfig.NativeOutputMaxRingMs = ReadInt (root, "NativeOutputMaxRingMs", CMMConfig.NativeOutputMaxRingMs);
+                CMMConfig.NativeScheduler = ReadBool(root, "NativeScheduler", CMMConfig.NativeScheduler);
 
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);

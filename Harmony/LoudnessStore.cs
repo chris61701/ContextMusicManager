@@ -72,7 +72,9 @@ namespace CMM
             new Dictionary<string, PathRecord>(StringComparer.Ordinal);
 
         private static string _filePath;
-        private static bool _dirty;
+        // Read on the scheduler thread (CmmScheduler loudness-save task), written on the
+        // main thread — volatile so the off-thread dirty check sees commits promptly.
+        private static volatile bool _dirty;
 
         // ── Play-time lookup ───────────────────────────────────────────────────
         // O(1), no I/O, no hashing: relPath → hash → measurement → gain. Returns a
@@ -458,17 +460,75 @@ namespace CMM
 
         public static bool Dirty => _dirty;
 
-        // Atomic-ish write: serialize to a temp file then replace, so a crash mid-write
-        // can't corrupt the cache. Called on the main thread (debounced by the caller).
-        public static void Save()
+        // Re-flag the cache for save. Used by the off-thread save path (CmmScheduler) to
+        // request a retry when a background WriteSnapshot fails, without touching the
+        // dictionaries from that thread.
+        public static void MarkDirty() => _dirty = true;
+
+        // A detached, thread-safe copy of exactly what gets persisted: built on the MAIN
+        // thread (it reads the live dictionaries), then handed to WriteSnapshot to serialize
+        // on any thread. This is what lets the debounced save run its slow XML + file IO off
+        // Unity's frame loop (see CmmScheduler / ContextMusicManager.LoudnessSaveTick) while
+        // the dictionary read stays main-thread-only, as the store's threading contract
+        // requires.
+        public sealed class SaveSnapshot
         {
-            if (_filePath == null) return;
+            public string FilePath;
+            public readonly List<TrackLine> Tracks = new List<TrackLine>();
+            public readonly List<PathLine> Paths = new List<PathLine>();
+
+            public struct TrackLine { public string Hash; public double Lufs, Peak; public int Metric; public float Trim; }
+            public struct PathLine  { public string Rel, Hash; public long Size, Mtime; }
+        }
+
+        // MAIN THREAD: capture everything Save would persist into a detached snapshot and
+        // clear the dirty flag. Returns null only when there is no file target. Mirrors the
+        // old Save()'s selection exactly — persist-worthy (manually-trimmed) tracks, and the
+        // path records that point at them.
+        public static SaveSnapshot SnapshotForSave()
+        {
+            if (_filePath == null) return null;
+
+            var snap = new SaveSnapshot { FilePath = _filePath };
+            foreach (var kv in _byHash)
+            {
+                Measurement m = kv.Value;
+                if (!IsPersistWorthy(m)) continue;
+                snap.Tracks.Add(new SaveSnapshot.TrackLine
+                {
+                    Hash = kv.Key, Lufs = m.Lufs, Peak = m.Peak,
+                    Metric = m.MetricVersion, Trim = m.UserTrim,
+                });
+            }
+            foreach (var kv in _byPath)
+            {
+                PathRecord pr = kv.Value;
+                // Drop path records for measurements we didn't persist, so the file never
+                // references a hash that isn't in it.
+                if (!_byHash.TryGetValue(pr.Hash, out Measurement pm) || !IsPersistWorthy(pm))
+                    continue;
+                snap.Paths.Add(new SaveSnapshot.PathLine
+                {
+                    Rel = kv.Key, Hash = pr.Hash, Size = pr.Size, Mtime = pr.MtimeTicks,
+                });
+            }
+
+            _dirty = false;
+            return snap;
+        }
+
+        // ANY THREAD: serialize a previously-captured snapshot to disk. Atomic-ish — write a
+        // temp file then replace — so a crash mid-write can't corrupt the cache. Touches no
+        // shared state but `snap` (detached) and the filesystem, so it is safe to run on the
+        // scheduler thread. Returns false on IO failure so the caller can re-flag dirty.
+        public static bool WriteSnapshot(SaveSnapshot snap)
+        {
+            if (snap == null || snap.FilePath == null) return true;
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(_filePath));
+                Directory.CreateDirectory(Path.GetDirectoryName(snap.FilePath));
 
-                string tmp = _filePath + ".tmp";
-                int persisted = 0;
+                string tmp = snap.FilePath + ".tmp";
                 // Write through XmlWriter straight to the file with explicit UTF-8 (no
                 // BOM) so the emitted <?xml encoding?> declaration matches the bytes on
                 // disk — a StringWriter would force a utf-16 declaration and break reload.
@@ -484,34 +544,24 @@ namespace CMM
                     w.WriteStartElement("Loudness");
                     w.WriteAttributeString("metricVersion", MetricVersion.ToString(CultureInfo.InvariantCulture));
 
-                    // Only manually-trimmed tracks are persisted; auto-only measurements
-                    // are session-scoped and recomputed on demand next launch.
-                    foreach (var kv in _byHash)
+                    foreach (var t in snap.Tracks)
                     {
-                        Measurement m = kv.Value;
-                        if (!IsPersistWorthy(m)) continue;
-                        persisted++;
                         w.WriteStartElement("Track");
-                        w.WriteAttributeString("hash", kv.Key);
-                        w.WriteAttributeString("lufs", m.Lufs.ToString("F3", CultureInfo.InvariantCulture));
-                        w.WriteAttributeString("peak", m.Peak.ToString("F5", CultureInfo.InvariantCulture));
-                        w.WriteAttributeString("metric", m.MetricVersion.ToString(CultureInfo.InvariantCulture));
-                        w.WriteAttributeString("trim", m.UserTrim.ToString("F3", CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("hash", t.Hash);
+                        w.WriteAttributeString("lufs", t.Lufs.ToString("F3", CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("peak", t.Peak.ToString("F5", CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("metric", t.Metric.ToString(CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("trim", t.Trim.ToString("F3", CultureInfo.InvariantCulture));
                         w.WriteEndElement();
                     }
 
-                    foreach (var kv in _byPath)
+                    foreach (var p in snap.Paths)
                     {
-                        PathRecord pr = kv.Value;
-                        // Drop path records for measurements we didn't persist, so the
-                        // file never references a hash that isn't in it.
-                        if (!_byHash.TryGetValue(pr.Hash, out Measurement pm) || !IsPersistWorthy(pm))
-                            continue;
                         w.WriteStartElement("Path");
-                        w.WriteAttributeString("rel", kv.Key);
-                        w.WriteAttributeString("hash", pr.Hash);
-                        w.WriteAttributeString("size", pr.Size.ToString(CultureInfo.InvariantCulture));
-                        w.WriteAttributeString("mtime", pr.MtimeTicks.ToString(CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("rel", p.Rel);
+                        w.WriteAttributeString("hash", p.Hash);
+                        w.WriteAttributeString("size", p.Size.ToString(CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("mtime", p.Mtime.ToString(CultureInfo.InvariantCulture));
                         w.WriteEndElement();
                     }
 
@@ -519,15 +569,26 @@ namespace CMM
                     w.WriteEndDocument();
                 }
 
-                if (File.Exists(_filePath)) File.Delete(_filePath);
-                File.Move(tmp, _filePath);
-                _dirty = false;
-                CMMConfig.D($"[CMM] Cache/loudness.xml saved: {persisted} trimmed track(s).");
+                if (File.Exists(snap.FilePath)) File.Delete(snap.FilePath);
+                File.Move(tmp, snap.FilePath);
+                CMMConfig.D($"[CMM] Cache/loudness.xml saved: {snap.Tracks.Count} trimmed track(s).");
+                return true;
             }
             catch (Exception ex)
             {
                 Log.Error($"[CMM] Failed to write Cache/loudness.xml: {ex.Message}");
+                return false;
             }
+        }
+
+        // Synchronous save (snapshot + write on the calling thread). Retained for the
+        // coroutine fallback path (LoudnessSaveLoop) and any main-thread caller; the
+        // off-frame-loop path uses SnapshotForSave + WriteSnapshot directly so the IO
+        // lands on the scheduler thread. Called on the main thread.
+        public static void Save()
+        {
+            SaveSnapshot snap = SnapshotForSave();
+            if (snap != null && !WriteSnapshot(snap)) _dirty = true;
         }
 
         // ── XML attribute readers ──────────────────────────────────────────────

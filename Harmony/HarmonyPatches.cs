@@ -27,7 +27,15 @@ namespace CMM
         }
     }
 
-    public class CoRoutine : MonoBehaviour { }
+    // Hosts CMM's coroutines AND, via Update, pumps the MainThreadDispatcher: once per
+    // frame it drains any closures CmmScheduler (or another background thread) marshalled
+    // back for main-thread execution. Cheap no-op when the queue is empty (the common case
+    // when NativeScheduler is off). This is the only main-thread half of the off-frame-loop
+    // control plane.
+    public class CoRoutine : MonoBehaviour
+    {
+        void Update() => MainThreadDispatcher.Drain();
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // MUSIC STATES
@@ -338,6 +346,31 @@ namespace CMM
                 ContextMusicManager.SendContextUpdate("Death");
             }
         }
+    }
+
+    // Game pause/unpause (single-player ESC menu / inventory). Unity used to silence our
+    // AudioSource on pause for free; the native mixer is on its own thread Unity can't pause,
+    // so we duck its output gain ourselves (see OnGamePauseChanged).
+    //
+    // The pause flip lives in different methods across versions: 3.0 splits it into
+    // Pause(bool) (queues a request) + the private updatePauseState() that actually applies
+    // gamePaused; A20/A21's Pause(bool) applies it inline. Both leave gamePaused at its FINAL
+    // value by the time the method returns, so a postfix reading IsPaused() is correct on
+    // every version. Target updatePauseState where it exists (3.0) so we read the applied
+    // state, else fall back to Pause(bool) (A20/A21). updatePauseState early-returns when no
+    // pause was requested, so the per-frame postfix is a cheap no-op; OnGamePauseChanged
+    // edge-guards anyway.
+    [HarmonyPatch]
+    public class Patch_GamePause
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(GameManager), "updatePauseState")
+            ?? AccessTools.Method(typeof(GameManager), "Pause", new[] { typeof(bool) });
+
+        static bool Prepare() => TargetMethod() != null;
+
+        static void Postfix(GameManager __instance) =>
+            ContextMusicManager.OnGamePauseChanged(__instance.IsPaused());
     }
 
     // This patch exist for debuff purposes
