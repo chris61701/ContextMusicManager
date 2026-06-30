@@ -75,6 +75,19 @@ namespace CMM
             TryLoad();
         }
 
+        // Off-thread stamp probe: true when the on-disk script's write time differs from the
+        // last load attempt — i.e. CheckReload would actually do work. Pure stat, no parse, so
+        // it is safe to call from the scheduler thread to gate the main-thread CheckReload hop
+        // (the TryLoad/compile itself must still run on the main thread). _lastAttemptStamp is a
+        // plain DateTime written on the main thread; a torn read here only ever costs one extra
+        // (idempotent) CheckReload or a one-tick-late reload, which is fine for a 2s poll.
+        public static bool ScriptChangedOnDisk()
+        {
+            if (_scriptPath == null) return false;
+            try { return File.Exists(_scriptPath) && File.GetLastWriteTimeUtc(_scriptPath) != _lastAttemptStamp; }
+            catch { return false; }
+        }
+
         // Cheap stamp check; reloads only when the on-disk file's write time changed
         // since the last attempt. Call from the existing config-watch loop.
         public static void CheckReload()
