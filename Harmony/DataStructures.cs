@@ -73,59 +73,31 @@ namespace CMM
             ? (float)Samples.Length / Channels / Frequency : 0f;
     }
 
-    // Groups an AudioClip with its backing WaveStream and optional decoded PCM
-    // so current/next slots and the pending-disposal slot are each one field.
-    // Call Release() AFTER Destroy(Clip) — the audio thread must be off the
-    // clip before the WaveStream is disposed.
-    public struct TrackSlot
-    {
-        public AudioClip  Clip;
-        public WaveStream Reader;
-        public DecodedAudio Decoded;
-        // True when Clip is a borrowed game-owned asset (a vanilla DMS section
-        // clip we play on our own channel). We must NEVER Destroy() or dispose
-        // it — the game's Dynamic Music System owns its lifetime. Release() just
-        // drops our reference.
-        public bool Borrowed;
-
-        public void Release()
-        {
-            Clip = null;
-            Borrowed = false;
-            if (Reader  != null) { try { Reader.Dispose(); } catch { } Reader  = null; }
-            if (Decoded != null) { Decoded.Samples = null;               Decoded = null; }
-        }
-    }
-
     public class ContextCache
     {
-        public TrackSlot Current;
-        public TrackSlot Next;
         public float resumePosition;
         public float lastLeftTime = -1f;
-        // The file most recently LOADED into the cache for this context. Advances to
-        // the next track as soon as it is preloaded (≈10s before the current track
-        // ends, or immediately on a skip) — so it is NOT necessarily the audible file.
-        // Used for next-track avoidance, loudness measurement, and previous-track memory.
+        // The file most recently SELECTED for this context. Advances to the next track as
+        // soon as the auto-advance picks it (≈end of the current track, or immediately on a
+        // skip) — so it is NOT necessarily the audible file. Used for next-track avoidance,
+        // loudness measurement, and previous-track memory.
         public string lastPlayedFile;
-        // The file actually AUDIBLE on the active channel right now (set when PlayFromCache
-        // commits the clip). Volume/normalization keys off this, not lastPlayedFile, so the
-        // upcoming track's gain is never applied to the track still playing. See PlayFromCache.
+        // The file the native mixer is actually VOICING right now (set when StartNativeContext
+        // dispatches it). Volume/normalization keys off this, not lastPlayedFile, so the
+        // upcoming track's gain is never applied to the track still playing.
         public string playingFile;
         // The track that played immediately before lastPlayedFile in this context.
         // One-deep (no full history) — drives the "previous track" keybind, which
-        // toggles between the two. Captured in LoadNextClip on every advance.
+        // toggles between the two. Captured in StartNativeContext on every advance.
         public string previousPlayedFile;
         // The single track pinned to play the next time this context starts FRESH (a
         // switch-in, not a resume). It is the ONLY track pre-measured for an inactive
-        // context, and PreloadContextCore consumes it so the track we start is exactly
+        // context, and StartNativeContext consumes it so the track we start is exactly
         // the one we normalized — no just-in-time loudness stall. null when not yet
         // staged; kept measured by the loudness keep-set. See StageNextFile / PinStagedFile.
         public string stagedFile;
         public int sequentialIndex;
         public string[] directorySnapshot;
-        public bool nextClipLoading;
-        public bool isPreloading;
     }
 
     public class ActiveContext

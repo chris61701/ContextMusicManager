@@ -262,20 +262,13 @@ namespace CMM
             cache.directorySnapshot = snapshot;
             ApplyPresenceFromSnapshot(contextName, cache);
 
-            bool activeBorrowedRefill =
-                currentContext != null &&
-                string.Equals(contextName, currentContext.Context, StringComparison.OrdinalIgnoreCase) &&
-                cache.Current.Borrowed && snapshot.Length > 0;
-
             // MENU reclaim (the crawler is the ONLY thing that can do it for a recursive
             // Menu). On the menu screen ContextScanLoop doesn't run, and a subfolder context
             // never takes FileWatchLoop's flat "File change in Menu → SendContextUpdate"
             // reclaim path (it skips the folder walk after the O(1) playing-file ping). So
             // when custom files reappear for Menu while it has surrendered to the vanilla
-            // bed, nothing else brings its music back. Note the menu's vanilla state is
-            // vanillaIsActive with currentContext == "Vanilla" — NOT a Borrowed slot — so
-            // activeBorrowedRefill above can't catch it. Route through SendContextUpdate so
-            // the vanilla hand-off (DeactivateVanilla + fade) is handled like the flat path.
+            // bed, nothing else brings its music back. Route through SendContextUpdate so the
+            // vanilla hand-off (DeactivateVanilla + fade) is handled like the flat path.
             bool menuVanillaRefill =
                 !inGame && snapshot.Length > 0 &&
                 string.Equals(contextName, "Menu", StringComparison.OrdinalIgnoreCase) &&
@@ -286,23 +279,6 @@ namespace CMM
                 CMMConfig.D($"[CMM] Crawler: custom files appeared for Menu on the vanilla bed — reclaiming.");
                 if (_pendingContext == "Menu") _pendingContext = null;
                 SendContextUpdate("Menu");
-                yield break;
-            }
-
-            if (!activeBorrowedRefill) yield break;
-
-            CMMConfig.D($"[CMM] Crawler: custom files appeared for borrowed {contextName}, swapping in.");
-            _pendingContext = null;
-            yield return StartCoroutine(PreloadContext(contextName));
-            if (cache.Current.Clip != null && !cache.Current.Borrowed)
-            {
-                currentContext = GetContext(contextName);
-                TriggerMusic(contextName);
-            }
-            else if (inGame)
-            {
-                string fallback = GetTopContext() ?? "Ambient";
-                SendContextUpdate(fallback, 0);
             }
         }
 

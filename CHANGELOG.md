@@ -35,6 +35,18 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **Music now plays through Context Music Manager's own audio engine.** Custom tracks are
+  decoded, mixed, and sent to your audio device entirely on threads the mod owns, instead of
+  going through the game's Unity `AudioSource`/`AudioClip` system. Because playback no longer
+  shares Unity's audio and main threads, the music keeps playing smoothly even when the game
+  saturates the CPU — world generation, loading screens, or another program briefly hogging
+  the machine. The output buffer adapts on its own: it deepens while a world is loading, so
+  nothing can interrupt the music, and stays tight and responsive on the menu and in normal
+  play. Crossfades, mid-track resume, next/previous-track skipping, loudness normalization,
+  and the per-track volume trim all carry over unchanged, and menu↔game transitions fade in
+  and out gracefully over ~5 seconds. The engine uses the bundled cross-platform miniaudio
+  backend and shares the game's entry in the Windows volume mixer, so the system music slider
+  still controls it.
 - **Exit to the main menu now fades the music out** over ~5 seconds before releasing audio
   caches, instead of cutting it off abruptly.
 - **Moved-while-playing tracks are detected reliably on any filesystem.** The file watcher

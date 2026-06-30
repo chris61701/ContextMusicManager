@@ -94,11 +94,9 @@ namespace CMM
 
             IReadOnlyList<string> resolved = ScriptHost.LastContexts;
 
-            // The context the listener actually hears. When the native mixer owns output it's
-            // the native context (the AudioSource channels are idle); otherwise the channel's
-            // context, falling back to the resolver's logical pick before audio has settled.
+            // The context the listener actually hears: the native mixer's active context,
+            // falling back to the resolver's logical pick before audio has settled.
             string audible = _nativeActiveContext;
-            if (string.IsNullOrEmpty(audible)) audible = ActiveChannelContext;
             if (string.IsNullOrEmpty(audible)) audible = currentContext?.Context;
 
             cacheMap.TryGetValue(audible ?? "", out ContextCache cache);
@@ -114,16 +112,23 @@ namespace CMM
             var lines = new List<string>();
 
             // Playing: context (+ fallback marker) — Time elapsed / total — Codec.
-            // Time and Codec only apply to a real custom track (cache has a Clip and a
-            // playingFile); both are absent while riding a borrowed vanilla bed.
+            // Time/Codec apply to a real custom track; the position+length come straight
+            // from the live native mixer voice. Absent while on vanilla/silence.
             string playLine = audible ?? "(none)";
             if (fellBack) playLine += "  (fallback)";
-            float total = cache?.Current.Clip != null ? cache.Current.Clip.length : 0f;
-            if (total > 0f)
+            float total = 0f, elapsed = 0f;
+            if (!string.IsNullOrEmpty(_nativeActiveContext) && CmmMixer.Instance != null)
             {
-                float elapsed = GetPlaybackPosition(ActiveChannel, cache);
-                playLine += $"  —  Time: {Clock(elapsed)} / {Clock(total)}";
+                long vid = System.Threading.Interlocked.Read(ref _nativeVoiceId);
+                if (vid != 0 && CmmMixer.Instance.TryGetState(vid, out double posSec, out double lenSec, out bool active)
+                    && active && lenSec > 0)
+                {
+                    total = (float)lenSec;
+                    elapsed = (float)posSec;
+                }
             }
+            if (total > 0f)
+                playLine += $"  —  Time: {Clock(elapsed)} / {Clock(total)}";
             if (!string.IsNullOrEmpty(playingFile))
             {
                 string codec = CodecLabel(playingFile);

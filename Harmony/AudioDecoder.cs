@@ -482,59 +482,6 @@ namespace CMM
             return analyzer.Finish();
         }
 
-        // ── Streaming AudioClip factory ───────────────────────────────────────
-        // Creates an AudioClip whose PCMReaderCallback reads directly from the live
-        // reader's interleaved-float fast path (every native reader is an
-        // IFloatPcmSource emitting IEEE float). No full-decode allocation; memory cost
-        // ≈ the reader's internal packet buffer (a few KB at most).
-        //
-        // IMPORTANT: `reader` must stay alive (not disposed) until after
-        // Destroy(clip) has been called AND at least one frame has passed so
-        // the audio thread is off the clip.  ContextCache.DisposeCurrentReader()
-        // handles this correctly when called from DeferredDestroyPending().
-        public static AudioClip CreateStreamingClipFromReader(
-            WaveStream reader, string name)
-        {
-            if (reader == null) return null;
-
-            var directSrc = reader as IFloatPcmSource;
-            if (directSrc == null)
-            {
-                Log.Warning($"[CMM] '{name}' reader is not a float source — skipped.");
-                return null;
-            }
-
-            int channels = reader.WaveFormat.Channels;
-            int sampleRate = reader.WaveFormat.SampleRate;
-            CMMConfig.D($"[CMM] Clip '{name}': IEEE float {sampleRate}Hz {channels}ch");
-
-            // Length is in bytes of IEEE float (BlockAlign = channels*4), so convert
-            // back to sample-frames for AudioClip. The reader already outputs IEEE
-            // float and has its own ReadFloats fast path — no PCM conversion needed.
-            int totalSamples = (int)(reader.Length / (channels * 4L));
-
-            using (CMMPerf.Measure(CMMPerf.Phase.ClipCreate))
-            return AudioClip.Create(name, totalSamples, channels, sampleRate, true,
-                (float[] data) =>
-                {
-                    // Time the on-demand decode+disk read; this runs on the AUDIO thread.
-                    long _t0 = Stopwatch.GetTimestamp();
-                    int filled = directSrc.ReadFloats(data, 0, data.Length);
-                    CMMPerf.PcmCallback(Stopwatch.GetTimestamp() - _t0);
-                    if (filled < data.Length)
-                        Array.Clear(data, filled, data.Length - filled);
-                    PcmHeartbeat += filled;
-                },
-                (int newPosition) =>
-                {
-                    // Unity passes sample-frame position (not float index); the native
-                    // reader's Position is in bytes of IEEE float.
-                    try { reader.Position = (long)newPosition * channels * 4L; }
-                    catch (Exception ex)
-                    { UnityEngine.Debug.LogWarning($"[CMM] seek error at frame {newPosition}: {ex.Message}"); }
-                }
-            );
-        }
 
         public static long ClampLong(long value, long min, long max)
         {
@@ -602,50 +549,6 @@ namespace CMM
             return new DecodedAudio { Samples = result, Channels = channels, Frequency = frequency };
         }
 
-        // Legacy clip factory — still used when PreloadCacheEnabled = true.
-        public static AudioClip CreateStreamingClip(DecodedAudio audio, string name)
-        {
-            if (audio?.Samples == null || audio.Samples.Length == 0) return null;
-
-            float[] samples = audio.Samples;
-            int channels = audio.Channels;
-            int frequency = audio.Frequency;
-            int totalSamples = samples.Length / channels;
-            int cursor = 0;
-
-            using (CMMPerf.Measure(CMMPerf.Phase.ClipCreate))
-            return AudioClip.Create(name, totalSamples, channels, frequency, true,
-                (float[] data) =>
-                {
-                    long _t0 = Stopwatch.GetTimestamp();
-                    int srcStart = cursor * channels;
-                    int toCopy = Math.Min(data.Length, samples.Length - srcStart);
-                    if (toCopy > 0) Array.Copy(samples, srcStart, data, 0, toCopy);
-                    if (toCopy < data.Length) Array.Clear(data, toCopy, data.Length - toCopy);
-                    if (toCopy > 0) PcmHeartbeat += toCopy;
-                    cursor += data.Length / channels;
-                    CMMPerf.PcmCallback(Stopwatch.GetTimestamp() - _t0);
-                },
-                (int newPosition) =>
-                {
-                    cursor = Mathf.Clamp(newPosition, 0, totalSamples - 1);
-                }
-            );
-        }
-
-        // Non-streaming clip: PCM lives in Unity's native audio buffer so the
-        // audio thread never calls into managed code. Immune to GC pauses.
-        public static AudioClip CreateNonStreamingClip(DecodedAudio audio, string name)
-        {
-            if (audio?.Samples == null || audio.Samples.Length == 0) return null;
-            int totalSamples = audio.Samples.Length / audio.Channels;
-            using (CMMPerf.Measure(CMMPerf.Phase.ClipCreate))
-            {
-                var clip = AudioClip.Create(name, totalSamples, audio.Channels, audio.Frequency, false);
-                clip.SetData(audio.Samples, 0);   // full PCM upload — main-thread native cost
-                return clip;
-            }
-        }
 
         // ── Quick validate ────────────────────────────────────────────────────
         public static bool QuickValidate(string filePath)

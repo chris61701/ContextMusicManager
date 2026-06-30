@@ -264,13 +264,12 @@ namespace CMM
                 {
                     if (GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled))
                     {
-                        // If the originating context (e.g. Trader_Rekt) maps to a vanilla
-                        // SingleClip section we can play ourselves, resolve to that context
-                        // — PlayFromCache plays the borrowed game clip on our own channel
-                        // instead of handing off to the Conductor. contextName is the seed
-                        // of this resolve, so a per-trader context resolves to its own clip.
-                        if (TryGetReadyVanillaClip(contextName, out _))
-                            return contextName;
+                        // Every VanillaIfDMS context — including the five traders — hands off
+                        // to the warm, muted Conductor via the generic "Vanilla" path: we
+                        // unmute the DMS (edge-triggered) and let the game play its own clip.
+                        // CMM formerly borrowed a trader's vanilla SingleClip and replayed it
+                        // on its own channel; that path was removed once the warm-DMS unmute
+                        // was confirmed to reveal trader music reliably.
                         return "Vanilla";
                     }
                     foreach (ActiveContext active in _contextStack)
@@ -349,9 +348,22 @@ namespace CMM
         private static object _mixerInstance;
         private static volatile bool _mixerResolved;
         private static float _currentVanillaVolume = 0f;
+        // True only while SetVanillaMusicVolume is invoking the game's SetDynamicMusicVolume,
+        // so Patch_DmsVolumeReclamp can tell CMM's own dmsVol writes (mute + vanilla fade
+        // ramps) from the game's slider/snapshot re-applies, which it re-clamps to muted.
+        // Main-thread only, so a plain static is sufficient.
+        internal static bool _ownDmsWrite;
 
-        public static void SetVanillaMusicVolume(float vol)
+        public static void SetVanillaMusicVolume(float vol, bool force = false)
         {
+            // Only push to the game's DMS mixer when the value actually changes. The mute is
+            // edge-triggered now (asserted on world entry, ramped by the vanilla fade
+            // coroutines) rather than re-asserted every Conductor.Update frame, so skip
+            // redundant identical writes — but always proceed on the first call so the mixer
+            // reflection handles get resolved and the initial mute is applied. `force`
+            // bypasses the skip when the game has clobbered dmsVol out from under our cache
+            // (music-slider / snapshot re-apply); see Patch_DmsVolumeReclamp.
+            if (!force && _mixerResolved && vol == _currentVanillaVolume) return;
             _currentVanillaVolume = vol;
             if (!_mixerResolved)
             {
@@ -368,7 +380,13 @@ namespace CMM
                     CMMConfig.D($"[CMM] MixerController resolved — instance={_mixerInstance != null} method={_setDMVMethod.Name}");
             }
             if (_setDMVMethod != null && _mixerInstance != null)
-                _setDMVMethod.Invoke(_mixerInstance, new object[] { vol });
+            {
+                // Mark this as OUR write so Patch_DmsVolumeReclamp ignores it — otherwise the
+                // postfix would clamp our own vanilla fade ramps (and re-clamp) back to 0.
+                _ownDmsWrite = true;
+                try { _setDMVMethod.Invoke(_mixerInstance, new object[] { vol }); }
+                finally { _ownDmsWrite = false; }
+            }
         }
 
         // ── Cache cleanup ─────────────────────────────────────────────────────
@@ -379,7 +397,7 @@ namespace CMM
         public static void CleanupAllCaches()
         {
             StopMusicCoroutines();
-            StopAndDetachChannels();
+            StopNativeIfActive(0f);
             DisposeAllCaches();
         }
 
@@ -398,7 +416,7 @@ namespace CMM
 
             if (Instance == null || CMM_CoRoutines == null)
             {
-                StopAndDetachChannels();
+                StopNativeIfActive(0f);
                 DisposeAllCaches();
                 SendContextUpdate("Menu");
                 return;
@@ -416,29 +434,21 @@ namespace CMM
 
         private System.Collections.IEnumerator FadeOutAndCleanupCoroutine()
         {
-            AudioSource a = ActiveChannel;
-            AudioSource b = InactiveChannel;
-            float aStart = (a != null && a.isPlaying) ? a.volume : 0f;
-            float bStart = (b != null && b.isPlaying) ? b.volume : 0f;
-
-            // The game music usually plays through the NATIVE mixer, not the AudioSource channels.
-            // Fade it CONSUMER-side (output gain in the audio callback) — the producer-side ramp
-            // can't be relied on here because the world-unload starves the Pump mid-fade, cutting
-            // the music short. The consumer (OS audio thread) keeps running through the freeze, so
-            // the fade is heard over the full ExitFadeDuration. The voices are hard-stopped only
-            // AFTER the fade completes (below), so the device isn't torn down mid-fade.
+            // The game music plays through the NATIVE mixer. Fade it CONSUMER-side (output gain
+            // in the audio callback) — the producer-side ramp can't be relied on here because the
+            // world-unload starves the Pump mid-fade, cutting the music short. The consumer (OS
+            // audio thread) keeps running through the freeze, so the fade is heard over the full
+            // ExitFadeDuration. The voices are hard-stopped only AFTER the fade completes (below),
+            // so the device isn't torn down mid-fade.
             bool nativeWasPlaying = NativeOutputBusy();
             CmmMixer.Instance?.SetOutputGain(0f, ExitFadeDuration);
 
-            if (aStart > 0.0001f || bStart > 0.0001f || nativeWasPlaying)
+            if (nativeWasPlaying)
             {
                 float elapsed = 0f;
                 while (elapsed < ExitFadeDuration)
                 {
                     elapsed += Time.deltaTime;
-                    float t = Mathf.Clamp01(elapsed / ExitFadeDuration);
-                    if (a != null && a.isPlaying) a.volume = Mathf.Lerp(aStart, 0f, t);
-                    if (b != null && b.isPlaying) b.volume = Mathf.Lerp(bStart, 0f, t);
                     yield return null;
                 }
             }
@@ -454,7 +464,6 @@ namespace CMM
             // them once it restores the output gain, bleeding the just-faded game track back in.
             // Discard the voices synchronously here so the menu track starts over true silence.
             CmmMixer.Instance?.StopAllNow();
-            StopAndDetachChannels();
             DisposeAllCaches();
             _crossFadeCoroutine = null;
 
@@ -468,54 +477,28 @@ namespace CMM
         // play) on a reader we're about to dispose.
         private static void StopMusicCoroutines()
         {
-            if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
             if (_nextCacheCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);  _nextCacheCoroutine  = null; }
             if (_trackEndCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);   _trackEndCoroutine   = null; }
             if (_crossFadeCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);  _crossFadeCoroutine  = null; }
         }
 
-        // Stop and detach both channels BEFORE disposing readers. Unity's audio thread
-        // keeps invoking a streaming clip's PCMReaderCallback until the AudioSource is
-        // stopped; disposing the backing WaveStream while a clip is still playing throws
-        // an NRE on every buffer fill (the console spam seen on a return to the menu).
-        private static void StopAndDetachChannels()
-        {
-            foreach (var src in new[] { CMM_Primary_Channel, CMM_Secondary_Channel })
-            {
-                if (src == null) continue;
-                src.Stop();
-                src.clip = null;
-                src.volume = 0f;
-            }
-        }
-
-        // Stage every cached clip/reader for deferred disposal (one frame later) so the
-        // audio thread is fully off the clips before their readers are disposed — the
-        // same safety guarantee the normal transition path uses — and reset per-context
-        // state.
+        // Reset per-context cache state on teardown. The native mixer owns its own audio
+        // buffers (freed by StopNativeIfActive / StopAllNow), so there are no Unity clips
+        // or readers to dispose here anymore — just clear the path/selection bookkeeping.
         private static void DisposeAllCaches()
         {
             foreach (var cache in cacheMap.Values)
             {
-                StagePendingDisposal(cache.Current);
-                StagePendingDisposal(cache.Next);
-                cache.Current = default;
-                cache.Next = default;
                 cache.directorySnapshot = null;
                 cache.lastPlayedFile = null;
+                cache.stagedFile = null;
                 cache.resumePosition = 0f;
                 cache.lastLeftTime = -1f;
             }
-            if (Instance != null && CMM_CoRoutines != null)
-                CMM_CoRoutines.StartCoroutine(Instance.DeferredDestroyPending());
 
             _invalidFiles.Clear();
             _validatedFiles.Clear();
             _contextsWithFilesDirty = true;
-
-            // Drop borrowed vanilla-clip references — the DMS rebuilds its content on
-            // world reload, so a cached AudioClip from this world must not survive.
-            ClearVanillaClipState();
         }
 
         // ── Manual push/pop ───────────────────────────────────────────────────

@@ -70,12 +70,12 @@ namespace CMM
             else if (Input.GetKeyDown(CMMConfig.KeyVolumeDown)) TrimCurrentTrack(-CMMConfig.UserTrimStep);
         }
 
-        // The context backing the music actually playing. ActiveChannelContext names
-        // whatever is on the active channel (what the listener hears); currentContext
-        // is the resolver's logical pick, used as a fallback before audio settles.
+        // The context backing the music actually playing. _nativeActiveContext names what
+        // the mixer is voicing (what the listener hears); currentContext is the resolver's
+        // logical pick, used as a fallback before audio settles.
         private static string AudibleContextName()
         {
-            string c = ActiveChannelContext;
+            string c = _nativeActiveContext;
             if (!string.IsNullOrEmpty(c)) return c;
             return currentContext?.Context;
         }
@@ -119,65 +119,25 @@ namespace CMM
             if (_nextCacheCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);   _nextCacheCoroutine   = null; }
             if (_trackEndCoroutine    != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);    _trackEndCoroutine    = null; }
             if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
-            if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
 
-            // Native path: skip = a same-context next-track on the mixer (forcedFile for
-            // prev). Bypasses the AudioClip preload machinery entirely.
-            if (CMMConfig.NativeAudioOutput && ContextHasFiles(contextName))
+            // Skip = a same-context next-track on the native mixer (forcedFile for prev).
+            if (ContextHasFiles(contextName))
             {
                 int natId = ++_transitionId;
-                _scheduleHandledTransition = false;
                 Log.Out($"[CMM] {(forcedFile != null ? "Prev" : "Next")} track [{contextName}] (native)");
                 StartNativeContext(contextName, true, natId, forcedFile);
-                _skipInProgress = false;
-                yield break;
             }
-
-            ContextCache cache = cacheMap[contextName];
-
-            // LoadNextClip honors the menu native / streaming split and updates
-            // previousPlayedFile → lastPlayedFile. A null forcedFile makes it pick
-            // (avoiding the current track under RandomNoRepeat).
-            yield return StartCoroutine(LoadNextClip(contextName, forcedFile));
-            if (cache.Next.Clip == null)
+            else
             {
-                // Nothing loadable — the folder emptied out (or every remaining pick is
-                // unreadable) while the user was skipping. We already stopped the driver
-                // coroutines above, but the OLD clip is still playing on ActiveChannel.
-                // Leaving it there is the "moved everything out but the previous song kept
-                // playing" bug, so fade the stale track out and re-resolve to whatever is
-                // now valid (another context / vanilla / silence). FadeToSilence is required
-                // even though the resolver may already read Vanilla: SendContextUpdate
-                // ("Vanilla") early-returns when vanilla is already active and would never
-                // silence our channel.
-                CMMConfig.D($"[CMM] Skip: no clip loaded for {contextName} — fading out and re-resolving.");
-                if (cache.Current.Clip != null) StagePendingDisposal(cache.Current);
-                cache.Current = default;
+                // Files vanished while skipping — fade out and re-resolve to whatever's valid.
+                CMMConfig.D($"[CMM] Skip: no files for {contextName} — fading out and re-resolving.");
                 FadeToSilence();
-
                 _pendingContext = null;
-                if (!inGame)
-                    SendContextUpdate(currentContext?.Context ?? "Menu");
-                else
-                    SendContextUpdate(GetTopContext() ?? "Ambient");
-
-                _skipInProgress = false;
-                yield break;
+                if (!inGame) SendContextUpdate(currentContext?.Context ?? "Menu");
+                else         SendContextUpdate(GetTopContext() ?? "Ambient");
             }
-
-            // Promote Next → Current; stage the outgoing clip for deferred disposal.
-            if (cache.Current.Clip != null) StagePendingDisposal(cache.Current);
-            cache.Current = cache.Next;
-            cache.Next = default;
-            cache.resumePosition = 0f;
-            cache.lastLeftTime = -1f;
-
-            _scheduleHandledTransition = false;
-            int newId = ++_transitionId;
-            Log.Out($"[CMM] {(forcedFile != null ? "Prev" : "Next")} track [{contextName}]: " +
-                    $"{Path.GetFileName(cache.lastPlayedFile)}");
-            _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName, true, newId));
             _skipInProgress = false;
+            yield break;
         }
 
         // ── Per-track volume trim ──────────────────────────────────────────────
@@ -208,13 +168,10 @@ namespace CMM
                 return;
             }
 
-            UpdateVolume();
-
-            // UpdateVolume only touches the AudioSource channel — silent on the native path, where the
-            // per-track gain was baked into the live voice at Play time. Push the new trim straight to
-            // that voice so the change is audible immediately on the track you're listening to.
-            if (CMMConfig.NativeAudioOutput
-                && string.Equals(_nativeActiveContext, ctxName, System.StringComparison.OrdinalIgnoreCase))
+            // The per-track gain was baked into the live voice at Play time. Push the new trim
+            // straight to that voice so the change is audible immediately on the track you're
+            // listening to. (VolumeSyncLoop also re-reads it on its next tick for master volume.)
+            if (string.Equals(_nativeActiveContext, ctxName, System.StringComparison.OrdinalIgnoreCase))
             {
                 long vid = System.Threading.Interlocked.Read(ref _nativeVoiceId);
                 if (vid != 0)

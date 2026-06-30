@@ -79,17 +79,42 @@ namespace CMM
                 ContextMusicManager.OnEnterGame();
             }
 
-            // Let vanilla DMS keep ticking; just mute it at the mixer instead of
-            // suppressing Update. Conductor.Update runs server-side bloodmoon work
-            // (eligibility + NetPackage sends, gated only by IsServer) before any audio
-            // logic, so returning false killed that game state on a single-player host.
-            // Muting dmsVol persists frame-to-frame (MixerController.Update only touches
-            // AllCbtVol), and keeping vanilla warm lets the "Vanilla" fallback fade in
-            // seamlessly mid-track rather than cold-starting. The vanillaIsActive guard
-            // above keeps this per-frame re-mute from fighting FadeInVanillaCoroutine
-            // when vanilla is the active fallback.
-            ContextMusicManager.SetVanillaMusicVolume(0f);
+            // Let vanilla DMS keep ticking; we mute it at the mixer (not by suppressing
+            // Update — Conductor.Update runs server-side bloodmoon work, gated only by
+            // IsServer, before any audio logic, so returning false killed that game state
+            // on a single-player host). The DMS mute is now EDGE-TRIGGERED: asserted once
+            // on world entry (OnEnterGame, which both this prefix and PlayerRespawn route
+            // through) and ramped up/down by the vanilla fade coroutines for fallback.
+            // dmsVol persists frame-to-frame (MixerController.Update only touches AllCbtVol),
+            // so we no longer re-mute every frame here. Keeping the Conductor warm still lets
+            // the "Vanilla" fallback fade in seamlessly mid-track rather than cold-starting.
             return true;
+        }
+    }
+
+    // The game's MixerController re-applies dmsVol from the music-volume slider on
+    // OnGamePrefChanged (slider moved) and OnSnapshotTransition — both routed through
+    // SetDynamicMusicVolume — which clobbers CMM's edge-triggered mute. Re-clamp it back
+    // to muted whenever the GAME raises it while CMM owns in-game music (not vanilla
+    // fallback). CMM's own writes are flagged (_ownDmsWrite) and ignored here, so this
+    // never fights the vanilla fade ramps (the fade-out runs with vanillaIsActive already
+    // false) and never recurses. SetDynamicMusicVolume(float) exists identically in
+    // A20/A21/3.0; resolved by name so the build needs no direct MixerController reference.
+    [HarmonyPatch]
+    public class Patch_DmsVolumeReclamp
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(AccessTools.TypeByName("DynamicMusic.MixerController"), "SetDynamicMusicVolume");
+
+        static bool Prepare() => TargetMethod() != null;
+
+        static void Postfix(float _vol)
+        {
+            if (ContextMusicManager._ownDmsWrite) return;          // our own set, not a game clobber
+            if (_vol == 0f) return;                                // game already muted it — nothing to do
+            if (!ContextMusicManager.inGame || ContextMusicManager.vanillaIsActive) return;
+            if (MusicStates.DefaultMusicEnabled) return;
+            ContextMusicManager.SetVanillaMusicVolume(0f, force: true);
         }
     }
 

@@ -22,8 +22,8 @@ namespace CMM
         // When true, music plays through CMM's OWN miniaudio output device + mixer
         // thread (CmmMixer) instead of Unity's AudioSource/AudioClip — decode, mix
         // and output all run on threads CMM owns, off Unity's main and DSP threads.
-        // Opt-in; default OFF leaves the AudioSource path entirely unchanged.
-        public static bool NativeAudioOutput = false;
+        // Now the sole output path; the legacy AudioSource/AudioClip path has been removed.
+        public static bool NativeAudioOutput = true;
         // Output ring TIGHT target (ms): the cushion the mixer keeps queued in normal
         // play — also the output latency for volume/crossfade, so kept small (~200ms).
         public static int NativeOutputRingMs = 200;

@@ -16,34 +16,6 @@ namespace CMM
 
     public partial class ContextMusicManager
     {
-        private static AudioSource CMM_Primary_Channel;
-        private static AudioSource CMM_Secondary_Channel;
-        private static bool _primaryIsActive = true;
-        private static AudioSource ActiveChannel => _primaryIsActive ? CMM_Primary_Channel : CMM_Secondary_Channel;
-        private static AudioSource InactiveChannel => _primaryIsActive ? CMM_Secondary_Channel : CMM_Primary_Channel;
-
-        // The resolved context name each physical channel last played. Tracked so a
-        // re-entry into a context that is still audibly fading out on the inactive
-        // channel can reverse its fade (ramp it back up) instead of reloading and
-        // fading in from zero. See the reverse-fade reclaim path in PlayFromCache.
-        private static string _primaryChannelContext;
-        private static string _secondaryChannelContext;
-        private static string ActiveChannelContext
-        {
-            get => _primaryIsActive ? _primaryChannelContext : _secondaryChannelContext;
-            set { if (_primaryIsActive) _primaryChannelContext = value; else _secondaryChannelContext = value; }
-        }
-        private static string InactiveChannelContext
-        {
-            get => _primaryIsActive ? _secondaryChannelContext : _primaryChannelContext;
-            set { if (_primaryIsActive) _secondaryChannelContext = value; else _primaryChannelContext = value; }
-        }
-
-        // Slots awaiting disposal. A FIFO queue rather than a single field so that
-        // two transitions staging disposals back-to-back (e.g. rapid combat flicker)
-        // can't overwrite — and thereby leak — an earlier slot's AudioClip and its
-        // live streaming FileStream handle. Drained by DestroyPendingClipAndAudio().
-        private static readonly Queue<TrackSlot> _pendingDisposals = new Queue<TrackSlot>();
 
         // Menu-prewarm loudness state. _loudnessQueue holds files awaiting a
         // measurement; _loudnessProcessed marks files resolved this session (measured,
@@ -94,36 +66,7 @@ namespace CMM
             public MeasureHandle Handle;
         }
 
-        private static void StagePendingDisposal(TrackSlot slot)
-        {
-            // Borrowed game-owned clips are never ours to destroy/dispose — just drop them.
-            if (slot.Borrowed) return;
-            if (slot.Clip == null && slot.Reader == null && slot.Decoded == null) return;
-            _pendingDisposals.Enqueue(slot);
-        }
 
-        // Pulls a previously-staged slot back out of the disposal queue, matched by
-        // its AudioClip. Used by the reverse-fade reclaim path: when we left a context
-        // its slot was staged for disposal, but if it is still playing on the inactive
-        // channel and we re-enter it, we must reclaim that slot so it is not freed
-        // mid-fade and so future leaves manage it normally. Returns false (slot left
-        // untouched) when the clip is not in the queue.
-        private static bool TryReclaimSlotFromDisposal(AudioClip clip, out TrackSlot reclaimed)
-        {
-            reclaimed = default;
-            if (clip == null || _pendingDisposals.Count == 0) return false;
-            int count = _pendingDisposals.Count;
-            bool found = false;
-            for (int i = 0; i < count; i++)
-            {
-                TrackSlot slot = _pendingDisposals.Dequeue();
-                if (!found && slot.Clip == clip) { reclaimed = slot; found = true; }
-                else _pendingDisposals.Enqueue(slot);
-            }
-            return found;
-        }
-
-        private static bool _scheduleHandledTransition = false;
         public static bool _gameIsLoading = false;
 
         // Reused-channel residual quick-fade. When a new context interrupts an
@@ -136,32 +79,6 @@ namespace CMM
         private const float ResidualFadeDuration  = 0.12f;
         private const float ResidualFadeThreshold = 0.1f;
 
-        // ── Playback position (version-independent) ───────────────────────────
-        // AudioSource.time is unreliable for streaming AudioClip.Create clips on
-        // older Unity: A20 (Unity 2020.3) reports ~0 for PCM-callback clips, so the
-        // resume capture stored 0 and every "resume" restarted at the top. A21
-        // (2021.3) and 3.0 report it correctly. Derive the position from the backing
-        // NAudio reader's consumed-frame count instead — version-independent, and
-        // only a hair (one DSP/read buffer, tens of ms) ahead of the audible point.
-        // Falls back to AudioSource.time when there is no streaming reader (borrowed
-        // vanilla clips, or the preload full-PCM path where .time is reliable anyway).
-        private static float GetPlaybackPosition(AudioSource channel, ContextCache cache)
-        {
-            if (channel == null) return 0f;
-            WaveStream reader = cache?.Current.Reader;
-            if (reader != null)
-            {
-                try
-                {
-                    int blockAlign = reader.WaveFormat.BlockAlign;
-                    int sampleRate = reader.WaveFormat.SampleRate;
-                    if (blockAlign > 0 && sampleRate > 0)
-                        return (float)(reader.Position / (double)blockAlign / sampleRate);
-                }
-                catch { /* reader disposed or mid-seek; fall back to AudioSource.time */ }
-            }
-            return channel.time;
-        }
 
         // ── NAudio async decode helper ────────────────────────────────────────
         // FIX: Split into two phases so disk I/O and CPU decode are each on a
@@ -222,464 +139,6 @@ namespace CMM
             }
         }
 
-        // ── PlayFromCache ─────────────────────────────────────────────────────
-
-        private IEnumerator PlayFromCache(string contextName, bool isSameContextSwitchingToNextTrack, int transitionId)
-        {
-            if (transitionId != _transitionId) yield break;
-
-            Contexts ctx = GetContext(contextName);
-            ContextCache cache = cacheMap[contextName];
-
-            if (_crossFadeCoroutine != null)
-            {
-                CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);
-                _crossFadeCoroutine = null;
-            }
-
-            // ── Reverse-fade reclaim ─────────────────────────────────────────
-            // If this context is still audibly fading out on the inactive channel
-            // (a crossfade we just interrupted), don't reload it and fade in from
-            // zero — reverse the fade. Ramp that still-playing channel back up from
-            // its current volume while the channel we were fading IN now fades out.
-            if (CMMConfig.ReverseFadeReclaim
-                && CMMConfig.CrossfadeEnabled
-                && !isSameContextSwitchingToNextTrack
-                && !ctx.PlayOnce
-                && InactiveChannel != null
-                && InactiveChannel.isPlaying
-                && InactiveChannel.clip != null
-                && InactiveChannel.volume > 0.0001f
-                && string.Equals(InactiveChannelContext, contextName, StringComparison.OrdinalIgnoreCase)
-                // Only a genuine cross-context re-entry: the active channel must be a
-                // DIFFERENT context. If both channels carry this context we're mid
-                // same-context track flip — reclaiming would leak the new track.
-                && !string.Equals(ActiveChannelContext, contextName, StringComparison.OrdinalIgnoreCase))
-            {
-                // Recover the live slot. In streaming mode it was staged for disposal
-                // when we left; pull it back so it isn't freed mid-fade. In preload
-                // mode it still lives in cache.Current. If we can't recover it (e.g. a
-                // borrowed vanilla clip), fall through to the normal reload path.
-                bool slotOk = cache.Current.Clip == InactiveChannel.clip;
-                if (!slotOk && TryReclaimSlotFromDisposal(InactiveChannel.clip, out TrackSlot live))
-                {
-                    cache.Current = live;
-                    slotOk = true;
-                }
-
-                if (slotOk)
-                {
-                    AudioSource keep = InactiveChannel;   // still playing contextName
-                    AudioSource drop = ActiveChannel;     // the track we were fading in
-                    string leavingCtx = ActiveChannelContext;
-
-                    cache.lastLeftTime = -1f;             // active again; don't let staleness clear it
-
-                    _primaryIsActive = !_primaryIsActive; // keep becomes the active channel
-                    ActiveChannelContext = contextName;
-                    InactiveChannelContext = leavingCtx;
-
-                    float reclaimFade = ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration;
-                    CMMConfig.D($"[CMM] Reverse-fade reclaim: {contextName} ramping " +
-                            $"{keep.volume:F2}→target over {reclaimFade:F1}s (dropping {leavingCtx ?? "None"})");
-
-                    _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                        CrossFade(drop, keep, reclaimFade, _cooldownTarget?.Cooldown ?? 0, drop.volume, keep.volume, contextName));
-
-                    float reclaimLen = keep.clip.length;
-                    float reclaimPos = GetPlaybackPosition(keep, cache);
-                    if (!ctx.Loop)
-                    {
-                        _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(
-                            TrackEndWatcher(contextName, keep, transitionId));
-                        float remaining = (reclaimLen > 0f
-                                ? reclaimLen
-                                : TrackTransitionFadeDuration + TrackTransitionPreloadLead + 1f) - reclaimPos;
-                        _nextCacheCoroutine = CMM_CoRoutines.StartCoroutine(
-                            ScheduleNextCacheLoad(contextName, remaining, transitionId));
-                    }
-
-                    CMMPerf.EndTransition();
-                    _activeMusicCoroutine = null;
-                    yield break;
-                }
-            }
-
-            // ── Game-clip (vanilla section) path ─────────────────────────────
-            // A trader context with no custom files resolves to itself but is backed
-            // by the game's own DMS section clip, played on our channel while the
-            // Conductor stays frozen. Borrow the clip — we never decode or destroy it.
-            AudioClip gameClip = null;
-            bool useGameClip = !ContextHasFiles(contextName)
-                               && GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled)
-                               && TryGetReadyVanillaClip(contextName, out gameClip);
-
-            // ── Ensure clip is available ─────────────────────────────────────
-            if (useGameClip)
-            {
-                if (cache.Current.Clip != gameClip)
-                {
-                    if (cache.Current.Clip != null && !cache.Current.Borrowed)
-                        StagePendingDisposal(cache.Current);
-                    cache.Current = new TrackSlot { Clip = gameClip, Borrowed = true };
-                }
-                CMMConfig.D($"[CMM] Playing vanilla section clip for {contextName} (borrowed, looped).");
-            }
-            else if (CMMConfig.PreloadCacheEnabled)
-            {
-                // Clip may be null if files were removed and re-added (evicted from cache).
-                // Kick off a preload on-demand rather than spinning until timeout.
-                if (cache.Current.Clip == null && !cache.isPreloading)
-                {
-                    CMMConfig.D($"[CMM] PlayFromCache: clip missing for {contextName}, triggering on-demand preload.");
-                    CMM_CoRoutines.StartCoroutine(PreloadContext(contextName));
-                }
-                float waited = 0f;
-                while (cache.Current.Clip == null && waited < 10f)
-                {
-                    if (transitionId != _transitionId) yield break;
-                    yield return new WaitForSeconds(0.25f);
-                    waited += 0.25f;
-                }
-                if (cache.Current.Clip == null)
-                {
-                    CMMConfig.D($"[CMM] PlayFromCache: no clip for {contextName} after wait.");
-                    _activeMusicCoroutine = null;
-                    yield break;
-                }
-            }
-            else
-            {
-                if (cache.Current.Clip == null)
-                {
-                    CMMConfig.D($"[CMM] On-demand load for {contextName}...");
-                    if (cache.isPreloading)
-                    {
-                        // Proactive preload already in progress; wait for it instead of racing
-                        float onDemandWait = 0f;
-                        while (cache.isPreloading && cache.Current.Clip == null && onDemandWait < 10f)
-                        {
-                            if (transitionId != _transitionId) yield break;
-                            yield return new WaitForSeconds(0.1f);
-                            onDemandWait += 0.1f;
-                        }
-                    }
-                    else
-                    {
-                        yield return StartCoroutine(PreloadContext(contextName));
-                    }
-                }
-                if (cache.Current.Clip == null)
-                {
-                    CMMConfig.D($"[CMM] On-demand load failed for {contextName}.");
-                    _activeMusicCoroutine = null;
-                    // Don't leave a PlayOnce context as currentContext with no audio — it
-                    // blocks ContextScanLoop's priority guard forever since nothing beats it.
-                    if (currentContext?.Context == contextName)
-                    {
-                        _pendingContext = null;
-                        currentContext = GetContext("Silence");
-                    }
-                    yield break;
-                }
-            }
-
-            if (transitionId != _transitionId) yield break;
-
-            // ── Loudness normalization ───────────────────────────────────────
-            // Normal tracks: if the sweep hasn't reached this one yet, measure it now
-            // (block) so even the first play is normalized. Stingers/events (PlayOnce)
-            // must fire instantly — they NEVER block; instead we kick off a background
-            // measure so subsequent fires are normalized (this first fire uses whatever
-            // gain is already cached, unity on first encounter). Skipped for borrowed
-            // vanilla clips (no file).
-            if (!useGameClip && !cache.Current.Borrowed)
-            {
-                if (ctx.PlayOnce)
-                {
-                    CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(cache.lastPlayedFile));
-                }
-                else
-                {
-                    yield return StartCoroutine(EnsureLoudnessMeasured(cache.lastPlayedFile));
-                    if (transitionId != _transitionId) yield break;
-                }
-            }
-
-            // ── Resume position ──────────────────────────────────────────────
-            float startPosition = 0f;
-            if (ctx.CanBeResumed && cache.resumePosition > 0f)
-            {
-                float elapsed = Time.realtimeSinceStartup - cache.lastLeftTime;
-                if (elapsed < ctx.TimeUntilContextStale)
-                {
-                    startPosition = cache.resumePosition;
-                    CMMConfig.D($"[CMM] Resuming {contextName} at {startPosition:F2}s");
-                }
-                else
-                {
-                    cache.resumePosition = 0f;
-                    CMMConfig.D($"[CMM] Resume stale for {contextName}, starting fresh.");
-                }
-            }
-
-            // ── Channel setup ────────────────────────────────────────────────
-            // Normally the newcomer reuses the idle InactiveChannel and the playing
-            // ActiveChannel becomes the outgoing fade. But a faster context switch can
-            // INTERRUPT an in-flight crossfade — TriggerMusic stops the coroutine before
-            // its closing Stop() runs — leaving BOTH channels audible: ActiveChannel
-            // rising into the half-arrived context, InactiveChannel still falling from the
-            // one before it. Blindly reusing InactiveChannel then hard-cuts whatever is
-            // louder there (often the original track the listener is anchored on, while
-            // the transient gets the graceful fade — backwards). Instead, repurpose the
-            // QUIETER of the two channels for the newcomer so the DOMINANT track is the one
-            // that crossfades out gracefully; the quiet leftover we evict is barely
-            // audible. In the normal case InactiveChannel is idle (not playing, volume 0),
-            // so this reduces to the old behaviour exactly.
-            var _setupPerf = CMMPerf.Measure(CMMPerf.Phase.TxChannelSetup);
-            string activeCtxName = ActiveChannelContext;
-            string inactiveCtxName = InactiveChannelContext;
-            AudioSource incoming, outgoing;
-            string previousActiveContext;
-            if (InactiveChannel.isPlaying && InactiveChannel.volume > ActiveChannel.volume)
-            {
-                // Interrupted crossfade and the Inactive leftover is the louder track:
-                // fade IT out and repurpose the quieter Active channel for the newcomer.
-                incoming = ActiveChannel;
-                outgoing = InactiveChannel;
-                previousActiveContext = inactiveCtxName;
-                CMMConfig.D($"[CMM] Interrupted crossfade: fading out louder '{inactiveCtxName ?? "None"}' " +
-                        $"({outgoing.volume:F2}), evicting quieter '{activeCtxName ?? "None"}' ({incoming.volume:F2}) for {contextName}");
-            }
-            else
-            {
-                incoming = InactiveChannel;
-                outgoing = ActiveChannel;
-                previousActiveContext = activeCtxName;
-            }
-            float outgoingStartVol = outgoing.volume;
-            _setupPerf.Dispose();
-
-            float clipLen = cache.Current.Clip.length;
-            float safeStart = clipLen > 0.02f
-                ? Mathf.Clamp(startPosition, 0f, clipLen - 0.01f)
-                : 0f;
-
-            // Vanilla trader songs are one-shot in the DMS; loop them here so the
-            // borrowed clip plays as a continuous bed. This also suppresses the
-            // track-end and next-clip scheduling below (there is no "next" file).
-            bool loopThis = ctx.Loop || useGameClip;
-
-            // Quick-silence any audible residual still on the channel we're reusing so
-            // the incoming priority track fades in over silence instead of replacing a
-            // click. This only fires after an interrupted crossfade left the reused
-            // channel playing at a real volume; in the normal idle case the channel is
-            // not playing (volume already 0), so this is skipped and behaviour is
-            // unchanged. The new clip is not assigned until below, so this ramps the
-            // leftover track itself. unscaledDeltaTime so it still progresses if paused.
-            if (incoming.isPlaying && incoming.volume > ResidualFadeThreshold)
-            {
-                float residualStart = incoming.volume;
-                float residualElapsed = 0f;
-                while (residualElapsed < ResidualFadeDuration)
-                {
-                    if (transitionId != _transitionId) yield break;
-                    residualElapsed += Time.unscaledDeltaTime;
-                    incoming.volume = Mathf.Lerp(residualStart, 0f,
-                        Mathf.Clamp01(residualElapsed / ResidualFadeDuration));
-                    yield return null;
-                }
-            }
-
-            incoming.loop = loopThis;
-            incoming.volume = 0f;
-
-            if (safeStart > 0f)
-            {
-                CMMConfig.D($"[CMM] Seek to {safeStart:F2}s for {contextName} " +
-                        $"(clip={clipLen:F1}s, streaming={cache.Current.Reader != null})");
-
-                if (cache.Current.Reader is IFloatPcmSource opusRdr)
-                {
-                    // Unity does NOT call PCMSetPositionCallback(0) on Play() — it
-                    // just starts invoking PCMReaderCallback from wherever the reader
-                    // is.  We must pre-seek the reader to the resume frame BEFORE
-                    // Play() is called so the very first DSP buffer fill is correct.
-                    // Seek by opening from byte 0 + decode-discard (no PrependStream,
-                    // no Ogg sequence-number assumptions).  Done on a background thread
-                    // to avoid blocking the main thread for long tracks.
-                    // Use the reader's OWN sample rate: Opus is always 48k, but native
-                    // FLAC (also IFloatPcmSource) preserves its source rate (e.g. 44.1k).
-                    int rdrRate = cache.Current.Reader.WaveFormat.SampleRate;
-                    long resumeFrame = (long)(safeStart * rdrRate);
-                    bool[] seekDone = { false };
-                    ThreadPool.QueueUserWorkItem(_ =>
-                    {
-                        try   { opusRdr.SeekBeforePlay(resumeFrame); }
-                        catch (Exception ex)
-                        { UnityEngine.Debug.LogWarning($"[CMM] Opus pre-seek failed: {ex.Message}"); }
-                        seekDone[0] = true;
-                    });
-                    float seekWait = 0f;
-                    while (!seekDone[0] && seekWait < 30f)
-                    {
-                        if (transitionId != _transitionId) yield break;
-                        yield return null;
-                        seekWait += Time.unscaledDeltaTime;
-                    }
-                    if (!seekDone[0])
-                        Log.Warning($"[CMM] Opus pre-seek timed out for {contextName}");
-
-                    // playbackOffset stays 0: the incoming.time = safeStart below
-                    // makes Unity's AudioSource.time track the true absolute position,
-                    // so the leave-context code needs no offset correction.
-                }
-            }
-
-            // The clip assign + Play() + time-set below run synchronously on the main
-            // thread. The time-set fires the streaming clip's SetPosition callback, but on
-            // a resume the reader pre-seeked (SeekBeforePlay) and armed its one-shot
-            // intercept, so that callback is swallowed instead of repeating the decode-scan
-            // here — what used to be a 70–192ms main-thread hitch for AAC resumes. Timed as
-            // one span (no yields inside).
-            var _commitPerf = CMMPerf.Measure(CMMPerf.Phase.TxClipCommit);
-            incoming.clip = cache.Current.Clip;
-            CMMConfig.D($"[CMM] Clip assigned: samples={incoming.clip.samples} ch={incoming.clip.channels} len={incoming.clip.length:F2}s");
-
-            incoming.Play();
-            CMMConfig.D($"[CMM] After Play(): isPlaying={incoming.isPlaying} time={incoming.time:F3}s vol={incoming.volume:F2}");
-
-            // Pin the playhead after Play() — even for a fresh start (safeStart == 0).
-            // The AudioSource can carry a stale `time` from a previously-interrupted
-            // crossfade: a channel that never received Stop() (Stop only runs at the
-            // END of CrossFade/FadeToSilence) keeps its playhead live, and assigning a
-            // new clip does not reliably zero it on every Unity version. On A21 this
-            // made a first-play track begin mid-song at the leaving track's offset.
-            // Writing time also flushes Unity's primed DSP buffer and updates
-            // AudioSource.time to `safeStart`; the reader itself stays where SeekBeforePlay
-            // put it (the redundant reader re-seek is intercepted). incoming.volume is still
-            // 0 at this point (the crossfade ramps it up), so any one-frame correction burst
-            // is silent.
-            incoming.time = safeStart;
-            // On a resume the reader was pre-seeked to safeStart and the post-Play seek
-            // interceptor armed; disarm it now the explicit time-set has committed the
-            // position, so a later loop restart's SetPosition(0) isn't swallowed.
-            if (safeStart > 0f && cache.Current.Reader is IFloatPcmSource flushedRdr)
-                flushedRdr.ClearInitialSeekIntercept();
-            CMMConfig.D($"[CMM] Pinned time: requested={safeStart:F3}s actual={incoming.time:F3}s isPlaying={incoming.isPlaying}");
-            _commitPerf.Dispose();
-
-            // incoming becomes the active channel. Derive the flag from the concrete
-            // channel identity (not a blind toggle): after the quieter-channel selection
-            // above, incoming may be EITHER physical channel, so a toggle could point
-            // ActiveChannel at the wrong source.
-            _primaryIsActive = (incoming == CMM_Primary_Channel);
-            // outgoing (the leaving context) becomes the inactive channel and may still
-            // fade for a few seconds — record both so a re-entry can reverse that fade
-            // instead of restarting.
-            ActiveChannelContext = contextName;
-            InactiveChannelContext = previousActiveContext;
-            AudioSource watchTarget = incoming;
-
-            // On the menu, a real custom track is now starting — fade out any vanilla
-            // title theme still audible underneath (A20 cold-start, where the mod loaded
-            // too late for the Start-postfix mute). Skipped for borrowed vanilla beds.
-            if (!inGame && !cache.Current.Borrowed)
-                FadeOutMenuVanillaIfAudible();
-
-            // The incoming clip is now committed to the active channel, so THIS is the
-            // file actually audible. Volume keys off playingFile, not lastPlayedFile:
-            // lastPlayedFile advances to the next track the moment its preload runs
-            // (≈10s before this one ends, or immediately on a skip), and applying that
-            // upcoming track's normalization gain to the still-playing track would
-            // swell/duck it before the crossfade. Borrowed vanilla beds have no file.
-            cache.playingFile = (useGameClip || cache.Current.Borrowed) ? null : cache.lastPlayedFile;
-
-            // ── Crossfade ────────────────────────────────────────────────────
-            float targetVolume = GetContextVolume(contextName);
-
-            if (CMMConfig.CrossfadeEnabled)
-            {
-                float fadeDuration;
-                // -1 = outgoing shares the incoming fade duration (a true crossfade).
-                float outFadeDuration = -1f;
-                if (ctx.PlayOnce)
-                {
-                    fadeDuration = 0.25f;                      // stinger enters quickly
-                    outFadeDuration = CrossFadeDuration;       // previous track leaves gracefully
-                }
-                else if (isSameContextSwitchingToNextTrack)
-                {
-                    float cLen = clipLen > 0f ? clipLen : CrossFadeDuration;
-                    fadeDuration = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, cLen * 0.5f);
-                }
-                else
-                    fadeDuration = ctx.FadeInDuration;
-
-                _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(
-                    CrossFade(outgoing, incoming, fadeDuration, _cooldownTarget?.Cooldown ?? 0, outgoingStartVol, 0f, contextName, outFadeDuration));
-            }
-            else
-            {
-                outgoing.Stop();
-                outgoing.clip = null;
-                outgoing.volume = 0f;
-                // FIX: Defer destroy by one frame so the audio thread has fully
-                // moved off the outgoing clip before we release it.
-                CMM_CoRoutines.StartCoroutine(DeferredDestroyPending());
-                incoming.volume = targetVolume;
-                int cooldown = currentContext.Cooldown;
-                if (cooldown > 0)
-                {
-                    if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
-                    _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(ContextCooldownTimer(contextName, cooldown));
-                }
-            }
-
-            CMMConfig.D($"[CMM] Playing: {contextName}");
-
-            if (!loopThis)
-                _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(TrackEndWatcher(contextName, watchTarget, transitionId));
-
-            if (!loopThis && !ctx.PlayOnce)
-            {
-                float remaining = (clipLen > 0f ? clipLen : TrackTransitionFadeDuration + TrackTransitionPreloadLead + 1f)
-                                  - safeStart;
-                _nextCacheCoroutine = CMM_CoRoutines.StartCoroutine(
-                    ScheduleNextCacheLoad(contextName, remaining, transitionId));
-                // (Next-track loudness is measured inside ScheduleNextCacheLoad, against the
-                // exact file it pre-picks — see there.)
-            }
-
-            CMMPerf.EndTransition();
-            _activeMusicCoroutine = null;
-        }
-
-        // FIX: Waits one frame after Stop() before releasing clip/buffer so the
-        // audio thread cannot be mid-fill on the old clip when we free it.
-        private IEnumerator DeferredDestroyPending()
-        {
-            yield return new WaitForEndOfFrame();
-            DestroyPendingClipAndAudio();
-        }
-
-        private static void DestroyPendingClipAndAudio()
-        {
-            if (_pendingDisposals.Count == 0) return;
-            // Destroy() frees the clip's native audio buffer on the main thread — for a
-            // non-streaming (full-PCM) clip that can be a multi-MB free and a real hitch.
-            // Timed so a frame stutter caused by clip teardown is attributable.
-            using (CMMPerf.Measure(CMMPerf.Phase.ClipDestroy))
-            {
-                while (_pendingDisposals.Count > 0)
-                {
-                    TrackSlot slot = _pendingDisposals.Dequeue();
-                    if (slot.Clip != null) Destroy(slot.Clip);
-                    slot.Release();
-                }
-            }
-        }
-
         // ── Volume ────────────────────────────────────────────────────────────
         // Per-context target volume = global/override volume × the active track's
         // loudness-normalization gain. The gain is keyed to the file currently loaded
@@ -701,7 +160,6 @@ namespace CMM
 
         private IEnumerator VolumeSyncLoop()
         {
-            float previousVolume = -1f;
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
@@ -709,42 +167,20 @@ namespace CMM
                 // music slider. Sampled here on the main thread (GamePrefs is not safe
                 // to read from the mixer thread) and stored in a volatile the mixer reads.
                 // Uses the active native context's volume override, mirroring GetContextVolume.
-                if (CMMConfig.NativeAudioOutput)
-                {
-                    Contexts nctx = _nativeActiveContext != null ? GetContext(_nativeActiveContext) : null;
-                    CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, nctx?.VolumeOverride ?? -1f);
-                    // Hold a DEEP output cushion ONLY while actually loading a world (_gameIsLoading)
-                    // — the window of heavy CPU contention (world-gen) where output latency doesn't
-                    // matter — so the music can't hitch no matter how starved the producer gets.
-                    // NOT on the idle main menu: the menu isn't CPU-starved, and a deep cushion there
-                    // makes decode run seconds ahead of playback, so a manual next-track flush would
-                    // teleport the leaving track forward (and without a flush the new track lags behind
-                    // the queue). Tight on the menu keeps track changes prompt; reactive growth in the
-                    // mixer still covers any surprise starvation (other apps) on menu OR in gameplay.
-                    CmmMixer.DeepBuffer = _gameIsLoading;
-                }
-                // Key off ActiveChannelContext, NOT currentContext: currentContext is
-                // reassigned to the incoming context before PlayFromCache swaps the
-                // audio channels, so for a short window ActiveChannel still plays the
-                // OUTGOING track. Using currentContext's loudness gain there would ramp
-                // the still-playing old track to the incoming track's normalized level.
-                // ActiveChannelContext always names whatever is actually on ActiveChannel.
-                float currentVolume = GetContextVolume(ActiveChannelContext);
-                if (Mathf.Approximately(currentVolume, previousVolume)) continue;
-                previousVolume = currentVolume;
-                if (_crossFadeCoroutine == null && ActiveChannel != null && ActiveChannel.isPlaying)
-                    ActiveChannel.volume = currentVolume;
+                Contexts nctx = _nativeActiveContext != null ? GetContext(_nativeActiveContext) : null;
+                CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, nctx?.VolumeOverride ?? -1f);
+                // Hold a DEEP output cushion ONLY while actually loading a world (_gameIsLoading)
+                // — the window of heavy CPU contention (world-gen) where output latency doesn't
+                // matter — so the music can't hitch no matter how starved the producer gets.
+                // NOT on the idle main menu: the menu isn't CPU-starved, and a deep cushion there
+                // makes decode run seconds ahead of playback, so a manual next-track flush would
+                // teleport the leaving track forward (and without a flush the new track lags behind
+                // the queue). Tight on the menu keeps track changes prompt; reactive growth in the
+                // mixer still covers any surprise starvation (other apps) on menu OR in gameplay.
+                CmmMixer.DeepBuffer = _gameIsLoading;
             }
         }
 
-        public static void UpdateVolume()
-        {
-            if (ActiveChannel == null) return;
-            // ActiveChannelContext, not currentContext — see VolumeSyncLoop: the two can
-            // briefly disagree across a context switch, and ActiveChannel must be scaled
-            // by the gain of the track it is actually playing.
-            ActiveChannel.volume = GetContextVolume(ActiveChannelContext);
-        }
 
         // ── Loudness: measure-on-demand (block-before-play) ───────────────────
         // Ensures `filePath` has a current LUFS measurement, measuring it now (on a
@@ -844,7 +280,7 @@ namespace CMM
         // context whose resume later goes stale gets pinned on the next pass.
         private void EnsureStagedPins()
         {
-            string active = ActiveChannelContext;
+            string active = _nativeActiveContext;
             foreach (var kv in cacheMap)
             {
                 string name = kv.Key;
@@ -1056,10 +492,9 @@ namespace CMM
             {
                 LoudnessStore.Store(slot.Path, res.Size, slot.Mtime, res.Hash, res.Lufs, res.Peak);
                 CMMConfig.D($"[CMM] Loudness prescanned {Path.GetFileName(slot.Path)}: {res.Lufs:F1} LUFS (peak {res.Peak:F3})");
-                if (ActiveChannelContext != null
-                    && cacheMap.TryGetValue(ActiveChannelContext, out ContextCache cc)
-                    && string.Equals(cc.playingFile, slot.Path, StringComparison.OrdinalIgnoreCase))
-                    UpdateVolume();
+                // If this measured the currently-playing track, VolumeSyncLoop re-reads
+                // GetContextVolume (with the new gain) within its next 0.1s tick — no
+                // explicit re-apply needed on the native mixer path.
             }
             slot = default;
         }
@@ -1204,56 +639,6 @@ namespace CMM
         }
 
         // ── Crossfade ─────────────────────────────────────────────────────────
-        private IEnumerator CrossFade(AudioSource outgoing, AudioSource incoming,
-            float duration, int cooldownSeconds, float outgoingStartVol, float incomingStartVol = 0f,
-            string incomingContext = null, float outDuration = -1f)
-        {
-            // The incoming side fades to its context volume INCLUDING the loudness gain
-            // of its current track; the outgoing side always fades to 0 (its gain is
-            // irrelevant). incomingContext == null falls back to a neutral global volume.
-            float targetVolume = incomingContext != null
-                ? GetContextVolume(incomingContext)
-                : CMMConfig.GetVolume(inGame);
-            // The outgoing track may fade over a different span than the incoming one
-            // (e.g. a PlayOnce stinger enters fast but lets the previous track leave
-            // gracefully). When unset, both share the same duration.
-            if (outDuration < 0f) outDuration = duration;
-            float total = Mathf.Max(duration, outDuration);
-            float elapsed = 0f;
-            while (elapsed < total)
-            {
-                elapsed += Time.deltaTime;
-                float tIn  = duration    > 0f ? Mathf.Clamp01(elapsed / duration)    : 1f;
-                float tOut = outDuration > 0f ? Mathf.Clamp01(elapsed / outDuration) : 1f;
-                incoming.volume = Mathf.Lerp(incomingStartVol, targetVolume, tIn);
-                outgoing.volume = Mathf.Lerp(outgoingStartVol, 0f, tOut);
-                yield return null;
-            }
-
-            incoming.volume = targetVolume;
-            outgoing.Stop();
-            outgoing.clip = null;
-            outgoing.volume = 0f;
-            CMMConfig.D($"[CMM] CrossFade done: vol={incoming.volume:F3} target={targetVolume:F3} isPlaying={incoming.isPlaying}");
-
-            // FIX: Defer destroy past the end of the crossfade coroutine so the
-            // audio thread has fully moved off the outgoing clip. One frame is
-            // sufficient; the crossfade already takes several seconds.
-            yield return new WaitForEndOfFrame();
-            DestroyPendingClipAndAudio();
-
-            if (cooldownSeconds > 0)
-            {
-                if (_cooldownCoroutine != null) CMM_CoRoutines.StopCoroutine(_cooldownCoroutine);
-                // Associate the cooldown with the LEAVING context (_cooldownTarget),
-                // captured before currentContext was reassigned to the incoming one.
-                // currentContext here is already the incoming context, so using it
-                // would put the just-started context on cooldown instead.
-                _cooldownCoroutine = CMM_CoRoutines.StartCoroutine(
-                    ContextCooldownTimer(_cooldownTarget?.Context ?? "None", cooldownSeconds));
-            }
-            _crossFadeCoroutine = null;
-        }
 
         // fadeSeconds < 0 uses the normal in-game CrossFadeDuration; pass a longer value
         // (e.g. MenuTransitionFade) for a graceful, deliberate fade such as entering the game.
@@ -1261,59 +646,23 @@ namespace CMM
         {
             float fade = fadeSeconds >= 0f ? fadeSeconds : CrossFadeDuration;
             CMMConfig.D($"[CMM] Fading to silence ({fade:F1}s).");
-            if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
             if (_nextCacheCoroutine != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine); _nextCacheCoroutine = null; }
             if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
             if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
-            // If the native mixer is the current output, fade it out too (covers
-            // native→silence and, via ActivateVanilla→FadeToSilence, native→vanilla).
+            // The native mixer is the only output — fade it out (covers native→silence
+            // and, via ActivateVanilla→FadeToSilence, native→vanilla).
             StopNativeIfActive(fade);
-            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine(fade));
         }
 
-        private IEnumerator FadeOutCoroutine(float fadeSeconds = -1f)
-        {
-            float CrossFadeDuration = fadeSeconds >= 0f ? fadeSeconds : ContextMusicManager.CrossFadeDuration;
-            AudioSource outgoing = ActiveChannel;
-            // If a crossfade was interrupted, the inactive channel (previous outgoing)
-            // never received its Stop() call and may still be audible at high volume.
-            AudioSource orphan = InactiveChannel;
-            float startVol = outgoing.volume;
-            float orphanStartVol = (orphan != null && orphan.isPlaying) ? orphan.volume : 0f;
-            float elapsed = 0f;
-            while (elapsed < CrossFadeDuration)
-            {
-                elapsed += Time.deltaTime;
-                float t = Mathf.Clamp01(elapsed / CrossFadeDuration);
-                outgoing.volume = Mathf.Lerp(startVol, 0f, t);
-                if (orphan != null && orphan.isPlaying)
-                    orphan.volume = Mathf.Lerp(orphanStartVol, 0f, t);
-                yield return null;
-            }
-            outgoing.Stop();
-            outgoing.clip = null;
-            outgoing.volume = 0f;
-            if (orphan != null)
-            {
-                orphan.Stop();
-                orphan.clip = null;
-                orphan.volume = 0f;
-            }
-            yield return new WaitForEndOfFrame();
-            DestroyPendingClipAndAudio();
-            _crossFadeCoroutine = null;
-        }
 
         // Menu → game graceful fade (entering a world). The menu music plays through the native
         // mixer behind a DEEP load cushion, so a producer-side gain ramp would be buried — the
         // fade must run CONSUMER-side (output gain in the audio callback) to be heard. The mixer
         // voices also fade producer-side so they retire, but the device stays OPEN so the Spawn
-        // stinger reuses it (its Play snaps the output gain back to full). Any audible AudioSource
-        // (vanilla-borrow menu) is faded too. Stops the menu control coroutines first so nothing
-        // re-triggers mid-fade.
+        // stinger reuses it (its Play snaps the output gain back to full). Stops the menu control
+        // coroutines first so nothing re-triggers mid-fade.
         internal static void FadeMenuOutputForGameStart(float seconds)
         {
-            if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
             if (_nextCacheCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);  _nextCacheCoroutine  = null; }
             if (_trackEndCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);   _trackEndCoroutine   = null; }
             if (_crossFadeCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);  _crossFadeCoroutine  = null; }
@@ -1328,7 +677,6 @@ namespace CMM
             // the faded menu voice; the worker's commit lock guards an in-flight start.
             lock (_natCommitLock) { _nativeActiveContext = null; Interlocked.Exchange(ref _nativeVoiceId, 0); }
             CMMConfig.D($"[CMM] native: menu output fading out ({seconds:F1}s) for game start.");
-            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine(seconds));
         }
 
         // ── Vanilla fade-out ──────────────────────────────────────────────────
@@ -1424,330 +772,6 @@ namespace CMM
             _menuVanillaFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutMenuVanillaCoroutine(CrossFadeDuration));
         }
 
-        // ── Track-end watcher ─────────────────────────────────────────────────
-        private IEnumerator TrackEndWatcher(string contextName, AudioSource watchTarget, int transitionId)
-        {
-            // FIX: Record startTime after the initial sleep so the minimum-play
-            // guard is measured from when we actually start watching, not from
-            // when the coroutine was spawned.
-            yield return new WaitForSeconds(1f);
-            float startTime = Time.realtimeSinceStartup;
-            float minimumPlaySeconds = 2f;
-
-            if (transitionId != _transitionId) { _trackEndCoroutine = null; yield break; }
-
-            float notPlayingDuration = 0f;
-            while (true)
-            {
-                yield return new WaitForSeconds(TrackEndPollInterval);
-                if (transitionId != _transitionId)
-                {
-                    CMMConfig.D($"[CMM] TrackEndWatcher: transition superseded for {contextName}, exiting.");
-                    _trackEndCoroutine = null;
-                    yield break;
-                }
-                if (currentContext.Context != contextName)
-                {
-                    CMMConfig.D($"[CMM] TrackEndWatcher: context changed mid-watch for {contextName}, bailing.");
-                    _trackEndCoroutine = null;
-                    yield break;
-                }
-                if (watchTarget == null) { _trackEndCoroutine = null; yield break; }
-                if (watchTarget.isPlaying) { notPlayingDuration = 0f; continue; }
-                if (Time.realtimeSinceStartup - startTime < minimumPlaySeconds) continue;
-                notPlayingDuration += TrackEndPollInterval;
-                if (notPlayingDuration >= 0.5f) break;
-            }
-
-            if (transitionId != _transitionId || currentContext.Context != contextName)
-            {
-                CMMConfig.D($"[CMM] TrackEndWatcher: context changed away from {contextName}, ignoring.");
-                _trackEndCoroutine = null;
-                yield break;
-            }
-
-            CMMConfig.D($"[CMM] Track ended: {contextName}");
-            _trackEndCoroutine = null;
-
-            if (GetContext(contextName).PlayOnce)
-            {
-                if (playerIsDead)
-                {
-                    CMMConfig.D($"[CMM] PlayOnce {contextName} finished but player is dead — fading to silence.");
-                    _pendingContext = null;
-                    currentContext = GetContext("Silence");
-                    FadeToSilence();
-                    yield break;
-                }
-                string returnTo = _contextStack
-                    .Where(c => c.ContextName != contextName)
-                    .Select(c => ResolvePlayableContext(c.ContextName))
-                    .FirstOrDefault(c => c != null) ?? "Ambient";
-                CMMConfig.D($"[CMM] PlayOnce finished, returning to: {returnTo}");
-                SendContextUpdate(returnTo, 0);
-                yield break;
-            }
-
-            if (_scheduleHandledTransition)
-            {
-                CMMConfig.D($"[CMM] TrackEndWatcher: ScheduleNextCacheLoad already handled transition for {contextName}, skipping safety net.");
-                _scheduleHandledTransition = false;
-                yield break;
-            }
-
-            if (currentContext.Context == contextName && !ActiveChannel.isPlaying)
-            {
-                CMMConfig.D($"[CMM] TrackEndWatcher safety net firing for {contextName}");
-                ContextCache cache = cacheMap[contextName];
-                cache.resumePosition = 0f;
-                cache.lastLeftTime = -1f;
-
-                if (cache.Current.Clip != null)
-                {
-                    Destroy(cache.Current.Clip);
-                    cache.Current.Clip = null;
-                    yield return new WaitForEndOfFrame();
-                    cache.Current.Release();
-                }
-
-                yield return StartCoroutine(PreloadContext(contextName));
-                if (cache.Current.Clip == null)
-                {
-                    CMMConfig.D($"[CMM] Safety net load failed for {contextName}. Giving up.");
-                    yield break;
-                }
-
-                int newId = ++_transitionId;
-                _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName, true, newId));
-            }
-        }
-
-        // ── ScheduleNextCacheLoad ─────────────────────────────────────────────
-        // FIX: Pick the next file once here (for the size estimate) and pass
-        // it directly to LoadNextClip so the random/sequential selector does not
-        // advance twice and land on different files.
-        private IEnumerator ScheduleNextCacheLoad(string contextName, float clipLength, int transitionId)
-        {
-            ContextCache cache = cacheMap[contextName];
-
-            string avoidForPick = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat
-                                   ? cache.lastPlayedFile : null;
-            // Within-context advance: uniform-random pick (see PickNextFile). The loudness
-            // measurement of this file is deferred to the preload lead window below (just
-            // before LoadNextClip), NOT fired here at track START. Measuring here meant every
-            // brief visit to a resume-capable context — swap in, resume the same (already
-            // measured) track, swap straight back out — speculatively measured a fresh RANDOM
-            // next track that was never heard; and since auto measurements are retained for
-            // the session, each such visit permanently grew the in-memory store by one track.
-            // Past the waitBeforeLoad guard the measure only runs once we're committed to
-            // actually loading this next track, so a context left before its lead window adds
-            // nothing — a resume context keeps just its one prewarmed track (plus the genuine
-            // next track once we stay long enough to hear it).
-            string prePickedFile = PickNextFile(contextName, avoidFile: avoidForPick);
-
-            // File-size heuristic for decode-lead estimate.
-            // For the streaming path this is almost always negligible (just a
-            // file-open), so the estimate acts as a safety margin.
-            float estimatedOpenSeconds = 0f;
-            if (prePickedFile != null)
-            {
-                try
-                {
-                    long fileBytes = new FileInfo(prePickedFile).Length;
-                    estimatedOpenSeconds = fileBytes / (1024f * 1024f) * 0.0002f; // ~0.2ms/MB
-                }
-                catch { }
-            }
-
-            float effectiveFade = Mathf.Clamp(TrackTransitionFadeDuration, 0.25f, clipLength * 0.5f);
-            float safeLeadTime = TrackTransitionPreloadLead + estimatedOpenSeconds * 3f;
-            float waitBeforeLoad = Mathf.Max(0f, clipLength - effectiveFade - safeLeadTime);
-            float waitBeforePlay = Mathf.Max(0f, clipLength - effectiveFade);
-
-            CMMConfig.D($"[CMM] {contextName}: clip={clipLength:F1}s fade={effectiveFade:F1}s " +
-                    $"openEst={estimatedOpenSeconds * 1000f:F1}ms loadIn={waitBeforeLoad:F1}s playIn={waitBeforePlay:F1}s");
-
-            yield return new WaitForSeconds(waitBeforeLoad);
-            if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
-
-            // Committed to this next track now (context still active, transition current):
-            // measure it here, in the lead window, so PlayFromCache's block-before-play is
-            // already satisfied and the track starts without a measurement stall — while a
-            // context we leave before this point never measures a track it won't play.
-            if (prePickedFile != null)
-                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(prePickedFile, useScratch: true));
-
-            if (!cache.nextClipLoading && cache.Next.Clip == null)
-            {
-                cache.nextClipLoading = true;
-                CMMConfig.D($"[CMM] Pre-loading next clip for {contextName}");
-                yield return StartCoroutine(LoadNextClip(contextName, prePickedFile));
-                cache.nextClipLoading = false;
-            }
-
-            float remaining = waitBeforePlay - waitBeforeLoad;
-            if (remaining > 0f)
-                yield return new WaitForSeconds(remaining);
-
-            if (transitionId != _transitionId || currentContext.Context != contextName) yield break;
-
-            if (cache.Next.Clip == null)
-            {
-                CMMConfig.D($"[CMM] Next clip not ready in time for {contextName}, loading inline.");
-                if (cache.Current.Clip != null)
-                {
-                    StagePendingDisposal(cache.Current);
-                    cache.Current = default;
-                }
-                yield return StartCoroutine(PreloadContext(contextName));
-            }
-            else
-            {
-                // Promote next → current; stage current for deferred disposal.
-                if (cache.Current.Clip != null)
-                    StagePendingDisposal(cache.Current);
-                cache.Current = cache.Next;
-                cache.Next = default;
-            }
-
-            cache.resumePosition = 0f;
-            cache.lastLeftTime = -1f;
-
-            if (cache.Current.Clip == null)
-            {
-                CMMConfig.D($"[CMM] No clip available for {contextName} transition. Giving up.");
-                yield break;
-            }
-
-            _scheduleHandledTransition = true;
-            CMMConfig.D($"[CMM] Starting crossfade to next track in {contextName}");
-            int newId = ++_transitionId;
-            _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(PlayFromCache(contextName, true, newId));
-            _nextCacheCoroutine = null;
-        }
-
-        // ── LoadNextClip ──────────────────────────────────────────────────────
-        // FIX: Accept a pre-picked file path from ScheduleNextCacheLoad so the
-        // track selector doesn't advance twice.
-        private IEnumerator LoadNextClip(string contextName, string prePickedFile = null)
-        {
-            ContextCache cache = cacheMap[contextName];
-
-            // A single pick can be unloadable for reasons that DON'T mean "give up": the
-            // file was moved out from under us, or it's a freshly dropped-in track still
-            // being written/locked (a partial read decodes to garbage). Bailing after one
-            // failure strands a skip/advance on Vanilla even though other valid files
-            // remain — so mark/prune the bad pick (mirroring the Preload + HotSwap paths)
-            // and try another candidate, up to a small bound. Only the FIRST attempt
-            // honors the caller's pre-picked file; once it fails we must pick fresh.
-            const int maxAttempts = 8;
-            string failedFile = null;
-            for (int attempt = 0; attempt < maxAttempts; attempt++)
-            {
-                string avoid = GlobalTrackOrder == TrackOrderMode.RandomNoRepeat
-                                  ? cache.lastPlayedFile : null;
-                string filePath = (attempt == 0 && prePickedFile != null)
-                                      ? prePickedFile
-                                      : PickNextFile(contextName, avoidFile: failedFile ?? avoid);
-
-                if (filePath == null)
-                { CMMConfig.D($"[CMM] LoadNextClip: no files for {contextName}"); yield break; }
-
-                string clipName = Path.GetFileNameWithoutExtension(filePath);
-
-                // Menu (and PreloadCacheEnabled) get a fully-decoded clip on EVERY track, not
-                // just the first — native non-streaming for Menu so the audio thread never
-                // runs managed decode code and the menu can't stutter while a world loads.
-                // This mirrors the initial load in PreloadContextCore so the "menu is fully
-                // buffered" guarantee holds across the whole menu sequence: without it, only
-                // the opening menu track was native and track #2+ streamed (decoding on the
-                // audio thread), which hitched during the load screen.
-                if (CMMConfig.PreloadCacheEnabled || contextName == "Menu")
-                {
-                    byte[] rawBytes = null;
-                    bool ioOk = false;
-                    ThreadPool.QueueUserWorkItem(_ =>
-                    {
-                        try { rawBytes = File.ReadAllBytes(filePath); } catch { }
-                        ioOk = true;
-                    });
-                    while (!ioOk) yield return null;
-
-                    DecodedAudio decoded = null;
-                    if (rawBytes != null)
-                    {
-                        bool decodeOk = false;
-                        ThreadPool.QueueUserWorkItem(_ =>
-                        {
-                            try { decoded = AudioDecoder.DecodeFileFromBytes(rawBytes, filePath); } catch { }
-                            decodeOk = true;
-                        });
-                        while (!decodeOk) yield return null;
-                    }
-
-                    if (decoded == null)
-                    {
-                        // Distinguish moved-out (transient) from genuinely corrupt, exactly
-                        // like PreloadContextCore, then prune/refresh so PickNextFile stops
-                        // re-selecting this same file on the retry.
-                        MarkInvalidIfCorrupt(filePath, $"LoadNextClip: full decode failed for {contextName}");
-                        if (!File.Exists(filePath)) PruneMissingFromSnapshot(contextName, filePath);
-                        else                        InvalidateContextFileCache(contextName);
-                        failedFile = filePath;
-                        continue;
-                    }
-
-                    bool isMenu = contextName == "Menu";
-                    AudioClip fullClip = isMenu
-                        ? AudioDecoder.CreateNonStreamingClip(decoded, clipName)
-                        : AudioDecoder.CreateStreamingClip(decoded, clipName);
-                    if (fullClip == null) { failedFile = filePath; continue; }
-
-                    if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
-                    cache.Next.Clip = fullClip;
-                    cache.Next.Reader = null;
-                    // Menu: native buffer owns the samples now; drop the managed copy. Other
-                    // full-decode contexts keep it — CreateStreamingClip's callback reads from it.
-                    if (isMenu) { decoded.Samples = null; decoded = null; }
-                    cache.Next.Decoded = decoded;
-                    cache.previousPlayedFile = cache.lastPlayedFile;
-                    cache.lastPlayedFile = filePath;
-                    CMMConfig.D($"[CMM] Next clip ready (full decode{(isMenu ? "/native" : "")}) for {contextName}: {Path.GetFileName(filePath)}");
-                    yield break;
-                }
-
-                // ── Streaming path (default, in-game contexts) ─────────────────────
-                {
-                    WaveStream reader = null;
-                    yield return StartCoroutine(OpenReaderAsync(filePath, r => reader = r));
-
-                    if (reader == null)
-                    {
-                        // OpenReaderAsync already blacklisted (corrupt) or skipped (transient);
-                        // drop a genuinely-missing pick from the snapshot so the retry doesn't
-                        // re-select it, then try another candidate.
-                        if (!File.Exists(filePath)) PruneMissingFromSnapshot(contextName, filePath);
-                        else                        InvalidateContextFileCache(contextName);
-                        failedFile = filePath;
-                        continue;
-                    }
-
-                    AudioClip clip = AudioDecoder.CreateStreamingClipFromReader(reader, clipName);
-
-                    if (clip == null) { reader?.Dispose(); failedFile = filePath; continue; }
-
-                    if (cache.Next.Clip != null) { Destroy(cache.Next.Clip); cache.Next.Release(); }
-                    cache.Next.Clip   = clip;
-                    cache.Next.Reader = reader;
-                    cache.previousPlayedFile = cache.lastPlayedFile;
-                    cache.lastPlayedFile = filePath;
-                    CMMConfig.D($"[CMM] Next clip ready (streaming) for {contextName}: {Path.GetFileName(filePath)}");
-                    yield break;
-                }
-            }
-
-            CMMConfig.D($"[CMM] LoadNextClip: no decodable file for {contextName} after {maxAttempts} attempts.");
-        }
 
         // ── Subfolder recursion + subtree claiming ────────────────────────────
         // Shared by every context-folder enumeration site (PickNextFile, the
@@ -1881,14 +905,11 @@ namespace CMM
         // tracks: under on-demand scanning only a tiny handful of a context's files are
         // ever measured (the menu prewarm measures one per context), so biasing toward
         // them collapsed every pick onto that one track — the "same track out of 3000"
-        // bug. Normalization is handled independently of selection: the about-to-play
-        // track is measured just-in-time (block-before-play in PlayFromCache), and the
-        // next track is pre-measured during the preload lead window (ScheduleNextCacheLoad).
-        // ── Native-output debug driver (Phase 2 prototype) ────────────────────
-        // Drives CmmMixer from the `cmm native*` console commands so the new output
-        // path can be heard in-game without disturbing the AudioSource path. Plays one
-        // looped track per context; `next` crossfades to another pick; `stop` fades out.
-        // Real context-driven routing (through PlayFromCache) is Phase 3.
+        // bug. Normalization is handled independently of selection: StartNativeContext reads
+        // the stored gain (non-blocking) and the look-ahead pre-measures the staged next track.
+        // ── Native-output debug driver ────────────────────────────────────────
+        // Drives CmmMixer from the `cmm native*` console commands for manual testing. Plays
+        // one looped track per context; `next` crossfades to another pick; `stop` fades out.
         private static string _nativeDebugContext;
         private static string _nativeDebugLastFile;
 
@@ -2069,25 +1090,18 @@ namespace CMM
             }
         }
 
-        // The single branch point for starting a context's playback: native mixer when
-        // eligible, else the AudioSource PlayFromCache. Used by TriggerMusic, the skip
-        // path, and the native auto-advance. The AudioSource branch owns _activeMusicCoroutine
-        // (so TriggerMusic/FadeToSilence StopCoroutine cancels it); the native branch owns no
-        // coroutine — it's torn down by _transitionId bumps + StopNativeIfActive instead.
+        // The single branch point for starting a context's playback. A custom-file context
+        // plays through the native mixer; a context with no files (Vanilla / Silence / an
+        // emptied custom folder) has nothing to play, so we just stop the mixer and let the
+        // resolver / vanilla DMS handoff take over. Used by TriggerMusic, the skip path, and
+        // the native auto-advance. The native path owns no coroutine — it's torn down by
+        // _transitionId bumps + StopNativeIfActive.
         internal static void StartContextCoroutine(string contextName, bool isSameContextSwitchingToNextTrack, int newId)
         {
-            bool nat = CMMConfig.NativeAudioOutput && ContextHasFiles(contextName);
-            if (nat)
-            {
-                FadeOutAudioSourcesIfActive(CrossFadeDuration); // native taking over from an AudioSource (vanilla / DMS-borrow) context
+            if (ContextHasFiles(contextName))
                 Instance.StartNativeContext(contextName, isSameContextSwitchingToNextTrack, newId, null);
-            }
             else
-            {
-                StopNativeIfActive(CrossFadeDuration);          // an AudioSource/silent context is taking over
-                _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(
-                    Instance.PlayFromCache(contextName, isSameContextSwitchingToNextTrack, newId));
-            }
+                StopNativeIfActive(CrossFadeDuration);          // a silent / vanilla context is taking over
         }
 
         // Fade the mixer out and forget it's active. No-op (so safe to call anywhere)
@@ -2111,8 +1125,8 @@ namespace CMM
         // True when the native mixer is the current output and still producing sound (or a
         // start was just dispatched and the worker hasn't committed the voice yet). Lets
         // ContextScanLoop's currentAudioDead see native playback — without it, native output
-        // (which uses no AudioSource and no _activeMusicCoroutine) always looked "dead", so a
-        // PlayOnce stinger was treated as strandable and got interrupted ~0.3s in.
+        // (which owns no Unity coroutine) always looked "dead", so a PlayOnce stinger was
+        // treated as strandable and got interrupted ~0.3s in.
         internal static bool NativeOutputBusy()
         {
             if (_nativeActiveContext == null) return false;
@@ -2121,28 +1135,6 @@ namespace CMM
             return CmmMixer.Instance != null && CmmMixer.Instance.RemainingSeconds(vid) != -1;
         }
 
-        // Mirror of StopNativeIfActive for the opposite direction: the native mixer is
-        // taking over the current context, so fade out any audible AudioSource channel
-        // (a leftover vanilla bed or a DMS-borrowed trader theme). The new native voice
-        // never touches the AudioSource channels, so without this the old theme keeps
-        // playing UNDER the mixer — e.g. leaving Trader_Rekt (default theme on AudioSource)
-        // for a custom-file context left Rekt's theme audible out of context. Decision A:
-        // the two outputs never both drive the current context.
-        private static void FadeOutAudioSourcesIfActive(float fade)
-        {
-            bool audible =
-                (CMM_Primary_Channel   != null && CMM_Primary_Channel.isPlaying   && CMM_Primary_Channel.volume   > 0.0001f) ||
-                (CMM_Secondary_Channel != null && CMM_Secondary_Channel.isPlaying && CMM_Secondary_Channel.volume > 0.0001f);
-            if (!audible) return;
-            CMMConfig.D("[CMM] native: fading out AudioSource channels (mixer taking over).");
-            if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
-            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine());
-            // The channels no longer carry the current context once the mixer owns output —
-            // clear their labels so stale state (e.g. a DMS-borrow trader name) can't shadow
-            // the native context in the HUD or the AudioSource reverse-fade-reclaim check.
-            ActiveChannelContext = null;
-            InactiveChannelContext = null;
-        }
 
         // Resume capture for a native-played context being left. Reads the live playhead
         // from the mixer (the AudioSource sites read AudioSource.time, which is silent on
@@ -2181,7 +1173,6 @@ namespace CMM
         internal void StartNativeContext(string contextName, bool isSameContextSwitchingToNextTrack,
                                          int transitionId, string forcedFile)
         {
-            _activeMusicCoroutine = null;   // native path owns no coroutine; teardown is by transitionId
             if (transitionId != _transitionId) return;
             Contexts ctx = GetContext(contextName);
             if (ctx == null || !cacheMap.TryGetValue(contextName, out ContextCache cache)) return;
@@ -2367,7 +1358,6 @@ namespace CMM
             }
             if (transitionId != _transitionId || _nativeActiveContext != contextName) yield break;
             int newId = ++_transitionId;
-            _scheduleHandledTransition = false;
             StartNativeContext(contextName, true, newId, null);
         }
 
@@ -2647,65 +1637,12 @@ namespace CMM
         }
 
         // ── Memory summary ────────────────────────────────────────────────────
-        public static long GetCacheMemoryBytes()
-        {
-            long total = 0;
-            foreach (var cache in cacheMap.Values)
-            {
-                if (cache.Current.Decoded?.Samples != null) total += (long)cache.Current.Decoded.Samples.Length * 4;
-                if (cache.Next.Decoded?.Samples    != null) total += (long)cache.Next.Decoded.Samples.Length * 4;
-                if (cache.Current.Clip != null && cache.Current.Reader == null && cache.Current.Decoded == null)
-                    total += (long)cache.Current.Clip.samples * cache.Current.Clip.channels * 4;
-                if (cache.Next.Clip    != null && cache.Next.Reader    == null && cache.Next.Decoded    == null)
-                    total += (long)cache.Next.Clip.samples * cache.Next.Clip.channels * 4;
-            }
-            return total;
-        }
+        // CMM no longer holds Unity AudioClips/PCM in the managed cache — the native mixer
+        // decodes and buffers audio in its own (native) memory, off the managed heap. So
+        // there is no managed clip-cache footprint to report here.
+        public static long GetCacheMemoryBytes() => 0;
 
         public static string GetCacheMemorySummary(bool includePerContext = true)
-        {
-            long totalBytes = 0;
-            var lines = new System.Text.StringBuilder();
-
-            foreach (var kv in cacheMap)
-            {
-                ContextCache c = kv.Value;
-
-                bool curStreaming  = c.Current.Clip != null && c.Current.Reader != null;
-                bool nextStreaming = c.Next.Clip    != null && c.Next.Reader    != null;
-
-                long cur  = c.Current.Decoded?.Samples != null ? (long)c.Current.Decoded.Samples.Length * 4 : 0;
-                long next = c.Next.Decoded?.Samples    != null ? (long)c.Next.Decoded.Samples.Length    * 4 : 0;
-                if (cur  == 0 && c.Current.Clip != null && !curStreaming)
-                    cur  = (long)c.Current.Clip.samples * c.Current.Clip.channels * 4;
-                if (next == 0 && c.Next.Clip    != null && !nextStreaming)
-                    next = (long)c.Next.Clip.samples    * c.Next.Clip.channels    * 4;
-
-                bool anyLoaded = c.Current.Clip != null || c.Next.Clip != null;
-                if (!anyLoaded) continue;
-
-                totalBytes += cur + next;
-                if (includePerContext)
-                {
-                    string curLabel = curStreaming ? "streaming" : FormatBytes(cur);
-                    string nextLabel = nextStreaming ? "streaming" : (next > 0 ? FormatBytes(next) : null);
-                    lines.AppendLine($"  {kv.Key}: {curLabel} current" +
-                                     (nextLabel != null ? $" + {nextLabel} next" : ""));
-                }
-            }
-
-            string footer = $"  PCM total: {FormatBytes(totalBytes)}" +
-                            (totalBytes == 0 ? " (all contexts streaming)" : "");
-            if (includePerContext) lines.Append(footer);
-            else lines.Append(totalBytes == 0 ? "streaming" : FormatBytes(totalBytes));
-            return lines.ToString();
-        }
-
-        private static string FormatBytes(long bytes)
-        {
-            if (bytes >= 1024 * 1024) return $"{bytes / (1024f * 1024f):F1} MB";
-            if (bytes >= 1024) return $"{bytes / 1024f:F1} KB";
-            return $"{bytes} B";
-        }
+            => "native mixer (buffers held in native memory)";
     }
 }

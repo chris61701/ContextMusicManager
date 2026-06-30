@@ -39,19 +39,14 @@ namespace CMM
             ScanPoll,        // ContextResolver.BuildSnapshot — game-state poll
             ScanResolve,     // ScriptHost.Resolve — whole Lua marshal + decision (parent of the two below)
             ScanGate,        // change-detection / stack rebuild gate
-            TxChannelSetup,  // PlayFromCache channel selection (synchronous)
-            TxClipCommit,    // PlayFromCache clip assign + Play() + time-set (DSP flush)
             ScanMarshal,     // ScriptHost: GameState/cfg → Lua tables (per-enemy table alloc lives here)
             ScanLuaCall,     // ScriptHost: _script.Call + result-table walk (MoonSharp's own alloc)
-            ClipCreate,      // AudioClip.Create (+ SetData) — main-thread native audio alloc/upload
-            ClipDestroy,     // Destroy(clip) — main-thread native audio buffer free
             COUNT
         }
 
         static readonly string[] Names =
         {
-            "ScanPoll", "ScanResolve", "ScanGate", "TxChannelSetup", "TxClipCommit",
-            "ScanMarshal", "ScanLuaCall", "ClipCreate", "ClipDestroy"
+            "ScanPoll", "ScanResolve", "ScanGate", "ScanMarshal", "ScanLuaCall"
         };
 
         const int N = (int)Phase.COUNT;
