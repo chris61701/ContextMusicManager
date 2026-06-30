@@ -2,7 +2,7 @@
 <CMMSettings>
 
   <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
-  <VolumeModifier>1.0</VolumeModifier>
+  <VolumeModifier>0.5</VolumeModifier>
 
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back
