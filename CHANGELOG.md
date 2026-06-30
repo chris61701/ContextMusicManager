@@ -2,7 +2,7 @@
 
 All notable changes to Context Music Manager are documented here.
 
-## 1.0.3a
+## 1.0.4
 
 ### Added
 
