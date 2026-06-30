@@ -18,7 +18,10 @@ namespace CMM
         public static List<ActiveContext> _contextStack = new List<ActiveContext>();
         public static Contexts currentContext;
 
-        private static int _transitionId = 0;
+        // Cancellation token for in-flight transitions. Bumped on EVERY context change
+        // (TriggerMusic, skip, auto-advance, fade-to-silence). Volatile because the native
+        // start worker thread reads it to drop superseded requests (see StartNativeContext).
+        private static volatile int _transitionId = 0;
         public static string _pendingContext = null;
 
         // When true, Conductor.Update() runs freely and BackgroundMusicMono is unblocked.
@@ -401,12 +404,15 @@ namespace CMM
                 return;
             }
 
+            // Hold off the menu-screen auto-trigger (MenuMusicPatch) so the menu music can't
+            // fade in until the game music has fully faded out (cleared at the end of the coroutine).
+            _menuMusicHold = true;
             _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutAndCleanupCoroutine());
         }
 
         // Game-exit fade is intentionally longer than the in-game CrossFadeDuration —
         // a slower, more deliberate fade as the world tears down and the menu loads.
-        private const float ExitFadeDuration = 5f;
+        private const float ExitFadeDuration = MenuTransitionFade;
 
         private System.Collections.IEnumerator FadeOutAndCleanupCoroutine()
         {
@@ -415,7 +421,16 @@ namespace CMM
             float aStart = (a != null && a.isPlaying) ? a.volume : 0f;
             float bStart = (b != null && b.isPlaying) ? b.volume : 0f;
 
-            if (aStart > 0.0001f || bStart > 0.0001f)
+            // The game music usually plays through the NATIVE mixer, not the AudioSource channels.
+            // Fade it CONSUMER-side (output gain in the audio callback) — the producer-side ramp
+            // can't be relied on here because the world-unload starves the Pump mid-fade, cutting
+            // the music short. The consumer (OS audio thread) keeps running through the freeze, so
+            // the fade is heard over the full ExitFadeDuration. The voices are hard-stopped only
+            // AFTER the fade completes (below), so the device isn't torn down mid-fade.
+            bool nativeWasPlaying = NativeOutputBusy();
+            CmmMixer.Instance?.SetOutputGain(0f, ExitFadeDuration);
+
+            if (aStart > 0.0001f || bStart > 0.0001f || nativeWasPlaying)
             {
                 float elapsed = 0f;
                 while (elapsed < ExitFadeDuration)
@@ -428,12 +443,24 @@ namespace CMM
                 }
             }
 
-            // Faded out — now do the actual teardown the hard-cut path does up front.
+            // Faded out — now hard-stop the (already silent) native voices and do the teardown the
+            // hard-cut path does up front. The menu music below opens a FRESH device (output gain
+            // back to full), so it fades in cleanly after the silence rather than over the game.
+            StopNativeIfActive(0f);
+            // StopNativeIfActive only ARMS a per-voice snap-to-0 (Stop) and waits on a Pump tick to
+            // retire the voices. The menu Play below now wins that race (files buffer into native
+            // memory, so its worker reaches Play almost immediately) and, finding the voices still
+            // live at full per-voice gain — the consumer fade above never touched them — re-fades
+            // them once it restores the output gain, bleeding the just-faded game track back in.
+            // Discard the voices synchronously here so the menu track starts over true silence.
+            CmmMixer.Instance?.StopAllNow();
             StopAndDetachChannels();
             DisposeAllCaches();
             _crossFadeCoroutine = null;
 
-            // Music has faded and caches are released — bring up the menu music.
+            // Game music has FULLY faded and caches are released — only NOW release the hold and
+            // bring up the menu music, so it fades in after silence rather than over the game music.
+            _menuMusicHold = false;
             SendContextUpdate("Menu");
         }
 

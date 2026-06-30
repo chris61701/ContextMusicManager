@@ -22,6 +22,69 @@ namespace CMM
         static readonly List<Entity> _entityScratch = new List<Entity>();
         static readonly List<EnemyInfo> _enemyPool = new List<EnemyInfo>();
 
+        // ── POI quest-clear stinger (the only authoritative clear signal) ─────────
+        // POI_Cleared fires solely off the quest system's SleepersCleared event — the one
+        // sleeper signal that crosses the network (NetPackageQuestEvent's ClearSleeper
+        // case raises QuestEventManager.Current.ClearedSleepers on the client). It reaches
+        // a client only while subscribed via an active clear/fetch quest objective
+        // (ObjectiveClearSleepers), i.e. it fires once you complete the clear part of a POI
+        // quest. We stage the cleared POI's boundingBoxPosition as a ONE-SHOT here; the next
+        // BuildSnapshot that finds the player standing in that POI consumes it (removes it)
+        // and sets GameState.PoiQuestCleared for a single tick. QuestEventManager.Current is
+        // a process-wide singleton that survives world reloads, so we subscribe once; the
+        // pending set is cleared on world-unload.
+        static readonly HashSet<Vector3i> _poiClearedPending = new HashSet<Vector3i>();
+        static bool _poiClearHooked;
+
+        // Subscribe (once) to the quest system's sleepers-cleared event. Idempotent and
+        // cheap to call every tick — guarded by _poiClearHooked.
+        static void EnsurePoiClearHook()
+        {
+            if (_poiClearHooked) return;
+            _poiClearHooked = true;
+            QuestEventManager.Current.SleepersCleared += OnSleepersCleared;
+            CMMConfig.D("[CMM POI] Subscribed to QuestEventManager.SleepersCleared.");
+        }
+
+        // The event fires with a world position inside the cleared POI. Resolve it back to
+        // the prefab and stage a one-shot POI_Cleared for that POI. Logged unconditionally
+        // so the in-game test can confirm whether/when this event reaches the client.
+        static void OnSleepersCleared(Vector3 pos)
+        {
+            var world = GameManager.Instance?.World;
+            PrefabInstance pi = world?.GetPOIAtPosition(pos);
+            if (pi != null)
+            {
+                _poiClearedPending.Add(pi.boundingBoxPosition);
+                CMMConfig.D($"[CMM POI] SleepersCleared FIRED at {pos} → '{pi.prefab?.PrefabName ?? pi.name}' " +
+                            $"(bbox {pi.boundingBoxPosition}) → POI_Cleared staged.");
+            }
+            else
+            {
+                CMMConfig.D($"[CMM POI] SleepersCleared FIRED at {pos} but no POI resolved there.");
+            }
+        }
+
+        // Clears the pending one-shots on world unload (the subscription itself persists
+        // with the QuestEventManager singleton). Called from Patch_GameEnded.
+        public static void ResetPoiClearState() => _poiClearedPending.Clear();
+
+        // "Real dungeon" gate for the MP client fallback, using only client-available
+        // design data (sleeper VOLUMES aren't synced, but the prefab's design definition
+        // is — clients load it to render the POI). On 3.0 the prefab's SleeperVolumeList
+        // is the exact equivalent of the server's sleeperVolumes>0 guard and catches
+        // tier-0 dungeons (e.g. abandoned_house_06) that a DifficultyTier>0 test would
+        // miss. A20/A21 have no SleeperVolumeList, so fall back to DifficultyTier>0.
+        static bool IsRealPoiByDesign(Prefab prefab)
+        {
+            if (prefab == null) return false;
+#if GV_V3
+            return prefab.SleeperVolumeList != null && prefab.SleeperVolumeList.Count > 0;
+#else
+            return prefab.DifficultyTier > 0;
+#endif
+        }
+
         // Resolves an entity's config class name (e.g. "zombieBoeFeral") for threat
         // weighting. EntityClass.list is keyed by the entity's entityClass hash; guarded
         // because a despawning entity can briefly carry an unmapped class id.
@@ -47,6 +110,18 @@ namespace CMM
         }
 #endif
 
+        // A live, allied player who is "with" the local player: in the local player's
+        // party OR an ACL friend, and within PlayerDetectRange. Both IsInPartyOfLocalPlayer
+        // and IsFriendOfLocalPlayer are replicated/derivable on a client (party membership
+        // via NetPackagePartyData; friend status via the synced persistent-player ACL), so
+        // this is valid client-side. Excludes the local player itself and the dead.
+        static bool IsNearbyAlly(EntityPlayer other, EntityPlayer local)
+        {
+            if (other == null || other == local || !other.IsAlive()) return false;
+            if (!other.IsInPartyOfLocalPlayer && !other.IsFriendOfLocalPlayer) return false;
+            return Vector3.Distance(local.position, other.position) < CMMConfig.PlayerDetectRange;
+        }
+
         // ─────────────────────────────────────────────────────────────────────
         // STAGE 1 — POLL: game state → version-agnostic GameState
         // ─────────────────────────────────────────────────────────────────────
@@ -58,6 +133,9 @@ namespace CMM
             var player = world?.GetPrimaryPlayer();
             if (world == null || player == null) return null;
             var localPlayer = player as EntityPlayerLocal;
+
+            // Lazily hook the quest sleepers-cleared event (used by the MP POI fallback).
+            EnsurePoiClearHook();
 
             var gameState = _gameState;
             gameState.Now   = Time.realtimeSinceStartup;
@@ -126,6 +204,17 @@ namespace CMM
             // this loop runs, which causes InvalidOperationException on the live list.
             // EnemyInfo instances are drawn from a pool so refilling Enemies each tick
             // doesn't allocate.
+            // In multiplayer, an enemy aggroed onto a NEARBY ALLY counts as combat too:
+            // it's a fight happening right next to us (the scan is already range-gated to
+            // EnemyDetectRange around the local player), so squadmate aggro should drive
+            // combat music even when nothing is on us specifically. ConnectionManager
+            // .IsSinglePlayer is false on any client and false on a host once someone else
+            // has joined; it's true only for a solo host — so !IsSinglePlayer is exactly
+            // "another player could be present." Defaults to single-player (ally logic off)
+            // if the manager isn't available, leaving SP behavior identical to before.
+            bool isMultiplayer =
+                !(SingletonMonoBehaviour<ConnectionManager>.Instance?.IsSinglePlayer ?? true);
+
             gameState.Enemies.Clear();
             _entityScratch.Clear();
             _entityScratch.AddRange(world.Entities.list);
@@ -136,12 +225,39 @@ namespace CMM
                 if (entity is EntityEnemy enemy && enemy.IsAlive())
                 {
                     float dist = Vector3.Distance(player.position, enemy.position);
-                    if (dist >= CMMConfig.EnemyDetectRange) continue;
 
                     bool alert = enemy.IsAlert;
-                    // Combat intensity is driven by who is actually targeting us, so
-                    // targeting is only meaningful (and only recorded) while alert.
-                    bool targeting = alert && enemy.GetAttackTarget() == player;
+                    // Targeting is only meaningful (and only read) while alert.
+                    // GetAttackTargetLocal() (not GetAttackTarget()) so this works on a
+                    // multiplayer CLIENT: enemy AI runs server-side, so the authoritative
+                    // attackTarget field is null on a client — the server replicates the
+                    // target into attackTargetClient instead, which GetAttackTargetLocal()
+                    // returns for remote entities (and falls back to attackTarget for local
+                    // entities, i.e. host/singleplayer — correct in both cases).
+                    EntityAlive attackTarget = alert ? enemy.GetAttackTargetLocal() : null;
+
+                    bool targetingMe = attackTarget == player && dist < CMMConfig.EnemyDetectRange;
+
+                    // ── Squad-shared combat (multiplayer) ──────────────────────
+                    // An enemy fighting a nearby ally (party member / friend within
+                    // PlayerDetectRange) counts as OUR combat too — and is gated by the
+                    // enemy's distance to THAT ALLY, not to us. So the whole in-range
+                    // party shares one combat state: a squadmate being attacked puts us
+                    // in combat even when their zombies are past our own EnemyDetectRange
+                    // (and even when nothing is on us at all). In single-player nothing is
+                    // ever a nearby ally, so this is always false and behavior is unchanged.
+                    bool targetingAlly =
+                        isMultiplayer && !targetingMe
+                        && attackTarget is EntityPlayer ally && ally != player
+                        && IsNearbyAlly(ally, player)
+                        && Vector3.Distance(ally.position, enemy.position) < CMMConfig.EnemyDetectRange;
+
+                    // Keep the enemy in the snapshot if it's physically near US (drives
+                    // tension + our own combat) OR it's part of a squadmate's fight we're
+                    // sharing. Enemies that are neither are irrelevant and dropped.
+                    if (dist >= CMMConfig.EnemyDetectRange && !targetingAlly) continue;
+
+                    bool targeting = targetingMe || targetingAlly;
 
                     EnemyInfo info;
                     if (used < _enemyPool.Count) info = _enemyPool[used];
@@ -154,6 +270,22 @@ namespace CMM
                     info.IsTargetingPlayer = targeting;
                     gameState.Enemies.Add(info);
                 }
+            }
+
+            // ── Nearby-ally scan (multiplayer only) ────────────────────────────
+            // Count living party members / friends within PlayerDetectRange. The
+            // decision layer uses this to scale combat intensity — fighting shoulder
+            // to shoulder with a squad is a bigger musical moment than soloing the
+            // same swarm. Single-player leaves this at 0 (the scan is skipped), so SP
+            // behavior is unchanged. world.GetPlayers() is the full replicated player
+            // list, so this works on a client.
+            gameState.AlliesNearby = 0;
+            if (isMultiplayer)
+            {
+                var players = world.GetPlayers();
+                for (int pi = 0; pi < players.Count; pi++)
+                    if (IsNearbyAlly(players[pi], player))
+                        gameState.AlliesNearby++;
             }
 
             // ── Home ──────────────────────────────────────────────────────────
@@ -198,8 +330,15 @@ namespace CMM
             gameState.PoiName = "None";
             gameState.PoiTier = 0;
             gameState.PoiEnemiesRemaining = 0;
+            gameState.PoiQuestCleared = false;
+            gameState.PoiClearFromQuestOnly = false;
             PrefabInstance prefab = world?.GetPOIAtPosition(player.position);
-            if (prefab != null)
+            // GetPOIAtPosition returns any prefab footprint, including RWG road/gateway
+            // tiles and decoration "parts" (all DifficultyTier 0, no sleepers). Those were
+            // flooding the stack with POI_T0 in the open world. Require at least one sleeper
+            // volume so only real dungeon POIs count — design-time data that survives
+            // clearing, so a fully-cleared POI still registers (POI_Cleared keeps working).
+            if (prefab != null && prefab.sleeperVolumes.Count > 0)
             {
                 // In 3.0, PrefabName is a property backed by location.FileNameNoExtension and
                 // is always populated. In A21 it is a plain field that defaults to "" unless
@@ -228,6 +367,50 @@ namespace CMM
                 gameState.PoiName = currentPoI;
                 gameState.PoiTier = tier;
                 gameState.PoiEnemiesRemaining = enemiesRemainingInPoi;
+            }
+            else if (isMultiplayer && prefab != null && IsRealPoiByDesign(prefab.prefab))
+            {
+                // ── MP CLIENT FALLBACK ──────────────────────────────────────────
+                // On a multiplayer client the world's SleeperVolume objects are never
+                // synced (server-only save load; only the quest system replicates
+                // anything), so prefab.sleeperVolumes is always empty and the accurate
+                // path above can't run. Use client-available design data + live entities:
+                //   • presence/tier  → GetPOIAtPosition + design data (IsRealPoiByDesign).
+                //   • POI_Infested vs POI → count of spawned enemies inside the POI bounds.
+                //     A spawned sleeper IS an EntityEnemy in bounds, and dormant sleepers
+                //     are replicated as IsSleeping entities, so they count too. >0 ⇒
+                //     infested, 0 ⇒ plain POI. The un-triggered far-room gap is inherent:
+                //     the server stages sleeper spawns and never replicates un-spawned
+                //     volumes, so a deep POI can read 0 between rooms — which is exactly
+                //     why POI_Cleared must NOT come from this count (see below).
+                //   • POI_Cleared → ONLY the quest SleepersCleared one-shot. PoiQuestCleared
+                //     fires it; PoiClearFromQuestOnly tells the script not to derive the
+                //     stinger from the count bouncing to 0.
+                string prefabName = prefab.prefab?.PrefabName;
+                string currentPoI = !string.IsNullOrEmpty(prefabName) ? prefabName : prefab.name;
+                int tier = prefab.prefab?.DifficultyTier ?? 0;
+
+                // Count living enemies whose position is inside the POI's bounding box.
+                // _entityScratch is the entity-list snapshot taken by the enemy scan above,
+                // so this reuses it (no extra allocation / no second live-list walk).
+                Bounds aabb = prefab.GetAABB();
+                int spawnedEnemies = 0;
+                foreach (var e in _entityScratch)
+                    if (e is EntityEnemy en && en.IsAlive() && aabb.Contains(en.position))
+                        spawnedEnemies++;
+
+                // Consume the one-shot quest-clear marker for this POI (if any).
+                bool questCleared = _poiClearedPending.Remove(prefab.boundingBoxPosition);
+
+                CMMConfig.D($"[CMM POI] (MP client) name='{currentPoI}' tier={tier} " +
+                            $"spawnedEnemies={spawnedEnemies} questCleared={questCleared} (client heuristic)");
+
+                gameState.InPoi = true;
+                gameState.PoiName = currentPoI;
+                gameState.PoiTier = tier;
+                gameState.PoiEnemiesRemaining = spawnedEnemies;
+                gameState.PoiQuestCleared = questCleared;
+                gameState.PoiClearFromQuestOnly = true;
             }
 
             return gameState;

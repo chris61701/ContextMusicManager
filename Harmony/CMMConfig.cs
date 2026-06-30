@@ -18,6 +18,22 @@ namespace CMM
         }
         public static long HotSwapMaxFileSizeBytes = 100L * 1024 * 1024;
 
+        // ── Native audio output (miniaudio, optional/experimental) ────────────
+        // When true, music plays through CMM's OWN miniaudio output device + mixer
+        // thread (CmmMixer) instead of Unity's AudioSource/AudioClip — decode, mix
+        // and output all run on threads CMM owns, off Unity's main and DSP threads.
+        // Opt-in; default OFF leaves the AudioSource path entirely unchanged.
+        public static bool NativeAudioOutput = false;
+        // Output ring TIGHT target (ms): the cushion the mixer keeps queued in normal
+        // play — also the output latency for volume/crossfade, so kept small (~200ms).
+        public static int NativeOutputRingMs = 200;
+        // Output ring MAX depth (ms): the ceiling the cushion can ADAPTIVELY grow to when
+        // the producer is being starved (game world-gen / other programs hogging the CPU)
+        // or proactively during loading. The ring is allocated at this size; the live fill
+        // level floats between the tight target and this max, and snaps back tight on a
+        // context change (see CmmMixer). 15s ≈ 5.8 MB of native ring at 48k stereo f32.
+        public static int NativeOutputMaxRingMs = 15000;
+
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track
         // gain (target − measured, in dB) folded into the volume multiplier. See
@@ -55,6 +71,12 @@ namespace CMM
         // ── Context detection tuning (Config/settings.xml) ─────────────────────
         // Max distance (game units) an enemy is counted toward combat/tension state.
         public static float EnemyDetectRange = 30f;
+        // Max distance (game units) another player counts as "with you" for the
+        // multiplayer social signals: an enemy aggroed onto a party member / friend
+        // within this range counts as your combat, and allies within it scale combat
+        // intensity (see ContextResolver player scan). Independent of EnemyDetectRange
+        // so "fighting alongside" can be tuned wider/narrower than "an enemy is near".
+        public static float PlayerDetectRange = 30f;
         // Distance (game units) from a bedroll or land-claim that counts as "home".
         public static float HomeDetectRange = 70f;
         // Health fraction (0–1) below which combat escalates to Low_Health_Panic.

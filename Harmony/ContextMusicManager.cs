@@ -71,6 +71,14 @@ namespace CMM
         public static float TrackTransitionFadeDuration = 6f;
         public static float TrackTransitionPreloadLead = 10f;
 
+        // Graceful, deliberate fade for the menu↔game boundary (entering a world, exiting
+        // back to the menu) — intentionally longer than the in-game CrossFadeDuration.
+        public const float MenuTransitionFade = 5f;
+        // While true, the menu-screen BackgroundMusicMono auto-trigger does NOT start CMM's
+        // menu music. Held during the game-exit fade so the menu music can't fade in until
+        // the game music has fully faded out (set in FadeOutAndCleanup, cleared once silent).
+        internal static bool _menuMusicHold;
+
         private static readonly HashSet<string> _contextsWithFiles =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool _contextsWithFilesDirty = true;
@@ -144,7 +152,30 @@ namespace CMM
             CMM_CoRoutines.StartCoroutine(Instance.LoudnessSweepLoop());
             CMM_CoRoutines.StartCoroutine(Instance.LoudnessSaveLoop());
 
+            // Follow OS audio-device changes (headset plugged/unplugged, default endpoint
+            // switched). Unity re-targets its own audio automatically; the native mixer owns a
+            // device pinned at open time, so it must reopen on the new endpoint or it strands
+            // on the old one. Registered once.
+            if (!_audioConfigHooked)
+            {
+                AudioSettings.OnAudioConfigurationChanged += OnAudioConfigChanged;
+                _audioConfigHooked = true;
+            }
+
             CMMConfig.D($"[CMM] Initialized! Decoder: CMM_Decoder (native) | Preload: {CMMConfig.PreloadCacheEnabled}");
+        }
+
+        private static bool _audioConfigHooked = false;
+
+        // OS audio device / config changed. Ask the native mixer to reopen its output device
+        // on the new default endpoint (no-op when native output is off or nothing is playing —
+        // the next Play opens fresh on the new endpoint anyway). deviceWasChanged is true only
+        // for an actual device swap, but Unity also fires this for sample-rate/speaker changes,
+        // which equally invalidate our open device, so we reinit on any firing.
+        private static void OnAudioConfigChanged(bool deviceWasChanged)
+        {
+            CMMConfig.D($"[CMM] Audio configuration changed (deviceWasChanged={deviceWasChanged}).");
+            if (CMMConfig.NativeAudioOutput) CmmMixer.Instance?.RequestDeviceReinit();
         }
 
         public static void OnEnterGame()
@@ -159,7 +190,11 @@ namespace CMM
             if (contextIn == "Vanilla")
             {
                 if (vanillaIsActive || _pendingContext == "Vanilla") return;
-                if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
+                if (currentContext != null && CaptureNativeResume(currentContext))
+                {
+                    // native mixer playhead saved; nothing further to do for resume
+                }
+                else if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
                 {
                     ContextCache leavingCache = cacheMap[currentContext.Context];
                     leavingCache.resumePosition = GetPlaybackPosition(ActiveChannel, leavingCache);
@@ -196,7 +231,11 @@ namespace CMM
             CMMConfig.D($"[CMM] Context accepted: {currentContext?.Context} -> {contextIn}");
             _pendingContext = contextIn;
 
-            if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
+            if (currentContext != null && CaptureNativeResume(currentContext))
+            {
+                // native mixer playhead saved; the AudioSource clip-release below is N/A
+            }
+            else if (currentContext != null && currentContext.CanBeResumed && ActiveChannel.isPlaying)
             {
                 ContextCache leavingCache = cacheMap[currentContext.Context];
                 leavingCache.resumePosition = GetPlaybackPosition(ActiveChannel, leavingCache);
@@ -289,7 +328,9 @@ namespace CMM
             int newId = ++_transitionId;
             _scheduleHandledTransition = false;
             CMMPerf.BeginTransition(contextName);
-            _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(Instance.PlayFromCache(contextName, false, newId));
+            // Branch to the native mixer for custom-file contexts (when enabled), else
+            // the AudioSource path; either way this owns _activeMusicCoroutine.
+            StartContextCoroutine(contextName, false, newId);
         }
 
         // ── Scan loops ────────────────────────────────────────────────────────
@@ -363,7 +404,11 @@ namespace CMM
                     && _trackEndCoroutine == null
                     && _nextCacheCoroutine == null
                     && (ActiveChannel == null || !ActiveChannel.isPlaying)
-                    && (InactiveChannel == null || !InactiveChannel.isPlaying);
+                    && (InactiveChannel == null || !InactiveChannel.isPlaying)
+                    // The native mixer uses neither AudioSource nor _activeMusicCoroutine, so
+                    // without this a native context (esp. a PlayOnce stinger or a looping track,
+                    // which start no NativeTrackLoop) always looked dead and got interrupted.
+                    && !NativeOutputBusy();
                 // Also keep running if any stack entry is absent from activeContexts but hasn't
                 // hit the 1.5s eviction threshold yet — without this the early-continue fires
                 // on the second scan and the RemoveAll eviction check never runs again.
@@ -378,6 +423,16 @@ namespace CMM
                 bool warmingJustCleared = _hadWarmingContexts && !hasWarmingContexts;
                 _hadWarmingContexts = hasWarmingContexts;
 
+                // Keep scanning while a PlayOnce stinger (Spawn / Death / POI_Cleared) is still
+                // AUDIBLY playing, even if the active set hasn't changed. The stinger is current
+                // but below combat/panic priority; without this the early-out swallows the standing
+                // mismatch and a higher-priority danger context can't cut in until the stinger ends
+                // (e.g. respawning INTO existing combat — combat was already active, so namesChanged
+                // is false). The PlayOnce guard at the transition below still blocks anything of
+                // EQUAL-or-LOWER priority, so the stinger is only interrupted by genuine higher-pri
+                // events — exactly "let combat cut in to warn you're in danger".
+                bool currentIsLivePlayOnce = currentContext != null && currentContext.PlayOnce && !currentAudioDead;
+
                 // Record this tick's allocation (the resolve + gate work above runs every
                 // tick whether or not we end up transitioning). Drop negative samples — a GC
                 // fired inside the window, so the delta is meaningless there.
@@ -386,7 +441,7 @@ namespace CMM
                 _scanAllocTicks++;
 
                 _gatePerf.Dispose();
-                if (!namesChanged && !playabilityChanged && !currentIsStuck && !currentAudioDead && !vanillaIsActive && !hasPendingEvictions && !hasWarmingContexts && !warmingJustCleared) continue;
+                if (!namesChanged && !playabilityChanged && !currentIsStuck && !currentAudioDead && !vanillaIsActive && !hasPendingEvictions && !hasWarmingContexts && !warmingJustCleared && !currentIsLivePlayOnce) continue;
 
                 _previousActiveContexts.Clear();
                 foreach (string c in activeContexts) _previousActiveContexts.Add(c);
@@ -899,6 +954,12 @@ namespace CMM
                     {
                         CMMConfig.D($"[CMM] {contextName} folder emptied, re-evaluating.");
                         _pendingContext = null;
+                        // Native: the active context's voice is buffered in native memory, so
+                        // deleting its files does NOT stop it, and the re-resolve below isn't
+                        // guaranteed to tear it down (cooldown / priority early-returns, the
+                        // DMS-borrow path). Stop it explicitly so a hot-swap (remove → re-add)
+                        // can't leave the old buffered track overlapping the re-added one.
+                        StopNativeIfActive(CrossFadeDuration);
                         if (currentContext.PlayOnce)
                         {
                             // PlayOnce events (Spawn/Death): don't wait for the fallback clip

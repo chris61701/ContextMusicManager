@@ -705,6 +705,24 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
+                // Keep the native mixer's master volume in lock-step with the game's
+                // music slider. Sampled here on the main thread (GamePrefs is not safe
+                // to read from the mixer thread) and stored in a volatile the mixer reads.
+                // Uses the active native context's volume override, mirroring GetContextVolume.
+                if (CMMConfig.NativeAudioOutput)
+                {
+                    Contexts nctx = _nativeActiveContext != null ? GetContext(_nativeActiveContext) : null;
+                    CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, nctx?.VolumeOverride ?? -1f);
+                    // Hold a DEEP output cushion ONLY while actually loading a world (_gameIsLoading)
+                    // — the window of heavy CPU contention (world-gen) where output latency doesn't
+                    // matter — so the music can't hitch no matter how starved the producer gets.
+                    // NOT on the idle main menu: the menu isn't CPU-starved, and a deep cushion there
+                    // makes decode run seconds ahead of playback, so a manual next-track flush would
+                    // teleport the leaving track forward (and without a flush the new track lags behind
+                    // the queue). Tight on the menu keeps track changes prompt; reactive growth in the
+                    // mixer still covers any surprise starvation (other apps) on menu OR in gameplay.
+                    CmmMixer.DeepBuffer = _gameIsLoading;
+                }
                 // Key off ActiveChannelContext, NOT currentContext: currentContext is
                 // reassigned to the incoming context before PlayFromCache swaps the
                 // audio channels, so for a short window ActiveChannel still plays the
@@ -1237,18 +1255,25 @@ namespace CMM
             _crossFadeCoroutine = null;
         }
 
-        public static void FadeToSilence()
+        // fadeSeconds < 0 uses the normal in-game CrossFadeDuration; pass a longer value
+        // (e.g. MenuTransitionFade) for a graceful, deliberate fade such as entering the game.
+        public static void FadeToSilence(float fadeSeconds = -1f)
         {
-            CMMConfig.D("[CMM] Fading to silence.");
+            float fade = fadeSeconds >= 0f ? fadeSeconds : CrossFadeDuration;
+            CMMConfig.D($"[CMM] Fading to silence ({fade:F1}s).");
             if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
             if (_nextCacheCoroutine != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine); _nextCacheCoroutine = null; }
             if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
             if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
-            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine());
+            // If the native mixer is the current output, fade it out too (covers
+            // native→silence and, via ActivateVanilla→FadeToSilence, native→vanilla).
+            StopNativeIfActive(fade);
+            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine(fade));
         }
 
-        private IEnumerator FadeOutCoroutine()
+        private IEnumerator FadeOutCoroutine(float fadeSeconds = -1f)
         {
+            float CrossFadeDuration = fadeSeconds >= 0f ? fadeSeconds : ContextMusicManager.CrossFadeDuration;
             AudioSource outgoing = ActiveChannel;
             // If a crossfade was interrupted, the inactive channel (previous outgoing)
             // never received its Stop() call and may still be audible at high volume.
@@ -1277,6 +1302,33 @@ namespace CMM
             yield return new WaitForEndOfFrame();
             DestroyPendingClipAndAudio();
             _crossFadeCoroutine = null;
+        }
+
+        // Menu → game graceful fade (entering a world). The menu music plays through the native
+        // mixer behind a DEEP load cushion, so a producer-side gain ramp would be buried — the
+        // fade must run CONSUMER-side (output gain in the audio callback) to be heard. The mixer
+        // voices also fade producer-side so they retire, but the device stays OPEN so the Spawn
+        // stinger reuses it (its Play snaps the output gain back to full). Any audible AudioSource
+        // (vanilla-borrow menu) is faded too. Stops the menu control coroutines first so nothing
+        // re-triggers mid-fade.
+        internal static void FadeMenuOutputForGameStart(float seconds)
+        {
+            if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
+            if (_nextCacheCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);  _nextCacheCoroutine  = null; }
+            if (_trackEndCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);   _trackEndCoroutine   = null; }
+            if (_crossFadeCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);  _crossFadeCoroutine  = null; }
+
+            var mx = CmmMixer.Instance;
+            if (mx != null)
+            {
+                mx.SetOutputGain(0f, seconds);            // audible consumer-side fade
+                mx.Stop(seconds, closeWhenIdle: false);   // retire the voices, keep the device for Spawn
+            }
+            // Clear the active-native marker so the Spawn context change doesn't try to reclaim
+            // the faded menu voice; the worker's commit lock guards an in-flight start.
+            lock (_natCommitLock) { _nativeActiveContext = null; Interlocked.Exchange(ref _nativeVoiceId, 0); }
+            CMMConfig.D($"[CMM] native: menu output fading out ({seconds:F1}s) for game start.");
+            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine(seconds));
         }
 
         // ── Vanilla fade-out ──────────────────────────────────────────────────
@@ -1832,6 +1884,493 @@ namespace CMM
         // bug. Normalization is handled independently of selection: the about-to-play
         // track is measured just-in-time (block-before-play in PlayFromCache), and the
         // next track is pre-measured during the preload lead window (ScheduleNextCacheLoad).
+        // ── Native-output debug driver (Phase 2 prototype) ────────────────────
+        // Drives CmmMixer from the `cmm native*` console commands so the new output
+        // path can be heard in-game without disturbing the AudioSource path. Plays one
+        // looped track per context; `next` crossfades to another pick; `stop` fades out.
+        // Real context-driven routing (through PlayFromCache) is Phase 3.
+        private static string _nativeDebugContext;
+        private static string _nativeDebugLastFile;
+
+        public static string NativeDebugPlay(string contextName)
+        {
+            if (!CMMConfig.NativeAudioOutput)
+                return "NativeAudioOutput is off — set <NativeAudioOutput>true</NativeAudioOutput> in Config/settings.xml and reload.";
+            if (!contexts.ContainsKey(contextName))
+                return $"unknown context '{contextName}'.";
+            if (!cacheMap.ContainsKey(contextName))
+                return $"context '{contextName}' not ready yet (enter a game first).";
+            _nativeDebugContext = contextName;
+            return LoadAndPlayNative(contextName, avoid: null, fadeSeconds: 1.0f, loop: true)
+                ? $"native: loading a track for '{contextName}'..."
+                : $"native: no playable file for '{contextName}'.";
+        }
+
+        public static string NativeDebugNext()
+        {
+            if (_nativeDebugContext == null)
+                return "nothing playing — use 'cmm nativeplay <context>' first.";
+            return LoadAndPlayNative(_nativeDebugContext, avoid: _nativeDebugLastFile, fadeSeconds: 2.0f, loop: true)
+                ? $"native: crossfading to another track in '{_nativeDebugContext}'..."
+                : $"native: no other file for '{_nativeDebugContext}'.";
+        }
+
+        public static string NativeDebugStop()
+        {
+            CmmMixer.Instance?.Stop(1.0f);
+            _nativeDebugContext = null;
+            return "native: stopping.";
+        }
+
+        // Picks a file on the calling (main) thread — PickNextFile touches shared
+        // per-context state — then opens the reader + installs the voice on a
+        // background thread, since the open does disk I/O + decode init.
+        private static bool LoadAndPlayNative(string contextName, string avoid, float fadeSeconds, bool loop)
+        {
+            string file = PickNextFile(contextName, avoid);
+            if (file == null) return false;
+            _nativeDebugLastFile = file;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    WaveStream reader = AudioDecoder.OpenStreamingReader(file);
+                    if (reader == null) { Log.Warning($"[CMM] native: failed to open {file}"); return; }
+                    long id = CmmMixer.GetOrCreate().Play(reader, fadeSeconds, loop);
+                    Log.Out($"[CMM] native: {(id != 0 ? "playing" : "rejected")} {System.IO.Path.GetFileName(file)}");
+                }
+                catch (Exception ex) { Log.Error($"[CMM] native play error: {ex.Message}"); }
+            });
+            return true;
+        }
+
+        // ── Native playback controller (Phase 3c) ─────────────────────────────
+        // When CMMConfig.NativeAudioOutput is on, custom-file contexts play through
+        // CmmMixer instead of AudioSource. Context RESOLUTION (what should play) is
+        // unchanged — only the output path differs. Vanilla/DMS-borrow + Silence stay
+        // on the AudioSource path (decision A: hybrid), so the two outputs never both
+        // produce the current context: StartContextCoroutine / FadeToSilence stop the
+        // mixer whenever an AudioSource (or silent) context takes over, and the mixer
+        // crossfades itself for native→native switches.
+        //
+        // _nativeActiveContext / _nativeVoiceId name the track currently on the mixer
+        // (null/0 when the mixer isn't the active output).
+        // _nativeActiveContext: volatile — set on the main thread, read by both the main
+        // thread and the start worker (commit guard). _nativeVoiceId: written by the worker
+        // once Play() succeeds, read by main-thread pollers; accessed via Interlocked since
+        // long isn't volatile-able.
+        private static volatile string _nativeActiveContext;
+        private static long _nativeVoiceId;
+
+        // ── Off-main-thread native start dispatcher ───────────────────────────────
+        // The native START path (open reader → CmmMixer.Play) is dispatched to this
+        // dedicated worker so a multi-second Unity MAIN-THREAD freeze (world load/unload,
+        // quit-to-menu) can't stall the music start. The main thread captures ALL Unity
+        // state synchronously at trigger time (file pick, resume, volume, loudness gain,
+        // cache bookkeeping — see StartNativeContext) and hands the worker a self-contained
+        // request; the worker then opens the reader and plays even while the main thread is
+        // frozen. Everything the worker touches is thread-safe (AudioDecoder.OpenStreamingReader,
+        // the locked CmmMixer.Play, volatile/Interlocked fields) — it never touches cache
+        // fields or Unity APIs, so the main-thread coroutines (scan/watch/volume loops) stay
+        // race-free.
+        private struct NativeStartReq
+        {
+            public string Context;
+            public string File;
+            public int    TransitionId;
+            public float  StartSeconds;
+            public float  Fade;
+            public bool   Loop;
+            public float  TrackGain;
+            public float  DuckOthersTo;   // >=0 → PlayOnce stinger ducks the bed; <0 → normal crossfade
+            public bool   SnapTight;      // context change → flush a deep cushion; track switch → don't (avoid teleport)
+        }
+        // Voice the named context most recently played, kept so a quick flip back to it can
+        // reverse-fade reclaim the still-fading voice instead of restarting its track. Touched
+        // only on the main thread (StartNativeContext).
+        private static readonly Dictionary<string, long> _recentNativeVoice =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Queue<NativeStartReq> _natQueue = new Queue<NativeStartReq>();
+        private static readonly object _natQueueLock = new object();
+        private static readonly AutoResetEvent _natSignal = new AutoResetEvent(false);
+        private static readonly object _natCommitLock = new object();
+        private static Thread _natWorker;
+
+        private static void EnsureNativeWorker()
+        {
+            if (_natWorker != null) return;
+            _natWorker = new Thread(NativeStartWorker)
+            {
+                IsBackground = true,
+                Name = "CMM-NativeStart",
+                Priority = System.Threading.ThreadPriority.AboveNormal,
+            };
+            _natWorker.Start();
+        }
+
+        private static void NativeStartWorker()
+        {
+            while (true)
+            {
+                _natSignal.WaitOne();
+                while (true)
+                {
+                    NativeStartReq req;
+                    lock (_natQueueLock)
+                    {
+                        if (_natQueue.Count == 0) break;
+                        req = _natQueue.Dequeue();
+                    }
+
+                    // Superseded before we paid the (buffering) open? Drop it. This is what
+                    // dedups a skip storm: each skip bumps _transitionId, so all but the last
+                    // queued request is discarded without re-buffering the file.
+                    if (req.TransitionId != _transitionId) continue;
+
+                    WaveStream reader = null;
+                    try { reader = AudioDecoder.OpenStreamingReader(req.File); }
+                    catch { }
+                    if (reader == null)
+                    {
+                        // _invalidFiles is main-thread-only, so the worker only logs; genuinely
+                        // corrupt files get blacklisted by the preload / file-watch paths.
+                        Log.Warning($"[CMM] native: failed to open {Path.GetFileName(req.File)} (worker)");
+                        continue;
+                    }
+
+                    lock (_natCommitLock)
+                    {
+                        // Re-check under the commit lock: a teardown during the open (a newer
+                        // transition, or StopNativeIfActive nulling the context) means this start
+                        // is stale — drop it instead of resurrecting dead audio.
+                        if (req.TransitionId != _transitionId
+                            || !string.Equals(_nativeActiveContext, req.Context, StringComparison.OrdinalIgnoreCase))
+                        {
+                            reader.Dispose();
+                            continue;
+                        }
+
+                        long startFrame = 0;
+                        if (req.StartSeconds > 0f)
+                            startFrame = (long)(req.StartSeconds * reader.WaveFormat.SampleRate);
+
+                        long voiceId = CmmMixer.GetOrCreate().Play(reader, req.Fade, req.Loop, startFrame, req.TrackGain, req.DuckOthersTo, req.SnapTight);
+                        if (voiceId == 0)
+                        {
+                            Log.Warning($"[CMM] native: Play rejected {Path.GetFileName(req.File)}");
+                            continue;
+                        }
+                        Interlocked.Exchange(ref _nativeVoiceId, voiceId);
+                        Log.Out($"[CMM] native: playing {Path.GetFileName(req.File)} for {req.Context} " +
+                                $"(fade {req.Fade:F1}s, loop {req.Loop}, gain {req.TrackGain:F2}, start {req.StartSeconds:F1}s)");
+                    }
+                }
+            }
+        }
+
+        // The single branch point for starting a context's playback: native mixer when
+        // eligible, else the AudioSource PlayFromCache. Used by TriggerMusic, the skip
+        // path, and the native auto-advance. The AudioSource branch owns _activeMusicCoroutine
+        // (so TriggerMusic/FadeToSilence StopCoroutine cancels it); the native branch owns no
+        // coroutine — it's torn down by _transitionId bumps + StopNativeIfActive instead.
+        internal static void StartContextCoroutine(string contextName, bool isSameContextSwitchingToNextTrack, int newId)
+        {
+            bool nat = CMMConfig.NativeAudioOutput && ContextHasFiles(contextName);
+            if (nat)
+            {
+                FadeOutAudioSourcesIfActive(CrossFadeDuration); // native taking over from an AudioSource (vanilla / DMS-borrow) context
+                Instance.StartNativeContext(contextName, isSameContextSwitchingToNextTrack, newId, null);
+            }
+            else
+            {
+                StopNativeIfActive(CrossFadeDuration);          // an AudioSource/silent context is taking over
+                _activeMusicCoroutine = CMM_CoRoutines.StartCoroutine(
+                    Instance.PlayFromCache(contextName, isSameContextSwitchingToNextTrack, newId));
+            }
+        }
+
+        // Fade the mixer out and forget it's active. No-op (so safe to call anywhere)
+        // when the mixer isn't the current output. Callers stop _trackEndCoroutine
+        // (the native auto-advance) themselves before this, mirroring the AudioSource teardown.
+        internal static void StopNativeIfActive(float fade)
+        {
+            if (_nativeActiveContext == null) return;
+            // Null the context under the commit lock so an in-flight start worker that has
+            // already opened its reader sees the teardown and drops the request instead of
+            // committing a voice after we've stopped.
+            lock (_natCommitLock)
+            {
+                CMMConfig.D($"[CMM] native: stopping mixer (was {_nativeActiveContext}).");
+                _nativeActiveContext = null;
+                Interlocked.Exchange(ref _nativeVoiceId, 0);
+            }
+            CmmMixer.Instance?.Stop(fade);
+        }
+
+        // True when the native mixer is the current output and still producing sound (or a
+        // start was just dispatched and the worker hasn't committed the voice yet). Lets
+        // ContextScanLoop's currentAudioDead see native playback — without it, native output
+        // (which uses no AudioSource and no _activeMusicCoroutine) always looked "dead", so a
+        // PlayOnce stinger was treated as strandable and got interrupted ~0.3s in.
+        internal static bool NativeOutputBusy()
+        {
+            if (_nativeActiveContext == null) return false;
+            long vid = Interlocked.Read(ref _nativeVoiceId);
+            if (vid == 0) return true;   // dispatched; worker hasn't committed the voice yet
+            return CmmMixer.Instance != null && CmmMixer.Instance.RemainingSeconds(vid) != -1;
+        }
+
+        // Mirror of StopNativeIfActive for the opposite direction: the native mixer is
+        // taking over the current context, so fade out any audible AudioSource channel
+        // (a leftover vanilla bed or a DMS-borrowed trader theme). The new native voice
+        // never touches the AudioSource channels, so without this the old theme keeps
+        // playing UNDER the mixer — e.g. leaving Trader_Rekt (default theme on AudioSource)
+        // for a custom-file context left Rekt's theme audible out of context. Decision A:
+        // the two outputs never both drive the current context.
+        private static void FadeOutAudioSourcesIfActive(float fade)
+        {
+            bool audible =
+                (CMM_Primary_Channel   != null && CMM_Primary_Channel.isPlaying   && CMM_Primary_Channel.volume   > 0.0001f) ||
+                (CMM_Secondary_Channel != null && CMM_Secondary_Channel.isPlaying && CMM_Secondary_Channel.volume > 0.0001f);
+            if (!audible) return;
+            CMMConfig.D("[CMM] native: fading out AudioSource channels (mixer taking over).");
+            if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
+            _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutCoroutine());
+            // The channels no longer carry the current context once the mixer owns output —
+            // clear their labels so stale state (e.g. a DMS-borrow trader name) can't shadow
+            // the native context in the HUD or the AudioSource reverse-fade-reclaim check.
+            ActiveChannelContext = null;
+            InactiveChannelContext = null;
+        }
+
+        // Resume capture for a native-played context being left. Reads the live playhead
+        // from the mixer (the AudioSource sites read AudioSource.time, which is silent on
+        // this path). Returns true when it handled the capture so the caller skips its
+        // AudioSource branch.
+        internal static bool CaptureNativeResume(Contexts leaving)
+        {
+            if (leaving == null || !leaving.CanBeResumed) return false;
+            if (_nativeActiveContext == null
+                || !string.Equals(_nativeActiveContext, leaving.Context, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (CmmMixer.Instance != null
+                && CmmMixer.Instance.TryGetState(Interlocked.Read(ref _nativeVoiceId), out double pos, out _, out bool active) && active
+                && cacheMap.TryGetValue(leaving.Context, out ContextCache lc))
+            {
+                lc.resumePosition = (float)pos;
+                lc.lastLeftTime = Time.realtimeSinceStartup;
+                CMMConfig.D($"[CMM] Saved native resume for {leaving.Context}: {pos:F2}s");
+                return true;
+            }
+            return false;
+        }
+
+        // Native counterpart of PlayFromCache. SYNCHRONOUS and MAIN-THREAD: it does every
+        // Unity-touching step inline (file pick, loudness gain, resume calc, cache bookkeeping,
+        // volume) and then hands the reader-open + CmmMixer.Play to the background start worker
+        // (NativeStartWorker). Because all of this runs at trigger time — before any world
+        // load/unload freeze — the music starts even while the main thread is subsequently
+        // frozen. forcedFile (skip-to-specific) overrides the pick.
+        //
+        // Loudness change vs. the old coroutine: we no longer BLOCK the start on measurement.
+        // Blocking re-introduced a main-thread stall — the exact thing this path removes. We
+        // read the stored gain now (real for staged / menu-prewarmed tracks, which is the
+        // common case; 1.0 if a straggler isn't measured yet) and fire a non-blocking measure
+        // so it's correct next time.
+        internal void StartNativeContext(string contextName, bool isSameContextSwitchingToNextTrack,
+                                         int transitionId, string forcedFile)
+        {
+            _activeMusicCoroutine = null;   // native path owns no coroutine; teardown is by transitionId
+            if (transitionId != _transitionId) return;
+            Contexts ctx = GetContext(contextName);
+            if (ctx == null || !cacheMap.TryGetValue(contextName, out ContextCache cache)) return;
+
+            // Remember the voice of the context we're leaving so a quick flip back can reclaim
+            // its still-fading track (and so a stinger's ducked bed can be reclaimed after).
+            if (_nativeActiveContext != null
+                && !string.Equals(_nativeActiveContext, contextName, StringComparison.OrdinalIgnoreCase))
+            {
+                long leavingVid = Interlocked.Read(ref _nativeVoiceId);
+                if (leavingVid != 0) _recentNativeVoice[_nativeActiveContext] = leavingVid;
+            }
+
+            // ── C: reverse-fade reclaim ──────────────────────────────────────────
+            // A genuine cross-context re-entry (not a same-context track flip, not a forced
+            // skip, not a stinger) into a context whose voice is still audibly fading out:
+            // ramp that voice back to full instead of restarting the track from the top. Also
+            // reclaims the ducked bed when a stinger ends. Native analogue of PlayFromCache's
+            // reverse-fade reclaim.
+            if (CMMConfig.ReverseFadeReclaim
+                && !isSameContextSwitchingToNextTrack
+                && forcedFile == null
+                && !ctx.PlayOnce
+                && _recentNativeVoice.TryGetValue(contextName, out long reclaimId)
+                && CmmMixer.Instance != null
+                && CmmMixer.Instance.TryReclaim(reclaimId, ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration))
+            {
+                _recentNativeVoice.Remove(contextName);
+                _nativeActiveContext = contextName;
+                Interlocked.Exchange(ref _nativeVoiceId, reclaimId);
+                cache.lastLeftTime = -1f;            // active again; don't let staleness clear resume
+                CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, ctx.VolumeOverride);
+                CMMConfig.D($"[CMM] native: reverse-fade reclaim {contextName} (voice {reclaimId}).");
+
+                // Re-arm auto-advance for the reclaimed voice (its prior loop was cancelled by
+                // the transitionId bump).
+                if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
+                if (!ctx.Loop && !ctx.PlayOnce)
+                    _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(NativeTrackLoop(contextName, transitionId));
+                CMMPerf.EndTransition();
+                return;
+            }
+
+            // ── Resume decision (fresh switch-in only) ───────────────────────────
+            // A saved resume position belongs to the SPECIFIC track that was playing — it's
+            // meaningless for any other track. So when we resume, we must replay THAT exact
+            // file; otherwise the staged/random pick below would choose a different track in a
+            // multi-track context and inherit the old track's position (random track starting
+            // mid-way — the reported bug). Single-track contexts only ever had one file to land
+            // on, which is why they looked fine.
+            float startSeconds = 0f;
+            string resumeFile = null;
+            if (!isSameContextSwitchingToNextTrack && forcedFile == null
+                && ctx.CanBeResumed && cache.resumePosition > 0f
+                && !string.IsNullOrEmpty(cache.lastPlayedFile)
+                && !_invalidFiles.Contains(cache.lastPlayedFile))
+            {
+                float elapsed = Time.realtimeSinceStartup - cache.lastLeftTime;
+                if (elapsed < ctx.TimeUntilContextStale && File.Exists(cache.lastPlayedFile))
+                {
+                    resumeFile   = cache.lastPlayedFile;   // replay the exact track the position belongs to
+                    startSeconds = cache.resumePosition;
+                }
+                else cache.resumePosition = 0f;            // stale (or file gone) → fresh pick from 0
+            }
+
+            // ── Select the file ──
+            string file = forcedFile ?? resumeFile;
+            if (file == null)
+            {
+                if (!isSameContextSwitchingToNextTrack
+                    && cache.stagedFile != null && !_invalidFiles.Contains(cache.stagedFile))
+                    file = cache.stagedFile;        // pre-measured pin for a fresh switch-in
+                else
+                    file = PickNextFile(contextName, isSameContextSwitchingToNextTrack ? cache.lastPlayedFile : null);
+            }
+            cache.stagedFile = null;                // consume the pin; maintenance re-pins later
+
+            if (file == null)
+            {
+                CMMConfig.D($"[CMM] native: no file for {contextName} — fading to silence.");
+                StopNativeIfActive(CrossFadeDuration);
+                if (currentContext?.Context == contextName) { _pendingContext = null; currentContext = GetContext("Silence"); }
+                return;
+            }
+
+            // ── Loudness gain (non-blocking; see method header) ──
+            float trackGain = CMMConfig.LoudnessNormalizationEnabled ? LoudnessStore.GetTrackGain(file) : 1f;
+            if (CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(file))
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(file));
+
+            bool loop = ctx.Loop;
+            float fade;
+            if (ctx.PlayOnce) fade = 0.25f;
+            else if (isSameContextSwitchingToNextTrack) fade = Mathf.Max(0.25f, TrackTransitionFadeDuration);
+            else fade = ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration;
+
+            // ── Cache bookkeeping (main thread, before dispatch) ──
+            cache.previousPlayedFile = cache.lastPlayedFile;
+            cache.playingFile        = file;
+            cache.lastPlayedFile     = file;
+            cache.resumePosition     = 0f;
+            cache.lastLeftTime       = -1f;
+            _nativeActiveContext = contextName;
+            Interlocked.Exchange(ref _nativeVoiceId, 0);   // the worker sets the real id once Play succeeds
+            CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, ctx.VolumeOverride);
+
+            // Menu cold-start (A20): the vanilla title theme can already be playing when the mod
+            // loads (BackgroundMusicMono.Start() ran before our Start-postfix mute could catch it).
+            // The AudioSource path fades that leftover bed out from PlayFromCache, but native menu
+            // music never goes through PlayFromCache — so without this the vanilla theme keeps
+            // playing under our custom menu track. Fade it out here as our track takes over (no-op
+            // in-game, or when the bed is already muted/silent). Native menu music only runs when the
+            // Menu context HAS files, so this never silences vanilla without a custom track to replace it.
+            if (!inGame) FadeOutMenuVanillaIfAudible();
+
+            // A PlayOnce stinger (Spawn / Death / POI_Cleared) OVERRIDES the music underneath:
+            // the bed fades fully OUT, the stinger plays alone. After it ends the resolved context
+            // re-resolves on its own — POI_Cleared → ambient, Spawn → the zone. For Death this is
+            // what produces the wanted SILENCE between the death stinger and the respawn Spawn
+            // stinger: the bed is gone and the scan loop is dead-gated (playerIsDead) so nothing
+            // new resolves until respawn. duckTo = -1 = normal full crossfade-out (NOT a duck —
+            // ducking would swell the bed back when the stinger retires and play music in that gap).
+            // CmmMixer still supports ducking via Play(duckOthersTo>=0); we just don't ask for it.
+            float duckTo = -1f;
+
+            // ── Hand the open + Play to the start worker (survives a main-thread freeze) ──
+            EnsureNativeWorker();
+            var req = new NativeStartReq
+            {
+                Context = contextName, File = file, TransitionId = transitionId,
+                StartSeconds = startSeconds, Fade = fade, Loop = loop, TrackGain = trackGain,
+                DuckOthersTo = duckTo,
+                // Only a genuine context change may flush a deep cushion. A same-context Next/Prev
+                // must NOT — flushing teleports the outgoing track being crossfaded (jump + swell).
+                SnapTight = !isSameContextSwitchingToNextTrack,
+            };
+            lock (_natQueueLock) _natQueue.Enqueue(req);
+            _natSignal.Set();
+
+            CMMConfig.D($"[CMM] native: dispatched {Path.GetFileName(file)} for {contextName} " +
+                    $"(fade {fade:F1}s, loop {loop}, gain {trackGain:F2}, start {startSeconds:F1}s" +
+                    $"{(duckTo >= 0f ? $", duck→{duckTo:F2}" : "")})");
+
+            // ── Auto-advance (non-loop, non-stinger): crossfade to the next pick at end ──
+            if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
+            if (!loop && !ctx.PlayOnce)
+                _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(NativeTrackLoop(contextName, transitionId));
+
+            CMMPerf.EndTransition();
+        }
+
+        // Polls the active voice and, at the transition lead window (or once it has
+        // ended), crossfades in the context's next track — the native equivalent of
+        // TrackEndWatcher + ScheduleNextCacheLoad. Reads _nativeVoiceId (set by the start
+        // worker) each tick rather than a captured id, so it works even though the voice
+        // doesn't exist yet at dispatch. Cancelled by a _transitionId bump (any context
+        // switch) or the mixer moving off this context.
+        internal IEnumerator NativeTrackLoop(string contextName, int transitionId)
+        {
+            float lead = Mathf.Max(TrackTransitionFadeDuration, 0.5f);
+            while (true)
+            {
+                if (transitionId != _transitionId || _nativeActiveContext != contextName) yield break;
+                long vid = Interlocked.Read(ref _nativeVoiceId);
+                if (vid != 0)                                                // worker has committed the voice
+                {
+                    if (CmmMixer.Instance == null) break;
+                    if (!CmmMixer.Instance.TryGetState(vid, out double posSec, out double lenSec, out bool active) || !active)
+                        break;                                              // voice gone (ended) → advance now
+                    // Cap the pre-roll lead to HALF the track length: a track SHORTER than the lead
+                    // window (e.g. a few-second .wav) otherwise satisfies remain<=lead from the very
+                    // first frame and is advanced the instant it starts — the "press Next → it flashes
+                    // then jumps to another track" double-dispatch. Unknown length (lenSec<=0, e.g. raw
+                    // ADTS) keeps the full lead and relies on the active=false EOF check above.
+                    if (lenSec > 0)
+                    {
+                        double effLead = Math.Min(lead, lenSec * 0.5);
+                        if (lenSec - posSec <= effLead) break;              // near end → advance
+                    }
+                }
+                yield return new WaitForSeconds(TrackEndPollInterval);
+            }
+            if (transitionId != _transitionId || _nativeActiveContext != contextName) yield break;
+            int newId = ++_transitionId;
+            _scheduleHandledTransition = false;
+            StartNativeContext(contextName, true, newId, null);
+        }
+
         private static string PickNextFile(string contextName, string avoidFile)
         {
             Contexts ctx = GetContext(contextName);

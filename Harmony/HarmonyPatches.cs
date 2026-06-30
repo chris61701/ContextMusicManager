@@ -71,7 +71,11 @@ namespace CMM
             {
                 CMMConfig.D("[CMM] Entering game world");
                 ContextMusicManager.inGame = true;
-                ContextMusicManager.FadeToSilence();
+                ContextMusicManager._menuMusicHold = false;   // back in-game; clear any stuck exit hold
+                // Fade the menu music out GRACEFULLY (≈5s) as the world comes up — CONSUMER-side
+                // (output gain) so it's audible through the deep load cushion — tailing into the
+                // Spawn stinger, which reuses the same device and snaps the gain back to full.
+                ContextMusicManager.FadeMenuOutputForGameStart(ContextMusicManager.MenuTransitionFade);
                 ContextMusicManager.OnEnterGame();
             }
 
@@ -172,7 +176,10 @@ namespace CMM
         {
             CachedInstance = __instance;
             if (ContextMusicManager.vanillaIsActive) return true;
-            if (!ContextMusicManager.inGame)
+            // _menuMusicHold suppresses this auto-trigger during the game-exit fade, so the menu
+            // music doesn't start until the game music has fully faded out (returns false either
+            // way = vanilla menu music stays muted, leaving the exit fade audible over silence).
+            if (!ContextMusicManager.inGame && !ContextMusicManager._menuMusicHold)
                 ContextMusicManager.SendContextUpdate("Menu");
             return false;
         }
@@ -210,9 +217,14 @@ namespace CMM
         {
             ContextMusicManager.inGame = false;
             ContextMusicManager.playerIsDead = true;
+            // Safety: clear the loading flag on the way back to the menu in case StartGame
+            // armed it but a spawn (which clears it) never happened — otherwise the menu
+            // would stay deep-buffered. The idle menu wants the tight, responsive cushion.
+            ContextMusicManager._gameIsLoading = false;
             ContextMusicManager._contextStack.Clear();
             ContextMusicManager._pendingContext = "Silence";
             ScriptHost.Reset();   // clear the Lua script's cross-tick state on world-unload
+            ContextResolver.ResetPoiClearState();   // forget per-world cleared-POI markers
             // Fade the game music out, THEN release caches and bring up the menu music
             // (FadeOutAndCleanup ends with SendContextUpdate("Menu")), instead of the
             // old hard-cut CleanupAllCaches() + immediate Menu switch.
@@ -227,6 +239,11 @@ namespace CMM
         static void Postfix()
         {
             ContextMusicManager._gameIsLoading = false;
+            // Clear the deep cushion SYNCHRONOUSLY here, not via the 0.1s-polled VolumeSyncLoop:
+            // the Spawn stinger is dispatched a few ms below, and if DeepBuffer were still true the
+            // mixer would bank a deep cushion behind the stinger and then flush it on the falling
+            // edge once the poll caught up — clipping the stinger's start ("Spawn plays offset").
+            CmmMixer.DeepBuffer = false;
             CMMConfig.D("[CMM] Player respawned");
             ContextMusicManager._contextStack.Clear();
 
@@ -262,7 +279,12 @@ namespace CMM
                     });
                 }
                 ContextMusicManager._contextStack.Sort((a, b) => b.Priority.CompareTo(a.Priority));
-                ContextMusicManager.SendContextUpdate("Spawn");
+                // Force Spawn through: after a death, currentContext is still the Death stinger
+                // (priority 100, a lingering PlayOnce), so a normal SendContextUpdate("Spawn")
+                // (Spawn priority 45) would be REJECTED as not higher-priority — that's why the
+                // Spawn stinger only fired on initial entry (from low-priority Menu), not on a
+                // death respawn. bypassPriority=0 drops the bar so the forced Spawn always takes.
+                ContextMusicManager.SendContextUpdate("Spawn", 0);
                 ContextMusicManager.playerIsDead = false;
             }
             else
@@ -354,6 +376,34 @@ namespace CMM
             CMMConfig.D("[CMM] Game is loading, from LoadChecker.");
             ContextMusicManager._gameIsLoading = true;
             return true;
+        }
+    }
+
+    // Menu → game START (single-player or client). This fires ~30s BEFORE World.LoadWorld
+    // and, crucially, before the heavy asset load/unload freeze that drains the native
+    // output ring. We flag _gameIsLoading here so the mixer banks its DEEP output cushion
+    // ahead of that freeze — reacting at LoadWorld is too late (the ring already underran,
+    // a brief stutter). Cleared in PlayerRespawn (in-game) and Patch_GameEnded (back to menu).
+    //
+    // GameManager.StartGame(bool) exists on 3.0+ but NOT on A20/A21. Resolving the
+    // target via TargetMethod() + Prepare() (instead of an explicit attribute target)
+    // lets Harmony skip this patch on the older alphas rather than throwing
+    // "Undefined target method", which would abort PatchAll and fail the whole mod.
+    // The early deep-buffer arm is a 3.0 native-mixer optimization, so skipping it on
+    // A20/A21 is harmless (LoadChecker still flags loading on those versions).
+    [HarmonyPatch]
+    public class GameStartChecker
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(GameManager), "StartGame", new Type[] { typeof(bool) });
+
+        static bool Prepare() =>
+            AccessTools.Method(typeof(GameManager), "StartGame", new Type[] { typeof(bool) }) != null;
+
+        static void Prefix()
+        {
+            CMMConfig.D("[CMM] Game is loading, from StartGame (early deep-buffer arm).");
+            ContextMusicManager._gameIsLoading = true;
         }
     }
 }

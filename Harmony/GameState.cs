@@ -41,10 +41,25 @@ namespace CMM
 
         public bool   NearHome;
 
+        // Living party members / ACL friends within CMMConfig.PlayerDetectRange.
+        // Multiplayer only (0 in single-player). Drives combat-intensity scaling —
+        // fighting alongside a squad escalates the combat tier (see context.lua).
+        public int    AlliesNearby;
+
         public bool   InPoi;
         public string PoiName;
         public int    PoiTier;
         public int    PoiEnemiesRemaining;
+        // True for one tick when the quest system reports this POI's sleepers cleared
+        // (the only authoritative clear signal a multiplayer client receives). Drives
+        // the POI_Cleared stinger explicitly.
+        public bool   PoiQuestCleared;
+        // When true, POI_Cleared must come ONLY from PoiQuestCleared — the script must
+        // NOT derive it from the infested→0 entity-count transition. Set on the MP
+        // client fallback (where the count bounces room-to-room and can't tell a real
+        // clear from an un-triggered far room); false on the accurate single-player /
+        // host path, which keeps deriving POI_Cleared from real sleeper-volume state.
+        public bool   PoiClearFromQuestOnly;
 
         // Reused buffer; cleared and refilled each BuildSnapshot. Holds pooled
         // EnemyInfo instances (see ContextResolver), so iteration is alloc-free.

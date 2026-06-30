@@ -121,6 +121,18 @@ namespace CMM
             if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
             if (_activeMusicCoroutine != null) { CMM_CoRoutines.StopCoroutine(_activeMusicCoroutine); _activeMusicCoroutine = null; }
 
+            // Native path: skip = a same-context next-track on the mixer (forcedFile for
+            // prev). Bypasses the AudioClip preload machinery entirely.
+            if (CMMConfig.NativeAudioOutput && ContextHasFiles(contextName))
+            {
+                int natId = ++_transitionId;
+                _scheduleHandledTransition = false;
+                Log.Out($"[CMM] {(forcedFile != null ? "Prev" : "Next")} track [{contextName}] (native)");
+                StartNativeContext(contextName, true, natId, forcedFile);
+                _skipInProgress = false;
+                yield break;
+            }
+
             ContextCache cache = cacheMap[contextName];
 
             // LoadNextClip honors the menu native / streaming split and updates
@@ -197,6 +209,17 @@ namespace CMM
             }
 
             UpdateVolume();
+
+            // UpdateVolume only touches the AudioSource channel — silent on the native path, where the
+            // per-track gain was baked into the live voice at Play time. Push the new trim straight to
+            // that voice so the change is audible immediately on the track you're listening to.
+            if (CMMConfig.NativeAudioOutput
+                && string.Equals(_nativeActiveContext, ctxName, System.StringComparison.OrdinalIgnoreCase))
+            {
+                long vid = System.Threading.Interlocked.Read(ref _nativeVoiceId);
+                if (vid != 0)
+                    CmmMixer.Instance?.SetVoiceTrackGain(vid, LoudnessStore.GetTrackGain(cache.playingFile));
+            }
 
             string note = CMMConfig.LoudnessNormalizationEnabled
                 ? ""

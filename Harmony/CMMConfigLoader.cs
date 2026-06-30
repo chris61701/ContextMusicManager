@@ -38,6 +38,7 @@ namespace CMM
                 CMMConfig.LoudnessMaxBoostDb           = ReadFloat(root, "LoudnessMaxBoostDb",           CMMConfig.LoudnessMaxBoostDb);
 
                 CMMConfig.EnemyDetectRange                = ReadFloat(root, "EnemyDetectRange",                 CMMConfig.EnemyDetectRange);
+                CMMConfig.PlayerDetectRange                = ReadFloat(root, "PlayerDetectRange",                CMMConfig.PlayerDetectRange);
                 CMMConfig.HomeDetectRange                  = ReadFloat(root, "HomeDetectRange",                  CMMConfig.HomeDetectRange);
                 CMMConfig.PlayerHealthDangerThresholdPercent = ReadFloat(root, "PlayerHealthDangerThresholdPercent", CMMConfig.PlayerHealthDangerThresholdPercent);
                 CMMConfig.CombatExitDelay                  = ReadFloat(root, "CombatExitDelay",                  CMMConfig.CombatExitDelay);
@@ -73,6 +74,10 @@ namespace CMM
                 CMMConfig.KeyVolumeUp   = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeUp",   CMMConfig.KeyVolumeUp);
                 CMMConfig.KeyVolumeDown = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeDown", CMMConfig.KeyVolumeDown);
                 CMMConfig.UserTrimStep  = ReadFloat(root, "UserTrimStep", CMMConfig.UserTrimStep);
+
+                CMMConfig.NativeAudioOutput = ReadBool(root, "NativeAudioOutput", CMMConfig.NativeAudioOutput);
+                CMMConfig.NativeOutputRingMs = ReadInt (root, "NativeOutputRingMs", CMMConfig.NativeOutputRingMs);
+                CMMConfig.NativeOutputMaxRingMs = ReadInt (root, "NativeOutputMaxRingMs", CMMConfig.NativeOutputMaxRingMs);
 
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);

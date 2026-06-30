@@ -24,9 +24,13 @@ namespace CMM
         private const string Desc = "Context Music Manager controls";
         private const string Help =
             "Usage:\n" +
-            "  cmm rescan <context>  - re-scan one subfolder context now\n" +
-            "  cmm rescan all        - re-scan every subfolder context now\n" +
-            "  cmm rescan            - same as 'all'";
+            "  cmm rescan <context>     - re-scan one subfolder context now\n" +
+            "  cmm rescan all           - re-scan every subfolder context now\n" +
+            "  cmm rescan               - same as 'all'\n" +
+            "  cmm nativeplay <context> - (experimental) play a track via CMM's own\n" +
+            "                             audio output, off Unity's threads\n" +
+            "  cmm nativenext           - crossfade to another track in that context\n" +
+            "  cmm nativestop           - stop the native-output player";
 
 #if GV_A20
         // A20: PascalCase, public abstract.
@@ -54,6 +58,22 @@ namespace CMM
             {
                 string target = _params.Count > 1 ? _params[1] : "all";
                 Out(ContextMusicManager.RescanCommand(target));
+                return;
+            }
+            if (sub == "nativeplay")
+            {
+                if (_params.Count < 2) { Out("usage: cmm nativeplay <context>"); return; }
+                Out(ContextMusicManager.NativeDebugPlay(_params[1]));
+                return;
+            }
+            if (sub == "nativenext")
+            {
+                Out(ContextMusicManager.NativeDebugNext());
+                return;
+            }
+            if (sub == "nativestop")
+            {
+                Out(ContextMusicManager.NativeDebugStop());
                 return;
             }
 

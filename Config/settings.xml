@@ -49,6 +49,10 @@
   <!-- ── Context detection tuning ───────────────────────────────────────
        Max distance (game units) an enemy is counted toward combat/tension state. -->
   <EnemyDetectRange>30</EnemyDetectRange>
+  <!-- Multiplayer: max distance (game units) another player counts as "with you".
+       An enemy aggroed onto a party member / friend within this range counts as your
+       combat, and allies within it scale combat intensity. No effect in single-player. -->
+  <PlayerDetectRange>30</PlayerDetectRange>
   <!-- Distance (game units) from your bedroll or land claim that counts as "home". -->
   <HomeDetectRange>70</HomeDetectRange>
   <!-- Health fraction (0.0–1.0) below which combat escalates to Low_Health_Panic. -->
@@ -132,6 +136,25 @@
   <KeyVolumeDown>DownArrow</KeyVolumeDown>
   <!-- Per-press change to the current track's volume trim (linear factor). -->
   <UserTrimStep>0.1</UserTrimStep>
+
+  <!-- ── Native audio output (EXPERIMENTAL) ─────────────────────────────
+       When true, music plays through CMM's OWN audio output + mixer thread
+       (miniaudio, in CMM_Decoder.dll) instead of Unity's AudioSource — so
+       decode, mixing and output all run on threads CMM owns, off Unity's main
+       and audio threads. It plays to the same default device and shares the
+       game's music-volume slider. Default false keeps the normal Unity path.
+       NOTE (prototype): currently only driven by the console commands
+       'cmm nativeplay <context>' / 'cmm nativenext' / 'cmm nativestop'; it does
+       not yet replace normal context playback.
+         NativeOutputRingMs – tight output cushion (ms) kept in normal play; also
+                              the volume/crossfade latency, so kept small (~200ms).
+         NativeOutputMaxRingMs – ceiling (ms) the cushion can ADAPTIVELY grow to
+                              when the CPU is starved (world-gen / other apps) or
+                              while loading, then snaps back tight on a context
+                              change. 15000 ≈ 5.8 MB native ring. -->
+  <NativeAudioOutput>true</NativeAudioOutput>
+  <NativeOutputRingMs>200</NativeOutputRingMs>
+  <NativeOutputMaxRingMs>15000</NativeOutputMaxRingMs>
 
   <!-- Set to false to silence verbose [CMM] console output.
        Log.Warning and Log.Error always emit regardless of this flag. -->

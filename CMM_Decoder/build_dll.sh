@@ -35,6 +35,7 @@ INC=(
   -Ithird_party/fdk-aac/libAACdec/include   # aacdecoder_lib.h
   -Ithird_party/fdk-aac/libSYS/include      # FDK_audio.h / machine_type.h
   -Ithird_party/minimp4        # minimp4.h
+  -Ithird_party/miniaudio      # miniaudio.h (audio OUTPUT)
   -I.                          # CMM_Decoder.h
 )
 
@@ -46,6 +47,8 @@ SRC=(
   dr_wav_impl.c
   stb_vorbis_impl.c
   minimp4_impl.c
+  miniaudio_impl.c             # the one MINIAUDIO_IMPLEMENTATION TU
+  cmm_out.c                    # cmm_out_* playback shim
   third_party/opusfile/src/info.c
   third_party/opusfile/src/internal.c
   third_party/opusfile/src/opusfile.c
@@ -57,6 +60,8 @@ SRC=(
 mkdir -p dist
 "$GCC" -O2 -shared -o "$OUT" \
   -DOP_DISABLE_HTTP -DNDEBUG \
+  -DMA_NO_DECODING -DMA_NO_ENCODING -DMA_NO_GENERATION \
+  -DMA_NO_RESOURCE_MANAGER -DMA_NO_NODE_GRAPH \
   "${INC[@]}" \
   "${SRC[@]}" \
   build/fdk-aac/libfdk-aac.a build/opus/libopus.a build/ogg/libogg.a \

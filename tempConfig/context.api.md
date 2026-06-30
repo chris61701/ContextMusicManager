@@ -43,6 +43,7 @@ persists between calls; `reset()` is your hook to clear it when a world unloads.
 | `traderName` | string/nil | lowercased name, nil unless inside an **open** trader |
 | `biome` | string/nil | raw name (`"desert"`); **nil = chunk not loaded yet** |
 | `nearHome` | bool | near bedroll or a land claim |
+| `alliesNearby` | number | living party members / friends within `cfg.playerDetectRange` (multiplayer only; 0 in single-player) |
 | `inPoi` | bool | |
 | `poiName` | string | stable POI identifier |
 | `poiTier` | number | difficulty tier (0–5; else no `_Tn` suffix) |
@@ -55,8 +56,8 @@ Each `enemies[i]`: `{ className, distance, isAlert, isTargetingPlayer }`.
 
 ## `cfg` (read-only, from settings.xml)
 
-`enemyDetectRange`, `homeDetectRange`, `healthDangerPct`, `combatExitDelay`,
-`combatCooldown`, `combatLowThreshold`, `combatHighThreshold`.
+`enemyDetectRange`, `playerDetectRange`, `homeDetectRange`, `healthDangerPct`,
+`combatExitDelay`, `combatCooldown`, `combatLowThreshold`, `combatHighThreshold`.
 
 > The combat **threat weights/tiers** are no longer read from settings.xml's
 > `<CombatThreat>` when a script is active — they live in `context.lua` (see the

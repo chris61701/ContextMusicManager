@@ -57,6 +57,15 @@ local STATE_MULTS = {                  -- class-name substring → multiplier
   { "feral", 1.5 }, { "radiated", 2.0 }, { "charged", 2.75 }, { "infernal", 3.25 },
 }
 
+-- Multiplayer combat-intensity scaling: fighting shoulder to shoulder with a squad
+-- is a bigger musical moment than soloing the same swarm. Each living party member /
+-- friend within cfg.playerDetectRange (gameState.alliesNearby) adds this much to the
+-- threat score — but ONLY once a real fight is already underway (so standing next to
+-- friends out of combat never starts combat music). 0 disables the effect. Calibrated
+-- in the same units as TYPE_WEIGHTS (a walker ≈ 1.0), so 2.0 ≈ "each ally counts like
+-- a couple extra zombies" toward the next combat tier. Single-player: always 0 allies.
+local ALLY_COMBAT_BONUS = 2.0
+
 -- ── Raw game strings → context tokens ───────────────────────────────────────
 -- Left side = what the game reports (lowercased); right side = the context name
 -- CMM looks up in contexts.xml. Add or rename freely to match your own folders.
@@ -147,6 +156,10 @@ function resolve(gameState, cfg)
   for _, e in ipairs(gameState.enemies) do
     if e.isTargetingPlayer then score = score + scoreEnemy(e.className) end
   end
+  -- Squad bonus: only escalate an already-live fight, never start one from allies alone.
+  if score > 0 and gameState.alliesNearby > 0 then
+    score = score + gameState.alliesNearby * ALLY_COMBAT_BONUS
+  end
   local instantTier  = tierForScore(score)
   local windowLapsed = (now - memory.lastAggro) > cfg.combatExitDelay
 
@@ -200,11 +213,23 @@ function resolve(gameState, cfg)
   if gameState.inPoi then
     local tier = gameState.poiTier
     local suffix = (tier >= 0 and tier <= 5) and ("_T" .. tier) or ""
+    -- POI_Cleared sources:
+    --   • poiQuestCleared — the authoritative one-shot from the quest system (the only
+    --     clear signal a multiplayer client gets; fires once the clear part of a POI
+    --     quest completes). Always honored.
+    --   • the infested→0 transition — derived locally from real sleeper state. Only used
+    --     when poiClearFromQuestOnly is false (single-player / host). On a MP client the
+    --     entity count bounces room-to-room and can't tell a real clear from an
+    --     un-triggered far room, so that path is suppressed there.
+    if gameState.poiQuestCleared then add(active, "POI_Cleared") end
     if gameState.poiEnemiesRemaining > 0 then
       memory.wasInfested = true
       add(active, "POI_Infested" .. suffix)
     else
-      if memory.wasInfested and gameState.poiName == memory.lastPoi then add(active, "POI_Cleared") end
+      if not gameState.poiClearFromQuestOnly
+         and memory.wasInfested and gameState.poiName == memory.lastPoi then
+        add(active, "POI_Cleared")
+      end
       memory.wasInfested = false
       add(active, "POI" .. suffix)
     end

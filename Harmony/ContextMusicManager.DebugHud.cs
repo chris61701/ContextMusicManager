@@ -94,9 +94,11 @@ namespace CMM
 
             IReadOnlyList<string> resolved = ScriptHost.LastContexts;
 
-            // The context the listener actually hears (the channel's context), falling
-            // back to the resolver's logical pick before audio has settled.
-            string audible = ActiveChannelContext;
+            // The context the listener actually hears. When the native mixer owns output it's
+            // the native context (the AudioSource channels are idle); otherwise the channel's
+            // context, falling back to the resolver's logical pick before audio has settled.
+            string audible = _nativeActiveContext;
+            if (string.IsNullOrEmpty(audible)) audible = ActiveChannelContext;
             if (string.IsNullOrEmpty(audible)) audible = currentContext?.Context;
 
             cacheMap.TryGetValue(audible ?? "", out ContextCache cache);

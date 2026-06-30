@@ -329,10 +329,13 @@ namespace CMM
             t["traderName"]  = gameState.TraderName;
             t["biome"]       = gameState.Biome;
             t["nearHome"]    = gameState.NearHome;
+            t["alliesNearby"] = gameState.AlliesNearby;
             t["inPoi"]       = gameState.InPoi;
             t["poiName"]     = gameState.PoiName;
             t["poiTier"]     = gameState.PoiTier;
             t["poiEnemiesRemaining"] = gameState.PoiEnemiesRemaining;
+            t["poiQuestCleared"]     = gameState.PoiQuestCleared;
+            t["poiClearFromQuestOnly"] = gameState.PoiClearFromQuestOnly;
 
             // Fresh enemies array each tick — the count varies, and the per-enemy
             // tables are tiny; building them is well within the sub-Hz scan budget.
@@ -354,6 +357,7 @@ namespace CMM
         {
             Table c = _cfgTable;
             c["enemyDetectRange"]   = CMMConfig.EnemyDetectRange;
+            c["playerDetectRange"]  = CMMConfig.PlayerDetectRange;
             c["homeDetectRange"]    = CMMConfig.HomeDetectRange;
             c["healthDangerPct"]    = CMMConfig.PlayerHealthDangerThresholdPercent;
             c["combatExitDelay"]    = CMMConfig.CombatExitDelay;

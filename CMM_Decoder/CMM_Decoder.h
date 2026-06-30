@@ -41,8 +41,18 @@ typedef struct cmm_decoder cmm_decoder;
  *   v5: + MP3 (dr_mp3) and WAV/AIFF (dr_wav) — the last managed-decoder holdouts.
  *   v6: + AAC (fdk-aac + minimp4) — AAC-LC / HE-AAC in MP4/M4A or raw ADTS.
  *   v7: + container (Matroska/WebM) — demux one audio track and remux it into an
- *        existing backend (Opus/Vorbis→Ogg, AAC→ADTS, MP3 raw, FLAC native). */
-#define CMM_DECODER_ABI 7
+ *        existing backend (Opus/Vorbis→Ogg, AAC→ADTS, MP3 raw, FLAC native).
+ *   v8: + audio OUTPUT (miniaudio) — cmm_out_* plays interleaved-f32 PCM straight
+ *        to the OS default endpoint, independent of Unity's audio engine.
+ *   v9: + format converter (miniaudio) — cmm_dc_* resamples + channel-maps a voice
+ *        to the mixer's fixed 48k-stereo bus so any-rate tracks crossfade.
+ *   v10:+ cmm_out_queued (live cushion depth) + cmm_out_reset (consumer-side flush)
+ *        for the adaptive output ring (grow under CPU starvation, snap tight on a
+ *        context change).
+ *   v11:+ cmm_out_set_gain (consumer-side output gain ramp so menu↔game transition fades
+ *        are heard in real output time, not buried behind the ring cushion) + cmm_out_reset_gain
+ *        (flush + restore gain atomically so restarting after a fade can't bleed the old track). */
+#define CMM_DECODER_ABI 11
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -221,6 +231,77 @@ CMM_API int cmm_container_seek(cmm_decoder* d, long long frame);
 
 /* Free the decoder (and the inner backend it owns). NULL-safe. */
 CMM_API void cmm_container_close(cmm_decoder* d);
+
+/* ── Audio output (miniaudio) ─────────────────────────────────────────────
+ * Plays interleaved 32-bit-float PCM to the OS DEFAULT output endpoint in shared
+ * mode — i.e. through the same device, and under the same Windows volume-mixer
+ * entry, as the host process's other audio (so CMM shares 7 Days' volume slider
+ * rather than appearing separately). This is the playback counterpart to the
+ * decoders above: the managed mixer thread decodes/mixes/gains into f32 frames
+ * and pushes them here, bypassing Unity's AudioSource/AudioClip entirely.
+ *
+ * Threading: a handle backs a single-producer/single-consumer ring buffer. The
+ * caller's mixer thread is the only writer (cmm_out_write); miniaudio's realtime
+ * audio thread is the only reader. Do NOT call cmm_out_write from two threads.
+ * cmm_out_open starts the device immediately (it emits silence until fed). */
+typedef struct cmm_out cmm_out;
+
+/* Open + start a playback device. `ringFrames` is the ring capacity in frames
+ * (<=0 selects ~200ms at the given rate). Returns NULL on failure with *err set
+ * to the miniaudio ma_result, or a small negative for bad args / OOM. */
+CMM_API cmm_out* cmm_out_open(int sampleRate, int channels, int ringFrames, int* err);
+
+/* Enqueue up to `frames` interleaved-f32 frames (data holds frames*channels
+ * floats). Non-blocking: returns frames actually accepted; retry the remainder
+ * after a short sleep when the ring is full. */
+CMM_API int cmm_out_write(cmm_out* o, const float* data, int frames);
+
+/* Frames of free space in the ring right now (lets the producer pace itself). */
+CMM_API int cmm_out_avail(cmm_out* o);
+
+/* Frames currently queued for playback — the live cushion / output latency. The
+ * producer targets a fill level from this rather than always topping the ring off. */
+CMM_API int cmm_out_queued(cmm_out* o);
+
+/* Request a flush: the next audio callback discards all queued frames, snapping the
+ * cushion to empty (then it refills tight). Only raises a flag — safe from the
+ * producer/control thread; the actual discard happens on the callback. */
+CMM_API void cmm_out_reset(cmm_out* o);
+
+/* Set the consumer-side output gain (0..1), optionally ramped over rampFrames output
+ * frames (<=0 snaps). Applied by the audio callback, so a transition fade is heard in
+ * real output time regardless of cushion depth / producer starvation. */
+CMM_API void cmm_out_set_gain(cmm_out* o, float target, int rampFrames);
+
+/* Flush the queued (stale) frames AND restore the output gain to `target` atomically inside
+ * the callback — use when restarting music after a fade so no stale full-volume frame bleeds
+ * through at the restored gain. */
+CMM_API void cmm_out_reset_gain(cmm_out* o, float target);
+
+/* Stop the device and free the handle. NULL-safe. */
+CMM_API void cmm_out_close(cmm_out* o);
+
+/* ── Format converter (resample + channel map) ────────────────────────────
+ * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
+ * converter). The mixer gives each voice whose native format differs from the
+ * 48k-stereo bus one of these, feeds it decoded input frames, and pulls bus-
+ * format output frames — so tracks at any sample rate mix and crossfade on a
+ * single fixed bus instead of forcing a device reopen on every rate change. */
+typedef struct cmm_dc cmm_dc;
+
+/* Open a converter from (inRate,inChannels) to (outRate,outChannels). f32 both
+ * ends. Returns NULL on failure with *err set (ma_result, or small negative). */
+CMM_API cmm_dc* cmm_dc_open(int inRate, int inChannels, int outRate, int outChannels, int* err);
+
+/* Convert: consume up to inFrames input frames, produce up to outCap output
+ * frames. *inConsumed / *outWritten report what actually happened (the converter
+ * buffers internally, so neither need equal the request). inFrames=0 drains the
+ * tail at end-of-stream. Returns 0 on success, <0 on error. */
+CMM_API int cmm_dc_process(cmm_dc* c, const float* in, long long inFrames, long long* inConsumed,
+                           float* out, long long outCap, long long* outWritten);
+
+/* Free the converter. NULL-safe. */
+CMM_API void cmm_dc_close(cmm_dc* c);
 
 #ifdef __cplusplus
 }
