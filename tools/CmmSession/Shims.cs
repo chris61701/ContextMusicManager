@@ -28,10 +28,23 @@ namespace CMM
         public static int   CombatLowEnemyThreshold = 1;
         public static int   CombatHighEnemyThreshold = 4;
         public static float EnemyDetectRange = 30f;
+        public static float PlayerDetectRange = 30f;
         public static float HomeDetectRange = 70f;
         public static float PlayerHealthDangerThresholdPercent = 0.30f;
         public static float CombatExitDelay = 2f;
         public static float CombatCooldown = 10f;
+    }
+
+    // No-op stand-in for the real CMMPerf (Harmony/CMMPerf.cs), which ScriptHost wraps its
+    // marshal/Lua-call spans in. The harness does its own per-phase timing + allocation
+    // accounting in Program.cs, so these spans must be inert here — and the real CMMPerf
+    // pulls in CMMConfig.PerfTiming + a Unity-side dump path we don't want linked. Keep the
+    // Phase enum in sync with CMMPerf.cs only insofar as ScriptHost references its members.
+    internal static class CMMPerf
+    {
+        public enum Phase { ScanPoll, ScanResolve, ScanGate, ScanMarshal, ScanLuaCall, COUNT }
+        public readonly struct Scope : IDisposable { public void Dispose() { } }
+        public static Scope Measure(Phase phase) => new Scope();
     }
 
     internal static class Log
