@@ -133,7 +133,6 @@ namespace CMM
             CMM_CoRoutines = CMM_Audio_Object.AddComponent<CoRoutine>();
             CMM_CoRoutines.StartCoroutine(Instance.ContextScanLoop());
             CMM_CoRoutines.StartCoroutine(Instance.StalenessCheckLoop());
-            CMM_CoRoutines.StartCoroutine(Instance.FileWatchLoop());
             CMM_CoRoutines.StartCoroutine(Instance.PresenceScanLoop());
             CMM_CoRoutines.StartCoroutine(Instance.RecursiveCrawlLoop());
             CMM_CoRoutines.StartCoroutine(Instance.VolumeSyncLoop());
@@ -160,12 +159,19 @@ namespace CMM
                 // back to the main thread (see ConfigWatchTick). Replaces ConfigWatchLoop.
                 ConfigWatchInit();
                 CmmScheduler.Every(2.0, ConfigWatchTick, "config-watch");
+                // Music-folder watch, off the frame loop: the directory-signature probe +
+                // active-track ping run on the scheduler thread and only an actual change
+                // marshals its reaction (hot-swap / re-resolve) back to the main thread, so
+                // a file edit is picked up even mid-freeze. Replaces FileWatchLoop.
+                FileWatchInit();
+                CmmScheduler.Every(2.0, FileWatchTick, "file-watch");
                 CmmScheduler.Start();
             }
             else
             {
                 CMM_CoRoutines.StartCoroutine(Instance.LoudnessSaveLoop());
                 CMM_CoRoutines.StartCoroutine(Instance.ConfigWatchLoop());
+                CMM_CoRoutines.StartCoroutine(Instance.FileWatchLoop());
             }
 
             // Follow OS audio-device changes (headset plugged/unplugged, default endpoint
@@ -1048,6 +1054,181 @@ namespace CMM
                     SendContextUpdate(top, 0);
                 }
             }
+        }
+
+        // ── Off-frame-loop file watch (NativeScheduler) ──────────────────────
+        // Same idea as the config watch: the cheap detection (folder write-time signature
+        // + the active track's File.Exists ping) runs on the scheduler thread, and only a
+        // context that ACTUALLY changed marshals its reaction back to the main thread. So
+        // file edits are still picked up while Unity's main thread is frozen (world load/
+        // unload) and the per-frame `while(!done) yield` busy-poll is gone. Mirrors
+        // FileWatchLoop, which stays the NativeScheduler-off fallback.
+        //
+        // The watch SET is built on the main thread each tick (it reads the lock-free
+        // resolver state — current/stack/fallback chains/PlayOnce/Menu) via a single
+        // blocking Send; that closure does no IO, so it does not forfeit freeze-survival
+        // for the stat/scan work that follows it off-thread.
+        private sealed class FileWatchDescriptor
+        {
+            public string ContextName;
+            public string Dir;
+            public bool   IncludeSub;
+            public string PlayingFile;      // active context only (else null) — the O(1) ping target
+            public bool   IsActiveContext;
+            public int    SnapshotLength;   // for the empty→filled "previouslyEmpty" gate
+        }
+
+        private const double FwBlacklistRetryInterval = 30.0;   // see FileWatchLoop's BlacklistRetryInterval
+        private const double FwSignatureFreshnessWindow = 6.0;  // see FileWatchLoop's SignatureFreshnessWindow
+
+        // Scheduler-owned: only ever touched on the scheduler thread, never the main thread,
+        // so they need no lock and stay independent of the coroutine fallback's own copies.
+        private static readonly Dictionary<string, DateTime> _fwLastWriteTimes =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static readonly System.Diagnostics.Stopwatch _fwClock = System.Diagnostics.Stopwatch.StartNew();
+        private static double _fwLastBlacklistRetry;
+
+        internal static void FileWatchInit()
+        {
+            _fwLastWriteTimes.Clear();
+            _fwLastBlacklistRetry = -FwBlacklistRetryInterval;   // allow the first retry sweep immediately
+        }
+
+        // MAIN THREAD ONLY (run inside the tick's Send). Reproduces FileWatchLoop's
+        // top-of-tick guards + watch-set construction, capturing per-context only the
+        // handful of values the off-thread stat/scan needs. Empty list = watch nothing.
+        private static List<FileWatchDescriptor> BuildFileWatchDescriptors()
+        {
+            var result = new List<FileWatchDescriptor>();
+            if (currentContext == null) return result;
+            if (!inGame && currentContext.Context != "Menu" && currentContext.Context != "Ambient"
+                && currentContext.Context != "Silence" && currentContext.Context != "Vanilla") return result;
+
+            var contextsToWatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { currentContext.Context };
+            foreach (var ac in _contextStack)
+                contextsToWatch.Add(ac.ContextName);
+            // Expand each watched context's fallback chain (e.g. POI_T1 -> POI -> Ambient) so
+            // files restored to a fallback-only context that never lands on the stack are seen.
+            foreach (string seed in contextsToWatch.ToList())
+            {
+                string cur = seed;
+                for (int fi = 0; fi < 5; fi++)
+                {
+                    Contexts fctx = GetContext(cur);
+                    string fb = fctx?.Fallback ?? "None";
+                    if (fb == "None" || fb == "Stack" || fb == cur) break;
+                    contextsToWatch.Add(fb);
+                    cur = fb;
+                }
+            }
+            // Stack is empty on the menu screen — always watch Menu so additions re-trigger it.
+            if (!inGame) contextsToWatch.Add("Menu");
+            // PlayOnce events (Spawn/Death) are never on the stack but still need change
+            // detection so files added back are recognized on the next death/spawn.
+            foreach (var ctx in contexts.Values)
+                if (ctx.PlayOnce && !string.IsNullOrEmpty(ctx.Path))
+                    contextsToWatch.Add(ctx.Context);
+
+            foreach (string contextName in contextsToWatch)
+            {
+                ContextCache cache = cacheMap.TryGetValue(contextName, out var c) ? c : null;
+                if (cache == null) continue;
+                Contexts ctx = GetContext(contextName);
+                if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
+
+                bool isActive = string.Equals(contextName, currentContext.Context, StringComparison.OrdinalIgnoreCase);
+                result.Add(new FileWatchDescriptor
+                {
+                    ContextName     = contextName,
+                    Dir             = Path.Combine(MusicDirectory, ctx.Path),
+                    IncludeSub      = ctx.IncludeSubfolders,
+                    // Active context only: we can't trust the folder mtime for the playing
+                    // track (exFAT/network/junction), so we ping that one file (O(1)) instead.
+                    PlayingFile     = isActive ? cache.lastPlayedFile : null,
+                    IsActiveContext = isActive,
+                    SnapshotLength  = cache.directorySnapshot?.Length ?? 0,
+                });
+            }
+            return result;
+        }
+
+        internal static void FileWatchTick()
+        {
+            // One main-thread hop to snapshot the watch set + whether anything is blacklisted.
+            List<FileWatchDescriptor> descriptors = null;
+            bool anyBlacklisted = false;
+            MainThreadDispatcher.Send(() =>
+            {
+                descriptors = BuildFileWatchDescriptors();
+                anyBlacklisted = _invalidFiles.Count > 0;
+            });
+            if (descriptors == null || descriptors.Count == 0) return;
+
+            // Re-validate blacklisted files only periodically, and only while something is
+            // blacklisted — paced off the scheduler's own clock (Time.realtimeSinceStartup
+            // isn't readable off the main thread). Forces a slow scan so a file that failed
+            // while still being copied in eventually recovers (the dir mtime doesn't bump
+            // when the file finishes writing its contents).
+            double now = _fwClock.Elapsed.TotalSeconds;
+            bool blacklistRetryDue = anyBlacklisted && (now - _fwLastBlacklistRetry) >= FwBlacklistRetryInterval;
+            if (blacklistRetryDue) _fwLastBlacklistRetry = now;
+
+            foreach (var d in descriptors)
+            {
+                string ctxName = d.ContextName, pf = d.PlayingFile;   // capture for the closures below
+                try
+                {
+                    // RECURSIVE: reconciliation is RecursiveCrawlLoop's job; here only the O(1)
+                    // ping of the active context's playing file, so a deleted current track
+                    // still hot-swaps instantly.
+                    if (d.IncludeSub)
+                    {
+                        if (d.IsActiveContext && !string.IsNullOrEmpty(pf) && PingGone(pf))
+                            MainThreadDispatcher.Post(() =>
+                                CMM_CoRoutines.StartCoroutine(Instance.HotSwapFromMissingPlayingFile(ctxName, pf)));
+                        continue;
+                    }
+
+                    // FAST PATH: one directory write-time signature (+ one ping for the active ctx).
+                    DateTime currentWriteTime = ContextWriteSignatureUtc(d.Dir, false);
+                    bool playingFileGone = !string.IsNullOrEmpty(pf) && PingGone(pf);
+
+                    bool neverScanned = !_fwLastWriteTimes.TryGetValue(ctxName, out DateTime knownTime);
+                    // Never trust the write-time shortcut for an empty dir (a refill can land on
+                    // the same filesystem-precision stamp) or a folder touched within the last
+                    // few poll intervals (a same-valued FAT/exFAT stamp may be masking a change).
+                    bool previouslyEmpty = !neverScanned && d.SnapshotLength == 0;
+                    bool activeNeedsScan = d.IsActiveContext && playingFileGone;
+                    bool recentlyTouched = currentWriteTime != DateTime.MinValue
+                        && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(FwSignatureFreshnessWindow);
+
+                    if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
+                        && currentWriteTime == knownTime && !blacklistRetryDue) continue;   // no change — no main hop
+                    _fwLastWriteTimes[ctxName] = currentWriteTime;
+
+                    if (d.IsActiveContext && playingFileGone)
+                    {
+                        // Playing file gone: react off the in-memory snapshot (O(1) in folder size).
+                        MainThreadDispatcher.Post(() =>
+                            CMM_CoRoutines.StartCoroutine(Instance.HotSwapFromMissingPlayingFile(ctxName, pf)));
+                        continue;
+                    }
+
+                    // Folder changed (or first scan / forced retry sweep): enumerate + reconcile on main.
+                    bool ns = neverScanned;
+                    MainThreadDispatcher.Post(() =>
+                        CMM_CoRoutines.StartCoroutine(Instance.ApplyFileWatchScan(ctxName, ns)));
+                }
+                catch (Exception ex) { Log.Error($"[CMM] FileWatchTick '{ctxName}' failed: {ex.Message}"); }
+            }
+        }
+
+        // File.Exists, swallowing the transient IO error an external move/delete can throw
+        // mid-stat (treated as "still present" — same as the coroutine fast path's empty catch).
+        private static bool PingGone(string path)
+        {
+            try { return !File.Exists(path); } catch { return false; }
         }
 
         // ── Config hot-reload ─────────────────────────────────────────────────
