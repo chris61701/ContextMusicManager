@@ -43,6 +43,14 @@ namespace CMM
         // First migrated loop: the debounced loudness cache save. When false, the
         // original coroutine paths run instead (the fallback). See CmmScheduler.
         public static bool NativeScheduler = true;
+        // Pre-stage the next track's fully-formed start request when the CURRENT one begins,
+        // so the scheduler thread can dispatch the auto-advance straight to the start worker
+        // at track-end WITHOUT a main-thread hop — the next track begins even while Unity's
+        // main thread is frozen (world load/unload). The main-thread cache bookkeeping is
+        // reconciled afterwards. Requires NativeScheduler. When false, auto-advance falls back
+        // to marshalling StartNativeContext to the main thread (still off-frame-loop polled,
+        // but the advance waits for a frame). See ContextMusicManager.PreStageNextAdvance.
+        public static bool NativePreStageAdvance = true;
 
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track

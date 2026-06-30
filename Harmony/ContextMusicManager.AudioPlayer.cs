@@ -1247,8 +1247,8 @@ namespace CMM
                 CMMConfig.D($"[CMM] native: reverse-fade reclaim {contextName} (voice {reclaimId}).");
 
                 // Re-arm auto-advance for the reclaimed voice (its prior loop was cancelled by
-                // the transitionId bump).
-                ArmNativeAutoAdvance(contextName, transitionId, !ctx.Loop && !ctx.PlayOnce);
+                // the transitionId bump). The reclaimed voice is still playing cache.lastPlayedFile.
+                ArmNativeAutoAdvance(contextName, transitionId, !ctx.Loop && !ctx.PlayOnce, cache.lastPlayedFile);
                 CMMPerf.EndTransition();
                 return;
             }
@@ -1355,7 +1355,7 @@ namespace CMM
                     $"{(duckTo >= 0f ? $", duck→{duckTo:F2}" : "")})");
 
             // ── Auto-advance (non-loop, non-stinger): crossfade to the next pick at end ──
-            ArmNativeAutoAdvance(contextName, transitionId, !loop && !ctx.PlayOnce);
+            ArmNativeAutoAdvance(contextName, transitionId, !loop && !ctx.PlayOnce, file);
 
             CMMPerf.EndTransition();
         }
@@ -1370,22 +1370,114 @@ namespace CMM
         private static volatile bool _advancePending;
 
         // Arm (or, for loop/PlayOnce, leave disarmed) auto-advance for the track just started
-        // in `contextName` under `transitionId`. NativeScheduler on → the singleton scheduler
-        // poll (NativeAdvanceTick) drives advancement off the frame loop; off → a per-track
-        // coroutine (NativeTrackLoop) on the frame loop, exactly as before. Centralizes both
-        // arm sites (fresh dispatch + reverse-fade reclaim).
-        private void ArmNativeAutoAdvance(string contextName, int transitionId, bool shouldAdvance)
+        // in `contextName` under `transitionId`, `currentFile` being the file it is playing.
+        // NativeScheduler on → the singleton scheduler poll (NativeAdvanceTick) drives
+        // advancement off the frame loop, and (NativePreStageAdvance on) the next track is
+        // pre-staged so the advance needs no main-thread hop; off → a per-track coroutine
+        // (NativeTrackLoop) on the frame loop, exactly as before. Centralizes both arm sites
+        // (fresh dispatch + reverse-fade reclaim) and the post-advance reconcile re-arm.
+        private void ArmNativeAutoAdvance(string contextName, int transitionId, bool shouldAdvance, string currentFile)
         {
             if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
             if (CMMConfig.NativeScheduler)
             {
                 _advancePending = false;             // fresh track: no advance in flight
                 _nativeAdvanceArmed = shouldAdvance;
+                if (shouldAdvance) PreStageNextAdvance(contextName, transitionId, currentFile);
+                else Interlocked.Exchange(ref _preStaged, null);
                 return;
             }
             _nativeAdvanceArmed = false;             // coroutine path owns advancement
             if (shouldAdvance)
                 _trackEndCoroutine = CMM_CoRoutines.StartCoroutine(NativeTrackLoop(contextName, transitionId));
+        }
+
+        // ── Pre-staged next-track advance (true advance-through-freeze) ──────────
+        // An immutable, fully-formed advance to a context's NEXT track, computed on the main
+        // thread when the CURRENT track starts. The scheduler thread can dispatch ps.Req
+        // straight to the start worker at track-end with NO main-thread hop, so the next track
+        // begins even while Unity's main thread is frozen; ReconcilePreStagedAdvance then fixes
+        // up the main-thread-only cache bookkeeping (and stages the next-next track) once the
+        // main thread runs again. Published/consumed via Interlocked (reference swap is atomic;
+        // the object is immutable after construction) so no tearing and no lock on the read.
+        private sealed class PreStagedAdvance
+        {
+            public NativeStartReq Req;
+            public string Context;
+            public int    TransitionId;
+            public string NextFile;
+            public string PrevFile;   // the file being replaced → cache.previousPlayedFile
+        }
+        private static PreStagedAdvance _preStaged;   // accessed only via Interlocked
+
+        // MAIN THREAD: compute and publish the pre-staged advance for `contextName`'s next
+        // track (the one after `currentFile`), under the SAME transition id the current track
+        // plays — an auto-advance within a context is a continuation, not a context change, so
+        // the worker's id guard still passes at dispatch time. Pre-measures the next track's
+        // loudness (non-blocking) so its gain is ready; the gain baked into the request is the
+        // value known now, which for a minutes-long track is virtually always the finished
+        // measurement by the time it actually advances. Clears the pre-stage when the context
+        // can't auto-advance or has no next file.
+        private void PreStageNextAdvance(string contextName, int transitionId, string currentFile)
+        {
+            if (!CMMConfig.NativePreStageAdvance) { Interlocked.Exchange(ref _preStaged, null); return; }
+
+            Contexts ctx = GetContext(contextName);
+            if (ctx == null || ctx.Loop || ctx.PlayOnce
+                || !cacheMap.TryGetValue(contextName, out ContextCache cache))
+            {
+                Interlocked.Exchange(ref _preStaged, null);
+                return;
+            }
+
+            string nextFile = PickNextFile(contextName, avoidFile: currentFile);
+            if (nextFile == null) { Interlocked.Exchange(ref _preStaged, null); return; }
+
+            float gain = CMMConfig.LoudnessNormalizationEnabled ? LoudnessStore.GetTrackGain(nextFile) : 1f;
+            if (CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(nextFile))
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(nextFile, useScratch: true));
+
+            var ps = new PreStagedAdvance
+            {
+                Context = contextName,
+                TransitionId = transitionId,
+                NextFile = nextFile,
+                PrevFile = currentFile,
+                Req = new NativeStartReq
+                {
+                    Context = contextName, File = nextFile, TransitionId = transitionId,
+                    StartSeconds = 0f, Fade = Mathf.Max(0.25f, TrackTransitionFadeDuration),
+                    Loop = false, TrackGain = gain, DuckOthersTo = -1f, SnapTight = false,
+                },
+            };
+            Interlocked.Exchange(ref _preStaged, ps);
+        }
+
+        // MAIN THREAD (posted from the scheduler after a pre-staged dispatch): commit the cache
+        // bookkeeping for the track the worker just started, but only if nothing superseded it
+        // — the worker applies the same transition-id + active-context guard to the AUDIO, so
+        // this keeps the cache consistent with what actually plays. Then re-arm advance and
+        // pre-stage the next-next track. Always releases the single-flight latch.
+        private static void ReconcilePreStagedAdvance(PreStagedAdvance ps)
+        {
+            if (ps.TransitionId == _transitionId
+                && string.Equals(_nativeActiveContext, ps.Context, StringComparison.OrdinalIgnoreCase)
+                && cacheMap.TryGetValue(ps.Context, out ContextCache cache))
+            {
+                cache.previousPlayedFile = ps.PrevFile;
+                cache.playingFile        = ps.NextFile;
+                cache.lastPlayedFile     = ps.NextFile;
+                cache.resumePosition     = 0f;
+                cache.lastLeftTime       = -1f;
+                cache.stagedFile         = null;
+                CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, GetContext(ps.Context)?.VolumeOverride ?? -1f);
+                // Re-arm + pre-stage the next-next track (also clears _advancePending).
+                Instance.ArmNativeAutoAdvance(ps.Context, ps.TransitionId, true, ps.NextFile);
+            }
+            else
+            {
+                _advancePending = false;   // superseded by a real context change — just release
+            }
         }
 
         // Off-frame-loop auto-advance: the singleton scheduler twin of NativeTrackLoop. Runs
@@ -1432,6 +1524,29 @@ namespace CMM
 
             if (!advance) return;
 
+            // ── Pre-staged path: dispatch straight to the start worker, no main-thread hop ──
+            // If a valid pre-stage exists for this exact context + transition, hand its request
+            // to the worker NOW (so the next track begins even while the main thread is frozen)
+            // and reconcile the cache bookkeeping back on the main thread whenever it next runs.
+            PreStagedAdvance ps = Interlocked.CompareExchange(ref _preStaged, null, null);   // atomic read
+            if (CMMConfig.NativePreStageAdvance && ps != null
+                && ps.TransitionId == tid
+                && string.Equals(ps.Context, ctx, StringComparison.OrdinalIgnoreCase)
+                && Interlocked.CompareExchange(ref _preStaged, null, ps) == ps)   // consume iff unchanged
+            {
+                _advancePending = true;
+                // Reset the tracked voice to "dispatched, not yet committed" (as StartNativeContext
+                // does) BEFORE enqueueing — otherwise, if the reconcile clears _advancePending
+                // before the worker commits the new voice, the poll would still see the OLD ended
+                // voice and advance a second time. The worker sets the new id once Play succeeds.
+                Interlocked.Exchange(ref _nativeVoiceId, 0);
+                lock (_natQueueLock) _natQueue.Enqueue(ps.Req);
+                _natSignal.Set();
+                MainThreadDispatcher.Post(() => ReconcilePreStagedAdvance(ps));
+                return;
+            }
+
+            // ── Fallback: marshal the advance to the main thread (no valid pre-stage) ──
             _advancePending = true;
             MainThreadDispatcher.Post(() =>
             {
