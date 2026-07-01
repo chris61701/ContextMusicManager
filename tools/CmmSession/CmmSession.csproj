@@ -35,6 +35,9 @@
     <Compile Include="..\..\Harmony\NativeAudio.cs"      Link="linked\NativeAudio.cs" />
     <Compile Include="..\..\Harmony\WaveShim.cs"         Link="linked\WaveShim.cs" />
     <Compile Include="..\..\Harmony\LoudnessAnalyzer.cs" Link="linked\LoudnessAnalyzer.cs" />
+    <!-- The native-mixer facade: the harness drives it in headless mode to stress the real
+         cmm_mix_* producer/voice/retire loop for leaks (see the mixer option in Program.cs). -->
+    <Compile Include="..\..\Harmony\CmmMixer.cs"         Link="linked\CmmMixer.cs" />
   </ItemGroup>
 
   <!-- MoonSharp: pure-managed Lua interpreter hosting context.lua (same DLL the mod ships). -->

@@ -53,6 +53,8 @@ namespace CMM
         // POI state.
         private int _poiTier;
         private string _poiName;
+        private string _poiId;          // per-instance id ("<name>#<seq>"); two visits to the
+        private int _poiVisitSeq;       // same _poiName still get distinct ids (mirrors PrefabInstance.name)
         private int _poiInfestedTicks;  // infested portion of the POI phase
         private bool _poiBossDone;
 
@@ -84,6 +86,29 @@ namespace CMM
         private int _mpVisitTicksLeft;                   // ticks until the roster is re-rolled
         private int _allyEdgeTicks, _strangerEdgeTicks;  // brief out-of-range wander (ticks left)
 
+        // ── Squad-shared-combat ally overlay ──
+        // A single squadmate whose distance OSCILLATES across CombatShareRange while they fight
+        // their own zombies, so the shared-combat trigger repeatedly enters and leaves. Active on
+        // HORDE NIGHTS (blood moon) and ~50% of POI visits — the scenarios that exercise the MP
+        // shared-combat path. In-game the decision is BuildSnapshot's SharesCombat + distance gate
+        // (ContextResolver.cs), which the harness can't link; we model its OUTCOME — inject the
+        // ally's targeting enemies into our snapshot while the ally is inside CombatShareRange and
+        // engaged. Oscillating the ally across the boundary flickers those enemies in/out.
+        private const float PlayerDetectRange = 30f;      // mirrors CMMConfig.PlayerDetectRange default
+        private const float CombatShareRange  = 30f;      // mirrors CMMConfig.CombatShareRange default
+        private bool  _sharedAllyActive, _sharedAllyActivePrev;
+        private float _sharedAllyDist;                    // current ally distance (oscillates)
+        private float _sharedAllyDistVel;                 // m/tick, sign flips at the bounds
+        private float _sharedAllyDistLo, _sharedAllyDistHi;
+        private bool  _sharedAllyEngaged;                 // ally currently fighting (their zombies bleed to us)
+        private int   _sharedAllyEngageTicksLeft;
+        private Tier  _sharedAllyTier;
+        private int   _sharedAllyCount;                   // shared enemies to inject while engaged
+        private int   _poiSharedAlly;                     // 1 = this POI visit runs the shared-ally scenario
+        private bool  _sharedFiredThisTick, _sharedFiredPrev;
+        private long  _sharedCombatTicks;                 // ticks the shared trigger was live
+        private int   _sharedCombatEnters;                // rising-edge activations of the shared trigger
+
         private static readonly string[] Biomes = { "pine_forest", "desert", "burnt_forest", "snow", "wasteland" };
         private static readonly string[] Vehicles = { "gyrocopter", "bicycle", "motorcycle", "minibike", "jeep" };
         private static readonly string[] Traders = { "jen", "rekt", "bob", "hugh", "joel" };
@@ -106,6 +131,9 @@ namespace CMM
         }
 
         public int WorldDay => _worldDay;
+        // Shared-combat exposure for the harness report (see TickSharedAlly).
+        public long SharedCombatTicks  => _sharedCombatTicks;
+        public int  SharedCombatEnters => _sharedCombatEnters;
         private bool IsDay => (_gameHour % 24.0) >= 4.0 && (_gameHour % 24.0) < 22.0;
 
         // Advances the world one tick and returns the freshly-filled (reused) snapshot.
@@ -126,6 +154,9 @@ namespace CMM
 
             // ── Multiplayer proximity overlay ──
             TickMultiplayer();
+
+            // ── Squad-shared-combat ally overlay (horde nights + ~50% of POIs) ──
+            TickSharedAlly(bloodMoonNight);
 
             FillSnapshot(isDay, bloodMoonNight);
             return _gs;
@@ -180,7 +211,9 @@ namespace CMM
                 case Phase.Poi:
                     _poiTier = _rng.Next(0, 6);
                     _poiName = PoiNames[_rng.Next(PoiNames.Length)];
+                    _poiId   = _poiName + "#" + (++_poiVisitSeq);   // unique per visit
                     _poiBossDone = false;
+                    _poiSharedAlly = _rng.Next(100) < 50 ? 1 : 0;   // ~half of POI visits run the shared-ally scenario
                     _phaseTicks = Secs(120f + Rand(480f));         // 2–10 min quest
                     _poiInfestedTicks = _phaseTicks - Secs(8f);    // last ~8 s = cleared tail
                     SetCombatProfile(gapSec: (2, 20), durSec: (4, 12)); // combat every 2–20 s
@@ -287,6 +320,54 @@ namespace CMM
             else if (_strangerRoster > 0 && _rng.Next(1000) < 10) _strangerEdgeTicks = RandRange(Secs(2f), Secs(8f));
         }
 
+        // ── Squad-shared-combat scheduling ──
+        // Runs the oscillating-ally scenario on horde nights (always) and the flagged POI visits.
+        // The ally drifts in and out across CombatShareRange while their own fight ebbs and flows;
+        // FillSnapshot injects their zombies as targeting enemies whenever they're in range AND
+        // engaged, so the shared-combat context repeatedly enters and leaves.
+        private void TickSharedAlly(bool bloodMoonNight)
+        {
+            bool active = bloodMoonNight || (_phase == Phase.Poi && _poiSharedAlly == 1);
+
+            if (active && !_sharedAllyActivePrev)
+            {
+                // Rising edge — spin up the distance oscillation + the ally's engagement.
+                _sharedAllyDistLo = 8f; _sharedAllyDistHi = 52f;   // straddles CombatShareRange (30)
+                _sharedAllyDist = _sharedAllyDistHi;               // start out of range, drift in
+                int sweep = RandRange(Secs(18f), Secs(40f));       // ticks for one Hi→Lo sweep
+                _sharedAllyDistVel = -(_sharedAllyDistHi - _sharedAllyDistLo) / sweep;
+                BeginAllyEngage(bloodMoonNight);
+            }
+            _sharedAllyActivePrev = active;
+            _sharedAllyActive = active;
+            if (!active) { _sharedAllyEngaged = false; return; }
+
+            // Triangle-wave the ally's distance across the share boundary.
+            _sharedAllyDist += _sharedAllyDistVel;
+            if (_sharedAllyDist <= _sharedAllyDistLo) { _sharedAllyDist = _sharedAllyDistLo; _sharedAllyDistVel = -_sharedAllyDistVel; }
+            else if (_sharedAllyDist >= _sharedAllyDistHi) { _sharedAllyDist = _sharedAllyDistHi; _sharedAllyDistVel = -_sharedAllyDistVel; }
+
+            // The ally's own fight ebbs and flows. On a horde night they're almost always engaged
+            // (short lulls); in a POI it's a more balanced burst pattern.
+            if (--_sharedAllyEngageTicksLeft <= 0)
+            {
+                if (_sharedAllyEngaged)   // engaged → drop into a lull
+                {
+                    _sharedAllyEngaged = false;
+                    _sharedAllyEngageTicksLeft = RandRange(Secs(2f), bloodMoonNight ? Secs(4f) : Secs(10f));
+                }
+                else BeginAllyEngage(bloodMoonNight);   // lull → re-engage
+            }
+        }
+
+        private void BeginAllyEngage(bool bloodMoonNight)
+        {
+            _sharedAllyEngaged = true;
+            _sharedAllyTier = bloodMoonNight ? Tier.High : (_rng.Next(100) < 40 ? Tier.High : Tier.Low);
+            _sharedAllyCount = _sharedAllyTier == Tier.High ? _rng.Next(3, 7) : _rng.Next(1, 4);
+            _sharedAllyEngageTicksLeft = RandRange(Secs(8f), Secs(20f));
+        }
+
         // ── Snapshot fill ──
         private void FillSnapshot(bool isDay, bool bloodMoonNight)
         {
@@ -307,6 +388,7 @@ namespace CMM
             bool inPoi = _phase == Phase.Poi;
             gs.InPoi = inPoi;
             gs.PoiName = inPoi ? _poiName : null;
+            gs.PoiId = inPoi ? _poiId : null;
             gs.PoiTier = _poiTier;
             // Infested (enemies remaining) until the cleared tail; then 0 → POI_Cleared.
             gs.PoiEnemiesRemaining = inPoi && _phaseElapsed < _poiInfestedTicks ? Math.Max(1, _encounterSize) : 0;
@@ -320,10 +402,11 @@ namespace CMM
             int n = engaged ? Math.Min(_encounterSize, _enemyPool.Length)
                   : aware ? Math.Min(Math.Max(1, _encounterSize / 2), _enemyPool.Length)
                   : 0;
+            int used = 0;
             bool danger = false;
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < n && used < _enemyPool.Length; i++)
             {
-                var e = _enemyPool[i];
+                var e = _enemyPool[used++];
                 e.ClassName = PickEnemyClass(_encounterTier, bloodMoonNight);
                 e.Distance = 2f + (float)_rng.NextDouble() * 25f;
                 e.IsAlert = true;
@@ -332,6 +415,36 @@ namespace CMM
                 gs.Enemies.Add(e);
                 if (e.IsTargetingPlayer) danger = true;
             }
+
+            // ── Squad-shared combat: the in-range ally's zombies bleed into OUR snapshot ──
+            // (see TickSharedAlly). In-game these are enemies aggroed onto a nearby squadmate
+            // that BuildSnapshot marks IsTargetingPlayer=true; here we inject the equivalent
+            // while the ally is inside CombatShareRange AND engaged. They drive the Combat
+            // context + the Lua ally bonus, but do NOT threaten us directly, so they don't
+            // set Panicked or drain our health (nothing is on us). Distance is past our own
+            // EnemyDetectRange — the point of shared combat is it's the ally's fight, not ours.
+            _sharedFiredThisTick = _sharedAllyActive && _sharedAllyEngaged && _sharedAllyDist < CombatShareRange;
+            if (_sharedFiredThisTick)
+            {
+                int m = Math.Min(_sharedAllyCount, _enemyPool.Length - used);
+                for (int i = 0; i < m; i++)
+                {
+                    var e = _enemyPool[used++];
+                    e.ClassName = PickEnemyClass(_sharedAllyTier, bloodMoonNight);
+                    e.Distance = CombatShareRange + 2f + (float)_rng.NextDouble() * 15f; // near the ally, past our range
+                    e.IsAlert = true;
+                    e.IsTargetingPlayer = true;   // targeting the ally == shared == our combat
+                    gs.Enemies.Add(e);
+                }
+                _sharedCombatTicks++;
+                if (!_sharedFiredPrev) _sharedCombatEnters++;   // rising edge = the trigger fired
+            }
+            _sharedFiredPrev = _sharedFiredThisTick;
+
+            // An in-range ally counts toward the nearby-ally tally even mid-oscillation, so the
+            // squad bonus (and Online_Friend) engage alongside the shared-combat enemies.
+            if (_sharedAllyActive && _sharedAllyDist < PlayerDetectRange)
+                gs.AlliesNearby = Math.Max(gs.AlliesNearby, 1);
 
             // Health drains under fire (harder in boss waves), recovers otherwise. Tuned so
             // Low_Health_Panic is an occasional serious-fight event, not every skirmish.

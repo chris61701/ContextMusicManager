@@ -23,6 +23,11 @@ namespace CMM
         // Decoder (CmmBench parity).
         public static long HotSwapMaxFileSizeBytes = 256L * 1024 * 1024;
 
+        // Native mixer output-ring depths (CmmMixer reads these to size the headless ring).
+        // Values match the shipped CMMConfig.cs defaults.
+        public static int NativeOutputRingMs = 200;
+        public static int NativeOutputMaxRingMs = 15000;
+
         // Read by ScriptHost.MarshalConfig → exposed to context.lua as cfg.*.
         // Values are the shipped CMMConfig.cs defaults.
         public static int   CombatLowEnemyThreshold = 1;
