@@ -319,6 +319,25 @@ namespace CMM
             return h;
         }
 
+        // Close a bare native handle from OpenNativeHandle that was NOT handed to a native
+        // consumer (e.g. a start superseded between open and cmm_mix_add). cmm_mix_add /
+        // cmm_loudness_analyze take ownership and close the handle themselves, so this is ONLY
+        // for the open-but-dropped path. `kind` is the 0..6 value OpenNativeHandle returned.
+        internal static void CloseNativeHandle(IntPtr dec, int kind)
+        {
+            if (dec == IntPtr.Zero) return;
+            switch (kind)
+            {
+                case 0: NativeOpus.cmm_opus_close(dec); break;
+                case 1: NativeFlac.cmm_flac_close(dec); break;
+                case 2: NativeVorbis.cmm_vorbis_close(dec); break;
+                case 3: NativeMp3.cmm_mp3_close(dec); break;
+                case 4: NativeWav.cmm_wav_close(dec); break;
+                case 5: NativeAac.cmm_aac_close(dec); break;
+                case 6: NativeContainer.cmm_container_close(dec); break;
+            }
+        }
+
         private enum ReaderKind { Unknown, Opus, Flac, Vorbis, Mp3, Wav, Aac, Container }
 
         // Single source of truth for the extension → native-reader-family mapping, shared by

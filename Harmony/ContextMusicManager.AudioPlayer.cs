@@ -1028,9 +1028,9 @@ namespace CMM
             {
                 try
                 {
-                    WaveStream reader = AudioDecoder.OpenStreamingReader(file);
-                    if (reader == null) { Log.Warning($"[CMM] native: failed to open {file}"); return; }
-                    long id = CmmMixer.GetOrCreate().Play(reader, fadeSeconds, loop);
+                    IntPtr dec = AudioDecoder.OpenNativeHandle(file, out int kind, out int srcCh, out int srcRate, out long total);
+                    if (dec == IntPtr.Zero) { Log.Warning($"[CMM] native: failed to open {file}"); return; }
+                    long id = CmmMixer.GetOrCreate().Play(dec, kind, srcRate, srcCh, total, fadeSeconds, loop);
                     Log.Out($"[CMM] native: {(id != 0 ? "playing" : "rejected")} {System.IO.Path.GetFileName(file)}");
                 }
                 catch (Exception ex) { Log.Error($"[CMM] native play error: {ex.Message}"); }
@@ -1120,10 +1120,15 @@ namespace CMM
                     // queued request is discarded without re-buffering the file.
                     if (req.TransitionId != _transitionId) continue;
 
-                    WaveStream reader = null;
-                    try { reader = AudioDecoder.OpenStreamingReader(req.File); }
+                    // Open a BARE native decoder handle (off the audio thread) to hand to the
+                    // mixer — no managed WaveStream wrapper. The mixer takes ownership of the
+                    // handle (closes it on retire, or on a Play/cmm_mix_add failure).
+                    IntPtr dec = IntPtr.Zero;
+                    int kind = -1, srcRate = 0, srcCh = 0;
+                    long total = 0;
+                    try { dec = AudioDecoder.OpenNativeHandle(req.File, out kind, out srcCh, out srcRate, out total); }
                     catch { }
-                    if (reader == null)
+                    if (dec == IntPtr.Zero)
                     {
                         // _invalidFiles is main-thread-only, so the worker only logs; genuinely
                         // corrupt files get blacklisted by the preload / file-watch paths.
@@ -1135,21 +1140,23 @@ namespace CMM
                     {
                         // Re-check under the commit lock: a teardown during the open (a newer
                         // transition, or StopNativeIfActive nulling the context) means this start
-                        // is stale — drop it instead of resurrecting dead audio.
+                        // is stale — drop it instead of resurrecting dead audio. We opened the
+                        // handle but won't hand it to the mixer, so close it ourselves.
                         if (req.TransitionId != _transitionId
                             || !string.Equals(_nativeActiveContext, req.Context, StringComparison.OrdinalIgnoreCase))
                         {
-                            reader.Dispose();
+                            AudioDecoder.CloseNativeHandle(dec, kind);
                             continue;
                         }
 
                         long startFrame = 0;
-                        if (req.StartSeconds > 0f)
-                            startFrame = (long)(req.StartSeconds * reader.WaveFormat.SampleRate);
+                        if (req.StartSeconds > 0f && srcRate > 0)
+                            startFrame = (long)(req.StartSeconds * srcRate);
 
-                        long voiceId = CmmMixer.GetOrCreate().Play(reader, req.Fade, req.Loop, startFrame, req.TrackGain, req.DuckOthersTo, req.SnapTight);
+                        long voiceId = CmmMixer.GetOrCreate().Play(dec, kind, srcRate, srcCh, total, req.Fade, req.Loop, startFrame, req.TrackGain, req.DuckOthersTo, req.SnapTight);
                         if (voiceId == 0)
                         {
+                            // Play (cmm_mix_add) already closed the handle on rejection.
                             Log.Warning($"[CMM] native: Play rejected {Path.GetFileName(req.File)}");
                             continue;
                         }
