@@ -122,6 +122,35 @@ namespace CMM
             return Vector3.Distance(local.position, other.position) < CMMConfig.PlayerDetectRange;
         }
 
+        // A live player within PlayerDetectRange who is NOT an ally: neither in the
+        // local player's party nor an ACL friend — a "stranger" in the game's PvP
+        // sense. The exact inverse relationship test of IsNearbyAlly, reading the same
+        // client-replicated state (party membership + the synced persistent-player
+        // ACL), so it's valid client-side. Excludes the local player itself and the
+        // dead. This is a relationship check only; whether PvP rules actually let the
+        // stranger harm you is a separate server setting (PlayerKillingMode) and is
+        // intentionally not gated here.
+        static bool IsNearbyStranger(EntityPlayer other, EntityPlayer local)
+        {
+            if (other == null || other == local || !other.IsAlive()) return false;
+            if (other.IsInPartyOfLocalPlayer || other.IsFriendOfLocalPlayer) return false;
+            return Vector3.Distance(local.position, other.position) < CMMConfig.PlayerDetectRange;
+        }
+
+        // A live player close enough for their fight to become OUR combat (squad-shared
+        // combat). Uses its own CombatShareRange and, when CombatShareRequireAlly is set,
+        // the same party/friend test as IsNearbyAlly; with it off, any nearby living player
+        // qualifies. Both knobs are independent of PlayerDetectRange / the ally-count logic
+        // so the "share a squadmate's fight" radius and the ally requirement can be tuned
+        // on their own. Excludes the local player itself and the dead.
+        static bool SharesCombat(EntityPlayer other, EntityPlayer local)
+        {
+            if (other == null || other == local || !other.IsAlive()) return false;
+            if (CMMConfig.CombatShareRequireAlly
+                && !other.IsInPartyOfLocalPlayer && !other.IsFriendOfLocalPlayer) return false;
+            return Vector3.Distance(local.position, other.position) < CMMConfig.CombatShareRange;
+        }
+
         // ─────────────────────────────────────────────────────────────────────
         // STAGE 1 — POLL: game state → version-agnostic GameState
         // ─────────────────────────────────────────────────────────────────────
@@ -239,17 +268,18 @@ namespace CMM
                     bool targetingMe = attackTarget == player && dist < CMMConfig.EnemyDetectRange;
 
                     // ── Squad-shared combat (multiplayer) ──────────────────────
-                    // An enemy fighting a nearby ally (party member / friend within
-                    // PlayerDetectRange) counts as OUR combat too — and is gated by the
-                    // enemy's distance to THAT ALLY, not to us. So the whole in-range
-                    // party shares one combat state: a squadmate being attacked puts us
-                    // in combat even when their zombies are past our own EnemyDetectRange
-                    // (and even when nothing is on us at all). In single-player nothing is
-                    // ever a nearby ally, so this is always false and behavior is unchanged.
+                    // An enemy fighting a nearby player (within CombatShareRange, and — when
+                    // CombatShareRequireAlly is set — a party member / friend) counts as OUR
+                    // combat too, gated by the enemy's distance to THAT PLAYER, not to us. So
+                    // the whole in-range squad shares one combat state: a squadmate being
+                    // attacked puts us in combat even when their zombies are past our own
+                    // EnemyDetectRange (and even when nothing is on us at all). In single-player
+                    // there is never another player, so this is always false and behavior is
+                    // unchanged.
                     bool targetingAlly =
                         isMultiplayer && !targetingMe
                         && attackTarget is EntityPlayer ally && ally != player
-                        && IsNearbyAlly(ally, player)
+                        && SharesCombat(ally, player)
                         && Vector3.Distance(ally.position, enemy.position) < CMMConfig.EnemyDetectRange;
 
                     // Keep the enemy in the snapshot if it's physically near US (drives
@@ -280,12 +310,15 @@ namespace CMM
             // behavior is unchanged. world.GetPlayers() is the full replicated player
             // list, so this works on a client.
             gameState.AlliesNearby = 0;
+            gameState.StrangersNearby = 0;
             if (isMultiplayer)
             {
                 var players = world.GetPlayers();
                 for (int pi = 0; pi < players.Count; pi++)
-                    if (IsNearbyAlly(players[pi], player))
-                        gameState.AlliesNearby++;
+                {
+                    if (IsNearbyAlly(players[pi], player))         gameState.AlliesNearby++;
+                    else if (IsNearbyStranger(players[pi], player)) gameState.StrangersNearby++;
+                }
             }
 
             // ── Home ──────────────────────────────────────────────────────────

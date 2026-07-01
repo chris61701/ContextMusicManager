@@ -71,6 +71,19 @@ namespace CMM
         private int _gapMin, _gapMax, _durMin, _durMax;
         private bool _combatEnabled;
 
+        // ── Multiplayer proximity overlay ──
+        // Nearby players (party members / ACL friends = allies; non-friendlies = strangers)
+        // drift into and out of PlayerDetectRange on their OWN cadence, independent of the
+        // combat schedule, so their presence overlaps both in- and out-of-combat stretches
+        // (allies escalate a live fight via the Lua ally bonus; strangers drive Online_Stranger
+        // when nothing louder is playing). While someone is in the area they also wander to the
+        // edge of range "from time to time" — a brief drop from the nearby counts — so the
+        // enter/leave transitions of Online_Friend / Online_Stranger get exercised repeatedly.
+        // All 0 in a real single-player game; the harness injects them to simulate MP.
+        private int _allyRoster, _strangerRoster;        // players in the area during a visit
+        private int _mpVisitTicksLeft;                   // ticks until the roster is re-rolled
+        private int _allyEdgeTicks, _strangerEdgeTicks;  // brief out-of-range wander (ticks left)
+
         private static readonly string[] Biomes = { "pine_forest", "desert", "burnt_forest", "snow", "wasteland" };
         private static readonly string[] Vehicles = { "gyrocopter", "bicycle", "motorcycle", "minibike", "jeep" };
         private static readonly string[] Traders = { "jen", "rekt", "bob", "hugh", "joel" };
@@ -110,6 +123,9 @@ namespace CMM
 
             // ── Combat overlay ──
             TickCombat();
+
+            // ── Multiplayer proximity overlay ──
+            TickMultiplayer();
 
             FillSnapshot(isDay, bloodMoonNight);
             return _gs;
@@ -247,6 +263,30 @@ namespace CMM
             else { _mode = CombatMode.Engaged; _modeTicksLeft = _engagedDur; }
         }
 
+        // ── Multiplayer scheduling ──
+        // Re-rolls the nearby-player roster when a visit expires, then flickers the in-range
+        // count as a present player wanders to the edge of range and back.
+        private void TickMultiplayer()
+        {
+            if (--_mpVisitTicksLeft <= 0)
+            {
+                int roll = _rng.Next(100);
+                if      (roll < 55) { _allyRoster = 0;               _strangerRoster = 0; }               // usually alone
+                else if (roll < 80) { _allyRoster = _rng.Next(1, 3); _strangerRoster = 0; }               // 1-2 squadmates
+                else if (roll < 93) { _allyRoster = 0;               _strangerRoster = _rng.Next(1, 3); } // 1-2 strangers
+                else                { _allyRoster = 1;               _strangerRoster = 1; }               // a mixed crowd
+                _mpVisitTicksLeft = RandRange(Secs(20f), Secs(120f));  // 20 s – 2 min in the area
+                _allyEdgeTicks = 0; _strangerEdgeTicks = 0;
+            }
+
+            // "From time to time" one of them drifts to the edge of range and drops out for a
+            // few seconds, then comes back — so allies/strangers repeatedly enter and leave range.
+            if (_allyEdgeTicks > 0) _allyEdgeTicks--;
+            else if (_allyRoster > 0 && _rng.Next(1000) < 10) _allyEdgeTicks = RandRange(Secs(2f), Secs(8f));
+            if (_strangerEdgeTicks > 0) _strangerEdgeTicks--;
+            else if (_strangerRoster > 0 && _rng.Next(1000) < 10) _strangerEdgeTicks = RandRange(Secs(2f), Secs(8f));
+        }
+
         // ── Snapshot fill ──
         private void FillSnapshot(bool isDay, bool bloodMoonNight)
         {
@@ -259,6 +299,10 @@ namespace CMM
             gs.TraderName = _phase == Phase.Trader ? _trader : null;
             gs.Biome = _biome;
             gs.NearHome = _phase == Phase.Home;
+
+            // Nearby players, minus anyone momentarily wandering out of range (edge flicker).
+            gs.AlliesNearby    = _allyEdgeTicks    > 0 ? Math.Max(0, _allyRoster    - 1) : _allyRoster;
+            gs.StrangersNearby = _strangerEdgeTicks > 0 ? Math.Max(0, _strangerRoster - 1) : _strangerRoster;
 
             bool inPoi = _phase == Phase.Poi;
             gs.InPoi = inPoi;

@@ -277,6 +277,14 @@ namespace CMM
             // mixer would bank a deep cushion behind the stinger and then flush it on the falling
             // edge once the poll caught up — clipping the stinger's start ("Spawn plays offset").
             CmmMixer.DeepBuffer = false;
+            // Arm the post-spawn deep-cushion grace: chunk streaming keeps hammering the CPU for a
+            // while after the loading screen closes, which would otherwise underrun the tight in-game
+            // ring. This holds a deeper cushion (via CmmMixer.ExtraCushion, drained naturally — see
+            // VolumeSyncLoop) through that window. Set AFTER clearing DeepBuffer so the Spawn stinger
+            // still starts tight from frame 0; the grace engages on the next VolumeSyncLoop poll, once
+            // the stinger is already playing. Fires on initial spawn, death-respawn, and teleport.
+            ContextMusicManager._deepBufferUntil =
+                Time.realtimeSinceStartup + ContextMusicManager.PostSpawnDeepBufferSeconds;
             CMMConfig.D("[CMM] Player respawned");
             ContextMusicManager._contextStack.Clear();
 

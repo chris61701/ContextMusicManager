@@ -29,6 +29,8 @@ namespace CMM
         public static int   CombatHighEnemyThreshold = 4;
         public static float EnemyDetectRange = 30f;
         public static float PlayerDetectRange = 30f;
+        public static float CombatShareRange = 30f;
+        public static bool  CombatShareRequireAlly = true;
         public static float HomeDetectRange = 70f;
         public static float PlayerHealthDangerThresholdPercent = 0.30f;
         public static float CombatExitDelay = 2f;

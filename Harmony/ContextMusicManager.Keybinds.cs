@@ -175,7 +175,8 @@ namespace CMM
             {
                 long vid = System.Threading.Interlocked.Read(ref _nativeVoiceId);
                 if (vid != 0)
-                    CmmMixer.Instance?.SetVoiceTrackGain(vid, LoudnessStore.GetTrackGain(cache.playingFile));
+                    CmmMixer.Instance?.SetVoiceTrackGain(
+                            vid, LoudnessStore.GetTrackGain(cache.playingFile), TrackGainKeyRampSeconds);
             }
 
             string note = CMMConfig.LoudnessNormalizationEnabled

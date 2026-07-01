@@ -158,6 +158,33 @@ namespace CMM
             return vol;
         }
 
+        // Ramp durations for in-place per-track gain changes on the live native voice (see
+        // CmmMixer.SetVoiceTrackGain). The keypress is a small (≤10%) step — a brief declick is enough.
+        // A late measurement settling in can be a large correction (un-normalized 1.0 → normalized
+        // level), so it gets a slightly longer fade so the level just eases in rather than lurching.
+        private const float TrackGainKeyRampSeconds   = 0.04f;
+        private const float TrackGainSettleSeconds    = 0.20f;
+
+        // Settle a freshly-committed loudness measurement into the currently-playing native voice.
+        // A track that started before it was measured plays at neutral 1.0 (un-normalized); the
+        // per-voice TrackGain is baked once at Play time and is NOT re-read by VolumeSyncLoop (that
+        // only drives master volume), so without this the normalization never reaches the live voice
+        // and the first trim keypress would apply the whole correction at once (an audible lurch).
+        // No-op unless `file` is the exact track the native mixer is currently voicing.
+        private static void SettleTrackGainIntoLiveVoice(string file)
+        {
+            if (string.IsNullOrEmpty(file)) return;
+            string active = _nativeActiveContext;
+            if (active == null) return;
+            if (!cacheMap.TryGetValue(active, out ContextCache cache) ||
+                !string.Equals(cache.playingFile, file, StringComparison.OrdinalIgnoreCase))
+                return;
+            long vid = Interlocked.Read(ref _nativeVoiceId);
+            if (vid != 0)
+                CmmMixer.Instance?.SetVoiceTrackGain(
+                        vid, LoudnessStore.GetTrackGain(file), TrackGainSettleSeconds);
+        }
+
         private IEnumerator VolumeSyncLoop()
         {
             while (true)
@@ -178,6 +205,12 @@ namespace CMM
                 // the queue). Tight on the menu keeps track changes prompt; reactive growth in the
                 // mixer still covers any surprise starvation (other apps) on menu OR in gameplay.
                 CmmMixer.DeepBuffer = _gameIsLoading;
+                // Post-spawn/teleport grace: hold a deeper cushion through the tail of chunk
+                // streaming that continues after the loading screen closes. Excluded from the
+                // Pump's falling-edge flush (CmmMixer.ExtraCushion), so it eases out by natural
+                // drain rather than a flush — the same track is still playing, so a flush would
+                // teleport it forward. Only in-game, and only until the armed deadline passes.
+                CmmMixer.ExtraCushion = inGame && Time.realtimeSinceStartup < _deepBufferUntil;
             }
         }
 
@@ -233,6 +266,8 @@ namespace CMM
             {
                 LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak);
                 CMMConfig.D($"[CMM] Loudness (block) {Path.GetFileName(filePath)}: {res.Lufs:F1} LUFS");
+                // If this is the track already playing (started un-normalized), settle the gain in.
+                SettleTrackGainIntoLiveVoice(filePath);
             }
         }
 
@@ -492,9 +527,10 @@ namespace CMM
             {
                 LoudnessStore.Store(slot.Path, res.Size, slot.Mtime, res.Hash, res.Lufs, res.Peak);
                 CMMConfig.D($"[CMM] Loudness prescanned {Path.GetFileName(slot.Path)}: {res.Lufs:F1} LUFS (peak {res.Peak:F3})");
-                // If this measured the currently-playing track, VolumeSyncLoop re-reads
-                // GetContextVolume (with the new gain) within its next 0.1s tick — no
-                // explicit re-apply needed on the native mixer path.
+                // If this measured the currently-playing track, push the fresh gain to the live
+                // native voice (quick fade). VolumeSyncLoop only drives MASTER volume on the native
+                // path — it never re-reads the per-voice TrackGain — so the settle must be explicit.
+                SettleTrackGainIntoLiveVoice(slot.Path);
             }
             slot = default;
         }
@@ -712,6 +748,11 @@ namespace CMM
         private static volatile bool _pauseDucked;
         internal static void OnGamePauseChanged(bool paused)
         {
+            // Only ever engage in-game. When not in a world (menu / mid-quit teardown) there's no
+            // pause to duck for, and — critically — this stops a stray unpause fired during the
+            // quit-to-menu cleanup from RESTORING the output gain and swelling the just-faded music
+            // back in over the exit fade. The quit path continues the fade to silence itself.
+            if (!inGame) return;
             if (paused == _pauseDucked) return;          // no edge — cheap per-frame guard
             _pauseDucked = paused;
             CmmMixer.Instance?.SetOutputGain(paused ? 0f : 1f, PauseFadeDuration);
@@ -954,8 +995,6 @@ namespace CMM
 
         public static string NativeDebugPlay(string contextName)
         {
-            if (!CMMConfig.NativeAudioOutput)
-                return "NativeAudioOutput is off — set <NativeAudioOutput>true</NativeAudioOutput> in Config/settings.xml and reload.";
             if (!contexts.ContainsKey(contextName))
                 return $"unknown context '{contextName}'.";
             if (!cacheMap.ContainsKey(contextName))
@@ -1006,13 +1045,12 @@ namespace CMM
         }
 
         // ── Native playback controller (Phase 3c) ─────────────────────────────
-        // When CMMConfig.NativeAudioOutput is on, custom-file contexts play through
-        // CmmMixer instead of AudioSource. Context RESOLUTION (what should play) is
-        // unchanged — only the output path differs. Vanilla/DMS-borrow + Silence stay
-        // on the AudioSource path (decision A: hybrid), so the two outputs never both
-        // produce the current context: StartContextCoroutine / FadeToSilence stop the
-        // mixer whenever an AudioSource (or silent) context takes over, and the mixer
-        // crossfades itself for native→native switches.
+        // Custom-file contexts play through CmmMixer. Context RESOLUTION (what should
+        // play) is unchanged — only the output path differs. Vanilla/DMS-borrow +
+        // Silence stay on the AudioSource path (decision A: hybrid), so the two outputs
+        // never both produce the current context: StartContextCoroutine / FadeToSilence
+        // stop the mixer whenever an AudioSource (or silent) context takes over, and the
+        // mixer crossfades itself for native→native switches.
         //
         // _nativeActiveContext / _nativeVoiceId name the track currently on the mixer
         // (null/0 when the mixer isn't the active output).
@@ -1283,8 +1321,10 @@ namespace CMM
                 if (!isSameContextSwitchingToNextTrack
                     && cache.stagedFile != null && !_invalidFiles.Contains(cache.stagedFile))
                     file = cache.stagedFile;        // pre-measured pin for a fresh switch-in
+                else if (isSameContextSwitchingToNextTrack)
+                    file = PreferPreStagedNext(contextName, cache);   // prepared (measured) next, else fresh
                 else
-                    file = PickNextFile(contextName, isSameContextSwitchingToNextTrack ? cache.lastPlayedFile : null);
+                    file = PickNextFile(contextName, null);
             }
             cache.stagedFile = null;                // consume the pin; maintenance re-pins later
 
@@ -1471,6 +1511,16 @@ namespace CMM
                 cache.lastLeftTime       = -1f;
                 cache.stagedFile         = null;
                 CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, GetContext(ps.Context)?.VolumeOverride ?? -1f);
+                // Apply the loudness gain the track was measured to. The gain baked into ps.Req
+                // was read at PRE-stage time, when this (freshly-picked) next track was almost
+                // never measured yet — so a measurement that completed WHILE the previous track
+                // was still playing (its SettleTrackGainIntoLiveVoice ran as a no-op because this
+                // file wasn't playing yet) never reached the voice, leaving a natural transition
+                // un-normalized. Now that this track IS the playing one, re-read the current gain
+                // and settle it into the voice once the worker commits it.
+                if (CMMConfig.LoudnessNormalizationEnabled)
+                    CMM_CoRoutines.StartCoroutine(
+                        Instance.SettlePreStagedGain(ps.NextFile, ps.TransitionId));
                 // Re-arm + pre-stage the next-next track (also clears _advancePending).
                 Instance.ArmNativeAutoAdvance(ps.Context, ps.TransitionId, true, ps.NextFile);
             }
@@ -1478,6 +1528,26 @@ namespace CMM
             {
                 _advancePending = false;   // superseded by a real context change — just release
             }
+        }
+
+        // Settle the loudness gain into the voice a pre-staged advance just started. The worker
+        // opens the reader + calls Play on its own thread, so the voice id isn't committed the
+        // instant reconcile runs; wait for it (bounded), then push the CURRENT stored gain via
+        // SettleTrackGainIntoLiveVoice (which reads the gain fresh, so a measurement that landed
+        // between pre-stage and advance is now applied). Bails if a real context switch supersedes
+        // (transition id bumped) or the worker never commits (open failed). A same-context
+        // auto-advance keeps the same transition id, so the guard only trips on a genuine change.
+        private IEnumerator SettlePreStagedGain(string file, int transitionId)
+        {
+            float waited = 0f;
+            while (Interlocked.Read(ref _nativeVoiceId) == 0)
+            {
+                if (transitionId != _transitionId || waited >= 5f) yield break;
+                yield return null;
+                waited += Time.unscaledDeltaTime;
+            }
+            if (transitionId != _transitionId) yield break;
+            SettleTrackGainIntoLiveVoice(file);
         }
 
         // Off-frame-loop auto-advance: the singleton scheduler twin of NativeTrackLoop. Runs
@@ -1595,6 +1665,28 @@ namespace CMM
             if (transitionId != _transitionId || _nativeActiveContext != contextName) yield break;
             int newId = ++_transitionId;
             StartNativeContext(contextName, true, newId, null);
+        }
+
+        // Same-context track switch (manual Next, or an auto-advance that fell back to
+        // StartNativeContext instead of the direct pre-staged dispatch): reuse the ONE next
+        // track the playing context already prepared and began measuring (rule 2 — the playing
+        // context keeps a normalized track ready to go) rather than re-rolling a fresh unmeasured
+        // pick that discards that preparation. Returns _preStaged's next file when it's for this
+        // context and still valid; otherwise a fresh PickNextFile. TransitionId is deliberately
+        // NOT matched here — that id guards the freeze-survival DISPATCH, not file validity; a
+        // manual skip bumps it, yet the prepared file is still the right track to play (and the
+        // caller re-reads its loudness gain + re-arms a fresh pre-stage afterward).
+        private static string PreferPreStagedNext(string contextName, ContextCache cache)
+        {
+            PreStagedAdvance ps = Interlocked.CompareExchange(ref _preStaged, null, null);   // atomic read
+            if (ps != null
+                && string.Equals(ps.Context, contextName, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(ps.NextFile)
+                && !_invalidFiles.Contains(ps.NextFile)
+                && !string.Equals(ps.NextFile, cache.lastPlayedFile, StringComparison.OrdinalIgnoreCase)
+                && File.Exists(ps.NextFile))
+                return ps.NextFile;
+            return PickNextFile(contextName, cache.lastPlayedFile);
         }
 
         private static string PickNextFile(string contextName, string avoidFile)

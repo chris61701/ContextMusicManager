@@ -206,6 +206,15 @@ function resolve(gameState, cfg)
     add(active, "Tension")
   end
 
+  -- ── Online: a non-friendly player is nearby ────────────────────────────────
+  -- Any living player within cfg.playerDetectRange who is neither a party member nor
+  -- an ACL friend (multiplayer only; always 0 in single-player). Relationship-only —
+  -- this fires whether or not the server's PvP rules actually permit harm between you.
+  if gameState.strangersNearby > 0 then add(active, "Online_Stranger") end
+
+  -- ── Online: a friendly player is nearby ───────────────────────────────────
+  if gameState.alliesNearby > 0 then add(active, "Online_Friend") end
+
   -- ── Home ──────────────────────────────────────────────────────────────────
   if gameState.nearHome then add(active, gameState.isDay and "Home" or "Home_Night") end
 

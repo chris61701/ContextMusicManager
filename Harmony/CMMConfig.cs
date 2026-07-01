@@ -18,12 +18,11 @@ namespace CMM
         }
         public static long HotSwapMaxFileSizeBytes = 100L * 1024 * 1024;
 
-        // ── Native audio output (miniaudio, optional/experimental) ────────────
-        // When true, music plays through CMM's OWN miniaudio output device + mixer
-        // thread (CmmMixer) instead of Unity's AudioSource/AudioClip — decode, mix
-        // and output all run on threads CMM owns, off Unity's main and DSP threads.
-        // Now the sole output path; the legacy AudioSource/AudioClip path has been removed.
-        public static bool NativeAudioOutput = true;
+        // ── Native audio output (miniaudio) ───────────────────────────────────
+        // Music plays through CMM's OWN miniaudio output device + mixer thread
+        // (CmmMixer) — decode, mix and output all run on threads CMM owns, off
+        // Unity's main and DSP threads. This is the sole output path; the legacy
+        // AudioSource/AudioClip path has been removed.
         // Output ring TIGHT target (ms): the cushion the mixer keeps queued in normal
         // play — also the output latency for volume/crossfade, so kept small (~200ms).
         public static int NativeOutputRingMs = 200;
@@ -80,9 +79,9 @@ namespace CMM
         public static bool ReverseFadeReclaim = true;
         public static bool PreloadCacheEnabled = false;
 
-        // Number of player-targeting enemies required to trigger combat music.
-        // Used only when the weighted CombatThreat model below is not configured;
-        // Combat_Low fires at >= Low threshold, Combat_High at >= High threshold.
+        // Enemy-count thresholds exposed to the decision script as cfg.combatLowThreshold
+        // / cfg.combatHighThreshold. The stock context.lua does its combat tiering via
+        // weighted scoring instead, so these only matter to a custom script that reads them.
         public static int CombatLowEnemyThreshold = 1;
         public static int CombatHighEnemyThreshold = 4;
 
@@ -95,6 +94,15 @@ namespace CMM
         // intensity (see ContextResolver player scan). Independent of EnemyDetectRange
         // so "fighting alongside" can be tuned wider/narrower than "an enemy is near".
         public static float PlayerDetectRange = 30f;
+        // Squad-shared combat: how close (game units) another player must be for an
+        // enemy fighting THEM to count as your combat too. A fully independent setting from
+        // PlayerDetectRange, with its own default — the "share a squadmate's fight" radius is
+        // tuned separately from the ally/stranger proximity counts that scale combat intensity.
+        public static float CombatShareRange = 30f;
+        // Whether squad-shared combat requires the other player to be an ally (in your
+        // party or an ACL friend). When false, ANY nearby living player's fight counts as
+        // yours. Defaults to true (party/friend only), matching the original behavior.
+        public static bool CombatShareRequireAlly = true;
         // Distance (game units) from a bedroll or land-claim that counts as "home".
         public static float HomeDetectRange = 70f;
         // Health fraction (0–1) below which combat escalates to Low_Health_Panic.
@@ -108,19 +116,13 @@ namespace CMM
         public static float CombatExitDelay = 2f;
         public static float CombatCooldown = 10f;
 
-        // Optional weighted combat-threat model (Config/settings.xml <CombatThreat>).
-        // When configured (enabled + at least one tier), ResolveContext scores nearby
-        // player-targeting enemies by type/state and maps the total to a combat tier,
-        // replacing the flat CombatLow/HighEnemyThreshold count test. Never null —
-        // an unconfigured instance reports IsConfigured = false and the legacy path runs.
-        public static CombatThreatConfig CombatThreat = new CombatThreatConfig();
-
         // ── Playback keybinds (Config/settings.xml) ────────────────────────────
         // Live controls for whatever music is actually playing (menu or in-game).
-        // Gated behind Ctrl+Alt by default so they don't collide with game/chat
-        // input; clear the RequireCtrl/RequireAlt flags for bare-key bindings.
+        // Gated behind Alt by default so they don't collide with game/chat input.
+        // Ctrl is avoided because it's the game's crouch toggle; Alt is unbound in
+        // 7D2D. Set RequireCtrl/clear RequireAlt or both for other bindings.
         public static bool KeybindsEnabled = true;
-        public static bool KeybindRequireCtrl = true;
+        public static bool KeybindRequireCtrl = false;
         public static bool KeybindRequireAlt = true;
         public static KeyCode KeyNextTrack  = KeyCode.RightArrow;
         public static KeyCode KeyPrevTrack  = KeyCode.LeftArrow;

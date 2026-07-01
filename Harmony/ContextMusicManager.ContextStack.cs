@@ -428,47 +428,37 @@ namespace CMM
             _crossFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutAndCleanupCoroutine());
         }
 
-        // Game-exit fade is intentionally longer than the in-game CrossFadeDuration —
-        // a slower, more deliberate fade as the world tears down and the menu loads.
-        private const float ExitFadeDuration = MenuTransitionFade;
-
         private System.Collections.IEnumerator FadeOutAndCleanupCoroutine()
         {
-            // The game music plays through the NATIVE mixer. Fade it CONSUMER-side (output gain
-            // in the audio callback) — the producer-side ramp can't be relied on here because the
-            // world-unload starves the Pump mid-fade, cutting the music short. The consumer (OS
-            // audio thread) keeps running through the freeze, so the fade is heard over the full
-            // ExitFadeDuration. The voices are hard-stopped only AFTER the fade completes (below),
-            // so the device isn't torn down mid-fade.
-            bool nativeWasPlaying = NativeOutputBusy();
-            CmmMixer.Instance?.SetOutputGain(0f, ExitFadeDuration);
+            // Quit-to-menu: CONTINUE the in-game-menu fade to silence rather than restarting or
+            // hard-cutting it. Entering the ESC menu already ramped the output gain toward 0 over
+            // PauseFadeDuration (the pause duck); re-asserting the same target here keeps it heading
+            // to 0 from wherever it currently is (a no-op if it already reached 0, a smooth finish if
+            // the player quit mid-fade). If we somehow got here without a pause having engaged (e.g. a
+            // disconnect that never paused), this simply starts the same graceful fade. The fade is
+            // CONSUMER-side (output gain in the audio callback), so it completes in real time even
+            // through the world-unload main-thread freeze.
+            CmmMixer.Instance?.SetOutputGain(0f, PauseFadeDuration);
 
-            if (nativeWasPlaying)
-            {
-                float elapsed = 0f;
-                while (elapsed < ExitFadeDuration)
-                {
-                    elapsed += Time.deltaTime;
-                    yield return null;
-                }
-            }
+            // Wait out the fade (real post-freeze frame time — Time.deltaTime doesn't advance while
+            // the main thread is frozen, and the consumer fade runs in real time regardless), so the
+            // music is fully silent before we tear the voices down and the menu track starts over
+            // silence rather than during the freeze. _menuMusicHold keeps the menu auto-trigger
+            // (MenuMusicPatch) suppressed until we release it below.
+            float elapsed = 0f;
+            while (elapsed < PauseFadeDuration) { elapsed += Time.deltaTime; yield return null; }
 
-            // Faded out — now hard-stop the (already silent) native voices and do the teardown the
-            // hard-cut path does up front. The menu music below opens a FRESH device (output gain
-            // back to full), so it fades in cleanly after the silence rather than over the game.
+            // Silent now — hard-stop the faded-out voices and release caches. Menu Play opens/reuses
+            // the device and snaps the output gain back to full (ResetGain), so the menu track is
+            // audible even though the fade left the output gain at 0.
             StopNativeIfActive(0f);
-            // StopNativeIfActive only ARMS a per-voice snap-to-0 (Stop) and waits on a Pump tick to
-            // retire the voices. The menu Play below now wins that race (files buffer into native
-            // memory, so its worker reaches Play almost immediately) and, finding the voices still
-            // live at full per-voice gain — the consumer fade above never touched them — re-fades
-            // them once it restores the output gain, bleeding the just-faded game track back in.
-            // Discard the voices synchronously here so the menu track starts over true silence.
             CmmMixer.Instance?.StopAllNow();
             DisposeAllCaches();
+            // Clear the pause-duck edge state — we're leaving the world, and a stale _pauseDucked
+            // would make the NEXT session's first ESC a no-op (the edge guard sees paused==true).
+            _pauseDucked = false;
             _crossFadeCoroutine = null;
 
-            // Game music has FULLY faded and caches are released — only NOW release the hold and
-            // bring up the menu music, so it fades in after silence rather than over the game music.
             _menuMusicHold = false;
             SendContextUpdate("Menu");
         }

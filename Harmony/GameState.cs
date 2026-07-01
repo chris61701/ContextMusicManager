@@ -46,6 +46,13 @@ namespace CMM
         // fighting alongside a squad escalates the combat tier (see context.lua).
         public int    AlliesNearby;
 
+        // Living NON-friendly players (neither party member nor ACL friend — a
+        // "stranger" in the game's PvP sense) within CMMConfig.PlayerDetectRange.
+        // Multiplayer only (0 in single-player). Drives the Online_Stranger context.
+        // Relationship-only: whether PvP rules actually permit harm between you is a
+        // separate server setting (PlayerKillingMode) and is not considered here.
+        public int    StrangersNearby;
+
         public bool   InPoi;
         public string PoiName;
         public int    PoiTier;

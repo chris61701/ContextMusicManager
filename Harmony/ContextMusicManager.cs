@@ -70,9 +70,22 @@ namespace CMM
         // Graceful, deliberate fade for the menu↔game boundary (entering a world, exiting
         // back to the menu) — intentionally longer than the in-game CrossFadeDuration.
         public const float MenuTransitionFade = 5f;
-        // Quick duck when the game pauses (ESC menu / inventory in single-player). Short so
-        // it feels instantaneous; see OnGamePauseChanged.
-        public const float PauseFadeDuration = 0.25f;
+        // Graceful fade when the game pauses (entering the ESC menu / inventory in single-player):
+        // the music fades out over this window rather than cutting, and fades back in over it on
+        // resume. The quit-to-menu teardown reuses the same fade — quitting mid-fade just continues
+        // it to silence (see OnGamePauseChanged and FadeOutAndCleanupCoroutine).
+        public const float PauseFadeDuration = 3f;
+        // Post-spawn / post-teleport deep-cushion grace. The world-load deep buffer (_gameIsLoading)
+        // is cleared the instant the player spawns, but heavy chunk STREAMING continues for a while
+        // after the loading screen closes — starving the native mixer's producer (the managed Pump)
+        // and underrunning the tight in-game ring (an audible pause). AfterPlayerRespawn (which fires
+        // on initial spawn, death-respawn, AND teleport) arms this deadline; VolumeSyncLoop holds the
+        // extra cushion until it passes, then it eases back to tight by natural drain (no flush → no
+        // teleport). Covers the diagnosed post-load streaming; unpredictable heavy events elsewhere
+        // (fast travel, horde spawns) still fall back to the mixer's reactive growth.
+        public const float PostSpawnDeepBufferSeconds = 30f;
+        internal static float _deepBufferUntil;
+
         // While true, the menu-screen BackgroundMusicMono auto-trigger does NOT start CMM's
         // menu music. Held during the game-exit fade so the menu music can't fade in until
         // the game music has fully faded out (set in FadeOutAndCleanup, cleared once silent).
@@ -190,14 +203,14 @@ namespace CMM
         private static bool _audioConfigHooked = false;
 
         // OS audio device / config changed. Ask the native mixer to reopen its output device
-        // on the new default endpoint (no-op when native output is off or nothing is playing —
-        // the next Play opens fresh on the new endpoint anyway). deviceWasChanged is true only
-        // for an actual device swap, but Unity also fires this for sample-rate/speaker changes,
-        // which equally invalidate our open device, so we reinit on any firing.
+        // on the new default endpoint (no-op when nothing is playing — the next Play opens
+        // fresh on the new endpoint anyway). deviceWasChanged is true only for an actual device
+        // swap, but Unity also fires this for sample-rate/speaker changes, which equally
+        // invalidate our open device, so we reinit on any firing.
         private static void OnAudioConfigChanged(bool deviceWasChanged)
         {
             CMMConfig.D($"[CMM] Audio configuration changed (deviceWasChanged={deviceWasChanged}).");
-            if (CMMConfig.NativeAudioOutput) CmmMixer.Instance?.RequestDeviceReinit();
+            CmmMixer.Instance?.RequestDeviceReinit();
         }
 
         public static void OnEnterGame()
@@ -209,7 +222,17 @@ namespace CMM
             // paths — the Conductor.Update prefix and PlayerRespawn — funnel through
             // OnEnterGame, so this single point covers them. Vanilla fallback re-raises
             // dmsVol via the vanilla fade coroutines; don't fight that while it's active.
-            if (!vanillaIsActive) SetVanillaMusicVolume(0f);
+            //
+            // FORCE the write (bypass the idempotence guard): MixerController is a persistent
+            // static singleton whose Master AudioMixer keeps dmsVol across worlds. On a
+            // leave→rejoin the game's DMS preload (MixerController.Init / OnSnapshotTransition)
+            // re-raises dmsVol to the slider level DURING LOAD, while inGame is still false — so
+            // Patch_DmsVolumeReclamp (gated on inGame) skips it. Our cached _currentVanillaVolume
+            // is still 0 from the previous session's mute, so a non-forced SetVanillaMusicVolume(0f)
+            // no-ops and the mute is never re-applied — leaving vanilla DMS (e.g. the trader theme
+            // when you spawn straight into a trader) audible under CMM's own music. force:true
+            // re-asserts the mute on every entry; the reclamp still covers later in-game raises.
+            if (!vanillaIsActive) SetVanillaMusicVolume(0f, force: true);
         }
 
         // ── SendContextUpdate ─────────────────────────────────────────────────

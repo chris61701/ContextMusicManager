@@ -39,6 +39,8 @@ namespace CMM
 
                 CMMConfig.EnemyDetectRange                = ReadFloat(root, "EnemyDetectRange",                 CMMConfig.EnemyDetectRange);
                 CMMConfig.PlayerDetectRange                = ReadFloat(root, "PlayerDetectRange",                CMMConfig.PlayerDetectRange);
+                CMMConfig.CombatShareRange                 = ReadFloat(root, "CombatShareRange",                 CMMConfig.CombatShareRange);
+                CMMConfig.CombatShareRequireAlly           = ReadBool (root, "CombatShareRequireAlly",           CMMConfig.CombatShareRequireAlly);
                 CMMConfig.HomeDetectRange                  = ReadFloat(root, "HomeDetectRange",                  CMMConfig.HomeDetectRange);
                 CMMConfig.PlayerHealthDangerThresholdPercent = ReadFloat(root, "PlayerHealthDangerThresholdPercent", CMMConfig.PlayerHealthDangerThresholdPercent);
                 CMMConfig.CombatExitDelay                  = ReadFloat(root, "CombatExitDelay",                  CMMConfig.CombatExitDelay);
@@ -46,8 +48,6 @@ namespace CMM
 
                 CMMConfig.CombatLowEnemyThreshold  = ReadInt(root, "CombatLowEnemyThreshold",  CMMConfig.CombatLowEnemyThreshold);
                 CMMConfig.CombatHighEnemyThreshold = ReadInt(root, "CombatHighEnemyThreshold", CMMConfig.CombatHighEnemyThreshold);
-
-                CMMConfig.CombatThreat = ParseCombatThreat(root);
 
                 string rawMusicPath = ReadString(root, "MusicPath", null);
                 if (!string.IsNullOrWhiteSpace(rawMusicPath))
@@ -75,7 +75,6 @@ namespace CMM
                 CMMConfig.KeyVolumeDown = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeDown", CMMConfig.KeyVolumeDown);
                 CMMConfig.UserTrimStep  = ReadFloat(root, "UserTrimStep", CMMConfig.UserTrimStep);
 
-                CMMConfig.NativeAudioOutput = ReadBool(root, "NativeAudioOutput", CMMConfig.NativeAudioOutput);
                 CMMConfig.NativeOutputRingMs = ReadInt (root, "NativeOutputRingMs", CMMConfig.NativeOutputRingMs);
                 CMMConfig.NativeOutputMaxRingMs = ReadInt (root, "NativeOutputMaxRingMs", CMMConfig.NativeOutputMaxRingMs);
                 CMMConfig.NativeScheduler = ReadBool(root, "NativeScheduler", CMMConfig.NativeScheduler);
@@ -151,55 +150,6 @@ namespace CMM
             {
                 Log.Error($"[CMM] Failed to parse Config/contexts.xml: {ex.Message}");
             }
-        }
-
-        // ── Weighted combat-threat parser ─────────────────────────────────────
-        // Reads the optional <CombatThreat> block. Absent block ⇒ an unconfigured
-        // (IsConfigured == false) instance, so ResolveContext keeps the legacy
-        // enemy-count behavior. Match keys are lowercased so the runtime compare
-        // against the lowercased entity class name is a plain substring test.
-        private static CombatThreatConfig ParseCombatThreat(XmlElement root)
-        {
-            var cfg = new CombatThreatConfig();
-            if (!(root.SelectSingleNode("CombatThreat") is XmlElement node)) return cfg;
-
-            cfg.Enabled       = BoolAttr (node, "enabled",       true);
-            cfg.DefaultWeight = FloatAttr(node, "defaultWeight", 1f);
-
-            foreach (XmlNode child in node.ChildNodes)
-            {
-                if (child.NodeType != XmlNodeType.Element) continue;
-                var el = (XmlElement)child;
-                switch (el.Name)
-                {
-                    case "Enemy":
-                    {
-                        string m = el.GetAttribute("match").ToLowerInvariant();
-                        if (!string.IsNullOrEmpty(m))
-                            cfg.Weights.Add(new KeyValuePair<string, float>(m, FloatAttr(el, "weight", cfg.DefaultWeight)));
-                        break;
-                    }
-                    case "State":
-                    {
-                        string m = el.GetAttribute("match").ToLowerInvariant();
-                        if (!string.IsNullOrEmpty(m))
-                            cfg.States.Add(new KeyValuePair<string, float>(m, FloatAttr(el, "multiplier", 1f)));
-                        break;
-                    }
-                    case "Tier":
-                    {
-                        string ctx = el.GetAttribute("context");
-                        if (!string.IsNullOrEmpty(ctx))
-                            cfg.Tiers.Add(new TierBand { Context = ctx, MinScore = FloatAttr(el, "minScore", 0f) });
-                        break;
-                    }
-                }
-            }
-
-            cfg.Tiers.Sort((a, b) => a.MinScore.CompareTo(b.MinScore));
-            CMMConfig.D($"[CMM] CombatThreat: enabled={cfg.Enabled}, {cfg.Weights.Count} weights, " +
-                    $"{cfg.States.Count} states, {cfg.Tiers.Count} tiers.");
-            return cfg;
         }
 
         // ── Helpers: child-element readers ────────────────────────────────────

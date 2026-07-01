@@ -343,6 +343,7 @@ namespace CMM
             t["biome"]       = gameState.Biome;
             t["nearHome"]    = gameState.NearHome;
             t["alliesNearby"] = gameState.AlliesNearby;
+            t["strangersNearby"] = gameState.StrangersNearby;
             t["inPoi"]       = gameState.InPoi;
             t["poiName"]     = gameState.PoiName;
             t["poiTier"]     = gameState.PoiTier;
@@ -371,6 +372,8 @@ namespace CMM
             Table c = _cfgTable;
             c["enemyDetectRange"]   = CMMConfig.EnemyDetectRange;
             c["playerDetectRange"]  = CMMConfig.PlayerDetectRange;
+            c["combatShareRange"]        = CMMConfig.CombatShareRange;
+            c["combatShareRequireAlly"]  = CMMConfig.CombatShareRequireAlly;
             c["homeDetectRange"]    = CMMConfig.HomeDetectRange;
             c["healthDangerPct"]    = CMMConfig.PlayerHealthDangerThresholdPercent;
             c["combatExitDelay"]    = CMMConfig.CombatExitDelay;

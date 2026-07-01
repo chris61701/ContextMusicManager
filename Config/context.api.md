@@ -44,6 +44,7 @@ persists between calls; `reset()` is your hook to clear it when a world unloads.
 | `biome` | string/nil | raw name (`"desert"`); **nil = chunk not loaded yet** |
 | `nearHome` | bool | near bedroll or a land claim |
 | `alliesNearby` | number | living party members / friends within `cfg.playerDetectRange` (multiplayer only; 0 in single-player) |
+| `strangersNearby` | number | living **non-friendly** players (neither party member nor ACL friend) within `cfg.playerDetectRange` (multiplayer only; 0 in single-player) |
 | `inPoi` | bool | |
 | `poiName` | string | stable POI identifier |
 | `poiTier` | number | difficulty tier (0–5; else no `_Tn` suffix) |
@@ -56,13 +57,20 @@ Each `enemies[i]`: `{ className, distance, isAlert, isTargetingPlayer }`.
 
 ## `cfg` (read-only, from settings.xml)
 
-`enemyDetectRange`, `playerDetectRange`, `homeDetectRange`, `healthDangerPct`,
-`combatExitDelay`, `combatCooldown`, `combatLowThreshold`, `combatHighThreshold`.
+`enemyDetectRange`, `playerDetectRange`, `combatShareRange`, `combatShareRequireAlly`,
+`homeDetectRange`, `healthDangerPct`, `combatExitDelay`, `combatCooldown`,
+`combatLowThreshold`, `combatHighThreshold`.
 
-> The combat **threat weights/tiers** are no longer read from settings.xml's
-> `<CombatThreat>` when a script is active — they live in `context.lua` (see the
-> `COMBAT_TIERS` / `TYPE_WEIGHTS` / `STATE_MULTS` tables in the default). The
-> scalar tunables above still come from settings.xml.
+> `combatShareRange` / `combatShareRequireAlly` gate multiplayer squad-shared combat
+> **in C#** (an enemy fighting a nearby player becomes your combat): the range is the
+> local→other-player distance, and the ally toggle decides whether that player must be
+> a party member / ACL friend. They're surfaced here for reference; the decision to
+> share is made before the snapshot reaches the script.
+>
+> The combat **threat weights/tiers** live entirely in `context.lua` (see the
+> `COMBAT_TIERS` / `TYPE_WEIGHTS` / `STATE_MULTS` tables in the default); there is
+> no longer a `<CombatThreat>` block in settings.xml. The scalar tunables above
+> (including `combatLowThreshold` / `combatHighThreshold`) still come from settings.xml.
 
 ## `cmm` helpers
 

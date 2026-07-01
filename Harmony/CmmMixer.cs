@@ -27,9 +27,9 @@ namespace CMM
     // rate crossfade — each voice converts to the bus instead of forcing a device
     // reopen on every rate change (the Phase-2 behaviour).
     //
-    // Gated by CMMConfig.NativeAudioOutput, driven by the `cmm native*` console
-    // commands. It does not yet replace the AudioSource path in PlayFromCache
-    // (Phase 3c).
+    // This is the sole output path for custom-file contexts (the legacy AudioSource/
+    // AudioClip path has been removed); the `cmm native*` console commands drive it
+    // manually for testing.
 
     internal static class NativeOut
     {
@@ -158,6 +158,14 @@ namespace CMM
         // proactively while DeepBuffer is set (loading / menu); snapped tight again on a
         // context change. Driven from the control layer via DeepBuffer.
         internal static volatile bool DeepBuffer;   // hold a deep cushion proactively (loading/menu)
+        // Like DeepBuffer, this holds a deep cushion — but it is DELIBERATELY excluded from the
+        // Pump's deep-buffer falling-edge flush (see Pump). It's raised for the post-spawn / post-
+        // teleport grace window (heavy chunk streaming continues after the loading screen closes),
+        // where the same context keeps playing, so its expiry must ease back to tight by NATURAL
+        // DRAIN — a flush there would teleport the still-playing track forward by the cushion depth.
+        // (DeepBuffer's flush is safe only because leaving the load window coincides with the spawn
+        // context change, which discards the outgoing audio anyway.)
+        internal static volatile bool ExtraCushion;
         const int CalmMs       = 3000;   // no starvation for this long → ease back to the tight target
         const int FlushGraceMs = 750;    // after a flush, ignore the (intentionally) empty ring this long
         int _maxFillFrames, _tightFillFrames, _lowWaterFrames;
@@ -194,7 +202,9 @@ namespace CMM
             public float Gain;           // current crossfade gain
             public float TargetGain;     // gain we're ramping toward
             public float GainStep;       // per-frame ramp increment (0 = steady)
-            public float TrackGain;      // per-track loudness gain, multiplied on top of the crossfade gain
+            public float TrackGain;       // per-track loudness gain (× crossfade gain); has its own ramp below
+            public float TrackGainTarget; // loudness gain we're ramping toward (late measurement / trim key)
+            public float TrackGainStep;   // per-frame ramp increment for TrackGain (0 = steady)
             public bool  Loop;
             public bool  Ended;          // reader hit EOF and isn't looping
             public bool  IsStinger;      // PlayOnce overlay: when it retires, ducked voices are restored
@@ -327,6 +337,7 @@ namespace CMM
                     TotalFrames = total, SourceFramesRead = startFrame,
                     Conv = conv, InBuf = inBuf, Loop = loop, TargetGain = 1f,
                     TrackGain = trackGain > 0f ? trackGain : 1f,
+                    TrackGainTarget = trackGain > 0f ? trackGain : 1f,
                     IsStinger = stinger,
                 };
                 if (fadeSeconds <= 0f) { v.Gain = 1f; v.GainStep = 0f; }
@@ -434,18 +445,28 @@ namespace CMM
         }
 
         // Update a live voice's per-track gain (loudness × user trim) in place — no restart — so the
-        // per-track volume keybind is heard immediately on the currently-playing native track. The
-        // gain was baked into the Voice at Play time; without this, adjusting the trim only changed
-        // the STORED value and the next track, never the one you're listening to. Returns false when
-        // the voice is gone. Takes effect on the next rendered block (RenderVoiceAdd reads TrackGain).
-        public bool SetVoiceTrackGain(long id, float trackGain)
+        // per-track volume keybind is heard immediately on the currently-playing native track, and a
+        // loudness measurement that lands AFTER the track started (it played at neutral 1.0) settles to
+        // its normalized level without a restart. The gain was baked into the Voice at Play time; without
+        // this, changing it only updated the STORED value and the next track, never the one you're hearing.
+        // rampSeconds > 0 ramps TrackGain over that wall-clock time (declick / smooth correction) instead
+        // of snapping — the correction from un-normalized 1.0 down to a normalized level can be large, so a
+        // snap would click. rampSeconds <= 0 snaps. Returns false when the voice is gone. Takes effect from
+        // the next rendered block (RenderVoiceAdd ramps and reads TrackGain).
+        public bool SetVoiceTrackGain(long id, float trackGain, float rampSeconds = 0f)
         {
             if (id == 0) return false;
             float g = trackGain > 0f ? trackGain : 0f;
             lock (_lock)
             {
                 foreach (var v in _voices)
-                    if (v.Id == id) { v.TrackGain = g; return true; }
+                    if (v.Id == id)
+                    {
+                        v.TrackGainTarget = g;
+                        if (rampSeconds <= 0f) { v.TrackGain = g; v.TrackGainStep = 0f; }
+                        else                   v.TrackGainStep = ComputeStep(v.TrackGain, g, rampSeconds);
+                        return true;
+                    }
             }
             return false;
         }
@@ -535,8 +556,8 @@ namespace CMM
         int ComputeFillTargetLocked(int queued)
         {
             int now = Environment.TickCount;
-            if (DeepBuffer)
-                _targetFillFrames = _maxFillFrames;                         // hold deep through the load
+            if (DeepBuffer || ExtraCushion)
+                _targetFillFrames = _maxFillFrames;                         // hold deep (load, or post-spawn grace)
             else if (now - _flushUntilMs < 0)
                 _targetFillFrames = _tightFillFrames;                       // just flushed — refill tight, ignore the empty ring
             else if (queued < _lowWaterFrames)
@@ -703,6 +724,16 @@ namespace CMM
                         v.GainStep = 0f;
                     }
                 }
+                if (v.TrackGainStep != 0f)
+                {
+                    v.TrackGain += v.TrackGainStep;
+                    if ((v.TrackGainStep > 0f && v.TrackGain >= v.TrackGainTarget) ||
+                        (v.TrackGainStep < 0f && v.TrackGain <= v.TrackGainTarget))
+                    {
+                        v.TrackGain = v.TrackGainTarget;
+                        v.TrackGainStep = 0f;
+                    }
+                }
                 int o = f * BusChannels;     // _voiceStereo and _bus share the stereo layout
                 float g = v.Gain * v.TrackGain;   // crossfade gain × per-track loudness gain
                 _bus[o]     += _voiceStereo[o]     * g;
@@ -720,6 +751,13 @@ namespace CMM
                 if ((v.GainStep > 0f && v.Gain >= v.TargetGain) ||
                     (v.GainStep < 0f && v.Gain <= v.TargetGain))
                 { v.Gain = v.TargetGain; v.GainStep = 0f; }
+            }
+            if (silent > 0 && v.TrackGainStep != 0f)
+            {
+                v.TrackGain += v.TrackGainStep * silent;
+                if ((v.TrackGainStep > 0f && v.TrackGain >= v.TrackGainTarget) ||
+                    (v.TrackGainStep < 0f && v.TrackGain <= v.TrackGainTarget))
+                { v.TrackGain = v.TrackGainTarget; v.TrackGainStep = 0f; }
             }
 
             if (v.Ended && frames < n) return false;              // track finished and drained

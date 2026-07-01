@@ -33,6 +33,13 @@ All notable changes to Context Music Manager are documented here.
   and `LoudnessMaxBoostDb` (default 12 dB; attenuation is uncapped — the boost cap exists
   because `AudioSource.volume` can't exceed 1.0).
 
+- **Multiplayer squad-shared combat.** An enemy fighting a nearby player now puts you into
+  combat too, so a squad shares one combat state even when the zombies are on your teammate.
+  Two `settings.xml` knobs tune it, independently of `PlayerDetectRange` (which governs the
+  ally/stranger proximity counts): `CombatShareRange` (how close that player must be for their
+  fight to count as yours) and `CombatShareRequireAlly` (when `true`, only party members /
+  friends share combat; set `false` to share with any nearby player). No effect in single-player.
+
 ### Changed
 
 - **Music now plays through Context Music Manager's own audio engine.** Custom tracks are

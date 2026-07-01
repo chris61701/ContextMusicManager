@@ -53,6 +53,14 @@
        An enemy aggroed onto a party member / friend within this range counts as your
        combat, and allies within it scale combat intensity. No effect in single-player. -->
   <PlayerDetectRange>30</PlayerDetectRange>
+  <!-- Multiplayer squad-shared combat: how close (game units) another player must be for
+       an enemy fighting THEM to put you into combat too. A separate radius from
+       PlayerDetectRange (which governs the ally/stranger proximity counts), so "sharing a
+       squadmate's fight" and "who counts as near you" are tuned independently.
+       CombatShareRequireAlly: when true, only party members / ACL friends share combat;
+       set false to share combat with ANY nearby player. No effect in single-player. -->
+  <CombatShareRange>30</CombatShareRange>
+  <CombatShareRequireAlly>false</CombatShareRequireAlly>
   <!-- Distance (game units) from your bedroll or land claim that counts as "home". -->
   <HomeDetectRange>70</HomeDetectRange>
   <!-- Health fraction (0.0–1.0) below which combat escalates to Low_Health_Panic. -->
@@ -64,55 +72,10 @@
   <CombatExitDelay>2.0</CombatExitDelay>
   <CombatCooldown>10.0</CombatCooldown>
 
-  <!-- ── Weighted combat threat ─────────────────────────────────────────
-       When enabled, combat intensity is chosen by SCORING the enemies that are
-       targeting you rather than just counting them. Each such enemy contributes
-       (type weight × state multiplier); the summed score selects the highest Tier
-       whose minScore it meets. Tier "context" names must exist in contexts.xml.
-
-       Matching is longest-substring-wins against the entity's class name, e.g.
-       "zombieDireWolf" → matches "direwolf" (4.5), not "wolf"; "zombieBoeFeral"
-       → no type key, so defaultWeight (1.0), × state "feral" (1.5). Weights are
-       calibrated to V1 health/damage: a standard walker ≈ 1.0.
-
-       Set enabled="false" to fall back to the simple thresholds above. -->
-  <CombatThreat enabled="true" defaultWeight="1.0">
-    <!-- Type weights -->
-    <Enemy match="crawler"      weight="0.6" />
-    <Enemy match="spider"       weight="1.3" />
-    <Enemy match="dog"          weight="1.4" />
-    <Enemy match="vulture"      weight="1.4" />
-    <Enemy match="coyote"       weight="1.5" />
-    <Enemy match="wolf"         weight="2.0" />
-    <Enemy match="mountainlion" weight="3.0" />
-    <Enemy match="screamer"     weight="3.5" />  <!-- summons hordes -->
-    <Enemy match="cop"          weight="3.5" />  <!-- ranged vomit + corpse explosion -->
-    <Enemy match="wight"        weight="3.5" />
-    <Enemy match="mutated"      weight="3.5" />
-    <Enemy match="bear"         weight="4.0" />  <!-- AoE, huge HP -->
-    <Enemy match="direwolf"     weight="4.5" />  <!-- 60 melee, very fast -->
-    <Enemy match="demolition"   weight="8.0" />  <!-- detonates -->
-    <Enemy match="grace"        weight="10.0" /> <!-- boss -->
-
-    <!-- State multipliers, applied on top of the type weight. Charged hits hardest
-         (60 melee), Infernal is tankiest; Radiated reuses the Feral hand (20 dmg)
-         but adds regeneration, so it sits between. -->
-    <State match="feral"    multiplier="1.5" />
-    <State match="radiated" multiplier="2.0" />
-    <State match="charged"  multiplier="2.75" />
-    <State match="infernal" multiplier="3.25" />
-
-    <!-- Score → combat tier (any order; sorted ascending on load). Highest met wins.
-         minScore is a float, so fractional thresholds are allowed (e.g. 0.5 lets a
-         single sub-1.0-weight enemy such as a crawler still open the Low tier). -->
-    <Tier context="Combat_Low"  minScore="0.5" />
-    <Tier context="Combat_High" minScore="6"  />
-    <Tier context="Combat_Boss" minScore="18" />
-  </CombatThreat>
-
-  <!-- Number of player-targeting enemies required to trigger combat music.
-       Used ONLY when <CombatThreat> below is disabled or has no tiers.
-       Combat_Low fires at or above the Low threshold, Combat_High at or above the High threshold. -->
+  <!-- Enemy-count thresholds, passed to the decision script as cfg.combatLowThreshold
+       / cfg.combatHighThreshold. The default context.lua tiers combat via its own
+       weighted scoring (COMBAT_TIERS / TYPE_WEIGHTS / STATE_MULTS) and ignores these,
+       so they only take effect in a custom script that reads them. -->
   <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
   <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
 
@@ -125,10 +88,11 @@
                               (saved in Cache/loudness.xml, persists across sessions).
                               Only audible while LoudnessNormalizationEnabled is true.
        Keys use Unity KeyCode names (RightArrow, LeftArrow, F7, Keypad6, ...).
-       By default all four require Ctrl+Alt held so they don't collide with game or
-       chat input; set the Require flags false for bare-key bindings. -->
+       By default all four require Alt held so they don't collide with game or chat
+       input. Ctrl is NOT used because it's the game's crouch toggle; Alt is unbound
+       in 7D2D. Set the Require flags as you like for other bindings. -->
   <KeybindsEnabled>true</KeybindsEnabled>
-  <KeybindRequireCtrl>true</KeybindRequireCtrl>
+  <KeybindRequireCtrl>false</KeybindRequireCtrl>
   <KeybindRequireAlt>true</KeybindRequireAlt>
   <KeyNextTrack>RightArrow</KeyNextTrack>
   <KeyPrevTrack>LeftArrow</KeyPrevTrack>
@@ -137,22 +101,17 @@
   <!-- Per-press change to the current track's volume trim (linear factor). -->
   <UserTrimStep>0.1</UserTrimStep>
 
-  <!-- ── Native audio output (EXPERIMENTAL) ─────────────────────────────
-       When true, music plays through CMM's OWN audio output + mixer thread
-       (miniaudio, in CMM_Decoder.dll) instead of Unity's AudioSource — so
-       decode, mixing and output all run on threads CMM owns, off Unity's main
-       and audio threads. It plays to the same default device and shares the
-       game's music-volume slider. Default false keeps the normal Unity path.
-       NOTE (prototype): currently only driven by the console commands
-       'cmm nativeplay <context>' / 'cmm nativenext' / 'cmm nativestop'; it does
-       not yet replace normal context playback.
+  <!-- ── Native audio output ring buffer ─────────────────────────────────
+       Music plays through CMM's OWN audio output + mixer thread (miniaudio,
+       in CMM_Decoder.dll), so decode, mixing and output all run on threads
+       CMM owns, off Unity's main and audio threads. It plays to the same
+       default device and shares the game's music-volume slider.
          NativeOutputRingMs – tight output cushion (ms) kept in normal play; also
                               the volume/crossfade latency, so kept small (~200ms).
          NativeOutputMaxRingMs – ceiling (ms) the cushion can ADAPTIVELY grow to
                               when the CPU is starved (world-gen / other apps) or
                               while loading, then snaps back tight on a context
                               change. 15000 ≈ 5.8 MB native ring. -->
-  <NativeAudioOutput>true</NativeAudioOutput>
   <NativeOutputRingMs>200</NativeOutputRingMs>
   <NativeOutputMaxRingMs>15000</NativeOutputMaxRingMs>
 

@@ -41,7 +41,8 @@ internal static class Program
 
         string musicDir = null;
         double hours = 24; float tick = 0.5f, dayMinutes = 60f; int seed = 1;
-        bool decode = true, sweep = false, verbose = false;
+        bool decode = true, sweep = false, verbose = false, noLoudness = false, lookahead = true;
+        double loudSlow = 1.0;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -54,6 +55,9 @@ internal static class Program
                 case "--no-decode": decode = false; break;
                 case "--sweep": sweep = true; break;
                 case "--no-dms": ContextMusicManager.DmsEnabled = false; break;
+                case "--no-loudness": noLoudness = true; break;
+                case "--no-lookahead": lookahead = false; break;
+                case "--loud-slow": loudSlow = double.Parse(args[++i]); break;
                 case "-v": verbose = true; break;
                 case "-h": case "--help": Usage(); return 0;
                 default: musicDir ??= args[i]; break;
@@ -108,6 +112,61 @@ internal static class Program
 
         var gen = new SessionGenerator(seed, tick, dayMinutes);
 
+        // ── Loudness-normalization model (mirrors the shipped policy, timing-aware) ──
+        // A track plays at UNITY GAIN unless its integrated-LUFS measurement has COMPLETED
+        // when Play fires. Measuring is a full decode+R128 pass on a single background worker
+        // (the mod's look-ahead borrows one serial scratch), so it takes real time and can be
+        // outrun by rapid context churn. What keeps tracks normalized in time:
+        //   • menu prewarm — one track per context, measured while still on the menu (ready at t=0),
+        //   • look-ahead   — the current context's staged NEXT track, measured in the background,
+        //   • the cache    — a completed measurement normalizes every later play of that file.
+        // A track plays un-normalized when it is needed before its measurement finishes (a cold
+        // first-need or a look-ahead the churn outran) or when the measurement FAILS outright.
+        bool loudnessEnabled = !noLoudness && haveLib;
+        var loudScratch = new AudioDecoder.MeasureScratch();
+        var readyAt = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase); // file -> sim-time measure completed
+        var failedMeas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        double workerFree = 0.0;   // sim-time the single background measure worker is next free
+        long playsTotal = 0, playsNormalized = 0;
+        int unnormCold = 0, unnormFailed = 0;
+        var unnormByExt = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var unnormReasons = new Dictionary<string, int>();
+        var unnormSamples = new List<string>();
+
+        // Runs a measurement of `f` on the single background worker, starting no earlier than
+        // `atSim` (queued behind whatever the worker is already doing). background:false models
+        // the menu prewarm — ready at t=0 without occupying the worker. Returns true on success.
+        bool Measure(string f, double atSim, bool background)
+        {
+            if (f == null) return false;
+            if (readyAt.ContainsKey(f)) return true;
+            if (failedMeas.Contains(f)) return false;
+            long t0 = Stopwatch.GetTimestamp();
+            TrackLoudness m;
+            try { m = AudioDecoder.MeasureLoudness(f, loudScratch); }
+            catch { m = new TrackLoudness { Ok = false }; }
+            if (!m.Ok) { failedMeas.Add(f); return false; }
+            if (background)
+            {
+                double dur = (Stopwatch.GetTimestamp() - t0) * loudSlow / Stopwatch.Frequency; // measure wall = sim-sec cost (×loudSlow to model a CPU-starved worker)
+                double start = Math.Max(atSim, workerFree);
+                workerFree = start + dur;
+                readyAt[f] = workerFree;
+            }
+            else readyAt[f] = 0.0;  // prewarmed on the menu — ready from session start
+            return true;
+        }
+
+        // Menu prewarm: measure one track per context before the session (as the menu does).
+        if (loudnessEnabled)
+            foreach (var kv in ContextMusicManager.Index)
+                if (kv.Value.Length > 0) Measure(kv.Value[0], 0.0, background: false);
+
+        // ── Multiplayer proximity tally ──────────────────────────────────────────
+        long mpTicksAllies = 0, mpTicksStrangers = 0, mpTicksAny = 0, mpTicksInCombat = 0, mpTicksOutCombat = 0;
+        int mpEnters = 0, mpMaxAllies = 0, mpMaxStrangers = 0;
+        bool mpPrevAny = false;
+
         // Warm up the script + JIT (first Resolve compiles paths) so the baseline is steady-state.
         SimClock.Now = 0f;
         ScriptHost.Resolve(gen.Next());
@@ -140,6 +199,22 @@ internal static class Program
             long a2 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
             allocSelect += a2 - a1;
 
+            // ── Multiplayer proximity tally (every tick) ──
+            int allies = gs.AlliesNearby, strangers = gs.StrangersNearby;
+            bool anyPlayer = allies + strangers > 0;
+            bool inCombat = gs.IsPanicked;           // FillSnapshot sets this whenever an enemy targets the player
+            if (allies > 0) mpTicksAllies++;
+            if (strangers > 0) mpTicksStrangers++;
+            if (anyPlayer)
+            {
+                mpTicksAny++;
+                if (inCombat) mpTicksInCombat++; else mpTicksOutCombat++;
+                if (!mpPrevAny) mpEnters++;
+            }
+            if (allies > mpMaxAllies) mpMaxAllies = allies;
+            if (strangers > mpMaxStrangers) mpMaxStrangers = strangers;
+            mpPrevAny = anyPlayer;
+
             // Phase 3 — decode on a real transition to a file-backed context.
             if (r.Transitioned)
             {
@@ -159,28 +234,59 @@ internal static class Program
                 // Fade window for THIS transition = max(crossfade, the incoming context's FadeInDuration).
                 var topCtx = ContextMusicManager.GetContext(r.Top);
                 prevFadeWindow = Math.Max(ContextMusicManager.CrossFadeDuration, topCtx?.FadeInDuration ?? 0);
-                if (decode && haveLib && r.Top != "Vanilla" && r.Top != "Silence")
+                if (haveLib && r.Top != "Vanilla" && r.Top != "Silence")
                 {
                     string file = ContextMusicManager.PickFile(r.Top);
                     if (file != null)
                     {
-                        long d0 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
-                        ts = Stopwatch.GetTimestamp();
-                        try
+                        // ── Loudness: was this track normalized when Play fired? ──
+                        if (loudnessEnabled)
                         {
-                            if (sweep && measured.Add(file))
-                                AudioDecoder.MeasureLoudness(file, scratch);
-                            using (var rdr = AudioDecoder.OpenStreamingReader(file)) { }
-                            double ms = Ms(ts);
-                            decodeMs.Add(ms);
-                            string ext = Path.GetExtension(file).ToLowerInvariant();
-                            if (!decodeByExt.TryGetValue(ext, out var l)) decodeByExt[ext] = l = new List<double>();
-                            l.Add(ms);
-                            decodes++;
-                            if (verbose) Console.WriteLine($"  [{r.Top}] {Path.GetFileName(file)} open {ms:F2}ms");
+                            playsTotal++;
+                            double now = SimClock.Now;
+                            bool normalized; string reason = null;
+                            if (failedMeas.Contains(file)) { normalized = false; reason = "measurement FAILED — unity gain (every play)"; }
+                            else if (readyAt.TryGetValue(file, out double ra) && ra <= now) normalized = true;
+                            else if (readyAt.ContainsKey(file)) { normalized = false; reason = "look-ahead still measuring when Play fired (churn outran the worker)"; }
+                            else { normalized = false; reason = "first need — not pre-measured, measured on demand after Play"; }
+
+                            if (normalized) playsNormalized++;
+                            else
+                            {
+                                string uext = Path.GetExtension(file).ToLowerInvariant();
+                                unnormByExt[uext] = unnormByExt.TryGetValue(uext, out int uc) ? uc + 1 : 1;
+                                unnormReasons[reason] = unnormReasons.TryGetValue(reason, out int rc) ? rc + 1 : 1;
+                                if (reason.StartsWith("measurement FAILED")) unnormFailed++; else unnormCold++;
+                                if (unnormSamples.Count < 25)
+                                    unnormSamples.Add($"h{now / 3600.0,5:F1}  {r.Top,-24} {Path.GetFileName(file),-30} {reason}");
+                            }
+
+                            // On-demand measure of the track just played (so its NEXT play is normalized),
+                            // then the look-ahead for this context's staged next track — both on the worker.
+                            Measure(file, now, background: true);
+                            if (lookahead) Measure(ContextMusicManager.PeekNextFile(r.Top), now, background: true);
                         }
-                        catch (Exception ex) { decodeErrors++; if (verbose) Console.WriteLine($"  DECODE ERR {Path.GetFileName(file)}: {ex.Message}"); }
-                        allocDecode += AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize - d0;
+
+                        if (decode)
+                        {
+                            long d0 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
+                            ts = Stopwatch.GetTimestamp();
+                            try
+                            {
+                                if (sweep && measured.Add(file))
+                                    AudioDecoder.MeasureLoudness(file, scratch);
+                                using (var rdr = AudioDecoder.OpenStreamingReader(file)) { }
+                                double ms = Ms(ts);
+                                decodeMs.Add(ms);
+                                string ext = Path.GetExtension(file).ToLowerInvariant();
+                                if (!decodeByExt.TryGetValue(ext, out var l)) decodeByExt[ext] = l = new List<double>();
+                                l.Add(ms);
+                                decodes++;
+                                if (verbose) Console.WriteLine($"  [{r.Top}] {Path.GetFileName(file)} open {ms:F2}ms");
+                            }
+                            catch (Exception ex) { decodeErrors++; if (verbose) Console.WriteLine($"  DECODE ERR {Path.GetFileName(file)}: {ex.Message}"); }
+                            allocDecode += AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize - d0;
+                        }
                     }
                 }
             }
@@ -199,6 +305,45 @@ internal static class Program
                GC.CollectionCount(0) - g0, GC.CollectionCount(1) - g1, GC.CollectionCount(2) - g2,
                heapBaseline, heapCheckpoints);
         PrintCrossfadePressure(gaps, jarring, transitionTimes);
+
+        // ── Multiplayer proximity ──────────────────────────────────────────────
+        Console.WriteLine("\n── Multiplayer proximity (simulated nearby players) ──────────────────");
+        if (mpTicksAny == 0)
+            Console.WriteLine("   (no nearby players were simulated)");
+        else
+        {
+            double pct(long n) => 100.0 * n / totalTicks;
+            Console.WriteLine($"   ticks with a player nearby : {mpTicksAny:N0} ({pct(mpTicksAny):F1}% of session)  ·  {mpEnters:N0} separate arrivals (enter-range events)");
+            Console.WriteLine($"   allies nearby   : {mpTicksAllies:N0} ticks ({pct(mpTicksAllies):F1}%)  max {mpMaxAllies} at once");
+            Console.WriteLine($"   strangers nearby: {mpTicksStrangers:N0} ticks ({pct(mpTicksStrangers):F1}%)  max {mpMaxStrangers} at once");
+            Console.WriteLine($"   while nearby    : {mpTicksInCombat:N0} ticks IN combat ({pct(mpTicksInCombat):F1}%)  ·  {mpTicksOutCombat:N0} ticks OUT of combat ({pct(mpTicksOutCombat):F1}%)");
+            int onlineStranger = transitionsByTop.TryGetValue("Online_Stranger", out int os) ? os : 0;
+            int onlineFriend   = transitionsByTop.TryGetValue("Online_Friend",   out int of) ? of : 0;
+            Console.WriteLine($"   music fired     : Online_Stranger ×{onlineStranger}   Online_Friend ×{onlineFriend}   (else a louder context — combat/tension — won the stack)");
+        }
+
+        // ── Loudness normalization (what played un-normalized, and why) ─────────
+        Console.WriteLine("\n── Loudness normalization (un-normalized playback) ───────────────────");
+        if (!loudnessEnabled)
+            Console.WriteLine("   (normalization model off — run without --no-loudness and with a library to measure)");
+        else
+        {
+            long unnorm = playsTotal - playsNormalized;
+            Console.WriteLine($"   measured       : {readyAt.Count + failedMeas.Count:N0} tracks ({failedMeas.Count} FAILED)  ·  single background worker + menu prewarm + look-ahead");
+            Console.WriteLine($"   track plays    : {playsTotal:N0}   normalized {playsNormalized:N0} ({(playsTotal > 0 ? 100.0 * playsNormalized / playsTotal : 0):F1}%)   un-normalized {unnorm:N0} ({(playsTotal > 0 ? 100.0 * unnorm / playsTotal : 0):F1}%)");
+            Console.WriteLine($"   split          : {unnormCold:N0} cold (played before measure finished — normalized on later plays)  ·  {unnormFailed:N0} measurement FAILED (unity gain forever)");
+            foreach (var kv in unnormReasons.OrderByDescending(k => k.Value))
+                Console.WriteLine($"      {kv.Value,6:N0}  {kv.Key}");
+            if (unnormByExt.Count > 0)
+                Console.WriteLine("   by format      : " + string.Join("   ", unnormByExt.OrderByDescending(k => k.Value).Select(k => $"{k.Key} ×{k.Value}")));
+            if (unnormSamples.Count > 0)
+            {
+                Console.WriteLine($"   first {unnormSamples.Count} un-normalized plays (simhour  context  file  reason):");
+                foreach (var s in unnormSamples) Console.WriteLine("     " + s);
+            }
+            else
+                Console.WriteLine("   → every track was normalized at Play time (prewarm + look-ahead kept up; no failures).");
+        }
         return 0;
     }
 
@@ -330,5 +475,8 @@ internal static class Program
         "  --no-decode        resolve+select+GC only (skip per-transition decode)\n" +
         "  --sweep            EBU-R128 measure each track once on first play\n" +
         "  --no-dms           Dynamic Music disabled\n" +
+        "  --no-loudness      skip the loudness-normalization model\n" +
+        "  --no-lookahead     disable the look-ahead pre-measure (isolates its value)\n" +
+        "  --loud-slow <f>    x f the modeled measure time (simulate a CPU-starved worker)\n" +
         "  -v                 verbose\n");
 }

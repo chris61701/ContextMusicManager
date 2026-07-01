@@ -92,7 +92,7 @@
   <Context name="POI"                        path="poi"                         subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="poi"  bypass="false" priority="16"  once="false" volume="-1" />
 
   <!-- ── Combat ──────────────────────────────────── -->
-  <!-- Three combat tiers selected by the <CombatThreat> model in settings.xml. The
+  <!-- Three combat tiers selected by the weighted scoring in context.lua (COMBAT_TIERS). The
        combat/ root folder IS the base (low) tier; the escalations live in its _high and
        _boss subfolders, underscore-prefixed so the directory scan never confuses them with
        the per-biome subfolders below. Boss → High → Low; Low bridges to vanilla combat
@@ -137,6 +137,16 @@
 
   <!-- ── Tension ─────────────────────────────────── -->
   <Context name="Tension"                    path="tension"                     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="2"  warmgroup=""     bypass="false" priority="30"  once="false" volume="-1" />
+
+  <!-- ── Online players ──────────────────────────── -->
+  <!-- A non-friendly player (neither party member nor ACL friend) is within
+       PlayerDetectRange. Multiplayer only; never fires in single-player. Priority 29
+       sits just under Tension (30): a real fight (Combat 50+) still wins, but the
+       presence of a stranger outranks ambient/home/trader exploration music. The
+       warmup dwell keeps a player merely passing through from interrupting. Detection
+       is relationship-only and ignores the server PvP mode (PlayerKillingMode). -->
+  <Context name="Online_Stranger"            path="testing/online/stranger"     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="29"  once="false" volume="-1" />
+  <Context name="Online_Friend"              path="testing/online/friendly"     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="14"  once="false" volume="-1" />
 
   <!-- ── Traders ─────────────────────────────────── -->
   <Context name="Trader_Joel"                path="trader/joel"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />

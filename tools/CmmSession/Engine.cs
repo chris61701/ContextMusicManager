@@ -87,6 +87,8 @@ namespace CMM
             Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
             Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:45, once:true);
             Add("Tension",             "tension",               stale:30,                                      priority:30, warmup:2);
+            Add("Online_Stranger",     "testing/online/stranger", stale:30,                                    priority:29, warmup:3);
+            Add("Online_Friend",       "testing/online/friendly", stale:30,                                    priority:14, warmup:3);
             Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3);
             Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3);
             Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3);
@@ -183,6 +185,18 @@ namespace CMM
             if (contextName == null || !_index.TryGetValue(contextName, out var files) || files.Length == 0) return null;
             int i = _rotor.TryGetValue(contextName, out int last) ? (last + 1) % files.Length : 0;
             _rotor[contextName] = i;
+            return files[i];
+        }
+
+        // Read-only view of the file index + a non-advancing peek at the file the NEXT PickFile
+        // would return for a context. Used by the harness to model the loudness policy: the menu
+        // prewarm (one track per context) iterates the index; the look-ahead pre-measures the
+        // staged next track (PeekNextFile) exactly as ScheduleNextCacheLoad does in-game.
+        public static IReadOnlyDictionary<string, string[]> Index => _index;
+        public static string PeekNextFile(string contextName)
+        {
+            if (contextName == null || !_index.TryGetValue(contextName, out var files) || files.Length == 0) return null;
+            int i = _rotor.TryGetValue(contextName, out int last) ? (last + 1) % files.Length : 0;
             return files[i];
         }
 
