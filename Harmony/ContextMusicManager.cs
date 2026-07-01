@@ -151,8 +151,12 @@ namespace CMM
                 // Track-end auto-advance, off the frame loop: the poll reads only thread-safe
                 // mixer/transition state and marshals the actual advance back to the main
                 // thread, so advancement survives a main-thread freeze. Replaces the per-track
-                // NativeTrackLoop coroutine (still used when the flag is off).
-                CmmScheduler.Every(TrackEndPollInterval, NativeAdvanceTick, "native-advance");
+                // NativeTrackLoop coroutine (still used when the flag is off). On the CRITICAL
+                // lane (its own thread): the housekeeping ticks below block on the main thread
+                // via Send, and during a freeze that would park a shared thread — and the
+                // advance with it — exactly when advance-through-freeze is supposed to work.
+                CmmScheduler.Every(TrackEndPollInterval, NativeAdvanceTick, "native-advance",
+                    lane: CmmScheduler.Lane.Critical);
                 // Config/settings/contexts/script hot-reload watch, off the frame loop: the
                 // stamp probe runs on the scheduler thread and only marshals an actual change
                 // back to the main thread (see ConfigWatchTick). Replaces ConfigWatchLoop.
@@ -1212,6 +1216,9 @@ namespace CMM
         {
             if (_functionallyDormant) return;   // A/B dormant arm
             // One main-thread hop to snapshot the watch set + whether anything is blacklisted.
+            // Blocking Send: during a main-thread freeze this parks the HOUSEKEEPING lane
+            // until the main thread pumps again — which is why this tick must never share a
+            // thread with native-advance (see CmmScheduler's lane contract).
             List<FileWatchDescriptor> descriptors = null;
             bool anyBlacklisted = false;
             MainThreadDispatcher.Send(() =>

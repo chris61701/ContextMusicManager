@@ -591,7 +591,9 @@ namespace CMM
         // SNAPSHOT of the (main-thread-only) store is marshalled back via Send; then the slow
         // XML serialize + file write run HERE, on the scheduler thread, off the frame loop.
         // Send briefly blocks this thread for the (fast) snapshot — acceptable for a save,
-        // which is never time-critical. On write failure we re-flag dirty for a later retry.
+        // which is never time-critical, and it parks only the HOUSEKEEPING lane: the
+        // native-advance poll runs on its own lane thread (see CmmScheduler's lane contract).
+        // On write failure we re-flag dirty for a later retry.
         internal static void LoudnessSaveTick()
         {
             if (!LoudnessStore.Dirty) return;
@@ -1462,14 +1464,18 @@ namespace CMM
             SettleTrackGainIntoLiveVoice(file);
         }
 
-        // Off-frame-loop auto-advance: the singleton scheduler twin of NativeTrackLoop. Runs
-        // on CmmScheduler every TrackEndPollInterval when NativeScheduler is on, so track-end
-        // advancement survives a main-thread freeze (a world load/unload that stalls Unity's
-        // coroutines) instead of stalling with it. Everything it reads is thread-safe — the
-        // transition counter and active-context marker (volatile), the voice id (Interlocked),
-        // and the mixer's own locked TryGetState — so the POLL runs here; only the ADVANCE
-        // (++_transitionId + StartNativeContext, which mutate main-thread-only state) hops back
-        // to the main thread via MainThreadDispatcher.Post.
+        // Off-frame-loop auto-advance: the scheduler twin of NativeTrackLoop. Runs on
+        // CmmScheduler's CRITICAL lane (a dedicated thread) every TrackEndPollInterval when
+        // NativeScheduler is on, so track-end advancement survives a main-thread freeze (a
+        // world load/unload that stalls Unity's coroutines) instead of stalling with it —
+        // the housekeeping ticks' blocking Sends park only their own lane, never this poll.
+        // LANE CONTRACT: this body must never call MainThreadDispatcher.Send; a blocking
+        // wait on a frozen main thread here would re-create the very stall the lane split
+        // exists to remove. Everything it reads is thread-safe — the transition counter and
+        // active-context marker (volatile), the voice id (Interlocked), and the mixer's own
+        // locked TryGetState — so the POLL runs here; only the ADVANCE (++_transitionId +
+        // StartNativeContext, which mutate main-thread-only state) hops back to the main
+        // thread via MainThreadDispatcher.Post.
         //
         // Single-flight via _advancePending: once an advance is posted the poll stops until the
         // main thread applies it, so a fast poll can't double-dispatch. The posted advance

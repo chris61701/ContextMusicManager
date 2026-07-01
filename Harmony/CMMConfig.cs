@@ -34,12 +34,12 @@ namespace CMM
 
         // ── Off-frame-loop control thread (experimental) ──────────────────────
         // When true, periodic housekeeping that can run off Unity's frame loop is paced
-        // and executed on CMM's own CmmScheduler thread instead of as WaitForSeconds
-        // coroutines, marshalling back to the main thread via MainThreadDispatcher only
-        // for the parts that must observe game state or touch the lock-free structures.
+        // and executed on CMM's own CmmScheduler threads (two lanes: housekeeping +
+        // critical, see CmmScheduler) instead of as WaitForSeconds coroutines,
+        // marshalling back to the main thread via MainThreadDispatcher only for the
+        // parts that must observe game state or touch the lock-free structures.
         // Lets that work keep ticking through a main-thread freeze (world load/unload).
-        // First migrated loop: the debounced loudness cache save. When false, the
-        // original coroutine paths run instead (the fallback). See CmmScheduler.
+        // When false, the original coroutine paths run instead (the fallback).
         public static bool NativeScheduler = true;
         // Pre-stage the next track's fully-formed start request when the CURRENT one begins,
         // so the scheduler thread can dispatch the auto-advance straight to the start worker
