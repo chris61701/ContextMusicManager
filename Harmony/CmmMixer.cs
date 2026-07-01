@@ -70,6 +70,10 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_request_reinit();
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_get_output_stats(out int queued, out int target,
+            out int minQueued, out int voices, out int deep, out int underruns, out int busRate);
     }
 
     internal sealed class CmmMixer
@@ -220,6 +224,17 @@ namespace CMM
         public void RequestDeviceReinit()
         {
             NativeMix.cmm_mix_request_reinit();
+        }
+
+        // Live output-ring health for the debug HUD (frames + the bus rate to convert to ms).
+        // minQueued is the lowest depth since the LAST call — reset on read, so poll it on a
+        // fixed cadence to get a rolling min. Only call when the mixer exists (Instance != null),
+        // since the native side locks the mixer mutex that cmm_mix_start creates.
+        public void GetOutputStats(out int queuedFrames, out int targetFrames, out int minQueuedFrames,
+                                   out int voices, out int deep, out int underruns, out int busRate)
+        {
+            NativeMix.cmm_mix_get_output_stats(out queuedFrames, out targetFrames, out minQueuedFrames,
+                                               out voices, out deep, out underruns, out busRate);
         }
     }
 }

@@ -48,11 +48,22 @@ namespace CMM
         static string   _lastRunError;       // de-dups repeated runtime-error logging
         static bool     _usingEmbedded;      // active script is the DLL-embedded default, not on-disk
 
-        // Reused marshalling tables (resolve runs single-threaded on the scan tick),
-        // and the last successful token set used as the runtime-error fallback.
+        // Reused marshalling state (resolve runs single-threaded on the scan tick), so a tick
+        // re-sets fields instead of allocating fresh Lua tables:
+        //   _enemiesTable  — the enemies array, set into _gameStateTable ONCE (identity persists).
+        //   _enemyTablePool — per-enemy tables, each wrapped in a DynValue once and reused.
+        //   _prevEnemyCount — how many enemy slots were populated last tick (to nil the extras).
+        //   _cfgDirty      — cfg is marshalled only when settings change (MarkConfigDirty).
+        //   _tokens        — the reused resolve result (the caller copies it within the tick).
+        //   _lastGood      — the last successful token set, the runtime-error fallback.
         static Table _gameStateTable;
         static Table _cfgTable;
+        static Table _enemiesTable;
+        static readonly List<DynValue> _enemyTablePool = new List<DynValue>();
+        static int  _prevEnemyCount;
+        static bool _cfgDirty = true;
         static readonly List<string> _lastGood = new List<string>();
+        static readonly List<string> _tokens   = new List<string>();
 
         // A script is essentially always loaded (on-disk override or embedded default);
         // Active is false only if even the embedded baseline fails to compile (e.g.
@@ -63,6 +74,11 @@ namespace CMM
         // most recent resolved token set.
         public static bool UsingEmbeddedDefault => _usingEmbedded;
         public static IReadOnlyList<string> LastContexts => _lastGood;
+
+        // The marshalled cfg table is static between settings reloads, so it's built into Lua
+        // only when it changes. CMMConfigLoader's reload path calls this; the next Resolve
+        // re-marshals cfg once, then reverts to the cheap snapshot-only marshal.
+        public static void MarkConfigDirty() => _cfgDirty = true;
 
         public static string ScriptPath(string modPath) =>
             Path.Combine(modPath, "Config", "context.lua");
@@ -184,7 +200,12 @@ namespace CMM
                 DynValue reset = script.Globals.Get("reset");
                 _resetFn   = reset.Type == DataType.Function ? reset.Function : null;
                 _gameStateTable = new Table(script);
-                _cfgTable  = new Table(script);
+                _cfgTable       = new Table(script);
+                _enemiesTable   = new Table(script);
+                _gameStateTable["enemies"] = _enemiesTable;   // identity persists; contents refilled each tick
+                _enemyTablePool.Clear();                      // pooled tables were bound to the previous script
+                _prevEnemyCount = 0;
+                _cfgDirty = true;                             // re-marshal cfg against the new script
 
                 _lastLoadError = null;
                 _lastRunError  = null;
@@ -220,10 +241,10 @@ namespace CMM
                 using (CMMPerf.Measure(CMMPerf.Phase.ScanMarshal))
                 {
                     MarshalSnapshot(gameState);
-                    MarshalConfig();
+                    if (_cfgDirty) { MarshalConfig(); _cfgDirty = false; }   // cfg is static between reloads
                 }
 
-                var tokens = new List<string>();
+                _tokens.Clear();
                 using (CMMPerf.Measure(CMMPerf.Phase.ScanLuaCall))
                 {
                     DynValue result = _script.Call(_resolveFn, _gameStateTable, _cfgTable);
@@ -235,16 +256,16 @@ namespace CMM
                         {
                             DynValue v = t.Get(i);
                             if (v.Type == DataType.Nil) break;
-                            if (v.Type == DataType.String && !tokens.Contains(v.String))
-                                tokens.Add(v.String);
+                            if (v.Type == DataType.String && !_tokens.Contains(v.String))
+                                _tokens.Add(v.String);
                         }
                     }
                 }
 
                 _lastRunError = null;
                 _lastGood.Clear();
-                _lastGood.AddRange(tokens);
-                return tokens;
+                _lastGood.AddRange(_tokens);
+                return _tokens;
             }
             catch (ScriptRuntimeException ex)
             {
@@ -351,20 +372,28 @@ namespace CMM
             t["poiQuestCleared"]     = gameState.PoiQuestCleared;
             t["poiClearFromQuestOnly"] = gameState.PoiClearFromQuestOnly;
 
-            // Fresh enemies array each tick — the count varies, and the per-enemy
-            // tables are tiny; building them is well within the sub-Hz scan budget.
-            Table enemies = new Table(_script);
-            int i = 1;
+            // Enemies: reuse the array table (set into t once at compile time) + a pool of
+            // per-enemy tables, each wrapped in a DynValue ONCE. A tick only overwrites the four
+            // scalar fields — no per-tick Table or wrapper allocation. Trailing slots left by a
+            // previous, larger tick are niled so a stale enemy can't linger in the array.
+            int idx = 0;
             foreach (var e in gameState.Enemies)
             {
-                Table er = new Table(_script);
+                DynValue slot;
+                if (idx < _enemyTablePool.Count) slot = _enemyTablePool[idx];
+                else { slot = DynValue.NewTable(new Table(_script)); _enemyTablePool.Add(slot); }
+
+                Table er = slot.Table;
                 er["className"]         = e.ClassName;   // null ⇒ Lua nil
                 er["distance"]          = e.Distance;
                 er["isAlert"]           = e.IsAlert;
                 er["isTargetingPlayer"] = e.IsTargetingPlayer;
-                enemies[i++] = er;
+                _enemiesTable.Set(idx + 1, slot);        // 1-based Lua index; reuses the key node
+                idx++;
             }
-            t["enemies"] = enemies;
+            for (int k = idx; k < _prevEnemyCount; k++)
+                _enemiesTable.Set(k + 1, DynValue.Nil);  // clear last tick's extra slots
+            _prevEnemyCount = idx;
         }
 
         static void MarshalConfig()

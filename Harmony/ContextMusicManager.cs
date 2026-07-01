@@ -546,6 +546,8 @@ namespace CMM
         // and a concurrent background-thread allocation can slightly inflate it.
         private static long _scanAllocBytes = 0;
         private static int  _scanAllocTicks = 0;
+        // Last computed per-tick scan allocation (bytes), surfaced on the debug HUD's GC line.
+        private static float _lastScanBytesPerTick;
 
         // FIX: Log cache state only when something has actually changed,
         // not unconditionally every 5 seconds.
@@ -565,6 +567,7 @@ namespace CMM
                 {
                     float scanKB = _scanAllocBytes / 1024f;
                     float bytesPerTick = (float)_scanAllocBytes / _scanAllocTicks;
+                    _lastScanBytesPerTick = bytesPerTick;
                     float kbPerSec = scanKB / StalenessCheckInterval;
                     CMMConfig.D($"[CMM PERF] Scan churn: {scanKB:F1} KB / {_scanAllocTicks} ticks " +
                                 $"= {bytesPerTick:F0} B/tick, ~{kbPerSec:F1} KB/s " +
@@ -1304,6 +1307,7 @@ namespace CMM
             {
                 CMMConfig.D("[CMM] Config/settings.xml changed — reloading.");
                 CMMConfigLoader.LoadSettings(ModPath);
+                ScriptHost.MarkConfigDirty();   // re-marshal cfg into Lua on the next scan tick
             }
 
             if (contextsChanged)

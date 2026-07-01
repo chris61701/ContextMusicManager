@@ -55,8 +55,10 @@ typedef struct cmm_decoder cmm_decoder;
  *   v12:+ native MIXER (cmm_mix_*) — the per-sample decode→convert→gain→sum→write producer loop
  *        moved out of managed C# so the GC can't suspend it mid-stream (see cmm_mix.c).
  *   v13:+ native LOUDNESS analyzer (cmm_loudness_*) — the EBU R128 sweep's K-weighting + gating
- *        moved out of managed C# so the sweep allocates nothing on the GC heap (see cmm_loudness.c). */
-#define CMM_DECODER_ABI 13
+ *        moved out of managed C# so the sweep allocates nothing on the GC heap (see cmm_loudness.c).
+ *   v14:+ cmm_mix_get_output_stats — live output-ring health (queued/target/min depth, voices,
+ *        underruns) for the debug HUD's real-time buffer tracker. */
+#define CMM_DECODER_ABI 14
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -371,6 +373,14 @@ CMM_API void cmm_mix_set_cushion(int deep, int extra);
 
 /* Ask the producer thread to reopen the output device (OS default endpoint changed). */
 CMM_API void cmm_mix_request_reinit(void);
+
+/* Live output-ring health for the debug HUD's buffer tracker. queued/target/minQueued in
+ * FRAMES; minQueued is the lowest depth since the last call (reset on read) — near 0 means a
+ * near/actual underrun. voices = live mix voices; deep = DeepBuffer; underruns = cumulative
+ * ring-empty events during playback. Any out-pointer may be NULL. Do NOT call before
+ * cmm_mix_start (it locks the mixer mutex). */
+CMM_API void cmm_mix_get_output_stats(int* queued, int* target, int* minQueued,
+                                      int* voices, int* deep, int* underruns, int* busRate);
 
 /* ── Loudness analyzer (EBU R128 / ITU-R BS.1770 integrated loudness) ──────
  * A native port of the managed CMM.R128Analyzer, so the loudness sweep decodes AND

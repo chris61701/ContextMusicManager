@@ -127,6 +127,13 @@ static int g_lastStarveMs, g_flushUntilMs;
 static int g_prevDeep;
 static float g_outGainTarget = 1.0f;
 
+/* Live buffer-health stats for the debug HUD (producer-updated, read+reset via
+ * cmm_mix_get_output_stats). g_minQueued = lowest queued depth seen since the last read;
+ * g_underruns = cumulative producer-observed ring-empty events during active playback. */
+static volatile int g_minQueued = 0x7fffffff;
+static volatile int g_underruns;
+static int g_wasEmpty;
+
 /* pinned scratch (producer thread only, so no lock needed for these) */
 static float* g_bus;
 static float* g_voiceStereo;
@@ -342,6 +349,16 @@ static void pump_body(void) {
             queued = cmm_out_queued(dev);
             freeFrames = cmm_out_avail(dev);
             target = compute_fill_target_locked(queued);
+            /* Buffer-health watermark for the HUD: only while actually producing (voices>0)
+             * and outside the intentional post-flush empty window, so a context-change flush
+             * isn't miscounted as an underrun. */
+            if (g_voiceCount > 0 && (mix_now_ms() - g_flushUntilMs) >= 0) {
+                if (queued < g_minQueued) g_minQueued = queued;
+                if (queued == 0 && !g_wasEmpty) g_underruns++;   /* falling edge into empty */
+                g_wasEmpty = (queued == 0);
+            } else {
+                g_wasEmpty = 0;
+            }
         }
         mix_unlock(&g_lock);
 
@@ -424,6 +441,9 @@ CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int max
     g_maxFill     = maxFrames > g_tightFill ? maxFrames : g_tightFill;
     g_masterVol   = 1.0f;
     g_outGainTarget = 1.0f;
+    g_minQueued   = 0x7fffffff;
+    g_underruns   = 0;
+    g_wasEmpty    = 0;
 
     g_bus         = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_voiceStereo = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
@@ -635,3 +655,23 @@ CMM_API void cmm_mix_set_cushion(int deep, int extra) { g_deep = deep ? 1 : 0; g
 
 /* Ask the producer thread to reopen the output device (default endpoint changed). */
 CMM_API void cmm_mix_request_reinit(void) { g_reinitRequested = 1; }
+
+/* Live output-ring health for the debug HUD. queued/target/minQueued in FRAMES; minQueued
+ * is the lowest queued depth since the LAST call (reset to the current depth on read) — a
+ * min near 0 means the ring nearly/actually underran. voices = live mix voices (2 during a
+ * crossfade). deep = DeepBuffer active. underruns = cumulative producer-observed ring-empty
+ * events during playback. Any out-pointer may be NULL. */
+CMM_API void cmm_mix_get_output_stats(int* queued, int* target, int* minQueued,
+                                      int* voices, int* deep, int* underruns, int* busRate) {
+    mix_lock(&g_lock);
+    int q = g_out ? cmm_out_queued(g_out) : 0;
+    if (queued)    *queued    = q;
+    if (target)    *target    = g_targetFill;
+    if (minQueued) *minQueued = (g_minQueued == 0x7fffffff) ? q : g_minQueued;
+    if (voices)    *voices    = g_voiceCount;
+    if (deep)      *deep      = g_deep;
+    if (underruns) *underruns = g_underruns;
+    if (busRate)   *busRate   = g_busRate;
+    g_minQueued = q;   /* reset the watermark to the current depth */
+    mix_unlock(&g_lock);
+}

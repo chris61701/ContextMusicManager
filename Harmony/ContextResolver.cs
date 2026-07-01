@@ -393,8 +393,11 @@ namespace CMM
                 int tier = prefab.prefab?.DifficultyTier ?? 0;
                 string tierSuffix = (tier >= 0 && tier <= 5) ? "_T" + tier : "";
 
-                CMMConfig.D($"[CMM POI] name='{currentPoI}' tier={tier} tierSuffix='{tierSuffix}' " +
-                            $"volumes={totalVolumes} cleared={clearedVolumes} excluded={excludedVolumes} remaining={enemiesRemainingInPoi}");
+                // Guard the interpolation: D() re-checks the flag, but the string is built at the
+                // call site BEFORE D() runs — and this fires every scan tick while inside a POI.
+                if (CMMConfig.DebugLogging)
+                    CMMConfig.D($"[CMM POI] name='{currentPoI}' tier={tier} tierSuffix='{tierSuffix}' " +
+                                $"volumes={totalVolumes} cleared={clearedVolumes} excluded={excludedVolumes} remaining={enemiesRemainingInPoi}");
 
                 gameState.InPoi = true;
                 gameState.PoiName = currentPoI;
@@ -435,8 +438,9 @@ namespace CMM
                 // Consume the one-shot quest-clear marker for this POI (if any).
                 bool questCleared = _poiClearedPending.Remove(prefab.boundingBoxPosition);
 
-                CMMConfig.D($"[CMM POI] (MP client) name='{currentPoI}' tier={tier} " +
-                            $"spawnedEnemies={spawnedEnemies} questCleared={questCleared} (client heuristic)");
+                if (CMMConfig.DebugLogging)
+                    CMMConfig.D($"[CMM POI] (MP client) name='{currentPoI}' tier={tier} " +
+                                $"spawnedEnemies={spawnedEnemies} questCleared={questCleared} (client heuristic)");
 
                 gameState.InPoi = true;
                 gameState.PoiName = currentPoI;

@@ -56,6 +56,17 @@ namespace CMM
         private static int _hudNormCount, _hudSnapFiles;
         private static long _hudNormBytes, _hudSnapBytes;
 
+        // Real-time output-ring health for the buffer tracker, polled on a fast throttle. The
+        // native min-watermark resets on read, so polling on a fixed cadence makes the min the
+        // lowest depth over each window (near 0 ⇒ a near/actual underrun). Process heap is
+        // sampled here too so the GC line doesn't call GetTotalMemory every OnGUI frame.
+        private const float HudBufInterval = 0.25f;
+        private static float _hudBufNextTime;
+        private static bool  _hudBufValid;
+        private static float _hudBufQueuedMs, _hudBufTargetMs, _hudBufMinMs, _hudHeapMB;
+        private static int   _hudBufVoices, _hudBufUnderruns;
+        private static bool  _hudBufDeep;
+
         // Called from the unified Update() in ContextMusicManager.Keybinds.cs (a
         // MonoBehaviour may declare Update() only once, so the HUD toggle lives here
         // as a helper rather than its own Update). Compiled only with the HUD.
@@ -85,6 +96,29 @@ namespace CMM
             {
                 _hudStatsNextTime = Time.realtimeSinceStartup + HudStatsInterval;
                 RecomputeHudStats();
+            }
+
+            // Poll the native mixer's ring health on a fast cadence for the buffer tracker.
+            // Only when the mixer exists — the native stats call locks the mixer mutex that
+            // cmm_mix_start creates, so calling before first playback would be unsafe.
+            if (Time.realtimeSinceStartup >= _hudBufNextTime)
+            {
+                _hudBufNextTime = Time.realtimeSinceStartup + HudBufInterval;
+                _hudHeapMB = GC.GetTotalMemory(false) / 1048576f;
+                if (CmmMixer.Instance != null)
+                {
+                    CmmMixer.Instance.GetOutputStats(out int q, out int tgt, out int mn,
+                        out int voices, out int deep, out int under, out int busRate);
+                    float toMs = busRate > 0 ? 1000f / busRate : 0f;
+                    _hudBufQueuedMs  = q   * toMs;
+                    _hudBufTargetMs  = tgt * toMs;
+                    _hudBufMinMs     = mn  * toMs;
+                    _hudBufVoices    = voices;
+                    _hudBufDeep      = deep != 0;
+                    _hudBufUnderruns = under;
+                    _hudBufValid     = true;
+                }
+                else _hudBufValid = false;
             }
 
             // ── Gather state ───────────────────────────────────────────────────
@@ -139,6 +173,21 @@ namespace CMM
             }
             lines.Add(Row("Playing:", playLine));
 
+            // Buffer: live native output-ring depth / adaptive target, the min-watermark since
+            // the last poll (red when near underrun), voice count (2 mid-crossfade), the cushion
+            // mode, and the cumulative underrun counter. The payoff metric — it should hold near
+            // target with underruns 0 even under heavy load.
+            if (_hudBufValid)
+            {
+                string minStr = _hudBufMinMs < 20f
+                    ? $"<color={HudRed}>{_hudBufMinMs:0} ms</color>" : $"{_hudBufMinMs:0} ms";
+                string underStr = _hudBufUnderruns > 0
+                    ? $"<color={HudRed}>{_hudBufUnderruns}</color>" : "0";
+                string deepStr = _hudBufDeep ? "  •  <color=#ffd27f>DEEP</color>" : "";
+                lines.Add(Row("Buffer:", $"{_hudBufQueuedMs:0}/{_hudBufTargetMs:0} ms  (min {minStr})" +
+                                         $"  •  voices {_hudBufVoices}{deepStr}  •  underruns {underStr}"));
+            }
+
             // Resolved: the Lua tokens; empties in red.
             string resolvedLine = (resolved != null && resolved.Count > 0)
                 ? string.Join(", ", resolved.Select(ColorToken))
@@ -161,6 +210,10 @@ namespace CMM
             }
 
             lines.Add(Row("Source:", source));
+
+            // GC: our per-tick context-scan allocation (the marshalling churn) + process heap.
+            // Near-zero B/tick is the goal — it's what the Lua-marshalling pooling drove down.
+            lines.Add(Row("GC:", $"{_lastScanBytesPerTick:0} B/tick scan  •  heap {_hudHeapMB:0} MB"));
 
             // Memory diagnostics on one line: the directory snapshots (every eligible
             // file path per context) plus the normalized (loudness-measured) files held
