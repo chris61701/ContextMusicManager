@@ -52,11 +52,11 @@ namespace CMM
         // first play without scanning the whole library on the menu; the rest is left
         // to the on-demand look-ahead (EnsureLoudnessMeasured / ScheduleNextCacheLoad).
         // All orchestration here (queue, store, bookkeeping) stays on the main-thread
-        // coroutine — only the decode runs on the workers, each with its OWN scratch.
+        // coroutine — only the decode runs on the workers (each fully independent; the
+        // native loudness pass owns its own buffer, so no per-lane scratch is needed).
         // Set once the bounded menu prewarm goal is met (one track per context plus
         // a second for the playing context); stops the menu scanner.
         private static bool _menuPrescanComplete;
-        private static AudioDecoder.MeasureScratch[] _prescanScratch;
 
         // One concurrent measurement slot for the parallel prescan.
         private struct PrescanSlot
@@ -219,7 +219,7 @@ namespace CMM
         // delayed by one (low-priority) decode pass. That delay is intentional — see
         // StartMeasure: we favor a smooth frame rate over an instant start, so an
         // unscanned track waits to begin rather than stuttering the game as it scans.
-        private IEnumerator EnsureLoudnessMeasured(string filePath, bool useScratch = false)
+        private IEnumerator EnsureLoudnessMeasured(string filePath)
         {
             if (!CMMConfig.LoudnessNormalizationEnabled || string.IsNullOrEmpty(filePath)) yield break;
 
@@ -235,24 +235,9 @@ namespace CMM
             if (!ok) yield break;
             if (LoudnessStore.HasCurrent(filePath, size, mtime)) yield break;
 
-            // Look-ahead prefetch (useScratch) borrows the serial _lookAheadScratch so the
-            // common per-transition measurement allocates nothing on the LOH; it's lent out
-            // only while free, so two concurrent look-aheads never share it. The block-before-
-            // play and stinger paths pass useScratch=false and allocate per file (rare).
-            // Coroutines are single-threaded, so this check-and-set needs no lock.
-            AudioDecoder.MeasureScratch scratch = null;
-            bool heldScratch = false;
-            if (useScratch && !_lookAheadScratchBusy)
-            {
-                _lookAheadScratchBusy = true;
-                heldScratch = true;
-                scratch = _lookAheadScratch;
-            }
-
-            MeasureHandle h = StartMeasure(filePath, scratch);
+            MeasureHandle h = StartMeasure(filePath);
             while (!h.Done) yield return null;
             ClearInFlight(filePath, h);
-            if (heldScratch) _lookAheadScratchBusy = false;
             TrackLoudness res = h.Result;
 
             _loudnessProcessed.Add(filePath);
@@ -298,7 +283,7 @@ namespace CMM
         {
             string pin = PinStagedFile(contextName);
             if (pin != null && CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(pin))
-                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(pin, useScratch: true));
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(pin));
         }
 
         // Rule 1 maintenance: every context that is neither the active one nor parked on a
@@ -389,12 +374,11 @@ namespace CMM
         // Measures the bounded menu prewarm set up-front while on the menu, keeping up to
         // `width` decodes in flight on a worker pool. All queue/store bookkeeping stays on
         // this (main-thread) coroutine — no locking needed — while only MeasureLoudness runs
-        // on the workers, each with its OWN scratch. Runs until the bounded set is measured
+        // on the workers (each fully independent). Runs until the bounded set is measured
         // or a game starts loading, then lets in-flight slots finish (so no work is lost).
         private IEnumerator MenuPrescanDrain()
         {
             int width = PrescanThreadCount();
-            EnsurePrescanScratch(width);
             var slots = new PrescanSlot[width];
 
             // Make sure every context folder has been enumerated so there's a work set
@@ -427,7 +411,7 @@ namespace CMM
 
                     slots[i].Path = path;
                     slots[i].Mtime = mtime;
-                    slots[i].Handle = StartMeasure(path, _prescanScratch[i]);
+                    slots[i].Handle = StartMeasure(path);
                     busy++;
                 }
 
@@ -564,14 +548,6 @@ namespace CMM
         private static int PrescanThreadCount()
             => Mathf.Clamp(Environment.ProcessorCount - 2, 1, 8);
 
-        private static void EnsurePrescanScratch(int width)
-        {
-            if (_prescanScratch != null && _prescanScratch.Length >= width) return;
-            _prescanScratch = new AudioDecoder.MeasureScratch[width];
-            for (int i = 0; i < width; i++)
-                _prescanScratch[i] = new AudioDecoder.MeasureScratch();
-        }
-
         // ── Loudness: background measurement worker ───────────────────────────
         // Runs one MeasureLoudness pass (a full decode + R128 analysis) on a
         // dedicated BELOW-NORMAL priority thread, signalling completion via a flag
@@ -589,13 +565,6 @@ namespace CMM
         // Normal/AboveNormal to shave the start delay — that reintroduces the stutter this is
         // here to avoid.)
         //
-        // `scratch`, when supplied, gives MeasureLoudness a reused buffer so it allocates
-        // nothing on the LOH — the fix for the in-game GC stutter. Two callers pass one: the
-        // menu prewarm (per-worker _prescanScratch) and the look-ahead prefetch
-        // (_lookAheadScratch); each owns a distinct buffer and serializes its own use, so no
-        // buffer is ever touched by two decodes at once. The block-before-play and stinger
-        // paths pass null and allocate per file (rare).
-        //
         // De-duplicated by path: a second request for a file already being measured joins
         // the existing handle instead of spawning a competing decode — INCLUDING a handle
         // that has just finished (Done) but whose consumer hasn't run ClearInFlight yet.
@@ -604,7 +573,7 @@ namespace CMM
         // blind Remove delete the *newer* handle — the exact double-decode this map exists
         // to prevent.) Removal is the consumer's job via ClearInFlight, which deletes the
         // entry only if it is still this same handle.
-        private static MeasureHandle StartMeasure(string path, AudioDecoder.MeasureScratch scratch)
+        private static MeasureHandle StartMeasure(string path)
         {
             if (_loudnessInFlight.TryGetValue(path, out MeasureHandle existing))
                 return existing;
@@ -613,7 +582,7 @@ namespace CMM
             _loudnessInFlight[path] = h;
             var t = new Thread(() =>
             {
-                try { h.Result = AudioDecoder.MeasureLoudness(path, scratch); } catch { }
+                try { h.Result = AudioDecoder.MeasureLoudness(path); } catch { }
                 h.Done = true;
             })
             {
@@ -634,15 +603,6 @@ namespace CMM
             if (_loudnessInFlight.TryGetValue(path, out MeasureHandle cur) && cur == h)
                 _loudnessInFlight.Remove(path);
         }
-
-        // Reused by the look-ahead prefetch (ScheduleNextCacheLoad) so the common
-        // per-transition next-track measurement doesn't allocate a whole-file byte[] on the
-        // LOH every track change. It is lent out only when free (_lookAheadScratchBusy), so it
-        // is never touched by two decodes at once. A look-ahead that finds it busy falls back
-        // to per-file allocation for that one call.
-        private static readonly AudioDecoder.MeasureScratch _lookAheadScratch =
-            new AudioDecoder.MeasureScratch();
-        private static bool _lookAheadScratchBusy;
 
         private sealed class MeasureHandle
         {
@@ -1476,7 +1436,7 @@ namespace CMM
 
             float gain = CMMConfig.LoudnessNormalizationEnabled ? LoudnessStore.GetTrackGain(nextFile) : 1f;
             if (CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(nextFile))
-                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(nextFile, useScratch: true));
+                CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(nextFile));
 
             var ps = new PreStagedAdvance
             {

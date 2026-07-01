@@ -365,23 +365,16 @@ namespace CMM
         }
 
         // ── Loudness measurement ──────────────────────────────────────────────
-        // One full decode pass to integrated LUFS (EBU R128), plus the FNV-1a
-        // content hash computed from the same byte read. No PCM is retained — the
-        // R128Analyzer accumulates running statistics, so memory stays at a few KB
-        // regardless of track length. Mirrors the byte-read + Opus/generic reader
-        // branch in OpenStreamingReader / CreateStreamingClipFromReader.
+        // One full decode pass to integrated LUFS (EBU R128), plus the FNV-1a content hash
+        // computed from a separate streaming byte read. No PCM is retained and NOTHING lands on
+        // the GC heap: OpenNativeHandle opens a native decoder and cmm_loudness_analyze decodes
+        // + measures it entirely in native (malloc) memory, so a measurement can't trigger a
+        // stop-the-world collection that hitches the game (the point of the native port).
         //
         // Called on a BACKGROUND thread (by the menu prewarm / look-ahead / block-before-play).
-        // Pure measurement — touches no Unity main-thread state. The caller commits
-        // the TrackLoudness into LoudnessStore on the main thread.
-        // `scratch`, when supplied, provides a REUSED growable file buffer and sample buffer
-        // so a measurement allocates nothing on the Large Object Heap. This is the fix for the
-        // real cause of in-game stutter: the old per-file File.ReadAllBytes allocated a multi-MB
-        // LOH array every track, and on the ~2.6 GB in-game Mono heap the resulting Gen2
-        // collections were stop-the-world frame hitches. The scratch MUST be used
-        // single-threaded; each caller that passes one serializes its own use. Callers without
-        // a scratch (the rare block-before-play path) fall back to per-file allocation.
-        public static TrackLoudness MeasureLoudness(string filePath, MeasureScratch scratch = null)
+        // Pure measurement — touches no Unity main-thread state. The caller commits the
+        // TrackLoudness into LoudnessStore on the main thread.
+        public static TrackLoudness MeasureLoudness(string filePath)
         {
             var fail = new TrackLoudness { Ok = false };
 
@@ -493,17 +486,6 @@ namespace CMM
         // Stopwatch-ticks → milliseconds since `t0`.
         private static float ElapsedMs(long t0)
             => (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
-
-        // Per-lane token for the loudness sweep: one instance per parallel prescan lane
-        // marks that lane as single-threaded (each caller that passes one serializes its own
-        // use). SampleBuf is now VESTIGIAL — cmm_loudness_analyze decodes into its own native
-        // buffer, so a measurement allocates nothing on the managed heap (the whole point of
-        // the native port). Kept only so the existing lane-pool wiring compiles unchanged; the
-        // field and param can be dropped in a follow-up cleanup.
-        public sealed class MeasureScratch
-        {
-            public float[] SampleBuf;  // vestigial (unused since the native-loudness port)
-        }
 
         public static long ClampLong(long value, long min, long max)
         {
