@@ -1,15 +1,15 @@
 # CmmBench — standalone decode / loudness micro-benchmark
 
 Drives the mod's **real** decode + EBU-R128 pipeline
-([AudioDecoder.MeasureLoudness](../../Harmony/AudioDecoder.cs) and the streaming
-open path) over a set of audio files, outside the game. This is the fast
-measure-then-optimize loop for the CPU-bound sweep work — no Unity launch needed.
+([AudioDecoder.MeasureLoudness](../../Harmony/AudioDecoder.cs) and the bare
+native-handle open path used at a context transition) over a set of audio files,
+outside the game. This is the fast measure-then-optimize loop for the CPU-bound
+sweep work — no Unity launch needed.
 
-It **links** the actual source files (`AudioDecoder.cs`, `LoudnessAnalyzer.cs`)
+It **links** the actual source files (`AudioDecoder.cs`, `NativeAudio.cs`)
 so the bench can never drift from shipped code, and supplies
 thin shims (`Shims.cs`) for the handful of non-audio symbols the decoder touches
-(`CMMConfig`, `Log`, `LoudnessStore.HashBytes`, `Mathf`, `Debug`, and inert
-`AudioClip`/`DecodedAudio` stand-ins for the clip path the bench never runs).
+(`CMMConfig`, `Log`, `LoudnessStore.HashFile`, `Mathf`).
 
 ## Build & run
 
@@ -26,12 +26,13 @@ tools/CmmBench/bin/Release/net48/CmmBench.exe <dir-or-files> [options]
 
 ### Options
 
-| Flag           | Meaning |
-|----------------|---------|
-| `-n <count>`   | Timed repeats per file (default 5; plus 1 discarded warmup). |
-| `-v`           | Verbose — enables the decoder's own per-file read/hash/index/decode split. |
-| `--open`       | Also benchmark `OpenStreamingReader` (the per-transition open latency). |
-| `--no-scratch` | Don't reuse the `MeasureScratch` buffer — shows the per-file LOH allocation cost. |
+| Flag                | Meaning                                                                          |
+|---------------------|----------------------------------------------------------------------------------|
+| `-n <count>`        | Timed repeats per file (default 5; plus 1 discarded warmup).                     |
+| `-v`                | Verbose — enables the decoder's own per-file read/hash/index/decode split.       |
+| `--open`            | Also benchmark `OpenNativeHandle` (the per-transition open latency).             |
+| `--verify-fileopen` | Decode via `open_memory` **and** `open_file`, assert identical frames + peak.    |
+| `--cold`            | Cache-bypassed cold read + full decode (true load-from-disk cost on slow media). |
 
 ## Output
 

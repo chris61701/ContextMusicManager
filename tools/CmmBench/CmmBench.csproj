@@ -4,11 +4,11 @@
        CmmBench — standalone decode/loudness micro-benchmark (Arena B).
 
        Runs the mod's REAL decode + EBU R128 measurement pipeline outside the
-       game so the CPU-bound pieces (AudioDecoder.MeasureLoudness / streaming
-       open) can be profiled and optimized with a fast measure-edit loop, with
-       no Unity launch. It LINKS the actual source files (no copy to drift) and
-       supplies thin shims (Shims.cs) for the handful of non-audio symbols the
-       decoder touches (CMMConfig / Log / LoudnessStore.HashBytes / Mathf / Debug).
+       game so the CPU-bound pieces (AudioDecoder.MeasureLoudness / the bare
+       native-handle open) can be profiled and optimized with a fast measure-edit
+       loop, with no Unity launch. It LINKS the actual source files (no copy to
+       drift) and supplies thin shims (Shims.cs) for the handful of non-audio
+       symbols the decoder touches (CMMConfig / Log / LoudnessStore.HashFile / Mathf).
 
        Build and run with dotnet against tools/CmmBench in Release; pass a
        directory or files plus the flags documented in Program.cs.
@@ -29,8 +29,6 @@
   <ItemGroup>
     <Compile Include="..\..\Harmony\AudioDecoder.cs"   Link="linked\AudioDecoder.cs" />
     <Compile Include="..\..\Harmony\NativeAudio.cs"     Link="linked\NativeAudio.cs" />
-    <Compile Include="..\..\Harmony\WaveShim.cs"        Link="linked\WaveShim.cs" />
-    <Compile Include="..\..\Harmony\LoudnessAnalyzer.cs" Link="linked\LoudnessAnalyzer.cs" />
   </ItemGroup>
 
   <!-- Native decode shim — copied next to the exe so DllImport("CMM_Decoder") resolves. -->

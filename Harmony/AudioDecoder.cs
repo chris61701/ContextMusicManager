@@ -86,26 +86,6 @@ namespace CMM
             catch { return false; }
         }
 
-        // Opens a native reader for any supported format directly from a file path
-        // (large-file path: no full-file buffer). Returns null for unknown extensions.
-        private static WaveStream OpenNativeReader(string filePath)
-        {
-            string ext = System.IO.Path.GetExtension(filePath).ToLower();
-            bool isOpus = ext == ".opus" ||
-                ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath));
-            switch (ClassifyReader(ext, isOpus))
-            {
-                case ReaderKind.Opus:      return new NativeOggOpusReader(filePath);
-                case ReaderKind.Flac:      return new NativeFlacReader(filePath);
-                case ReaderKind.Vorbis:    return new NativeVorbisReader(filePath);
-                case ReaderKind.Mp3:       return new NativeMp3Reader(filePath);
-                case ReaderKind.Wav:       return new NativeWavReader(filePath);
-                case ReaderKind.Aac:       return new NativeAacReader(filePath);
-                case ReaderKind.Container: return new NativeContainerReader(filePath);
-                default:                   return WarnNoReader(ext);
-            }
-        }
-
         // Opens a BARE native decoder handle (no managed WaveStream wrapper) for the
         // native decoder handoff used by the loudness analyzer (and, later, the mixer):
         // returns the raw cmm_decoder* plus its format `kind` (0..6 — the cmm_loudness /
@@ -183,10 +163,9 @@ namespace CMM
             return ReaderKind.Unknown;
         }
 
-        private static WaveStream WarnNoReader(string ext)
+        private static void WarnNoReader(string ext)
         {
             Log.Warning($"[CMM] No native reader for extension '{ext}'");
-            return null;
         }
 
         // ── Loudness measurement ──────────────────────────────────────────────
@@ -336,18 +315,19 @@ namespace CMM
             try
             {
                 // Native file-open reads just the header (+ seek table / frame scan)
-                // without a full decode. A bad header throws and is caught below →
-                // invalid. OpenNativeReader routes every supported format.
-                using (WaveStream reader = OpenNativeReader(filePath))
-                {
-                    if (reader == null) return false;
-                    return reader.WaveFormat.SampleRate > 0
-                        && reader.WaveFormat.Channels > 0
-                        && reader.Length > 0
-                        // Reject sub-half-second stubs (truncated/corrupt files whose
-                        // header still parses), matching the Unity-clip validation path.
-                        && reader.TotalTime.TotalSeconds > 0.5;
-                }
+                // without a full decode; a failed open → invalid. Same acceptance as
+                // the retired WaveStream path: positive rate/channels, a known length,
+                // and more than half a second of audio (rejects truncated/corrupt
+                // stubs whose header still parses; unknown length — e.g. raw ADTS —
+                // reads as totalFrames <= 0 and is rejected, exactly as Length == 0 was).
+                IntPtr dec = OpenNativeHandle(filePath, out int kind,
+                    out int channels, out int sampleRate, out long totalFrames);
+                if (dec == IntPtr.Zero) return false;
+                CloseNativeHandle(dec, kind);
+                return sampleRate > 0
+                    && channels > 0
+                    && totalFrames > 0
+                    && (double)totalFrames / sampleRate > 0.5;
             }
             catch (Exception ex)
             {

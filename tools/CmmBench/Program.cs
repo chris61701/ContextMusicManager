@@ -9,17 +9,17 @@ using CMM;
 // CmmBench — standalone decode / EBU-R128 micro-benchmark.
 //
 // Drives the mod's REAL AudioDecoder.MeasureLoudness (and, with --open, the
-// streaming-open path used at a context transition) over a set of audio files,
-// timing each and aggregating per format. This is the fast measure→optimize loop
-// for the CPU-bound sweep work the in-game profiler points at — no Unity launch.
+// bare-handle open path used at a context transition: AudioDecoder.OpenNativeHandle
+// → cmm_mix_add) over a set of audio files, timing each and aggregating per format.
+// This is the fast measure→optimize loop for the CPU-bound sweep work the in-game
+// profiler points at — no Unity launch.
 //
 //   dotnet run --project tools/CmmBench -c Release -- <dir-or-files> [options]
 //
 // Options:
 //   -n <count>   timed repeats per file (default 5; plus 1 warmup, discarded)
 //   -v           verbose: enable the decoder's own per-file read/hash/decode split
-//   --open       also benchmark OpenStreamingReader (transition open latency)
-//   --no-scratch don't reuse the MeasureScratch buffer (measures per-file LOH cost)
+//   --open       also benchmark OpenNativeHandle (transition open latency)
 // ─────────────────────────────────────────────────────────────────────────────
 
 internal static class Program
@@ -35,7 +35,7 @@ internal static class Program
         AppDomain.MonitoringIsEnabled = true;
 
         int repeats = 5;
-        bool verbose = false, benchOpen = false, useScratch = true, verifyFileOpen = false, cold = false;
+        bool verbose = false, benchOpen = false, verifyFileOpen = false, cold = false;
         var inputs = new List<string>();
 
         for (int i = 0; i < args.Length; i++)
@@ -45,7 +45,6 @@ internal static class Program
                 case "-n": repeats = int.Parse(args[++i]); break;
                 case "-v": verbose = true; break;
                 case "--open": benchOpen = true; break;
-                case "--no-scratch": useScratch = false; break;
                 case "--verify-fileopen": verifyFileOpen = true; break;
                 case "--cold": cold = true; break;
                 case "-h": case "--help": Usage(); return 0;
@@ -60,11 +59,8 @@ internal static class Program
         if (cold) return RunCold(files, repeats);
         if (files.Count == 0) { Console.WriteLine("No supported audio files found."); return 1; }
 
-        Console.WriteLine($"CmmBench — {files.Count} file(s), {repeats} timed repeat(s) each, " +
-                          $"scratch={(useScratch ? "reused" : "per-file")}, open={benchOpen}\n");
+        Console.WriteLine($"CmmBench — {files.Count} file(s), {repeats} timed repeat(s) each, open={benchOpen}\n");
 
-        // One shared scratch buffer mirrors the real serial sweep (no per-file LOH alloc).
-        var scratch = useScratch ? new AudioDecoder.MeasureScratch() : null;
         var results = new List<Sample>();
 
         foreach (string f in files)
@@ -75,7 +71,7 @@ internal static class Program
 
             // Warmup (JIT + file cache), discarded for timing — but its result is the
             // correctness anchor (LUFS/peak), printed so a decode change can be verified.
-            var warm = AudioDecoder.MeasureLoudness(f, useScratch ? new AudioDecoder.MeasureScratch() : null);
+            var warm = AudioDecoder.MeasureLoudness(f);
             if (!warm.Ok) { Console.WriteLine($"  SKIP (measure failed): {Path.GetFileName(f)}"); continue; }
             s.Lufs = warm.Lufs; s.Peak = warm.Peak;
 
@@ -85,7 +81,7 @@ internal static class Program
             for (int r = 0; r < repeats; r++)
             {
                 long t = Stopwatch.GetTimestamp();
-                var res = AudioDecoder.MeasureLoudness(f, scratch);
+                var res = AudioDecoder.MeasureLoudness(f);
                 measMs[r] = Ms(t);
                 if (!res.Ok) { measMs[r] = double.NaN; }
             }
@@ -102,9 +98,9 @@ internal static class Program
                 for (int r = 0; r < repeats; r++)
                 {
                     long t = Stopwatch.GetTimestamp();
-                    var rdr = AudioDecoder.OpenStreamingReader(f);
+                    IntPtr dec = AudioDecoder.OpenNativeHandle(f, out int kind, out _, out _, out _);
                     openMs[r] = Ms(t);
-                    rdr?.Dispose();
+                    AudioDecoder.CloseNativeHandle(dec, kind);
                 }
                 s.OpenMs = openMs;
             }
@@ -180,44 +176,101 @@ internal static class Program
         return files.Distinct().OrderBy(f => f).ToList();
     }
 
+    // ── Bare-handle codec dispatch (bench-only: verify / cold paths) ──────────
+    // Routes by extension to the same cmm_* exports the mod's OpenNativeHandle
+    // uses. (.ogg is assumed Vorbis, matching the test set — no opus-in-ogg here.)
+    delegate IntPtr OpenMemFn(byte[] data, long len, out int ch, out int sr, out long total, out int err);
+    delegate IntPtr OpenFileFn(string path, out int ch, out int sr, out long total, out int err);
+    delegate int    ReadFn(IntPtr d, float[] buf, int maxFrames);
+    delegate void   CloseFn(IntPtr d);
+
+    sealed class Codec
+    {
+        public OpenMemFn OpenMem; public OpenFileFn OpenFile; public ReadFn Read; public CloseFn Close;
+    }
+
+    static Codec CodecFor(string ext)
+    {
+        switch (ext)
+        {
+            case ".opus":
+                return new Codec { OpenMem = NativeOpus.cmm_opus_open_memory, OpenFile = NativeOpus.cmm_opus_open_file,
+                                   Read = NativeOpus.cmm_opus_read_float, Close = NativeOpus.cmm_opus_close };
+            case ".flac":
+                return new Codec { OpenMem = NativeFlac.cmm_flac_open_memory, OpenFile = NativeFlac.cmm_flac_open_file,
+                                   Read = NativeFlac.cmm_flac_read_float, Close = NativeFlac.cmm_flac_close };
+            case ".ogg":
+            case ".oga":
+                return new Codec { OpenMem = NativeVorbis.cmm_vorbis_open_memory, OpenFile = NativeVorbis.cmm_vorbis_open_file,
+                                   Read = NativeVorbis.cmm_vorbis_read_float, Close = NativeVorbis.cmm_vorbis_close };
+            case ".mp3":
+                return new Codec { OpenMem = NativeMp3.cmm_mp3_open_memory, OpenFile = NativeMp3.cmm_mp3_open_file,
+                                   Read = NativeMp3.cmm_mp3_read_float, Close = NativeMp3.cmm_mp3_close };
+            case ".wav":
+            case ".wave":
+            case ".aiff":
+            case ".aif":
+                return new Codec { OpenMem = NativeWav.cmm_wav_open_memory, OpenFile = NativeWav.cmm_wav_open_file,
+                                   Read = NativeWav.cmm_wav_read_float, Close = NativeWav.cmm_wav_close };
+            case ".m4a":
+            case ".mp4":
+            case ".aac":
+            case ".m4v":
+            case ".3gp":
+                return new Codec { OpenMem = NativeAac.cmm_aac_open_memory, OpenFile = NativeAac.cmm_aac_open_file,
+                                   Read = NativeAac.cmm_aac_read_float, Close = NativeAac.cmm_aac_close };
+            case ".mkv":
+            case ".webm":
+                return new Codec { OpenMem = NativeContainer.cmm_container_open_memory, OpenFile = NativeContainer.cmm_container_open_file,
+                                   Read = NativeContainer.cmm_container_read_float, Close = NativeContainer.cmm_container_close };
+            default: return null;
+        }
+    }
+
+    // Read a handle to EOF, tracking frame count + sample peak, then close it.
+    static (long frames, float peak) DrainAndClose(IntPtr dec, Codec c, int channels)
+    {
+        var buf = new float[Math.Max(1, channels) * 8192];
+        long frames = 0; float peak = 0f;
+        int n;
+        while ((n = c.Read(dec, buf, 8192)) > 0)
+        {
+            int floats = n * channels;
+            for (int i = 0; i < floats; i++) { float a = Math.Abs(buf[i]); if (a > peak) peak = a; }
+            frames += n;
+        }
+        c.Close(dec);
+        return (frames, peak);
+    }
+
     // ── File-open verification ────────────────────────────────────────────────
     // Decodes each file through BOTH native paths — open_memory (buffered bytes) and
-    // open_file (FILE* + _wfopen, the large-file path) — and asserts identical output
+    // open_file (the streaming / large-file path) — and asserts identical output
     // (frame count + sample peak). Proves the file-open callbacks/seek/close are
-    // correct without needing an actual >100 MB file. (Routes by extension; assumes
-    // .ogg = Vorbis, matching the test set — no opus-in-ogg here.)
+    // correct without needing an actual >100 MB file.
     static int VerifyFileOpen(List<string> files)
     {
         int failures = 0;
         foreach (string f in files)
         {
             string ext = Path.GetExtension(f).ToLowerInvariant();
+            Codec c = CodecFor(ext);
+            if (c == null) { Console.WriteLine($"  SKIP (not native): {Path.GetFileName(f)}"); continue; }
+
             byte[] raw = File.ReadAllBytes(f);
-            WaveStream mem, fil;
-            switch (ext)
+            IntPtr mem = c.OpenMem(raw, raw.Length, out int mch, out _, out _, out int merr);
+            IntPtr fil = c.OpenFile(f, out int fch, out _, out _, out int ferr);
+            if (mem == IntPtr.Zero || fil == IntPtr.Zero)
             {
-                case ".opus":       mem = new NativeOggOpusReader(raw, raw.Length); fil = new NativeOggOpusReader(f); break;
-                case ".flac":       mem = new NativeFlacReader(raw, raw.Length);    fil = new NativeFlacReader(f);    break;
-                case ".ogg":
-                case ".oga":        mem = new NativeVorbisReader(raw, raw.Length);  fil = new NativeVorbisReader(f);  break;
-                case ".mp3":        mem = new NativeMp3Reader(raw, raw.Length);     fil = new NativeMp3Reader(f);     break;
-                case ".wav":
-                case ".wave":
-                case ".aiff":
-                case ".aif":        mem = new NativeWavReader(raw, raw.Length);     fil = new NativeWavReader(f);     break;
-                case ".m4a":
-                case ".mp4":
-                case ".aac":
-                case ".m4v":
-                case ".3gp":        mem = new NativeAacReader(raw, raw.Length);     fil = new NativeAacReader(f);     break;
-                case ".mkv":
-                case ".webm":       mem = new NativeContainerReader(raw, raw.Length); fil = new NativeContainerReader(f); break;
-                default: Console.WriteLine($"  SKIP (not native): {Path.GetFileName(f)}"); continue;
+                if (mem != IntPtr.Zero) c.Close(mem);
+                if (fil != IntPtr.Zero) c.Close(fil);
+                failures++;
+                Console.WriteLine($"  {Path.GetFileName(f),-30} {ext,-5} OPEN FAIL (mem err={merr}, file err={ferr})  FAIL");
+                continue;
             }
 
-            long mf, ff; float mpk, fpk;
-            using (mem) (mf, mpk) = Drain(mem);
-            using (fil) (ff, fpk) = Drain(fil);
+            (long mf, float mpk) = DrainAndClose(mem, c, mch);
+            (long ff, float fpk) = DrainAndClose(fil, c, fch);
 
             bool ok = mf == ff && Math.Abs(mpk - fpk) < 1e-6f;
             if (!ok) failures++;
@@ -228,31 +281,13 @@ internal static class Program
         return failures == 0 ? 0 : 1;
     }
 
-    static (long frames, float peak) Drain(WaveStream ws)
-    {
-        var src = (IFloatPcmSource)ws;
-        int ch = ws.WaveFormat.Channels;
-        var buf = new float[ch * 8192];
-        long frames = 0; float peak = 0f;
-        int n;
-        while ((n = src.ReadFloats(buf, 0, buf.Length)) > 0)
-        {
-            for (int i = 0; i < n; i++) { float a = Math.Abs(buf[i]); if (a > peak) peak = a; }
-            frames += n / ch;
-        }
-        return (frames, peak);
-    }
-
     // ── Cold-load benchmark ───────────────────────────────────────────────────
     // The default run warms the OS file cache (the warmup pass), so its timings are
     // decode-from-RAM. This mode instead reads every file CACHE-BYPASSED
     // (FILE_FLAG_NO_BUFFERING) so the bytes come off the physical device — the true
     // "load this track cold" cost on slow media (SD card / J:). Splits the cost into
-    // the device READ (size / device MB/s) and the cache-independent DECODE (CPU), and
-    // reports their sum — the full-decode preload path (Menu / PreloadCacheEnabled)
-    // pays read+decode; streaming formats only read headers at open and page the rest
-    // on the audio thread, so for them the read column is the upper bound, not the
-    // transition cost.
+    // the device READ (size / device MB/s) and the cache-independent DECODE (a full
+    // open_memory + drain-to-EOF, CPU only), and reports their sum.
     static int RunCold(List<string> files, int repeats)
     {
         var supported = files.Where(AudioDecoder.IsSupported).ToList();
@@ -265,6 +300,10 @@ internal static class Program
         var rows = new List<ColdRow>();
         foreach (string f in supported)
         {
+            string ext = Path.GetExtension(f).ToLowerInvariant();
+            Codec c = CodecFor(ext);
+            if (c == null) continue;
+
             double mb = new FileInfo(f).Length / 1024.0 / 1024.0;
             var readMs = new double[repeats];
             var decMs = new double[repeats];
@@ -276,15 +315,17 @@ internal static class Program
                 catch (Exception ex) { Console.WriteLine($"  COLD-READ ERR {Path.GetFileName(f)}: {ex.Message}"); ok = false; break; }
 
                 long t = Stopwatch.GetTimestamp();
-                var decoded = AudioDecoder.DecodeFileFromBytes(bytes, f);
+                IntPtr dec = c.OpenMem(bytes, bytes.Length, out int ch, out _, out _, out _);
+                if (dec == IntPtr.Zero) { Console.WriteLine($"  DECODE ERR {Path.GetFileName(f)}"); ok = false; break; }
+                (long frames, _) = DrainAndClose(dec, c, ch);
                 decMs[r] = Ms(t);
-                if (decoded == null) { Console.WriteLine($"  DECODE ERR {Path.GetFileName(f)}"); ok = false; break; }
+                if (frames == 0) { Console.WriteLine($"  DECODE ERR (0 frames) {Path.GetFileName(f)}"); ok = false; break; }
             }
             if (!ok) continue;
 
             var row = new ColdRow
             {
-                Ext = Path.GetExtension(f).ToLowerInvariant(),
+                Ext = ext,
                 MB = mb,
                 ReadMs = readMs.Average(),
                 DecodeMs = decMs.Average(),
@@ -322,11 +363,11 @@ internal static class Program
             "CmmBench — standalone decode / EBU-R128 micro-benchmark\n\n" +
             "  dotnet run --project tools/CmmBench -c Release -- <dir-or-files> [options]\n\n" +
             "Options:\n" +
-            "  -n <count>     timed repeats per file (default 5; +1 warmup)\n" +
-            "  -v             verbose per-file read/hash/index/decode split\n" +
-            "  --open         also benchmark OpenStreamingReader (transition open latency)\n" +
-            "  --no-scratch   don't reuse the MeasureScratch buffer (shows per-file LOH cost)\n" +
-            "  --cold         cache-bypassed cold read + decode (true load-from-disk cost on slow media)\n");
+            "  -n <count>         timed repeats per file (default 5; +1 warmup)\n" +
+            "  -v                 verbose per-file read/hash/index/decode split\n" +
+            "  --open             also benchmark OpenNativeHandle (transition open latency)\n" +
+            "  --verify-fileopen  decode via open_memory AND open_file, assert identical output\n" +
+            "  --cold             cache-bypassed cold read + full decode (true load-from-disk cost)\n");
     }
 
     sealed class Sample

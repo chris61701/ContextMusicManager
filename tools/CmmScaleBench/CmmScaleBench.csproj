@@ -34,7 +34,6 @@
   <!-- Real types, linked so the data model can't drift from shipped code. -->
   <ItemGroup>
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
-    <Compile Include="..\..\Harmony\WaveShim.cs"        Link="linked\WaveShim.cs" />
   </ItemGroup>
 
   <!-- contexts.xml parsing (XDocument). -->

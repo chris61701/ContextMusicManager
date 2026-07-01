@@ -161,7 +161,6 @@
     <Compile Include="Harmony\CmmMixer.cs" />
     <Compile Include="Harmony\CmmScheduler.cs" />
     <Compile Include="Harmony\MainThreadDispatcher.cs" />
-    <Compile Include="Harmony\WaveShim.cs" />
     <Compile Include="Harmony\LoudnessAnalyzer.cs" />
     <Compile Include="Harmony\LoudnessStore.cs" />
     <Compile Include="Harmony\R128SelfTest.cs" />
