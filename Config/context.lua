@@ -264,7 +264,11 @@ function resolve(gameState, cfg)
   return active
 end
 
--- Cleared on world-unload (mirrors ContextResolver.resetValues(): combat tier + biome).
+-- Cleared on world-unload: restore EVERY memory field to its initial value, so no
+-- combat latch, aggro timestamp or POI/infestation state leaks into the next world
+-- (a stale lastPoiId could otherwise suppress the poi_cleared detection on a revisit,
+-- and a stale lastAggro could resume the previous session's combat tier).
 function reset()
-  memory.tier, memory.biome = 0, ""
+  memory.tier, memory.lastAggro, memory.biome = 0, 0, ""
+  memory.wasInfested, memory.lastPoiId = false, "None"
 end
