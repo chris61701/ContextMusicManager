@@ -356,6 +356,10 @@ namespace CMM
         // see (the active set and resolved set are identical before and after), so we
         // force one extra evaluation on the warming→clear edge to actually promote it.
         private bool _hadWarmingContexts = false;
+        // Scratch map rebuilt every scan tick (cleared, never reallocated) — this loop
+        // runs forever at ContextScanCooldown, so per-tick allocations here are the
+        // mod's dominant steady-state GC churn (see _scanAllocBytes).
+        private readonly Dictionary<string, string> _currentlyPlayable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private IEnumerator ContextScanLoop()
         {
             while (true)
@@ -380,19 +384,33 @@ namespace CMM
                 // the playable set, OR the resolution of any context changes — a DMS
                 // toggle can change Combat_High from resolving to "Home_Night" to "Vanilla"
                 // without any context entering or leaving the active set.
-                var currentlyPlayable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                _currentlyPlayable.Clear();
                 foreach (string c in activeContexts)
                 {
                     string p = ResolvePlayableContext(c);
-                    if (p != null) currentlyPlayable[c] = p;
+                    if (p != null) _currentlyPlayable[c] = p;
                 }
 
-                bool namesChanged = activeContexts.Count != _previousActiveContexts.Count
-                                    || activeContexts.Any(c => !_previousActiveContexts.Contains(c));
-                bool playabilityChanged = currentlyPlayable.Count != _previousPlayableContexts.Count
-                                          || currentlyPlayable.Any(kv =>
-                                              !_previousPlayableContexts.TryGetValue(kv.Key, out string prev)
-                                              || !string.Equals(prev, kv.Value, StringComparison.OrdinalIgnoreCase));
+                // Plain loops instead of LINQ Any(): these gates run every tick and the
+                // lambdas were allocating a closure + enumerator each time.
+                bool namesChanged = activeContexts.Count != _previousActiveContexts.Count;
+                if (!namesChanged)
+                {
+                    for (int i = 0; i < activeContexts.Count; i++)
+                    {
+                        if (!_previousActiveContexts.Contains(activeContexts[i])) { namesChanged = true; break; }
+                    }
+                }
+                bool playabilityChanged = _currentlyPlayable.Count != _previousPlayableContexts.Count;
+                if (!playabilityChanged)
+                {
+                    foreach (var kv in _currentlyPlayable)
+                    {
+                        if (!_previousPlayableContexts.TryGetValue(kv.Key, out string prev)
+                            || !string.Equals(prev, kv.Value, StringComparison.OrdinalIgnoreCase))
+                        { playabilityChanged = true; break; }
+                    }
+                }
 
                 // Also re-evaluate if currentContext drifted to Silence/null from an external
                 // event (PlayOnce ended, load failed, folder emptied) without the active set changing.
@@ -419,11 +437,20 @@ namespace CMM
                 // Also keep running if any stack entry is absent from activeContexts but hasn't
                 // hit the 1.5s eviction threshold yet — without this the early-continue fires
                 // on the second scan and the RemoveAll eviction check never runs again.
-                bool hasPendingEvictions = _contextStack.Any(c => !c.Manual && !activeContexts.Contains(c.ContextName));
-                // Keep scanning while any context is still warming up: its WarmUp dwell can
-                // elapse without the active set changing, and GetTopContext must re-run to
-                // promote it once it becomes viable.
-                bool hasWarmingContexts = _contextStack.Any(c => !DwellSatisfied(c));
+                // Also: keep scanning while any context is still warming up — its WarmUp dwell
+                // can elapse without the active set changing, and GetTopContext must re-run to
+                // promote it once it becomes viable. One pass over the stack covers both.
+                bool hasPendingEvictions = false;
+                bool hasWarmingContexts = false;
+                for (int i = 0; i < _contextStack.Count; i++)
+                {
+                    ActiveContext ac = _contextStack[i];
+                    if (!hasPendingEvictions && !ac.Manual && !activeContexts.Contains(ac.ContextName))
+                        hasPendingEvictions = true;
+                    if (!hasWarmingContexts && !DwellSatisfied(ac))
+                        hasWarmingContexts = true;
+                    if (hasPendingEvictions && hasWarmingContexts) break;
+                }
                 // The tick a context finishes warming, hasWarmingContexts flips to false
                 // and every other flag is already false — so without catching this edge the
                 // early-out below swallows the promotion and the context never starts.
@@ -453,7 +480,7 @@ namespace CMM
                 _previousActiveContexts.Clear();
                 foreach (string c in activeContexts) _previousActiveContexts.Add(c);
                 _previousPlayableContexts.Clear();
-                foreach (var kv in currentlyPlayable) _previousPlayableContexts[kv.Key] = kv.Value;
+                foreach (var kv in _currentlyPlayable) _previousPlayableContexts[kv.Key] = kv.Value;
 
                 // Rest of the stack rebuild continues as before...
                 foreach (string ctxName in activeContexts)
@@ -572,13 +599,14 @@ namespace CMM
                 // against the game's own churn (typically hundreds of KB–MB/s), then reset.
                 if (_scanAllocTicks > 0)
                 {
-                    float scanKB = _scanAllocBytes / 1024f;
-                    float bytesPerTick = (float)_scanAllocBytes / _scanAllocTicks;
-                    _lastScanBytesPerTick = bytesPerTick;
-                    float kbPerSec = scanKB / StalenessCheckInterval;
-                    CMMConfig.D($"[CMM PERF] Scan churn: {scanKB:F1} KB / {_scanAllocTicks} ticks " +
-                                $"= {bytesPerTick:F0} B/tick, ~{kbPerSec:F1} KB/s " +
-                                $"(process heap {GC.GetTotalMemory(false) / 1048576f:F1} MB)");
+                    _lastScanBytesPerTick = (float)_scanAllocBytes / _scanAllocTicks;
+                    if (CMMConfig.DebugLogging) // interpolation below allocates; the HUD gauge above is kept fed either way
+                    {
+                        float scanKB = _scanAllocBytes / 1024f;
+                        CMMConfig.D($"[CMM PERF] Scan churn: {scanKB:F1} KB / {_scanAllocTicks} ticks " +
+                                    $"= {_lastScanBytesPerTick:F0} B/tick, ~{scanKB / StalenessCheckInterval:F1} KB/s " +
+                                    $"(process heap {GC.GetTotalMemory(false) / 1048576f:F1} MB)");
+                    }
                     _scanAllocBytes = 0;
                     _scanAllocTicks = 0;
                 }
@@ -588,18 +616,22 @@ namespace CMM
 
                 if (!inGame) continue;
 
-                // Build state string cheaply; only emit log lines if it changed. The native
-                // mixer holds no managed clip cache, so report each context's current pick.
-                string cacheState = string.Join(", ", cacheMap
-                    .Where(kv => kv.Value.playingFile != null || kv.Value.stagedFile != null)
-                    .Select(kv => $"{kv.Key}=play:{(kv.Value.playingFile != null ? Path.GetFileName(kv.Value.playingFile) : "-")}" +
-                                  $"/staged:{(kv.Value.stagedFile != null ? Path.GetFileName(kv.Value.stagedFile) : "-")}"));
-
-                if (cacheState != _lastCacheLogState)
+                // Build state string; only emit log lines if it changed. The native mixer
+                // holds no managed clip cache, so report each context's current pick. The
+                // string work only exists to be logged, so it's skipped when logging is off.
+                if (CMMConfig.DebugLogging)
                 {
-                    CMMConfig.D($"[CMM] Cache state: {cacheState}");
-                    CMMConfig.D($"[CMM] Cache memory: {GetCacheMemorySummary(false)}");
-                    _lastCacheLogState = cacheState;
+                    string cacheState = string.Join(", ", cacheMap
+                        .Where(kv => kv.Value.playingFile != null || kv.Value.stagedFile != null)
+                        .Select(kv => $"{kv.Key}=play:{(kv.Value.playingFile != null ? Path.GetFileName(kv.Value.playingFile) : "-")}" +
+                                      $"/staged:{(kv.Value.stagedFile != null ? Path.GetFileName(kv.Value.stagedFile) : "-")}"));
+
+                    if (cacheState != _lastCacheLogState)
+                    {
+                        CMMConfig.D($"[CMM] Cache state: {cacheState}");
+                        CMMConfig.D($"[CMM] Cache memory: {GetCacheMemorySummary(false)}");
+                        _lastCacheLogState = cacheState;
+                    }
                 }
 
                 float now = Time.realtimeSinceStartup;
@@ -1643,12 +1675,20 @@ namespace CMM
             CMMConfig.D($"[CMM] Cooldown expired for {contextName}.");
         }
 
+        // Cached scene AudioListener for the diagnostic line below. FindObjectOfType walks
+        // the whole scene, so it's only re-run when the cached one is gone (Unity's
+        // destroyed-object == null covers world unload/reload).
+        private AudioListener _diagListener;
+
         private IEnumerator DiagnosticLoop()
         {
             while (true)
             {
                 yield return new WaitForSeconds(3f);
                 if (!inGame && !vanillaIsActive) continue;
+                // Everything below exists solely to produce debug log lines — skip the
+                // string building (and the scene walk) entirely when logging is off.
+                if (!CMMConfig.DebugLogging) continue;
 
                 float gameMusicVol = GamePrefs.GetFloat(EnumGamePrefs.OptionsMusicVolumeLevel);
                 string stack = _contextStack.Count > 0
@@ -1670,7 +1710,8 @@ namespace CMM
                 // The native mixer drives the OS audio device directly (miniaudio), so the
                 // managed PcmHeartbeat stays flat — audibility is read from the mixer's own
                 // voice state plus the listener (still the final volume/pause gate in-game).
-                var listener = FindObjectOfType<AudioListener>();
+                if (_diagListener == null) _diagListener = FindObjectOfType<AudioListener>();
+                AudioListener listener = _diagListener;
                 CMMConfig.D($"[CMM AUDIBLE] nativeBusy={NativeOutputBusy()}" +
                         $" | masterVol={CmmMixer.MasterVolume:F2}" +
                         $" | listenerVol={AudioListener.volume:F2}" +

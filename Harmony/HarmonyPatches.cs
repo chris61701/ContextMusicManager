@@ -413,7 +413,10 @@ namespace CMM
     {
         public static bool Handle(string soundGroupName)
         {
-            CMMConfig.D($"[CMM Audio Spy] PlayInsidePlayerHead: {soundGroupName}");
+            // Guarded at the call site: this prefix fires for EVERY in-head sound the game
+            // plays, and the interpolation would allocate before D() checked the flag.
+            if (CMMConfig.DebugLogging)
+                CMMConfig.D($"[CMM Audio Spy] PlayInsidePlayerHead: {soundGroupName}");
             switch (soundGroupName)
             {
                 case "player_death_stinger": return !ContextMusicManager.ContextHasFiles("Death");
