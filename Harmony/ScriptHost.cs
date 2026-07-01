@@ -367,6 +367,7 @@ namespace CMM
             t["strangersNearby"] = gameState.StrangersNearby;
             t["inPoi"]       = gameState.InPoi;
             t["poiName"]     = gameState.PoiName;
+            t["poiId"]       = gameState.PoiId;
             t["poiTier"]     = gameState.PoiTier;
             t["poiEnemiesRemaining"] = gameState.PoiEnemiesRemaining;
             t["poiQuestCleared"]     = gameState.PoiQuestCleared;

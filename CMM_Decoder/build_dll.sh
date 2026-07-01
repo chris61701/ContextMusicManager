@@ -22,7 +22,8 @@ set -e
 cd "$(dirname "$0")"
 
 GCC=${GCC:-gcc}
-OUT=dist/CMM_Decoder.dll
+OUT=${OUT:-dist/CMM_Decoder.dll}
+EXTRA_CFLAGS=${EXTRA_CFLAGS:-}
 
 INC=(
   -Ithird_party/opusfile/include
@@ -59,8 +60,9 @@ SRC=(
 
 # libfdk-aac.a is C++ (built once via cmake; see native-audio-decode memory), so
 # the link pulls libstdc++ — kept static so the DLL still ships standalone.
-mkdir -p dist
+mkdir -p "$(dirname "$OUT")"
 "$GCC" -O2 -shared -o "$OUT" \
+  $EXTRA_CFLAGS \
   -DOP_DISABLE_HTTP -DNDEBUG \
   -DMA_NO_DECODING -DMA_NO_ENCODING -DMA_NO_GENERATION \
   -DMA_NO_RESOURCE_MANAGER -DMA_NO_NODE_GRAPH \

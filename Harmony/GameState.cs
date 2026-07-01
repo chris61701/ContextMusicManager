@@ -55,6 +55,13 @@ namespace CMM
 
         public bool   InPoi;
         public string PoiName;
+        // Per-INSTANCE identity of the current POI (PrefabInstance.name = "<location>.<id>",
+        // unique per placed prefab). PoiName is only the prefab TYPE (its file name), shared
+        // by every copy of a POI design in the world, so the script must key same-POI
+        // continuity (the infested→cleared guard) on PoiId — NOT PoiName. Otherwise fleeing
+        // an infested POI straight into another copy of the same type reads as one continuous
+        // POI and misfires POI_Cleared. Null when not in a POI.
+        public string PoiId;
         public int    PoiTier;
         public int    PoiEnemiesRemaining;
         // True for one tick when the quest system reports this POI's sleepers cleared

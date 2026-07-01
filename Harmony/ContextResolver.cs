@@ -361,6 +361,7 @@ namespace CMM
             // ── POI ───────────────────────────────────────────────────────────
             gameState.InPoi = false;
             gameState.PoiName = "None";
+            gameState.PoiId = "None";
             gameState.PoiTier = 0;
             gameState.PoiEnemiesRemaining = 0;
             gameState.PoiQuestCleared = false;
@@ -401,6 +402,10 @@ namespace CMM
 
                 gameState.InPoi = true;
                 gameState.PoiName = currentPoI;
+                // Instance-unique key ("<location>.<id>"); distinguishes two copies of the
+                // same prefab type so the script's same-POI continuity guard can't bleed
+                // across them. Always populated at PrefabInstance construction.
+                gameState.PoiId = prefab.name;
                 gameState.PoiTier = tier;
                 gameState.PoiEnemiesRemaining = enemiesRemainingInPoi;
             }
@@ -444,6 +449,7 @@ namespace CMM
 
                 gameState.InPoi = true;
                 gameState.PoiName = currentPoI;
+                gameState.PoiId = prefab.name;
                 gameState.PoiTier = tier;
                 gameState.PoiEnemiesRemaining = spawnedEnemies;
                 gameState.PoiQuestCleared = questCleared;

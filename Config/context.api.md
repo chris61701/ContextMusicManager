@@ -46,7 +46,8 @@ persists between calls; `reset()` is your hook to clear it when a world unloads.
 | `alliesNearby` | number | living party members / friends within `cfg.playerDetectRange` (multiplayer only; 0 in single-player) |
 | `strangersNearby` | number | living **non-friendly** players (neither party member nor ACL friend) within `cfg.playerDetectRange` (multiplayer only; 0 in single-player) |
 | `inPoi` | bool | |
-| `poiName` | string | stable POI identifier |
+| `poiName` | string | prefab **type** name (shared by every copy of a POI design) — use for context tokens, not for same-POI continuity |
+| `poiId` | string | per-**instance** id (unique per placed POI) — use this to tell two copies of the same type apart |
 | `poiTier` | number | difficulty tier (0–5; else no `_Tn` suffix) |
 | `poiEnemiesRemaining` | number | live sleepers left (>0 ⇒ infested) |
 | `enemies` | array | see below; pre-filtered to `cfg.enemyDetectRange` |

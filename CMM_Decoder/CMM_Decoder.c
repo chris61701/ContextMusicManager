@@ -121,6 +121,9 @@ struct cmm_decoder {
     long long         adts_pos;   /* read cursor into buf for raw ADTS */
     unsigned char*    aubuf;      /* scratch for one access unit (MP4 file path) */
     unsigned          aubuf_cap;  /* capacity of aubuf */
+    unsigned char*    moov_buf;   /* cached MP4 'moov' box (file path); NULL if not cached */
+    long long         moov_off;   /* file offset where moov_buf begins */
+    long long         moov_len;   /* length of moov_buf */
     short*            i16;        /* one decoded frame, interleaved int16 (fdk output) */
     float*            pcm;        /* same frame converted to interleaved float */
     int               pcm_fill;   /* valid floats in pcm */
@@ -138,6 +141,17 @@ struct cmm_decoder {
 
 /* Generous one-frame scratch: HE-AAC frameSize is up to 2048, up to 8 channels. */
 #define CMM_AAC_MAX_SAMPLES (2048 * 8)
+
+/* Upper bound on the MP4 'moov' (index) we will pull into RAM to serve minimp4's
+ * open-time sample-table parse from memory instead of a per-read syscall storm.
+ * A real music moov (even hours long, plus embedded cover art) is a few MB; past
+ * this we skip the cache and fall back to streamed reads (correct, just slower to
+ * open). The audio ('mdat') is NEVER buffered — only the index.
+ * Overridable at build time (e.g. -DCMM_MP4_MOOV_CACHE_MAX=0 disables the cache
+ * for an A/B benchmark). */
+#ifndef CMM_MP4_MOOV_CACHE_MAX
+#define CMM_MP4_MOOV_CACHE_MAX (16 * 1024 * 1024)
+#endif
 
 CMM_API int CMM_Decoder_abi(void) { return CMM_DECODER_ABI; }
 
@@ -692,11 +706,65 @@ static int cmm_mp4_read(int64_t offset, void* buffer, size_t size, void* token)
         memcpy(buffer, d->buf + offset, size);
         return 0;
     }
+    /* Serve any read wholly inside the cached 'moov' from RAM — this is where the
+     * open-time sample-table parse hammers the file with tiny reads. mdat reads
+     * (playback) fall through to the FILE* path below. */
+    if (d->moov_buf && (long long)offset >= d->moov_off &&
+        (long long)offset + (long long)size <= d->moov_off + d->moov_len) {
+        memcpy(buffer, d->moov_buf + (offset - d->moov_off), size);
+        return 0;
+    }
     if (d->fp) {
         if (CMM_FSEEK(d->fp, (long long)offset, SEEK_SET) != 0) return 1;
         return fread(buffer, 1, size, d->fp) != size;
     }
     return 1;
+}
+
+/* Walk the top-level ISOBMFF boxes to locate 'moov' and, if it is within the cap,
+ * read the whole box into d->moov_buf in a single fread. minimp4's sample-table
+ * parse then hits RAM (memcpy) instead of thousands of tiny seek+read syscalls.
+ * Best-effort: any failure just leaves moov_buf NULL and the streamed path stands.
+ * File opens only (memory opens already serve from d->buf). */
+static void cmm_mp4_prime_moov(cmm_decoder* d, long long filesize)
+{
+    if (!d->fp || d->buf) return;
+    long long pos = 0;
+    while (pos + 8 <= filesize) {
+        unsigned char h[16];
+        if (CMM_FSEEK(d->fp, pos, SEEK_SET) != 0) return;
+        if (fread(h, 1, 8, d->fp) != 8) return;
+        long long boxsize = ((long long)h[0] << 24) | ((long long)h[1] << 16) |
+                            ((long long)h[2] << 8)  |  (long long)h[3];
+        long long hdr = 8;
+        if (boxsize == 1) {                    /* 64-bit largesize follows the type */
+            if (fread(h + 8, 1, 8, d->fp) != 8) return;
+            boxsize = ((long long)h[8]  << 56) | ((long long)h[9]  << 48) |
+                      ((long long)h[10] << 40) | ((long long)h[11] << 32) |
+                      ((long long)h[12] << 24) | ((long long)h[13] << 16) |
+                      ((long long)h[14] << 8)  |  (long long)h[15];
+            hdr = 16;
+        } else if (boxsize == 0) {
+            boxsize = filesize - pos;          /* box runs to EOF */
+        }
+        if (boxsize < hdr || pos + boxsize > filesize) return;   /* malformed → bail */
+
+        if (h[4] == 'm' && h[5] == 'o' && h[6] == 'o' && h[7] == 'v') {
+            if (boxsize <= CMM_MP4_MOOV_CACHE_MAX) {
+                unsigned char* mb = (unsigned char*)malloc((size_t)boxsize);
+                if (mb) {
+                    if (CMM_FSEEK(d->fp, pos, SEEK_SET) == 0 &&
+                        fread(mb, 1, (size_t)boxsize, d->fp) == (size_t)boxsize) {
+                        d->moov_buf = mb; d->moov_off = pos; d->moov_len = boxsize;
+                    } else {
+                        free(mb);
+                    }
+                }
+            }
+            return;   /* found moov (cached or too big) — done either way */
+        }
+        pos += boxsize;
+    }
 }
 
 /* Decode exactly one access unit into d->pcm (interleaved f32). Returns the
@@ -800,6 +868,7 @@ static int cmm_aac_init(cmm_decoder* d, long long filesize, int* channels,
     if (is_mp4) {
         d->mp4 = (MP4D_demux_t*)calloc(1, sizeof(MP4D_demux_t));
         if (!d->mp4) return -1;
+        cmm_mp4_prime_moov(d, filesize);   /* cache the index so the parse reads from RAM */
         if (!MP4D_open(d->mp4, cmm_mp4_read, d, filesize) || d->mp4->track_count == 0)
             return -1;
 
@@ -1024,6 +1093,7 @@ CMM_API void cmm_aac_close(cmm_decoder* d)
     if (!d) return;
     if (d->aac)   aacDecoder_Close(d->aac);
     if (d->mp4) { MP4D_close(d->mp4); free(d->mp4); }
+    if (d->moov_buf) free(d->moov_buf);
     if (d->aubuf) free(d->aubuf);
     if (d->i16)   free(d->i16);
     if (d->pcm)   free(d->pcm);
@@ -1040,13 +1110,22 @@ CMM_API void cmm_aac_close(cmm_decoder* d)
  * delegate to it. Forward-only demux is enough: the inner decoder owns seeking
  * over the fully-remuxed buffer, so no Cues index is needed. */
 
-/* Growable byte buffer for the remuxed stream. */
+/* Growable byte buffer for the remuxed stream. Capped: the whole remuxed track
+ * is held in RAM (and copied once more by the inner *_open_memory decoder), so
+ * an unbounded track — e.g. a long movie's audio — could balloon. Music tracks
+ * are minutes; ~96 MB is ~90+ min of Opus/Vorbis. Over the cap, the open fails
+ * cleanly and the caller falls through to its normal load-failure handling. */
+#ifndef CMM_MKV_MAX_REMUX
+#define CMM_MKV_MAX_REMUX ((size_t)96 * 1024 * 1024)
+#endif
 typedef struct { unsigned char* p; size_t len, cap; } bytebuf;
 static int bb_grow(bytebuf* b, size_t need)
 {
     if (b->len + need <= b->cap) return 1;
+    if (b->len + need > CMM_MKV_MAX_REMUX) return 0;   /* refuse pathological tracks */
     size_t nc = b->cap ? b->cap : 65536;
     while (nc < b->len + need) nc *= 2;
+    if (nc > CMM_MKV_MAX_REMUX) nc = b->len + need;    /* exact-fit near the cap */
     unsigned char* np = (unsigned char*)realloc(b->p, nc);
     if (!np) return 0;
     b->p = np; b->cap = nc; return 1;
@@ -1057,8 +1136,19 @@ static int bb_append(bytebuf* b, const void* data, size_t n)
     memcpy(b->p + b->len, data, n); b->len += n; return 1;
 }
 
-/* Random-access source over either an in-memory buffer or an owned FILE*. */
-typedef struct { const unsigned char* buf; long long len; FILE* fp; } src_reader;
+/* Random-access source over either an in-memory buffer or an owned FILE*.
+ * The file path carries a read-ahead window so the demuxer's byte-at-a-time
+ * EBML parse (thousands of 1-byte reads) doesn't turn into a fseek+fread
+ * syscall storm — the diagnostic measured file-open ~90× slower than the same
+ * demux over memory purely from that. Access is forward-monotonic, so one
+ * sliding window refills ~once per window and serves the rest as memcpy. */
+#define SRC_WIN_CAP (64 * 1024)
+typedef struct {
+    const unsigned char* buf; long long len; FILE* fp;
+    unsigned char* win;   /* read-ahead window over fp (NULL on memory path/OOM) */
+    long long      win_pos;
+    int            win_len;
+} src_reader;
 static int src_cb(void* u, long long off, void* dst, int n)
 {
     src_reader* s = (src_reader*)u;
@@ -1070,7 +1160,21 @@ static int src_cb(void* u, long long off, void* dst, int n)
         return take;
     }
     if (s->fp) {
+        /* Serve from the window when the whole request fits inside it. */
+        if (s->win && off >= s->win_pos && off + n <= s->win_pos + s->win_len) {
+            memcpy(dst, s->win + (off - s->win_pos), (size_t)n);
+            return n;
+        }
         if (CMM_FSEEK(s->fp, off, SEEK_SET) != 0) return -1;
+        /* Requests bigger than the window (large block payloads) read straight
+         * through; small reads refill the window and serve from it. */
+        if (s->win && n <= SRC_WIN_CAP) {
+            int got = (int)fread(s->win, 1, (size_t)SRC_WIN_CAP, s->fp);
+            s->win_pos = off; s->win_len = got;
+            int take = n < got ? n : got;
+            memcpy(dst, s->win, (size_t)take);
+            return take;
+        }
         return (int)fread(dst, 1, (size_t)n, s->fp);
     }
     return -1;
@@ -1398,6 +1502,7 @@ CMM_API cmm_decoder* cmm_container_open_memory(const unsigned char* data, long l
     if (err) *err = 0;
     if (!data || len <= 0) { if (err) *err = -1; return NULL; }
     src_reader sr; sr.buf = data; sr.len = len; sr.fp = NULL;
+    sr.win = NULL; sr.win_pos = -1; sr.win_len = 0;   /* memory path never reads fp */
     return container_open(&sr, len, channels, sampleRate, totalFrames, err);
 }
 
@@ -1412,7 +1517,10 @@ CMM_API cmm_decoder* cmm_container_open_file(const wchar_t* path, int* channels,
     if (filesize <= 0) { fclose(fp); if (err) *err = -1; return NULL; }
 
     src_reader sr; sr.buf = NULL; sr.len = filesize; sr.fp = fp;
+    sr.win = (unsigned char*)malloc(SRC_WIN_CAP);   /* OOM → NULL → direct reads, still correct */
+    sr.win_pos = -1; sr.win_len = 0;
     cmm_decoder* d = container_open(&sr, filesize, channels, sampleRate, totalFrames, err);
+    if (sr.win) free(sr.win);
     fclose(fp);   /* the whole track was read during remux; inner decodes from memory */
     return d;
 }

@@ -85,7 +85,7 @@ local TRADERS = { jen = "Trader_Jen", rekt = "Trader_Rekt", bob = "Trader_Bob",
 -- Distinct from `gameState`, which is rebuilt fresh every tick. This is the small
 -- amount of history the combat/POI logic has to remember on its own.
 -- tier 0 = not in combat; 1..#COMBAT_TIERS = combat intensity (only climbs mid-fight).
-local memory = { tier = 0, lastAggro = 0, biome = "", wasInfested = false, lastPoi = "None" }
+local memory = { tier = 0, lastAggro = 0, biome = "", wasInfested = false, lastPoiId = "None" }
 
 -- Append a token. The host dedups, so insertion order just expresses intent (earlier = higher).
 local function add(list, token) list[#list + 1] = token end
@@ -230,19 +230,22 @@ function resolve(gameState, cfg)
     --     when poiClearFromQuestOnly is false (single-player / host). On a MP client the
     --     entity count bounces room-to-room and can't tell a real clear from an
     --     un-triggered far room, so that path is suppressed there.
+    -- Continuity is keyed on poiId (the per-INSTANCE id), NOT poiName (the prefab TYPE,
+    -- shared by every copy of a POI). Keying on the type let a wasInfested latch from one
+    -- POI "clear" the next copy of the same type you ran into (see the cross-POI misfire).
     if gameState.poiQuestCleared then add(active, "POI_Cleared") end
     if gameState.poiEnemiesRemaining > 0 then
       memory.wasInfested = true
       add(active, "POI_Infested" .. suffix)
     else
       if not gameState.poiClearFromQuestOnly
-         and memory.wasInfested and gameState.poiName == memory.lastPoi then
+         and memory.wasInfested and gameState.poiId == memory.lastPoiId then
         add(active, "POI_Cleared")
       end
       memory.wasInfested = false
       add(active, "POI" .. suffix)
     end
-    memory.lastPoi = gameState.poiName
+    memory.lastPoiId = gameState.poiId
   else
     memory.wasInfested = false
   end
