@@ -49,6 +49,7 @@ SRC=(
   minimp4_impl.c
   miniaudio_impl.c             # the one MINIAUDIO_IMPLEMENTATION TU
   cmm_out.c                    # cmm_out_* playback shim
+  cmm_mix.c                    # cmm_mix_* native mixer (producer loop, GC-immune)
   third_party/opusfile/src/info.c
   third_party/opusfile/src/internal.c
   third_party/opusfile/src/opusfile.c

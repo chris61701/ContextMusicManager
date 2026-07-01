@@ -40,7 +40,7 @@ namespace CMM
     internal static class NativeOpus
     {
         const string Dll = "CMM_Decoder";
-        const int ExpectedAbi = 11;  // v1 Opus, v2 +FLAC, v3 +Vorbis, v4 +open_file, v5 +MP3/WAV/AIFF, v6 +AAC, v7 +container, v8 +output (cmm_out_*), v9 +converter (cmm_dc_*), v10 +cmm_out_queued/reset (adaptive ring), v11 +cmm_out_set_gain (consumer fade)
+        const int ExpectedAbi = 12;  // v1 Opus, v2 +FLAC, v3 +Vorbis, v4 +open_file, v5 +MP3/WAV/AIFF, v6 +AAC, v7 +container, v8 +output (cmm_out_*), v9 +converter (cmm_dc_*), v10 +cmm_out_queued/reset (adaptive ring), v11 +cmm_out_set_gain (consumer fade), v12 +native mixer (cmm_mix_*)
 
         // The mod loads from a Mods subfolder that is NOT on the OS native search path,
         // so a bare DllImport("CMM_Decoder") would fail to locate CMM_Decoder.dll. Preload it

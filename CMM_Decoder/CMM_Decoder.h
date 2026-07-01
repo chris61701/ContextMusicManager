@@ -51,8 +51,10 @@ typedef struct cmm_decoder cmm_decoder;
  *        context change).
  *   v11:+ cmm_out_set_gain (consumer-side output gain ramp so menu↔game transition fades
  *        are heard in real output time, not buried behind the ring cushion) + cmm_out_reset_gain
- *        (flush + restore gain atomically so restarting after a fade can't bleed the old track). */
-#define CMM_DECODER_ABI 11
+ *        (flush + restore gain atomically so restarting after a fade can't bleed the old track).
+ *   v12:+ native MIXER (cmm_mix_*) — the per-sample decode→convert→gain→sum→write producer loop
+ *        moved out of managed C# so the GC can't suspend it mid-stream (see cmm_mix.c). */
+#define CMM_DECODER_ABI 12
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -302,6 +304,71 @@ CMM_API int cmm_dc_process(cmm_dc* c, const float* in, long long inFrames, long 
 
 /* Free the converter. NULL-safe. */
 CMM_API void cmm_dc_close(cmm_dc* c);
+
+/* ── Native mixer (producer loop) ─────────────────────────────────────────
+ * Moves the whole decode→convert→gain-ramp→sum→write producer loop into native
+ * code on its own thread, so the game's GC (stop-the-world for managed threads)
+ * can't suspend it and underrun the output ring. The managed side keeps DECIDING
+ * what plays (which file, when to switch, fades, resume); it opens each decoder
+ * (off the audio loop) and hands the cmm_decoder* + a format `kind` to the mixer,
+ * which then reads/mixes it entirely natively. Reuses cmm_out (output) + cmm_dc
+ * (per-voice converters). A faithful port of the managed CmmMixer; a singleton.
+ *
+ * `kind` matches the managed AudioDecoder.ClassifyReader:
+ *   0=Opus 1=FLAC 2=Vorbis 3=MP3 4=WAV 5=AAC 6=Container(Matroska/WebM).
+ * All control calls are thread-safe against the producer thread (one internal mutex). */
+
+/* Create the mixer + start the producer thread (idempotent). busRate/busChannels =
+ * the fixed mix bus (48000/2). tightFrames/maxFrames = the tight and deep output-ring
+ * cushion depths in FRAMES (the managed side computes them from config). The device
+ * opens lazily on the first cmm_mix_add. Returns 0 on success. */
+CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int maxFrames, int* err);
+
+/* Install a track and crossfade to it. `dec`+`kind` name a decoder the caller opened;
+ * srcRate/srcChannels/totalFrames describe it (totalFrames<=0 = unknown). fade = crossfade
+ * seconds; loop restarts at EOF; startFrame seeks before play (resume, 0 = from start);
+ * trackGain = per-track loudness gain; duckOthersTo>=0 marks a PlayOnce stinger overlay
+ * (existing voices DUCK to that level instead of fading out, and swell back when it ends);
+ * snapTight!=0 flushes a deep cushion (a context change). Takes ownership of `dec` (frees
+ * it on retire). Returns a voice id (0 on failure) to poll via cmm_mix_get_state/remaining. */
+CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
+                              long long totalFrames, float fade, int loop, long long startFrame,
+                              float trackGain, float duckOthersTo, int snapTight);
+
+/* Fade ALL voices out over `fade`. closeWhenIdle!=0 closes the device once silent;
+ * pass 0 to keep it open for a hand-off (e.g. a menu→game fade into the spawn stinger). */
+CMM_API void cmm_mix_stop(float fade, int closeWhenIdle);
+
+/* Retire + discard every voice immediately (no fade) and flush the queued output. */
+CMM_API void cmm_mix_stop_all_now(void);
+
+/* Master volume (music slider × modifier), applied to the summed bus. */
+CMM_API void cmm_mix_set_master(float vol);
+
+/* Update a live voice's per-track gain in place (loudness settle / trim keybind), ramped
+ * over rampSeconds (<=0 snaps). Returns 0 if the voice is gone. */
+CMM_API int cmm_mix_set_voice_gain(long long id, float trackGain, float rampSeconds);
+
+/* Reverse-fade reclaim: ramp voice `id` back to full and fade the others out. Returns 0
+ * when the voice is gone/inaudible (caller falls back to a fresh cmm_mix_add). */
+CMM_API int cmm_mix_reclaim(long long id, float fade);
+
+/* Playhead + length (seconds) of a voice; *active=0 (return 0) when the id is gone. */
+CMM_API int cmm_mix_get_state(long long id, double* posSec, double* lenSec, int* active);
+
+/* Seconds left in a voice: -1 gone, +Inf unknown length, else remaining play time. */
+CMM_API double cmm_mix_remaining(long long id);
+
+/* Consumer-side output-gain ramp over `seconds` (<=0 snaps) — menu↔game transition fades,
+ * heard in real output time regardless of cushion depth (forwards to cmm_out_set_gain). */
+CMM_API void cmm_mix_set_output_gain(float target, float seconds);
+
+/* Proactive deep-cushion flags: deep = world loading (its falling edge snap-flushes tight),
+ * extra = post-spawn/teleport grace (drains naturally, no flush → no track teleport). */
+CMM_API void cmm_mix_set_cushion(int deep, int extra);
+
+/* Ask the producer thread to reopen the output device (OS default endpoint changed). */
+CMM_API void cmm_mix_request_reinit(void);
 
 #ifdef __cplusplus
 }
