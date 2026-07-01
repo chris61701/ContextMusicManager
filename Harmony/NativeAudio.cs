@@ -40,7 +40,7 @@ namespace CMM
     internal static class NativeOpus
     {
         const string Dll = "CMM_Decoder";
-        const int ExpectedAbi = 12;  // v1 Opus, v2 +FLAC, v3 +Vorbis, v4 +open_file, v5 +MP3/WAV/AIFF, v6 +AAC, v7 +container, v8 +output (cmm_out_*), v9 +converter (cmm_dc_*), v10 +cmm_out_queued/reset (adaptive ring), v11 +cmm_out_set_gain (consumer fade), v12 +native mixer (cmm_mix_*)
+        const int ExpectedAbi = 13;  // v1 Opus, v2 +FLAC, v3 +Vorbis, v4 +open_file, v5 +MP3/WAV/AIFF, v6 +AAC, v7 +container, v8 +output (cmm_out_*), v9 +converter (cmm_dc_*), v10 +cmm_out_queued/reset (adaptive ring), v11 +cmm_out_set_gain (consumer fade), v12 +native mixer (cmm_mix_*), v13 +native loudness (cmm_loudness_*)
 
         // The mod loads from a Mods subfolder that is NOT on the OS native search path,
         // so a bare DllImport("CMM_Decoder") would fail to locate CMM_Decoder.dll. Preload it
@@ -311,6 +311,23 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_container_close(IntPtr d);
+
+        public static bool Available => NativeOpus.Available;
+    }
+
+    // Native EBU R128 loudness analyzer (cmm_loudness_*). One-shot: the caller opens a
+    // decoder off the audio thread (AudioDecoder.OpenNativeHandle) and hands the raw
+    // cmm_decoder* + its format kind here; native decodes to EOF, measures, and TAKES
+    // OWNERSHIP (closes the decoder). Returns 1 with a gated result, 0 when the track is
+    // too short/quiet to gate. The whole sweep then runs in native (malloc) memory — no
+    // managed-heap churn to trip the GC and hitch the game (the point of the port).
+    internal static class NativeLoudness
+    {
+        const string Dll = "CMM_Decoder";
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_loudness_analyze(IntPtr dec, int kind, int srcRate,
+            int srcChannels, out double outLufs, out double outPeak);
 
         public static bool Available => NativeOpus.Available;
     }

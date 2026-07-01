@@ -288,6 +288,37 @@ namespace CMM
             }
         }
 
+        // Opens a BARE native decoder handle (no managed WaveStream wrapper) for the
+        // native decoder handoff used by the loudness analyzer (and, later, the mixer):
+        // returns the raw cmm_decoder* plus its format `kind` (0..6 — the cmm_loudness /
+        // cmm_mix mapping, which is ClassifyReader − 1) and PCM format. The caller passes
+        // (handle, kind) to a native consumer that TAKES OWNERSHIP and closes it
+        // (cmm_loudness_analyze / cmm_mix_add). Returns IntPtr.Zero (kind = -1) for an
+        // unknown extension or a decode-open failure. Same header-sniff as OpenNativeReader.
+        internal static IntPtr OpenNativeHandle(string filePath, out int kind,
+            out int channels, out int sampleRate, out long totalFrames)
+        {
+            kind = -1; channels = 0; sampleRate = 0; totalFrames = 0;
+            string ext = System.IO.Path.GetExtension(filePath).ToLower();
+            bool isOpus = ext == ".opus" ||
+                ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath));
+
+            IntPtr h; int err;
+            switch (ClassifyReader(ext, isOpus))
+            {
+                case ReaderKind.Opus:      kind = 0; h = NativeOpus.cmm_opus_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                case ReaderKind.Flac:      kind = 1; h = NativeFlac.cmm_flac_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                case ReaderKind.Vorbis:    kind = 2; h = NativeVorbis.cmm_vorbis_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                case ReaderKind.Mp3:       kind = 3; h = NativeMp3.cmm_mp3_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                case ReaderKind.Wav:       kind = 4; h = NativeWav.cmm_wav_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                case ReaderKind.Aac:       kind = 5; h = NativeAac.cmm_aac_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                case ReaderKind.Container: kind = 6; h = NativeContainer.cmm_container_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
+                default: WarnNoReader(ext); return IntPtr.Zero;
+            }
+            if (h == IntPtr.Zero) { kind = -1; return IntPtr.Zero; }
+            return h;
+        }
+
         private enum ReaderKind { Unknown, Opus, Flac, Vorbis, Mp3, Wav, Aac, Container }
 
         // Single source of truth for the extension → native-reader-family mapping, shared by
@@ -381,30 +412,35 @@ namespace CMM
                 return fail;
             }
 
-            WaveStream reader = null;
             try
             {
-                // Decode straight from the file via the native readers (CMM_Decoder.dll):
-                // native memory the GC never scans, and no managed whole-file buffer. The OS
-                // page cache populated by the hash pass above usually serves this second read
-                // warm, so it is mostly CPU (decode), not a second cold disk hit.
+                // Decode + measure entirely in native code (CMM_Decoder.dll): open a bare
+                // decoder handle here, then cmm_loudness_analyze reads it to EOF and runs the
+                // K-weighting + gating in native (malloc) memory — nothing on the GC heap, so
+                // the sweep can't trigger a stop-the-world collection that hitches the game.
+                // It TAKES OWNERSHIP of the handle (closes it), so there's no managed reader to
+                // dispose. The OS page cache from the hash pass above usually serves this second
+                // read warm, so it is mostly CPU (decode), not a second cold disk hit.
                 long tIdx = Stopwatch.GetTimestamp();
-                reader = OpenNativeReader(filePath);
+                int kind, channels, sampleRate;
+                long total;
+                IntPtr dec = OpenNativeHandle(filePath, out kind, out channels, out sampleRate, out total);
                 indexMs = ElapsedMs(tIdx);
-                if (reader == null) return fail;
+                if (dec == IntPtr.Zero) return fail;
 
                 long tAnalyze = Stopwatch.GetTimestamp();
-                LoudnessResult result = AnalyzeToEnd(reader, filePath, scratch);
+                double lufs, peak;
+                int valid = NativeLoudness.cmm_loudness_analyze(dec, kind, sampleRate, channels, out lufs, out peak);
                 analyzeMs = ElapsedMs(tAnalyze);
-                if (!result.Valid) return fail;
+                if (valid == 0) return fail;
 
                 return new TrackLoudness
                 {
                     Ok = true,
                     Hash = hash,
                     Size = size,
-                    Lufs = result.IntegratedLufs,
-                    Peak = result.SamplePeak,
+                    Lufs = lufs,
+                    Peak = peak,
                 };
             }
             catch (Exception ex)
@@ -414,8 +450,6 @@ namespace CMM
             }
             finally
             {
-                reader?.Dispose();
-
                 if (CMMConfig.DebugLogging)
                 {
                     float totalMs = ElapsedMs(tStart);
@@ -441,47 +475,16 @@ namespace CMM
         private static float ElapsedMs(long t0)
             => (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
 
-        // Reusable scratch for the loudness sweep: the decode buffer is reused across files
-        // so a measurement allocates nothing on the heap per call. MUST be used single-
-        // threaded; each caller that passes one serializes its own use. (The whole-file
-        // FileBuf this used to carry is gone — MeasureLoudness now streams the hash and
-        // decodes natively from the path, so no multi-MB Large-Object-Heap buffer is ever
-        // allocated; see MeasureLoudness.)
+        // Per-lane token for the loudness sweep: one instance per parallel prescan lane
+        // marks that lane as single-threaded (each caller that passes one serializes its own
+        // use). SampleBuf is now VESTIGIAL — cmm_loudness_analyze decodes into its own native
+        // buffer, so a measurement allocates nothing on the managed heap (the whole point of
+        // the native port). Kept only so the existing lane-pool wiring compiles unchanged; the
+        // field and param can be dropped in a follow-up cleanup.
         public sealed class MeasureScratch
         {
-            public float[] SampleBuf;  // reused decode buffer
+            public float[] SampleBuf;  // vestigial (unused since the native-loudness port)
         }
-
-        // Pulls the whole stream through the R128 analyzer via the native readers'
-        // interleaved-float fast path (every reader is an IFloatPcmSource emitting IEEE
-        // float). Reuses scratch.SampleBuf when provided so the decode buffer isn't
-        // re-allocated per file.
-        private static LoudnessResult AnalyzeToEnd(WaveStream reader, string filePath, MeasureScratch scratch)
-        {
-            float[] buf = scratch?.SampleBuf;
-            if (buf == null)
-            {
-                buf = new float[16384];
-                if (scratch != null) scratch.SampleBuf = buf;
-            }
-
-            var src = reader as IFloatPcmSource;
-            if (src == null)
-            {
-                Log.Warning($"[CMM] Loudness: '{Path.GetFileName(filePath)}' reader is not a float source — skipping.");
-                return new LoudnessResult { Valid = false };
-            }
-
-            var analyzer = new R128Analyzer(reader.WaveFormat.SampleRate, reader.WaveFormat.Channels);
-            while (true)
-            {
-                int n = src.ReadFloats(buf, 0, buf.Length);
-                if (n <= 0) break;
-                analyzer.Feed(buf, n);
-            }
-            return analyzer.Finish();
-        }
-
 
         public static long ClampLong(long value, long min, long max)
         {

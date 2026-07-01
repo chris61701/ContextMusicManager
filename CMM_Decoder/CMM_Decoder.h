@@ -53,8 +53,10 @@ typedef struct cmm_decoder cmm_decoder;
  *        are heard in real output time, not buried behind the ring cushion) + cmm_out_reset_gain
  *        (flush + restore gain atomically so restarting after a fade can't bleed the old track).
  *   v12:+ native MIXER (cmm_mix_*) — the per-sample decode→convert→gain→sum→write producer loop
- *        moved out of managed C# so the GC can't suspend it mid-stream (see cmm_mix.c). */
-#define CMM_DECODER_ABI 12
+ *        moved out of managed C# so the GC can't suspend it mid-stream (see cmm_mix.c).
+ *   v13:+ native LOUDNESS analyzer (cmm_loudness_*) — the EBU R128 sweep's K-weighting + gating
+ *        moved out of managed C# so the sweep allocates nothing on the GC heap (see cmm_loudness.c). */
+#define CMM_DECODER_ABI 13
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -369,6 +371,37 @@ CMM_API void cmm_mix_set_cushion(int deep, int extra);
 
 /* Ask the producer thread to reopen the output device (OS default endpoint changed). */
 CMM_API void cmm_mix_request_reinit(void);
+
+/* ── Loudness analyzer (EBU R128 / ITU-R BS.1770 integrated loudness) ──────
+ * A native port of the managed CMM.R128Analyzer, so the loudness sweep decodes AND
+ * measures entirely in native memory — no managed-heap churn to trip Mono's stop-the-
+ * world GC and hitch the game's main thread. Two surfaces:
+ *   - streaming (cmm_loudness_new/_feed/_finish/_free): feed interleaved-f32 PCM in any
+ *     chunking, then finish once. Mirrors R128Analyzer; used by the self-test.
+ *   - one-shot (cmm_loudness_analyze): the caller opens a decoder (as for cmm_mix_add) and
+ *     hands the cmm_decoder* + a format `kind` (same 0..6 mapping as cmm_mix); this reads it
+ *     to EOF, measures, and TAKES OWNERSHIP (closes the decoder). This is the identical
+ *     C#→native decoder handoff the mixer uses. */
+typedef struct cmm_loudness cmm_loudness;
+
+/* Create a streaming analyzer for the given source rate/channels (coefficients are
+ * sample-rate-derived). Free with cmm_loudness_free. NULL on allocation failure. */
+CMM_API cmm_loudness* cmm_loudness_new(int sampleRate, int channels);
+
+/* Feed `count` interleaved floats (frames × channels). Partial trailing frames ignored. */
+CMM_API void cmm_loudness_feed(cmm_loudness* a, const float* data, int count);
+
+/* Finalise: *outLufs = integrated LUFS (only meaningful when the return is 1), *outPeak =
+ * highest absolute sample seen (always set). Returns 1 when a gated result exists, else 0
+ * (track too short/quiet — caller treats as "no normalization"). */
+CMM_API int cmm_loudness_finish(cmm_loudness* a, double* outLufs, double* outPeak);
+
+CMM_API void cmm_loudness_free(cmm_loudness* a);
+
+/* One-shot: read `dec` (opened by the caller; `kind` 0..6 as in cmm_mix) to EOF and measure.
+ * TAKES OWNERSHIP of `dec` (closes it before returning). Same out-params/return as finish. */
+CMM_API int cmm_loudness_analyze(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
+                                 double* outLufs, double* outPeak);
 
 #ifdef __cplusplus
 }

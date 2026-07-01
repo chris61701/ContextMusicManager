@@ -75,17 +75,6 @@ namespace CMM
         // resume. The quit-to-menu teardown reuses the same fade — quitting mid-fade just continues
         // it to silence (see OnGamePauseChanged and FadeOutAndCleanupCoroutine).
         public const float PauseFadeDuration = 3f;
-        // Post-spawn / post-teleport deep-cushion grace. The world-load deep buffer (_gameIsLoading)
-        // is cleared the instant the player spawns, but heavy chunk STREAMING continues for a while
-        // after the loading screen closes — starving the native mixer's producer (the managed Pump)
-        // and underrunning the tight in-game ring (an audible pause). AfterPlayerRespawn (which fires
-        // on initial spawn, death-respawn, AND teleport) arms this deadline; VolumeSyncLoop holds the
-        // extra cushion until it passes, then it eases back to tight by natural drain (no flush → no
-        // teleport). Covers the diagnosed post-load streaming; unpredictable heavy events elsewhere
-        // (fast travel, horde spawns) still fall back to the mixer's reactive growth.
-        public const float PostSpawnDeepBufferSeconds = 30f;
-        internal static float _deepBufferUntil;
-
         // While true, the menu-screen BackgroundMusicMono auto-trigger does NOT start CMM's
         // menu music. Held during the game-exit fade so the menu music can't fade in until
         // the game music has fully faded out (set in FadeOutAndCleanup, cleared once silent).

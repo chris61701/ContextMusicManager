@@ -205,12 +205,6 @@ namespace CMM
                 // the queue). Tight on the menu keeps track changes prompt; reactive growth in the
                 // mixer still covers any surprise starvation (other apps) on menu OR in gameplay.
                 CmmMixer.DeepBuffer = _gameIsLoading;
-                // Post-spawn/teleport grace: hold a deeper cushion through the tail of chunk
-                // streaming that continues after the loading screen closes. Excluded from the
-                // Pump's falling-edge flush (CmmMixer.ExtraCushion), so it eases out by natural
-                // drain rather than a flush — the same track is still playing, so a flush would
-                // teleport it forward. Only in-game, and only until the armed deadline passes.
-                CmmMixer.ExtraCushion = inGame && Time.realtimeSinceStartup < _deepBufferUntil;
             }
         }
 

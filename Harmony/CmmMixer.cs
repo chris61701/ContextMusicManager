@@ -158,14 +158,6 @@ namespace CMM
         // proactively while DeepBuffer is set (loading / menu); snapped tight again on a
         // context change. Driven from the control layer via DeepBuffer.
         internal static volatile bool DeepBuffer;   // hold a deep cushion proactively (loading/menu)
-        // Like DeepBuffer, this holds a deep cushion — but it is DELIBERATELY excluded from the
-        // Pump's deep-buffer falling-edge flush (see Pump). It's raised for the post-spawn / post-
-        // teleport grace window (heavy chunk streaming continues after the loading screen closes),
-        // where the same context keeps playing, so its expiry must ease back to tight by NATURAL
-        // DRAIN — a flush there would teleport the still-playing track forward by the cushion depth.
-        // (DeepBuffer's flush is safe only because leaving the load window coincides with the spawn
-        // context change, which discards the outgoing audio anyway.)
-        internal static volatile bool ExtraCushion;
         const int CalmMs       = 3000;   // no starvation for this long → ease back to the tight target
         const int FlushGraceMs = 750;    // after a flush, ignore the (intentionally) empty ring this long
         int _maxFillFrames, _tightFillFrames, _lowWaterFrames;
@@ -556,8 +548,8 @@ namespace CMM
         int ComputeFillTargetLocked(int queued)
         {
             int now = Environment.TickCount;
-            if (DeepBuffer || ExtraCushion)
-                _targetFillFrames = _maxFillFrames;                         // hold deep (load, or post-spawn grace)
+            if (DeepBuffer)
+                _targetFillFrames = _maxFillFrames;                         // hold deep (load/menu)
             else if (now - _flushUntilMs < 0)
                 _targetFillFrames = _tightFillFrames;                       // just flushed — refill tight, ignore the empty ring
             else if (queued < _lowWaterFrames)
