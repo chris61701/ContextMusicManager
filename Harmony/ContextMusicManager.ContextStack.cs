@@ -38,14 +38,15 @@ namespace CMM
                      bool resume = true, int stale = 120, bool loop = false,
                      int cool = 5, int fadeintime = 5, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
-                     int warmup = 0, string warmgroup = null, bool subfolders = false)
+                     int warmup = 0, string warmgroup = null, bool subfolders = false,
+                     string link = null)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,
                                                  loop, cool, fadeintime, bypass, true, priority, once, volume,
-                                                 warmup, warmgroup, subfolders);
+                                                 warmup, warmgroup, subfolders, link);
 
             Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
             Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90);
-            Add("Blood_Moon_Combat",   "combat/blood_moon",     "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:71);
+            Add("Blood_Moon_Combat",   "combat/blood_moon",     "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:71, link:"Bloodmoon");
             Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
             Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
             Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
@@ -58,7 +59,7 @@ namespace CMM
             // directory scan never confuses them with the per-biome subfolders). Low bridges
             // to vanilla via VanillaIfPanicked. Mirrors contexts.xml.
             Add("Combat_Boss",         "combat/_boss",          "Combat_High",       stale:20, cool:3, fadeintime:3, bypass:true, priority:52);
-            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, cool:3, fadeintime:3, bypass:true, priority:51);
+            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, cool:3, fadeintime:3, bypass:true, priority:51, link:"Combat");
             Add("Combat_Low",          "combat",                "VanillaIfPanicked", stale:20, cool:3, fadeintime:3, bypass:true, priority:50);
             // Biome-specific combat tiers (mirror contexts.xml). Each biome's combat/<biome>
             // folder mirrors the generic layout (root = Low, _high / _boss = escalations).
@@ -81,15 +82,15 @@ namespace CMM
             Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
             Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
             Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:45, once:true);
-            Add("Tension",             "tension",               stale:30,                                      priority:30, warmup:2);
-            Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3);
-            Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3);
-            Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3);
-            Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, warmup:3);
-            Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, warmup:3);
+            Add("Tension",             "tension",               stale:30,                                      priority:30, warmup:2, link:"Suspense");
+            Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3, link:"TraderJoel");
+            Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3, link:"TraderJen");
+            Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3, link:"TraderRekt");
+            Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, warmup:3, link:"TraderBob");
+            Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, warmup:3, link:"TraderHugh");
             Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25, warmup:3);
-            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home");
-            Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home");
+            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home", link:"HomeNight");
+            Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home", link:"HomeDay");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
             Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
             Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
@@ -116,11 +117,15 @@ namespace CMM
             Add("Ambient_Wasteland_Night",   "ambient/wasteland/_night",    "Ambient_Night",             priority:12);
             Add("Ambient_Wasteland",         "ambient/wasteland",           "Ambient",                   priority:11);
             Add("Ambient_Night",             "ambient/_night",              "Stack",                     priority:11);
-            Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10);
+            Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10, link:"Exploration");
             // Sentinels — no path, no files
-            Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0);
+            Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0, link:"None");
             Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:-1);
             Add("Menu",     "menu", "Vanilla", resume:false, stale:0, cool:5, fadeintime:2, bypass:true, priority:0);
+
+            // Build the vanilla section→context reverse map from the built-in Links (the
+            // external contexts.xml load, when present, rebuilds it again with its own).
+            RebuildVanillaLinkMap();
         }
 
         public static Contexts GetContext(string contextIn) =>
@@ -341,6 +346,126 @@ namespace CMM
                 _menuVanillaFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutMenuVanillaCoroutine(CrossFadeDuration));
             }
             CMMConfig.D("[CMM] Reclaiming from Vanilla.");
+        }
+
+        // ── Vanilla section governance ────────────────────────────────────────
+        // While CMM lets the game's Dynamic Music System play (the "Vanilla" fallback),
+        // the game's Conductor still picks its own sections and would snap straight to
+        // e.g. trader music the instant you step into a trader area — with none of CMM's
+        // anti-flicker WarmUp dwell, and bleeding the game's trader track through before
+        // CMM's own trader music is ready. A vanilla section may only fire when its LINKED
+        // CMM context (contexts.xml `link="…"`) says its rules allow it.
+        //
+        // Reverse map: game vanilla SectionType → the CMM context that governs it, built
+        // from each context's Link. Rebuilt on every contexts (re)load (InitContexts +
+        // CMMConfigLoader.LoadContexts). Main-thread only, so a plain Dictionary is fine.
+        private static readonly Dictionary<SectionType, string> _sectionToContext =
+            new Dictionary<SectionType, string>();
+
+        // (Re)builds _sectionToContext by parsing each context's Link string to a game
+        // SectionType. Later duplicate links for the same section win with a warning;
+        // unparseable link values are logged and skipped. None never needs a mapping.
+        public static void RebuildVanillaLinkMap()
+        {
+            _sectionToContext.Clear();
+            foreach (Contexts ctx in contexts.Values)
+            {
+                if (string.IsNullOrEmpty(ctx.Link)) continue;
+                if (!Enum.TryParse(ctx.Link, true, out SectionType section))
+                {
+                    Log.Warning($"[CMM] Context '{ctx.Context}' has an unknown link=\"{ctx.Link}\" — ignoring.");
+                    continue;
+                }
+                if (section == SectionType.None) continue;   // None = silence, never gated
+                if (_sectionToContext.TryGetValue(section, out string existing) && existing != ctx.Context)
+                    Log.Warning($"[CMM] Vanilla section {section} linked by both '{existing}' and '{ctx.Context}' — using '{ctx.Context}'.");
+                _sectionToContext[section] = ctx.Context;
+            }
+        }
+
+        // The section the Conductor is actually playing (what we last let through). A hold
+        // returns this so the current ambient keeps going rather than cutting to something new.
+        // Reset on world exit (Patch_GameEnded → ResetVanillaGovernance) so a stale value can't
+        // force a wrong section on the next world's first pick.
+        public static SectionType _lastGovernedSection = SectionType.None;
+        // Rising-edge guard so the "holding" diagnostic logs once per hold episode instead of
+        // every frame (Conductor.Update calls Select() each frame).
+        private static SectionType _lastLoggedHold = SectionType.None;
+        // Governance-owned WarmUp timer for the section the game is currently proposing. Timed
+        // off the GAME's proposal (not CMM's context stack) so a mapped section is held for its
+        // linked context's full WarmUp even during the scan-tick window before CMM has
+        // registered the context. Without this, the section would slip through that gap and fire
+        // before the dwell ("Trader_Rekt fires before the warmup"). Main-thread only.
+        private static SectionType _pendingVanillaSection = SectionType.None;
+        private static float _pendingVanillaSince;
+
+        // Clears all vanilla-governance state. Called on world exit.
+        public static void ResetVanillaGovernance()
+        {
+            _lastGovernedSection = SectionType.None;
+            _lastLoggedHold = SectionType.None;
+            _pendingVanillaSection = SectionType.None;
+        }
+
+        // Governs the section the game's SectionSelector just picked. Returns what should
+        // actually play so a vanilla section obeys the rules of its linked context. Called
+        // from a postfix on DynamicMusic.SectionSelector.Select (main thread, same as the
+        // scan loop — no locking needed).
+        public static SectionType GovernVanillaSection(SectionType proposed)
+        {
+            SectionType previous = _lastGovernedSection;
+            SectionType governed = GovernVanillaSectionCore(proposed, previous);
+            _lastGovernedSection = governed;
+            return governed;
+        }
+
+        private static SectionType GovernVanillaSectionCore(SectionType proposed, SectionType previous)
+        {
+            if (!inGame || MusicStates.DefaultMusicEnabled) return proposed;  // CMM off → game controls
+
+            // Which CMM context governs this vanilla section? Unlinked (or None) → defer to the
+            // game, and forget any in-flight warmup so the next mapped section starts fresh.
+            if (!_sectionToContext.TryGetValue(proposed, out string ctx))
+            {
+                _pendingVanillaSection = SectionType.None;
+                _lastLoggedHold = SectionType.None;
+                return proposed;
+            }
+
+            // Already settled on this section (or nothing to hold onto after a world load) —
+            // let it stand and keep the dwell anchored to the live section.
+            if (proposed == previous || previous == SectionType.None)
+            {
+                _pendingVanillaSection = proposed;
+                _lastLoggedHold = SectionType.None;
+                return proposed;
+            }
+
+            // Time the linked context's WarmUp dwell from the GAME's first continuous proposal
+            // of this section — robust to the lag before CMM's scan registers the context.
+            float now = Time.realtimeSinceStartup;
+            if (_pendingVanillaSection != proposed) { _pendingVanillaSection = proposed; _pendingVanillaSince = now; }
+            int warm = GetContext(ctx)?.WarmUp ?? 0;
+            bool warming = (now - _pendingVanillaSince) < warm;   // linked context still in its WarmUp dwell
+
+            // CMM will play its OWN track for this context, so the game's version must never be
+            // heard (keeps holding through the handoff crossfade). Traders also fall back to the
+            // generic "Trader" folder.
+            bool cmmOwns = ContextHasFiles(ctx)
+                || (ctx.StartsWith("Trader_", StringComparison.OrdinalIgnoreCase) && ContextHasFiles("Trader"));
+
+            if (warming || cmmOwns)
+            {
+                if (_lastLoggedHold != proposed)
+                {
+                    _lastLoggedHold = proposed;
+                    CMMConfig.D($"[CMM] Vanilla section governed: holding {previous} instead of {proposed} " +
+                                $"(linked {ctx}: warming={warming}, cmmOwns={cmmOwns})");
+                }
+                return previous;
+            }
+            _lastLoggedHold = SectionType.None;
+            return proposed;   // warmup elapsed and CMM has no music for it → fire the vanilla section
         }
 
         // Cached reflection handles for MixerController — resolved once on first use.

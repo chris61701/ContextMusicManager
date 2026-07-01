@@ -90,13 +90,22 @@ namespace CMM
         // that child and excluded here, so each file belongs to exactly one context
         // (see ContextMusicManager.GetClaimedSubtreePrefixes).
         public bool IncludeSubfolders { get; private set; }
+        // Optional name of the vanilla DMS SectionType this context governs (e.g.
+        // "TraderRekt", "Exploration"). When the game's Dynamic Music System wants to
+        // play that section (while CMM is on the Vanilla fallback), it must obey THIS
+        // context's rules — chiefly its WarmUp dwell. Stored as the raw string; parsed
+        // to a game SectionType in the reverse map (ContextMusicManager._sectionToContext)
+        // so this data structure stays free of any game-assembly enum dependency. Null =
+        // this context governs no vanilla section (the default).
+        public string Link { get; private set; }
 
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
             bool loop = false, int cooldown = 5, int fadeInDuration = 3,
             bool bypassescooldown = false, bool caninterrupt = false,
             int priority = 0, bool playOnce = false, float volumeOverride = -1f,
-            int warmup = 0, string warmGroup = null, bool includeSubfolders = false)
+            int warmup = 0, string warmGroup = null, bool includeSubfolders = false,
+            string link = null)
         {
             Context = context;
             Path = path;
@@ -114,6 +123,7 @@ namespace CMM
             WarmUp = warmup;
             WarmGroup = warmGroup;
             IncludeSubfolders = includeSubfolders;
+            Link = link;
         }
     }
 }

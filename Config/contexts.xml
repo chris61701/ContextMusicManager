@@ -65,7 +65,7 @@
        (generic 50-52 AND biome 60-62) is still on the stack during the brief eviction
        window. At 91 the stinger wins over all combat tiers, Blood_Moon (71), and
        Low_Health_Panic (90); only Death (100) supersedes it. -->
-  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="1.0" />
+  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="-1" />
 
   <!-- Infested and non-infested POI contexts share warmgroup="poi" so the clear handoff
        (POI_Infested_Tn -> POI_Tn) is continuous: the joining non-infested context inherits
@@ -99,9 +99,9 @@
        music (when DMS is on and the game threat is Panicked). Folder scanning is top-level
        only, so combat/ (Low) does NOT pick up files sitting in _high / _boss / <biome>. -->
   <!-- Blood_Moon_Combat: combat during a blood moon night (highest combat priority). -->
-  <Context name="Blood_Moon_Combat"          path="combat/blood_moon"           subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="71"  once="false" volume="-1" />
+  <Context name="Blood_Moon_Combat"          path="combat/blood_moon"           subfolders="false" fallback="Combat_Boss"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="71"  once="false" volume="-1" link="Bloodmoon" />
   <Context name="Combat_Boss"                path="combat/_boss"                subfolders="false" fallback="Combat_High"       resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="52"  once="false" volume="-1" />
-  <Context name="Combat_High"                path="combat/_high"                subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="51"  once="false" volume="-1" />
+  <Context name="Combat_High"                path="combat/_high"                subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="51"  once="false" volume="-1" link="Combat" />
   <Context name="Combat_Low"                 path="combat"                      subfolders="false" fallback="VanillaIfPanicked" resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="50"  once="false" volume="-1" />
 
   <!-- Biome-specific combat tiers. Each biome gets a combat/<biome> folder that mirrors
@@ -136,7 +136,7 @@
   <Context name="Combat_Low_Wasteland"       path="combat/wasteland"            subfolders="false" fallback="Combat_Low"        resume="true"  stale="20"  loop="false" cool="3" fadeintime="3" warmup="0"  warmgroup=""     bypass="true"  priority="60"  once="false" volume="-1" />
 
   <!-- ── Tension ─────────────────────────────────── -->
-  <Context name="Tension"                    path="tension"                     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="2"  warmgroup=""     bypass="false" priority="30"  once="false" volume="-1" />
+  <Context name="Tension"                    path="tension"                     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="2"  warmgroup=""     bypass="false" priority="30"  once="false" volume="-1" link="Suspense" />
 
   <!-- ── Online players ──────────────────────────── -->
   <!-- A non-friendly player (neither party member nor ACL friend) is within
@@ -149,18 +149,18 @@
   <Context name="Online_Friend"              path="testing/online/friendly"     subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="14"  once="false" volume="-1" />
 
   <!-- ── Traders ─────────────────────────────────── -->
-  <Context name="Trader_Joel"                path="trader/joel"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
-  <Context name="Trader_Jen"                 path="trader/jen"                  subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
-  <Context name="Trader_Rekt"                path="trader/rekt"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
-  <Context name="Trader_Bob"                 path="trader/bob"                  subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
-  <Context name="Trader_Hugh"                path="trader/hugh"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" />
+  <Context name="Trader_Joel"                path="trader/joel"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" link="TraderJoel" />
+  <Context name="Trader_Jen"                 path="trader/jen"                  subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" link="TraderJen" />
+  <Context name="Trader_Rekt"                path="trader/rekt"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" link="TraderRekt" />
+  <Context name="Trader_Bob"                 path="trader/bob"                  subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" link="TraderBob" />
+  <Context name="Trader_Hugh"                path="trader/hugh"                 subfolders="false" fallback="Trader"            resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="26"  once="false" volume="-1" link="TraderHugh" />
   <Context name="Trader"                     path="trader"                      subfolders="false" fallback="VanillaIfDMS"      resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="3"  warmgroup=""     bypass="false" priority="25"  once="false" volume="-1" />
 
   <!-- ── Home ──────────────────────────────────────── -->
   <!-- Home plays by day (and is the default); Home_Night provides night-exclusive
        tracks and falls back to Home when it has no files. -->
-  <Context name="Home_Night"                 path="home/night"                  subfolders="false" fallback="Home"              resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="home" bypass="false" priority="15"  once="false" volume="-1" />
-  <Context name="Home"                       path="home"                        subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="home" bypass="false" priority="15"  once="false" volume="-1" />
+  <Context name="Home_Night"                 path="home/night"                  subfolders="false" fallback="Home"              resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="home" bypass="false" priority="15"  once="false" volume="-1" link="HomeNight" />
+  <Context name="Home"                       path="home"                        subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="5"  warmgroup="home" bypass="false" priority="15"  once="false" volume="-1" link="HomeDay" />
 
   <!-- ── Ambient ─────────────────────────────────── -->
   <!-- The biome base plays by day (and is the everyday default); each biome's
@@ -181,13 +181,13 @@
   <Context name="Ambient_Wasteland_Night"    path="ambient/wasteland/_night"    subfolders="false" fallback="Ambient_Night"     resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="12"  once="false" volume="-1" />
   <Context name="Ambient_Wasteland"          path="ambient/wasteland"           subfolders="false" fallback="Ambient"           resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
   <Context name="Ambient_Night"              path="ambient/_night"              subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="11"  once="false" volume="-1" />
-  <Context name="Ambient"                    path="ambient"                     subfolders="false" fallback="VanillaIfDMS"      resume="true"  stale="120" loop="false" cool="5" fadeintime="4" warmup="0"  warmgroup=""     bypass="false" priority="10"  once="false" volume="-1" />
+  <Context name="Ambient"                    path="ambient"                     subfolders="false" fallback="VanillaIfDMS"      resume="true"  stale="120" loop="false" cool="5" fadeintime="4" warmup="0"  warmgroup=""     bypass="false" priority="10"  once="false" volume="-1" link="Exploration" />
 
   <!-- ── Menu ──────────────────────────────────────── -->
   <Context name="Menu"                       path="menu"                        subfolders="false" fallback="Vanilla"           resume="false" stale="0"   loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="0"   once="false" volume="-1" />
 
   <!-- ── Sentinels — required, do not remove ────────── -->
-  <Context name="Silence"                    path=""                            subfolders="false" fallback="Silence"           resume="false" stale="0"   loop="false" cool="0" fadeintime="0" warmup="0"  warmgroup=""     bypass="true"  priority="0"   once="false" volume="-1" />
+  <Context name="Silence"                    path=""                            subfolders="false" fallback="Silence"           resume="false" stale="0"   loop="false" cool="0" fadeintime="0" warmup="0"  warmgroup=""     bypass="true"  priority="0"   once="false" volume="-1" link="None" />
   <Context name="Vanilla"                    path=""                            subfolders="false" fallback="Vanilla"           resume="false" stale="0"   loop="false" cool="0" fadeintime="0" warmup="0"  warmgroup=""     bypass="true"  priority="-1"  once="false" volume="-1" />
 
 </Contexts>

@@ -126,6 +126,29 @@ namespace CMM
         }
     }
 
+    // Govern the game's DMS section selection so that, while CMM lets vanilla play (the
+    // "Vanilla" fallback), the game's sections obey CMM's context rules — chiefly the
+    // WarmUp dwell — instead of snapping straight to trader/home music. Conductor.Update
+    // calls SectionSelector.Select() each frame to pick the section; rewriting its result
+    // to the previously-playing section holds the current ambient until the mapped CMM
+    // context is viable, and defers indefinitely to CMM's own music when it has any (see
+    // GovernVanillaSection). Resolved by name with a Prepare() guard; SectionSelector.Select
+    // exists on A20/A21/3.0. Runs client-side only — Conductor.Update early-outs (and never
+    // reaches Select) on a dedicated server.
+    [HarmonyPatch]
+    public class Patch_GovernVanillaSection
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(AccessTools.TypeByName("DynamicMusic.SectionSelector"), "Select");
+
+        static bool Prepare() => TargetMethod() != null;
+
+        static void Postfix(ref MusicUtils.Enums.SectionType __result)
+        {
+            __result = ContextMusicManager.GovernVanillaSection(__result);
+        }
+    }
+
 #if GV_A20
     // ─────────────────────────────────────────────────────────────────────────
     // A20 COMBAT-MUSIC THROTTLE FIX (backport of the A21 FrequencyLimiter rule)
@@ -256,6 +279,7 @@ namespace CMM
             ContextMusicManager._gameIsLoading = false;
             ContextMusicManager._contextStack.Clear();
             ContextMusicManager._pendingContext = "Silence";
+            ContextMusicManager.ResetVanillaGovernance();   // forget the governed vanilla section + warmup timer
             ScriptHost.Reset();   // clear the Lua script's cross-tick state on world-unload
             ContextResolver.ResetPoiClearState();   // forget per-world cleared-POI markers
             // Fade the game music out, THEN release caches and bring up the menu music

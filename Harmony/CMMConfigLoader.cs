@@ -130,7 +130,8 @@ namespace CMM
                         volumeOverride:        FloatAttr(el, "volume",  -1f),
                         warmup:                IntAttr (el, "warmup",   0),
                         warmGroup:             StrAttr (el, "warmgroup", null),
-                        includeSubfolders:     BoolAttr(el, "subfolders", false)
+                        includeSubfolders:     BoolAttr(el, "subfolders", false),
+                        link:                  StrAttr (el, "link",     null)
                     );
                 }
 
@@ -143,6 +144,10 @@ namespace CMM
                 ContextMusicManager.contexts.Clear();
                 foreach (var kv in built)
                     ContextMusicManager.contexts[kv.Key] = kv.Value;
+
+                // Rebuild the vanilla section→context reverse map from the freshly loaded
+                // Link attributes (covers both first load and the hot-reload path).
+                ContextMusicManager.RebuildVanillaLinkMap();
 
                 CMMConfig.D($"[CMM] Config/contexts.xml loaded: {built.Count} contexts.");
             }
