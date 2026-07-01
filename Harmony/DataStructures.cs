@@ -88,6 +88,10 @@ namespace CMM
         // this context governs no vanilla section (the default).
         public string Link { get; private set; }
 
+        // NOTE: every call site (InitContexts, CMMConfigLoader, the tools) passes each
+        // argument explicitly, so these parameter defaults are inert — the effective
+        // defaults live in InitContexts' Add helper and the contexts.xml attribute
+        // readers, which must be kept in sync with each other.
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
             bool loop = false, int cooldown = 5, int fadeInDuration = 3,

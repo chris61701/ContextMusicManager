@@ -64,8 +64,8 @@ namespace CMM
 
         // Loudness scanning model: a track is measured on demand the first time it's
         // needed — the track about to play (block-before-play) plus a look-ahead of the
-        // CURRENT context's exact next track, measured during the preload lead window
-        // (ScheduleNextCacheLoad) — so it only measures music about to be heard. On the
+        // CURRENT context's exact next track, measured when the advance is pre-staged
+        // (PreStageNextAdvance) — so it only measures music about to be heard. On the
         // menu, one track per context is pre-measured (the bounded prewarm in
         // MenuPrescanDrain) so every context has a ready, normalized track for its first
         // play. Each track is only ever measured once (cached in Cache/loudness.xml).

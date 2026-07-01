@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.Text;
-using System.Threading;
 
 namespace CMM
 {
@@ -105,8 +104,8 @@ namespace CMM
 
         // ── Per-transition wall + GC correlation ───────────────────────────────
         // Begin at TriggerMusic (the moment a switch is decided); End when
-        // PlayFromCache finishes committing. Wall time spans yields on purpose, so
-        // it captures total transition latency including background-decode waits.
+        // StartNativeContext finishes committing. Wall time spans yields on purpose,
+        // so it captures total transition latency including background-decode waits.
         static long _txStart;
         static int  _gc0, _gc1, _gc2;
         static long _txMem;
@@ -121,7 +120,7 @@ namespace CMM
         {
             if (!Enabled) return;
             // If the previous transition is still open, this new trigger INTERRUPTED it
-            // (TriggerMusic StopCoroutine'd its PlayFromCache before EndTransition ran).
+            // (a newer _transitionId superseded it before EndTransition ran).
             // That is exactly the combat-churn case we care about, and the normal TX line
             // would otherwise be silently dropped — so log the partial here so the GC
             // pressure of interrupted transitions isn't invisible.

@@ -56,7 +56,7 @@ namespace CMM
             public double Lufs;
             public double Peak;
             public int MetricVersion = LoudnessStore.MetricVersion;
-            public float UserTrim = 1f;   // manual ±0.05 trim; survives re-measure
+            public float UserTrim = 1f;   // manual trim (±UserTrimStep, default 0.1); survives re-measure
         }
 
         private struct PathRecord

@@ -402,9 +402,9 @@ namespace CMM
                 // transition was interrupted or its load failed and stranded us in silence
                 // (a burst of interrupting contexts is the usual cause). The name-difference
                 // check below would miss this whenever the stranded context still equals the
-                // top context, so detect it here and force a re-assert. All four coroutines
-                // must be null: if any is live, a normal transition/track-flip is already
-                // recovering and re-triggering would race it.
+                // top context, so detect it here and force a re-assert. Every transition
+                // signal must be idle: if any is live, a normal transition/track-flip is
+                // already recovering and re-triggering would race it.
                 bool currentAudioDead = currentContext != null
                     && currentContext.Context != "Silence"
                     && currentContext.Context != "Vanilla"

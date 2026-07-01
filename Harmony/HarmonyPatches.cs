@@ -306,10 +306,8 @@ namespace CMM
 
             // Set inGame = true here, before any music operations.
             // Without this, InGameMusicPatch.Prefix fires on the next Conductor.Update()
-            // frame while Spawn's PlayFromCache coroutine is still loading, calls
-            // FadeToSilence(), and kills it. The PreloadContext sub-coroutine survives
-            // (child coroutines outlive their stopped parent), so the clip loads but
-            // PlayFromCache never completes — Spawn becomes current at vol=0 forever.
+            // frame while Spawn's start is still in flight, calls FadeToSilence(), and
+            // kills it — stranding Spawn as the current context with nothing audible.
             if (!ContextMusicManager.inGame)
             {
                 ContextMusicManager.inGame = true;
@@ -318,8 +316,8 @@ namespace CMM
 
             if (ContextMusicManager.playerIsDead)
             {
-                // Death-respawn: rebuild the stack immediately so Spawn's TrackEndWatcher
-                // can return to the correct zone when the stinger ends.
+                // Death-respawn: rebuild the stack immediately so the post-stinger
+                // re-resolve can return to the correct zone when Spawn ends.
                 List<string> worldContexts = ContextResolver.ResolveContext();
                 foreach (string ctxName in worldContexts)
                 {

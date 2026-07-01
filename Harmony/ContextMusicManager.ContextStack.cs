@@ -515,8 +515,8 @@ namespace CMM
         }
 
         // ── Cache cleanup ─────────────────────────────────────────────────────
-        // Releases all AudioClips and WaveStreams so Unity and NAudio can reclaim
-        // the memory before the menu screen loads. Immediate (hard-cut) form — the
+        // Stops playback and resets the per-context selection/bookkeeping state
+        // before the menu screen loads. Immediate (hard-cut) form — the
         // game-exit path uses FadeOutAndCleanup() to fade first; this remains for the
         // no-runner fallback and any caller that genuinely wants an instant teardown.
         public static void CleanupAllCaches()

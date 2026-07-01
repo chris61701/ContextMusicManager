@@ -3,9 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Threading;
-using UnityEngine;
 
 namespace CMM
 {
@@ -28,7 +25,7 @@ namespace CMM
 
     public static class AudioDecoder
     {
-        private static readonly HashSet<string> _naudioExts =
+        private static readonly HashSet<string> _supportedExts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac",
@@ -46,7 +43,7 @@ namespace CMM
         public static bool IsSupported(string filePath)
         {
             string ext = System.IO.Path.GetExtension(filePath);
-            return _naudioExts.Contains(ext);
+            return _supportedExts.Contains(ext);
         }
 
         // Returns true if this file must be fully decoded before playback

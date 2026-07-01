@@ -50,7 +50,7 @@ namespace CMM
         // second for the context currently playing — on a pool of worker threads, then
         // stop. The point is that every context has a normalized track ready for its
         // first play without scanning the whole library on the menu; the rest is left
-        // to the on-demand look-ahead (EnsureLoudnessMeasured / ScheduleNextCacheLoad).
+        // to the on-demand look-ahead (EnsureLoudnessMeasured / PreStageNextAdvance).
         // All orchestration here (queue, store, bookkeeping) stays on the main-thread
         // coroutine — only the decode runs on the workers (each fully independent; the
         // native loudness pass owns its own buffer, so no per-lane scratch is needed).
@@ -85,9 +85,9 @@ namespace CMM
                 });
                 while (!finished) yield return null;
                 if (!valid)
-                    Log.Warning($"[CMM] Validation failed (NAudio) for {filePath}");
+                    Log.Warning($"[CMM] Validation failed for {filePath}");
                 sw.Stop();
-                CMMConfig.D($"[CMM] QuickValidateWithCache took {sw.Elapsed.TotalMilliseconds:F3} ms");
+                CMMConfig.D($"[CMM] QuickValidate took {sw.Elapsed.TotalMilliseconds:F3} ms");
                 callback(valid);
             }
         }
@@ -165,8 +165,8 @@ namespace CMM
 
         // ── Loudness: measure-on-demand (block-before-play) ───────────────────
         // Ensures `filePath` has a current LUFS measurement, measuring it now (on a
-        // background thread, awaited) if not. Called from PlayFromCache before a track
-        // starts so the first play is normalized. No-op when normalization is off, the
+        // background thread, awaited) if not. Kicked off non-blocking by
+        // StartNativeContext for an unmeasured track. No-op when normalization is off, the
         // file is gone, or it's already current.
         //
         // When a measurement IS needed the caller awaits it, so the track's start is
@@ -305,7 +305,7 @@ namespace CMM
                 // (_menuPrescanComplete). This guarantees every context has a ready,
                 // normalized track the first time it's switched to. The rest of each
                 // context is filled in on demand by the look-ahead (EnsureLoudnessMeasured
-                // / ScheduleNextCacheLoad), so nothing is measured beyond what's about to
+                // / PreStageNextAdvance), so nothing is measured beyond what's about to
                 // be heard.
                 if (CMMConfig.LoudnessNormalizationEnabled
                     && !_menuPrescanComplete
@@ -745,8 +745,8 @@ namespace CMM
         // out over the crossfade window as the custom track fades in. No-op on A21/3.0
         // (the Start postfix muted the bed before it was ever audible), whenever the bed
         // is already silent/muted, or when a menu fade is already running. Only invoked
-        // from PlayFromCache when a real custom menu track is actually starting, so we
-        // never silence vanilla unless there's a custom track to replace it.
+        // from StartNativeContext when a real custom menu track is actually starting, so
+        // we never silence vanilla unless there's a custom track to replace it.
         public static void FadeOutMenuVanillaIfAudible()
         {
             if (inGame) return;
@@ -1149,7 +1149,7 @@ namespace CMM
             return false;
         }
 
-        // Native counterpart of PlayFromCache. SYNCHRONOUS and MAIN-THREAD: it does every
+        // The context-start entry point. SYNCHRONOUS and MAIN-THREAD: it does every
         // Unity-touching step inline (file pick, loudness gain, resume calc, cache bookkeeping,
         // volume) and then hands the reader-open + CmmMixer.Play to the background start worker
         // (NativeStartWorker). Because all of this runs at trigger time — before any world
@@ -1181,8 +1181,7 @@ namespace CMM
             // A genuine cross-context re-entry (not a same-context track flip, not a forced
             // skip, not a stinger) into a context whose voice is still audibly fading out:
             // ramp that voice back to full instead of restarting the track from the top. Also
-            // reclaims the ducked bed when a stinger ends. Native analogue of PlayFromCache's
-            // reverse-fade reclaim.
+            // reclaims the ducked bed when a stinger ends.
             if (CMMConfig.ReverseFadeReclaim
                 && !isSameContextSwitchingToNextTrack
                 && forcedFile == null
@@ -1272,12 +1271,11 @@ namespace CMM
             CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, ctx.VolumeOverride);
 
             // Menu cold-start (A20): the vanilla title theme can already be playing when the mod
-            // loads (BackgroundMusicMono.Start() ran before our Start-postfix mute could catch it).
-            // The AudioSource path fades that leftover bed out from PlayFromCache, but native menu
-            // music never goes through PlayFromCache — so without this the vanilla theme keeps
-            // playing under our custom menu track. Fade it out here as our track takes over (no-op
-            // in-game, or when the bed is already muted/silent). Native menu music only runs when the
-            // Menu context HAS files, so this never silences vanilla without a custom track to replace it.
+            // loads (BackgroundMusicMono.Start() ran before our Start-postfix mute could catch it)
+            // — without this the vanilla theme keeps playing under our custom menu track. Fade it
+            // out here as our track takes over (no-op in-game, or when the bed is already
+            // muted/silent). Native menu music only runs when the Menu context HAS files, so this
+            // never silences vanilla without a custom track to replace it.
             if (!inGame) FadeOutMenuVanillaIfAudible();
 
             // A PlayOnce stinger (Spawn / Death / POI_Cleared) OVERRIDES the music underneath:
@@ -1547,8 +1545,8 @@ namespace CMM
         }
 
         // Polls the active voice and, at the transition lead window (or once it has
-        // ended), crossfades in the context's next track — the native equivalent of
-        // TrackEndWatcher + ScheduleNextCacheLoad. Reads _nativeVoiceId (set by the start
+        // ended), crossfades in the context's next track — the frame-loop fallback for
+        // NativeAdvanceTick. Reads _nativeVoiceId (set by the start
         // worker) each tick rather than a captured id, so it works even though the voice
         // doesn't exist yet at dispatch. Cancelled by a _transitionId bump (any context
         // switch) or the mixer moving off this context.

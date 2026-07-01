@@ -6,18 +6,18 @@ namespace CMM
     // ─────────────────────────────────────────────────────────────────────────
     // NATIVE AUDIO  (CMM_Decoder.dll — libopusfile + stb_vorbis + dr_flac/mp3/wav + fdk-aac/minimp4)
     // ─────────────────────────────────────────────────────────────────────────
-    // P/Invoke surface for the native decode shim plus WaveStreams that decode
-    // EVERY supported format through it: Opus / Vorbis / FLAC / MP3 / WAV / AIFF / AAC.
-    // The whole point is GC pressure: the old managed decoders (Concentus / NVorbis
-    // / CSCore, and NAudio for wav/mp3/aiff) allocated on the GC heap — the worst
-    // loudness-sweep / playback offender under the game's non-generational Boehm GC.
-    // The native decoder does its work in native (malloc) memory the GC never scans;
-    // the only managed allocation left is the reusable output buffer the caller owns.
+    // P/Invoke surface for the native decode shim, covering EVERY supported format:
+    // Opus / Vorbis / FLAC / MP3 / WAV / AIFF / AAC / Matroska-WebM. Consumers work
+    // with BARE cmm_decoder* handles (AudioDecoder.OpenNativeHandle → the native
+    // mixer's cmm_mix_add, or cmm_loudness_analyze) — there is no managed reader
+    // wrapper. The whole point is GC pressure: the old managed decoders allocated on
+    // the GC heap — the worst loudness-sweep / playback offender under the game's
+    // non-generational Boehm GC. The native decoder does its work in native (malloc)
+    // memory the GC never scans.
     //
-    // CMM_Decoder.dll is REQUIRED — there is no managed fallback (all codec libraries,
-    // including NAudio's decoders, were removed). If the DLL is missing or the ABI
-    // mismatches, every format fails to open (the constructors throw, caught by the
-    // caller and the track is skipped).
+    // CMM_Decoder.dll is REQUIRED — there is no managed fallback (all managed codec
+    // libraries were removed). If the DLL is missing or the ABI mismatches, every
+    // format fails to open and the track is skipped.
 
     internal static class NativeOpus
     {
