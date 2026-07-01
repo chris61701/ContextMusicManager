@@ -295,6 +295,12 @@ namespace CMM
         // (handle, kind) to a native consumer that TAKES OWNERSHIP and closes it
         // (cmm_loudness_analyze / cmm_mix_add). Returns IntPtr.Zero (kind = -1) for an
         // unknown extension or a decode-open failure. Same header-sniff as OpenNativeReader.
+        // DIAG: native open error from the most recent OpenNativeHandle call on THIS
+        // thread (measures run on background threads). -1 = file open (share/IO) failed,
+        // -2 = decode-open failed, -3 = alloc, 0 = ok. Thread-static so concurrent
+        // prescan lanes don't clobber each other's code.
+        [ThreadStatic] internal static int LastNativeOpenErr;
+
         internal static IntPtr OpenNativeHandle(string filePath, out int kind,
             out int channels, out int sampleRate, out long totalFrames)
         {
@@ -303,7 +309,7 @@ namespace CMM
             bool isOpus = ext == ".opus" ||
                 ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath));
 
-            IntPtr h; int err;
+            IntPtr h; int err = 0;
             switch (ClassifyReader(ext, isOpus))
             {
                 case ReaderKind.Opus:      kind = 0; h = NativeOpus.cmm_opus_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
@@ -313,8 +319,9 @@ namespace CMM
                 case ReaderKind.Wav:       kind = 4; h = NativeWav.cmm_wav_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
                 case ReaderKind.Aac:       kind = 5; h = NativeAac.cmm_aac_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
                 case ReaderKind.Container: kind = 6; h = NativeContainer.cmm_container_open_file(filePath, out channels, out sampleRate, out totalFrames, out err); break;
-                default: WarnNoReader(ext); return IntPtr.Zero;
+                default: WarnNoReader(ext); LastNativeOpenErr = 0; return IntPtr.Zero;
             }
+            LastNativeOpenErr = err;   // DIAG: -1 fopen/share fail, -2 decode-open fail, -3 alloc
             if (h == IntPtr.Zero) { kind = -1; return IntPtr.Zero; }
             return h;
         }
@@ -394,13 +401,12 @@ namespace CMM
             string ext = Path.GetExtension(filePath).ToLower();
             try
             {
+                // No size cap: the native decoder streams files larger than
+                // HotSwapMaxFileSizeBytes (Windows: over a raw Win32 handle, race-free and with
+                // a few KB of state), so even the 100 MB+ ambient FLACs measure safely instead of
+                // playing at unity gain. Small files still buffer natively; it's a RAM/speed
+                // tradeoff inside the decoder, not a normalization boundary.
                 size = new FileInfo(filePath).Length;
-                if (size > CMMConfig.HotSwapMaxFileSizeBytes)
-                {
-                    Log.Warning($"[CMM] Loudness: {Path.GetFileName(filePath)} too large to buffer " +
-                                "— skipping normalization (plays at unity gain).");
-                    return fail;
-                }
             }
             catch (Exception ex)
             {
@@ -438,13 +444,31 @@ namespace CMM
                 long total;
                 IntPtr dec = OpenNativeHandle(filePath, out kind, out channels, out sampleRate, out total);
                 indexMs = ElapsedMs(tIdx);
-                if (dec == IntPtr.Zero) return fail;
+                if (dec == IntPtr.Zero)
+                {
+                    // DIAG: distinguish an OPEN failure (share/IO = -1, decode-open = -2)
+                    // from an analyze failure below. This is the FLAC-only in-game symptom
+                    // we're hunting — a measure that logs decode=0ms / no LUFS.
+                    Log.Warning($"[CMM DIAG] Loudness OPEN FAILED {Path.GetFileName(filePath)} " +
+                                $"({ext}) kind={kind} err={LastNativeOpenErr} " +
+                                "(-1=file-open/share, -2=decode-open, -3=alloc)");
+                    return fail;
+                }
 
                 long tAnalyze = Stopwatch.GetTimestamp();
                 double lufs, peak;
                 int valid = NativeLoudness.cmm_loudness_analyze(dec, kind, sampleRate, channels, out lufs, out peak);
                 analyzeMs = ElapsedMs(tAnalyze);
-                if (valid == 0) return fail;
+                if (valid == 0)
+                {
+                    // DIAG: open SUCCEEDED but analyze produced no gated result — either the
+                    // decoder read 0 frames or the track gated out (too short/quiet). ch/rate/
+                    // total let us tell a bad open (0/0/0) from a genuine gating result.
+                    Log.Warning($"[CMM DIAG] Loudness ANALYZE=0 {Path.GetFileName(filePath)} " +
+                                $"({ext}) kind={kind} ch={channels} rate={sampleRate} " +
+                                $"total={total} analyzeMs={analyzeMs:F1}");
+                    return fail;
+                }
 
                 return new TrackLoudness
                 {

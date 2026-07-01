@@ -40,6 +40,38 @@
  *
  * _wfopen keeps non-ASCII music paths working (bare fopen is ANSI); on POSIX we
  * down-convert (future Linux build) — unlink there already allows delete-while-open. */
+/* ── File-open serialization ───────────────────────────────────────────────
+ * msvcrt's low-level fd table (__pioinfo) + FILE* buffer setup is NOT safe to
+ * run on multiple threads at once: two threads simultaneously creating a FILE*
+ * (CreateFileW → _open_osfhandle → _wfdopen) — or one creating while another is
+ * still reading a freshly-opened stream — can cross the fd/buffer bookkeeping,
+ * so a read returns full-length but WRONG bytes. drflac_open then rejects those
+ * bytes and returns NULL, i.e. an intermittent open failure with NO short read
+ * and a perfectly healthy FILE* afterward.
+ *
+ * This bit us specifically on FLAC because a FLAC open reads the most through
+ * the callbacks (STREAMINFO + all metadata blocks, our seek doing an extra
+ * SEEK_END probe each time) — the widest concurrent-read window — and the
+ * in-game loudness prescan opens several tracks in parallel. Measured on the
+ * real library: ~18-38% of concurrent FLAC opens failed. A global critical
+ * section spanning the FILE* creation AND the decoder's metadata-read init
+ * drops that to 0/80000. Opens are brief (metadata only); the expensive decode
+ * runs after the lock is released, so parallelism where it matters is kept.
+ *
+ * Lazy-initialised (no DllMain): the first caller InitializeCriticalSection's
+ * it; others spin until state==2. Windows critical sections are re-entrant, so
+ * nesting (a format's open holding it across cmm_open_path) is fine. */
+static CRITICAL_SECTION g_openCs;
+static volatile LONG g_openCsState = 0;
+static void cmm_openlock(void) {
+    if (InterlockedCompareExchange(&g_openCsState, 1, 0) == 0) {
+        InitializeCriticalSection(&g_openCs);
+        InterlockedExchange(&g_openCsState, 2);
+    } else { while (g_openCsState != 2) Sleep(0); }
+    EnterCriticalSection(&g_openCs);
+}
+static void cmm_openunlock(void) { LeaveCriticalSection(&g_openCs); }
+
 static FILE* cmm_open_path(const wchar_t* path)
 {
     if (!path) return NULL;
@@ -61,6 +93,18 @@ static FILE* cmm_open_path(const wchar_t* path)
     return fopen(buf, "rb");
 #endif
 }
+
+/* Files at/under this size are decoded from a whole-file native buffer; larger ones
+ * stream (Windows: over a raw Win32 HANDLE — see the FLAC streaming path). This is now
+ * purely a RAM-vs-speed tradeoff, NOT a safety boundary: both paths are race-free, so
+ * the loudness measure normalizes files of ANY size (the >100 MB ambient tracks stream
+ * with a few KB of state instead of a 100 MB buffer). Mirrors HotSwapMaxFileSizeBytes. */
+#define CMM_BUFFER_MAX (100LL * 1024 * 1024)
+
+/* Whole-file → native buffer via raw Win32 (thread-safe; no msvcrt fd table). Returns
+ * NULL (caller falls back to streaming) if the file exceeds maxBytes (>0) or the 2 GiB
+ * hard cap, or on any I/O error. Defined below cmm_flac_open_file; forward-declared here. */
+static unsigned char* cmm_read_whole_file(const wchar_t* path, long long maxBytes, long long* outLen);
 
 /* opusfile pulls in the opus + ogg headers it needs. We only use the
  * memory-stream + float-read API, so HTTP support is compiled out upstream. */
@@ -103,7 +147,9 @@ struct cmm_decoder {
     drmp3*         mp3;    /* dr_mp3 handle (mp3)          */
     drwav*         wav;    /* dr_wav handle (wav/aiff)     */
     unsigned char* buf;    /* owned copy of source bytes (memory opens; NULL for file opens) */
-    FILE*          fp;     /* owned file handle (file opens; NULL for memory opens) */
+    FILE*          fp;     /* owned file handle (POSIX file/streaming opens; NULL otherwise) */
+    void*          fh;     /* owned Win32 HANDLE for streamed FLAC (Windows big-file path; NULL otherwise) */
+    long long      fsize;  /* cached file size for the streamed past-EOF seek check (fh path) */
     int            channels;
 
     /* ── AAC (fdk-aac + minimp4) ──────────────────────────────────────────
@@ -277,6 +323,9 @@ CMM_API void cmm_flac_close(cmm_decoder* d)
     if (d->flac) drflac_close(d->flac);
     if (d->buf)  free(d->buf);
     if (d->fp)   fclose(d->fp);
+#ifdef _WIN32
+    if (d->fh)   CloseHandle((HANDLE)d->fh);   /* Windows streamed-FLAC handle */
+#endif
     free(d);
 }
 
@@ -360,28 +409,15 @@ static const OpusFileCallbacks CMM_OP_CB = { cmm_op_read, cmm_op_seek, cmm_op_te
 CMM_API cmm_decoder* cmm_opus_open_file(const wchar_t* path, int* channels,
                                         int* sampleRate, long long* totalFrames, int* err)
 {
+    /* Whole-file native buffer + in-memory decode, NOT a streaming msvcrt FILE*:
+     * concurrent opens race msvcrt's fd table (see cmm_read_whole_file /
+     * cmm_flac_open_file). cmm_opus_open_memory copies the buffer, so we free ours. */
     if (err) *err = 0;
-    FILE* fp = cmm_open_path(path);
-    if (!fp) { if (err) *err = OP_EFAULT; return NULL; }
-
-    int e = 0;
-    OggOpusFile* of = op_open_callbacks(fp, &CMM_OP_CB, NULL, 0, &e);
-    if (!of) { fclose(fp); if (err) *err = e; return NULL; }
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { op_free(of); fclose(fp); if (err) *err = OP_EFAULT; return NULL; }
-
-    d->kind     = CMM_KIND_OPUS;
-    d->of       = of;
-    d->flac     = NULL;
-    d->vorbis   = NULL;
-    d->buf      = NULL;
-    d->fp       = fp;
-    d->channels = op_channel_count(of, -1);
-
-    if (channels)    *channels    = d->channels;
-    if (sampleRate)  *sampleRate  = 48000;
-    if (totalFrames) *totalFrames = (long long)op_pcm_total(of, -1);
+    long long len = 0;
+    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
+    if (!buf) { if (err) *err = OP_EFAULT; return NULL; }
+    cmm_decoder* d = cmm_opus_open_memory(buf, len, channels, sampleRate, totalFrames, err);
+    free(buf);
     return d;
 }
 
@@ -421,60 +457,194 @@ static drflac_bool32 cmm_drf_tell(void* ud, drflac_int64* cursor)
     return DRFLAC_TRUE;
 }
 
+#ifdef _WIN32
+/* dr_flac callbacks over a raw Win32 HANDLE (userData = the cmm_decoder; d->fh is the
+ * handle, d->fsize the cached size). Used for the big-file STREAMING path so it never
+ * touches msvcrt's stdio FILE handle or fd table — the concurrent create-vs-read race that silently
+ * un-normalized FLACs lives entirely in that stdio layer; ReadFile / SetFilePointerEx
+ * take no shared CRT state and run fully in parallel. cmm_flac_close owns the handle. */
+static size_t cmm_drf_read_h(void* ud, void* out, size_t n)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)ud)->fh;
+    size_t done = 0;
+    while (done < n) {
+        size_t remain = n - done;
+        DWORD  want   = remain > (1u << 30) ? (1u << 30) : (DWORD)remain;
+        DWORD  got    = 0;
+        if (!ReadFile(h, (unsigned char*)out + done, want, &got, NULL)) break;
+        if (got == 0) break;   /* EOF */
+        done += got;
+    }
+    return done;
+}
+static drflac_bool32 cmm_drf_seek_h(void* ud, int offset, drflac_seek_origin origin)
+{
+    cmm_decoder* d = (cmm_decoder*)ud;
+    LARGE_INTEGER dist; dist.QuadPart = offset;
+    DWORD method = (origin == DRFLAC_SEEK_CUR) ? FILE_CURRENT
+                 : (origin == DRFLAC_SEEK_END) ? FILE_END
+                 : FILE_BEGIN;
+    LARGE_INTEGER newpos;
+    if (!SetFilePointerEx((HANDLE)d->fh, dist, &newpos, method)) return DRFLAC_FALSE;
+    /* dr_flac REQUIRES a seek past the end of the stream to be reported as failure
+     * (its binary search speculatively probes past EOF). SetFilePointerEx happily
+     * sets the pointer past the end and returns success, so reject it ourselves
+     * against the size captured at open — same contract the FILE* callback enforced. */
+    if (d->fsize >= 0 && newpos.QuadPart > d->fsize) return DRFLAC_FALSE;
+    return DRFLAC_TRUE;
+}
+static drflac_bool32 cmm_drf_tell_h(void* ud, drflac_int64* cursor)
+{
+    LARGE_INTEGER zero; zero.QuadPart = 0;
+    LARGE_INTEGER pos;
+    if (!SetFilePointerEx((HANDLE)((cmm_decoder*)ud)->fh, zero, &pos, FILE_CURRENT))
+        return DRFLAC_FALSE;
+    *cursor = (drflac_int64)pos.QuadPart;
+    return DRFLAC_TRUE;
+}
+#endif /* _WIN32 */
+
+/* Read a whole file into a malloc'd native buffer via RAW Win32 (CreateFileW +
+ * ReadFile + CloseHandle) — NOT the msvcrt stdio stack. This deliberately avoids
+ * _open_osfhandle/_wfdopen/fread: msvcrt's fd table + FILE* buffer setup is not
+ * safe to run concurrently (see cmm_openlock), and the failure is a concurrent
+ * FILE* CREATE crossing another thread's FILE* READ — which no open-only lock can
+ * cover, since decode/measure reads run unlocked for hundreds of ms. Win32
+ * CreateFile/ReadFile take no shared CRT state, so any number of these run in
+ * parallel safely. Caller owns the buffer (free it). NULL on error/empty/too big.
+ * Keeps FILE_SHARE_DELETE so a played/measured track can still be moved/deleted. */
+static unsigned char* cmm_read_whole_file(const wchar_t* path, long long maxBytes, long long* outLen)
+{
+    if (outLen) *outLen = 0;
+    if (!path) return NULL;
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 0x7FFFFFFFLL) {
+        CloseHandle(h); return NULL;   /* empty or >2GiB */
+    }
+    if (maxBytes > 0 && sz.QuadPart > maxBytes) { CloseHandle(h); return NULL; }   /* caller streams */
+    unsigned char* buf = (unsigned char*)malloc((size_t)sz.QuadPart);
+    if (!buf) { CloseHandle(h); return NULL; }
+    long long off = 0;
+    while (off < sz.QuadPart) {
+        long long rem = sz.QuadPart - off;
+        DWORD toRead = (DWORD)(rem > 0x08000000LL ? 0x08000000LL : rem);   /* 128 MB chunks */
+        DWORD got = 0;
+        if (!ReadFile(h, buf + off, toRead, &got, NULL) || got == 0) {
+            free(buf); CloseHandle(h); return NULL;
+        }
+        off += got;
+    }
+    CloseHandle(h);
+    if (outLen) *outLen = sz.QuadPart;
+    return buf;
+#else
+    char nb[4096];
+    if (wcstombs(nb, path, sizeof(nb)) == (size_t)-1) return NULL;
+    FILE* f = fopen(nb, "rb");
+    if (!f) return NULL;
+    if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long long sz = (long long)ftello(f);
+    if (sz <= 0 || fseeko(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    if (maxBytes > 0 && sz > maxBytes) { fclose(f); return NULL; }   /* caller streams */
+    unsigned char* buf = (unsigned char*)malloc((size_t)sz);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
+    fclose(f);
+    if (outLen) *outLen = sz;
+    return buf;
+#endif
+}
+
 CMM_API cmm_decoder* cmm_flac_open_file(const wchar_t* path, int* channels,
                                         int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
+
+    /* BUFFERED path (files ≤ CMM_BUFFER_MAX): decode from a whole-file native buffer,
+     * NOT a streaming msvcrt FILE*. The loudness prescan opens many FLACs in parallel
+     * and each measure/decode does long unlocked reads; concurrent msvcrt FILE* create-
+     * vs-read crosses buffers so drflac_open returns NULL (~18-38% of concurrent opens
+     * → tracks silently un-normalized). Raw Win32 read + in-memory decode removes the
+     * FILE* — and with it the fd-table race — entirely, and holds nothing open so the
+     * folder isn't pinned (better hot-swap). Measured files are ALWAYS here (the measure
+     * skips > CMM_BUFFER_MAX). drflac reads on demand from `buf`; cmm_flac_close frees it. */
+    long long len = 0;
+    unsigned char* buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
+    if (buf)
+    {
+        drflac* f = drflac_open_memory(buf, (size_t)len, NULL);
+        if (!f) { free(buf); if (err) *err = -2; return NULL; }   /* corrupt: don't retry via stream */
+
+        cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+        if (!d) { drflac_close(f); free(buf); if (err) *err = -3; return NULL; }
+
+        d->kind = CMM_KIND_FLAC; d->of = NULL; d->flac = f; d->vorbis = NULL;
+        d->buf = buf;      /* owned; drflac references it for its life */
+        d->fp = NULL;
+        d->channels = (int)f->channels;
+        if (channels)    *channels    = d->channels;
+        if (sampleRate)  *sampleRate  = (int)f->sampleRate;
+        if (totalFrames) *totalFrames = (long long)f->totalPCMFrameCount;
+        return d;
+    }
+
+    /* STREAMING path (files > CMM_BUFFER_MAX, e.g. the 100 MB+ ambient tracks): buffering
+     * would hold the whole file in RAM for the song, so stream instead — a few KB of decode
+     * state regardless of file size. On Windows this streams over a RAW Win32 HANDLE (no
+     * msvcrt stdio FILE handle or fd table), so it is race-free against concurrent opens AND against the
+     * playing track's reads — that is what lets the loudness measure normalize files of ANY
+     * size safely (no size cap needed). FILE_SHARE_DELETE keeps the file movable for hot-swap
+     * while it plays. POSIX has no fd-table race, so it keeps the plain FILE* stream. */
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { if (err) *err = -1; return NULL; }
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); if (err) *err = -1; return NULL; }
+
+    cmm_decoder* ds = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!ds) { CloseHandle(h); if (err) *err = -3; return NULL; }
+    ds->fh = (void*)h; ds->fsize = sz.QuadPart;   /* set BEFORE drflac_open — it reads via the callbacks */
+
+    drflac* fs = drflac_open(cmm_drf_read_h, cmm_drf_seek_h, cmm_drf_tell_h, ds, NULL);
+    if (!fs) { CloseHandle(h); free(ds); if (err) *err = -2; return NULL; }
+    ds->kind = CMM_KIND_FLAC; ds->of = NULL; ds->flac = fs; ds->vorbis = NULL;
+    ds->buf = NULL; ds->fp = NULL;
+#else
     FILE* fp = cmm_open_path(path);
     if (!fp) { if (err) *err = -1; return NULL; }
+    drflac* fs = drflac_open(cmm_drf_read, cmm_drf_seek, cmm_drf_tell, fp, NULL);
+    if (!fs) { fclose(fp); if (err) *err = -2; return NULL; }
 
-    drflac* f = drflac_open(cmm_drf_read, cmm_drf_seek, cmm_drf_tell, fp, NULL);
-    if (!f) { fclose(fp); if (err) *err = -1; return NULL; }
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { drflac_close(f); fclose(fp); if (err) *err = -1; return NULL; }
-
-    d->kind     = CMM_KIND_FLAC;
-    d->of       = NULL;
-    d->flac     = f;
-    d->vorbis   = NULL;
-    d->buf      = NULL;
-    d->fp       = fp;
-    d->channels = (int)f->channels;
-
-    if (channels)    *channels    = d->channels;
-    if (sampleRate)  *sampleRate  = (int)f->sampleRate;
-    if (totalFrames) *totalFrames = (long long)f->totalPCMFrameCount;
-    return d;
+    cmm_decoder* ds = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!ds) { drflac_close(fs); fclose(fp); if (err) *err = -3; return NULL; }
+    ds->kind = CMM_KIND_FLAC; ds->of = NULL; ds->flac = fs; ds->vorbis = NULL;
+    ds->buf = NULL; ds->fp = fp;
+#endif
+    ds->channels = (int)fs->channels;
+    if (channels)    *channels    = ds->channels;
+    if (sampleRate)  *sampleRate  = (int)fs->sampleRate;
+    if (totalFrames) *totalFrames = (long long)fs->totalPCMFrameCount;
+    return ds;
 }
 
 CMM_API cmm_decoder* cmm_vorbis_open_file(const wchar_t* path, int* channels,
                                           int* sampleRate, long long* totalFrames, int* err)
 {
+    /* Whole-file native buffer + in-memory decode (see cmm_flac_open_file) — avoids
+     * the concurrent msvcrt FILE* fd-table race. cmm_vorbis_open_memory copies. */
     if (err) *err = 0;
-    FILE* fp = cmm_open_path(path);
-    if (!fp) { if (err) *err = -1; return NULL; }
-
-    int e = 0;
-    /* close_on_close = 0: cmm_vorbis_close owns the FILE*. */
-    stb_vorbis* v = stb_vorbis_open_file(fp, 0, &e, NULL);
-    if (!v) { fclose(fp); if (err) *err = e ? e : -1; return NULL; }
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { stb_vorbis_close(v); fclose(fp); if (err) *err = -1; return NULL; }
-
-    stb_vorbis_info info = stb_vorbis_get_info(v);
-    d->kind     = CMM_KIND_VORBIS;
-    d->of       = NULL;
-    d->flac     = NULL;
-    d->vorbis   = v;
-    d->buf      = NULL;
-    d->fp       = fp;
-    d->channels = info.channels;
-
-    if (channels)    *channels    = info.channels;
-    if (sampleRate)  *sampleRate  = (int)info.sample_rate;
-    if (totalFrames) *totalFrames = (long long)stb_vorbis_stream_length_in_samples(v);
+    long long len = 0;
+    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
+    if (!buf) { if (err) *err = -1; return NULL; }
+    cmm_decoder* d = cmm_vorbis_open_memory(buf, len, channels, sampleRate, totalFrames, err);
+    free(buf);
     return d;
 }
 
@@ -616,27 +786,14 @@ static drmp3_bool32 cmm_drm_tell(void* ud, drmp3_int64* cursor)
 CMM_API cmm_decoder* cmm_mp3_open_file(const wchar_t* path, int* channels,
                                        int* sampleRate, long long* totalFrames, int* err)
 {
+    /* Whole-file native buffer + in-memory decode (see cmm_flac_open_file) — avoids
+     * the concurrent msvcrt FILE* fd-table race. cmm_mp3_open_memory copies. */
     if (err) *err = 0;
-    FILE* fp = cmm_open_path(path);
-    if (!fp) { if (err) *err = -1; return NULL; }
-
-    drmp3* m = (drmp3*)malloc(sizeof(drmp3));
-    if (!m) { fclose(fp); if (err) *err = -1; return NULL; }
-    if (!drmp3_init(m, cmm_drm_read, cmm_drm_seek, cmm_drm_tell, NULL, fp, NULL)) {
-        free(m); fclose(fp); if (err) *err = -1; return NULL;
-    }
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { drmp3_uninit(m); free(m); fclose(fp); if (err) *err = -1; return NULL; }
-
-    d->kind     = CMM_KIND_MP3;
-    d->mp3      = m;
-    d->fp       = fp;
-    d->channels = (int)m->channels;
-
-    if (channels)    *channels    = (int)m->channels;
-    if (sampleRate)  *sampleRate  = (int)m->sampleRate;
-    if (totalFrames) *totalFrames = (long long)drmp3_get_pcm_frame_count(m);
+    long long len = 0;
+    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
+    if (!buf) { if (err) *err = -1; return NULL; }
+    cmm_decoder* d = cmm_mp3_open_memory(buf, len, channels, sampleRate, totalFrames, err);
+    free(buf);
     return d;
 }
 
@@ -660,27 +817,14 @@ static drwav_bool32 cmm_drw_tell(void* ud, drwav_int64* cursor)
 CMM_API cmm_decoder* cmm_wav_open_file(const wchar_t* path, int* channels,
                                        int* sampleRate, long long* totalFrames, int* err)
 {
+    /* Whole-file native buffer + in-memory decode (see cmm_flac_open_file) — avoids
+     * the concurrent msvcrt FILE* fd-table race. cmm_wav_open_memory copies. */
     if (err) *err = 0;
-    FILE* fp = cmm_open_path(path);
-    if (!fp) { if (err) *err = -1; return NULL; }
-
-    drwav* w = (drwav*)malloc(sizeof(drwav));
-    if (!w) { fclose(fp); if (err) *err = -1; return NULL; }
-    if (!drwav_init(w, cmm_drw_read, cmm_drw_seek, cmm_drw_tell, fp, NULL)) {
-        free(w); fclose(fp); if (err) *err = -1; return NULL;
-    }
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { drwav_uninit(w); free(w); fclose(fp); if (err) *err = -1; return NULL; }
-
-    d->kind     = CMM_KIND_WAV;
-    d->wav      = w;
-    d->fp       = fp;
-    d->channels = (int)w->channels;
-
-    if (channels)    *channels    = (int)w->channels;
-    if (sampleRate)  *sampleRate  = (int)w->sampleRate;
-    if (totalFrames) *totalFrames = (long long)w->totalPCMFrameCount;
+    long long len = 0;
+    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
+    if (!buf) { if (err) *err = -1; return NULL; }
+    cmm_decoder* d = cmm_wav_open_memory(buf, len, channels, sampleRate, totalFrames, err);
+    free(buf);
     return d;
 }
 
@@ -988,39 +1132,44 @@ CMM_API cmm_decoder* cmm_aac_open_file(const wchar_t* path, int* channels,
                                        int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
+    /* Serialize the whole open — create + demux/decoder init all read the FILE*
+     * (see cmm_openlock). AAC/MP4 is rare in a music library, so full serialization
+     * of its open is negligible. */
+    cmm_openlock();
     FILE* fp = cmm_open_path(path);
-    if (!fp) { if (err) *err = -1; return NULL; }
+    if (!fp) { cmm_openunlock(); if (err) *err = -1; return NULL; }
 
     long long filesize = 0;
     if (CMM_FSEEK(fp, 0, SEEK_END) == 0) { filesize = (long long)CMM_FTELL(fp); CMM_FSEEK(fp, 0, SEEK_SET); }
-    if (filesize <= 0) { fclose(fp); if (err) *err = -1; return NULL; }
+    if (filesize <= 0) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
 
     /* Container peek: MP4 streams from the FILE* (random-access via callback);
      * raw ADTS is read whole into memory (small; movies are always MP4). */
     unsigned char hdr[8];
-    if (fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr)) { fclose(fp); if (err) *err = -1; return NULL; }
+    if (fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr)) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
     int is_mp4 = (hdr[4] == 'f' && hdr[5] == 't' && hdr[6] == 'y' && hdr[7] == 'p');
 
     cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { fclose(fp); if (err) *err = -1; return NULL; }
+    if (!d) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
     d->kind = CMM_KIND_AAC;
 
     if (is_mp4) {
         d->fp = fp;                       /* demuxer reads via cmm_mp4_read */
     } else {
         unsigned char* copy = (unsigned char*)malloc((size_t)filesize);
-        if (!copy) { fclose(fp); free(d); if (err) *err = -1; return NULL; }
+        if (!copy) { cmm_openunlock(); fclose(fp); free(d); if (err) *err = -1; return NULL; }
         if (CMM_FSEEK(fp, 0, SEEK_SET) != 0 ||
             fread(copy, 1, (size_t)filesize, fp) != (size_t)filesize) {
-            free(copy); fclose(fp); free(d); if (err) *err = -1; return NULL;
+            cmm_openunlock(); free(copy); fclose(fp); free(d); if (err) *err = -1; return NULL;
         }
         fclose(fp);
         d->buf = copy; d->srclen = filesize;   /* fp left NULL: ADTS works in memory */
     }
 
     if (cmm_aac_init(d, filesize, channels, sampleRate, totalFrames) != 0) {
-        cmm_aac_close(d); if (err) *err = -1; return NULL;
+        cmm_openunlock(); cmm_aac_close(d); if (err) *err = -1; return NULL;
     }
+    cmm_openunlock();
     return d;
 }
 
@@ -1510,11 +1659,14 @@ CMM_API cmm_decoder* cmm_container_open_file(const wchar_t* path, int* channels,
                                              int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
+    /* Serialize the whole open — the remux reads the entire FILE* (see cmm_openlock).
+     * Matroska/WebM is rare in a music library, so full serialization is negligible. */
+    cmm_openlock();
     FILE* fp = cmm_open_path(path);
-    if (!fp) { if (err) *err = -1; return NULL; }
+    if (!fp) { cmm_openunlock(); if (err) *err = -1; return NULL; }
     long long filesize = 0;
     if (CMM_FSEEK(fp, 0, SEEK_END) == 0) { filesize = (long long)CMM_FTELL(fp); CMM_FSEEK(fp, 0, SEEK_SET); }
-    if (filesize <= 0) { fclose(fp); if (err) *err = -1; return NULL; }
+    if (filesize <= 0) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
 
     src_reader sr; sr.buf = NULL; sr.len = filesize; sr.fp = fp;
     sr.win = (unsigned char*)malloc(SRC_WIN_CAP);   /* OOM → NULL → direct reads, still correct */
@@ -1522,6 +1674,7 @@ CMM_API cmm_decoder* cmm_container_open_file(const wchar_t* path, int* channels,
     cmm_decoder* d = container_open(&sr, filesize, channels, sampleRate, totalFrames, err);
     if (sr.win) free(sr.win);
     fclose(fp);   /* the whole track was read during remux; inner decodes from memory */
+    cmm_openunlock();
     return d;
 }
 
