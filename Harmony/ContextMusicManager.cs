@@ -366,6 +366,7 @@ namespace CMM
             {
                 yield return new WaitForSeconds(ContextScanCooldown);
                 if (!inGame || playerIsDead) continue;
+                if (_functionallyDormant) continue;   // A/B: dormant arm skips resolve+gate (the dominant allocator)
 
                 // GC instrumentation: bracket the per-tick resolve + change-detection work
                 // below (no yields in this window, so the main-thread heap delta is CMM's
@@ -549,6 +550,17 @@ namespace CMM
         // Last computed per-tick scan allocation (bytes), surfaced on the debug HUD's GC line.
         private static float _lastScanBytesPerTick;
 
+        // A/B diagnostic kill-switch (toggled by Numpad 7 while the debug HUD is up). When
+        // set, CMM's steady-state managed loops become no-ops — the context scan/resolve/gate,
+        // presence rescan, loudness sweep, volume sync, and the config/file/advance watch
+        // ticks all early-out — so the mod sits "functionally dormant" while still loaded.
+        // This gives the whole-heap GC gauge a clean second arm (enabled vs dormant) in the
+        // SAME session, with the HUD's own per-frame allocation common to both arms. Native
+        // playback already running is left alone (it's GC-immune); nothing is torn down, so
+        // clearing the flag resumes normal work on the next tick. Read from the CmmScheduler
+        // thread as well as the main thread, hence volatile.
+        internal static volatile bool _functionallyDormant;
+
         // FIX: Log cache state only when something has actually changed,
         // not unconditionally every 5 seconds.
         private string _lastCacheLogState = "";
@@ -640,6 +652,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(2f);
+                if (_functionallyDormant) continue;   // A/B dormant arm
                 if (!inGame && currentContext?.Context != "Menu" && currentContext?.Context != "Ambient"
                     && currentContext?.Context != "Silence" && currentContext?.Context != "Vanilla") continue;
                 if (currentContext == null) continue;
@@ -1170,6 +1183,7 @@ namespace CMM
 
         internal static void FileWatchTick()
         {
+            if (_functionallyDormant) return;   // A/B dormant arm
             // One main-thread hop to snapshot the watch set + whether anything is blacklisted.
             List<FileWatchDescriptor> descriptors = null;
             bool anyBlacklisted = false;
@@ -1259,6 +1273,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(2f);
+                if (_functionallyDormant) continue;   // A/B dormant arm
 
                 bool settingsChanged = false, contextsChanged = false;
                 DateTime newSettingsTime = settingsTime, newContextsTime = contextsTime;
@@ -1489,6 +1504,7 @@ namespace CMM
 
         internal static void ConfigWatchTick()
         {
+            if (_functionallyDormant) return;   // A/B dormant arm
             bool settingsChanged = false, contextsChanged = false;
             DateTime ns = _cfgSettingsTime, nc = _cfgContextsTime;
             try

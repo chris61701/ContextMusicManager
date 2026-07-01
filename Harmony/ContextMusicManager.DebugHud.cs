@@ -27,6 +27,11 @@ namespace CMM
     //   Path      the containing folder (no filename) — relative to the Music dir, or
     //             the absolute folder when the context was configured with one
     //   Source    the active decision script (on-disk context.lua / embedded default)
+    //   Heap      the whole managed heap now, its peak, and drift since the GC window armed
+    //   GC        per-generation collections accrued over the window + gen0/min + scan churn
+    //             — the enabled-vs-dormant A/B signal; ends with the current arm
+    //             (ENABLED (A) / DORMANT (B)). Numpad 9 re-arms a fresh window; Numpad 7
+    //             flips CMM's steady-state loops on/off for arm B and re-arms the window
     //   Snapshots directory snapshots (every eligible file path per context) plus, on
     //             the same line, the normalized (loudness-measured) files in memory
 
@@ -67,6 +72,21 @@ namespace CMM
         private static int   _hudBufVoices, _hudBufUnderruns;
         private static bool  _hudBufDeep;
 
+        // Whole-heap GC gauge for the enabled-vs-dormant A/B. Sampled on the same fast
+        // cadence as the buffer tracker. The baseline (window start time + per-generation
+        // GC.CollectionCount + heap) is armed when the HUD opens and re-armable with Numpad
+        // 9, so the line reads collections accrued over THIS window — the signal that
+        // actually reflects GC pressure. Unlike the scan-churn number it captures every
+        // allocation source (mixer, decoder, Unity, and CMM), so the collection rate is
+        // directly comparable across A/B arms as long as the HUD is open in both (its own
+        // per-frame allocation is then common-mode and cancels in the delta). Managed heap
+        // only (GC.GetTotalMemory) — that IS the whole heap the collector walks.
+        private static bool   _hudGcArmed;
+        private static float  _hudGcBaseTime;
+        private static float  _hudGcBaseHeapMB, _hudGcPeakHeapMB;
+        private static readonly int[] _hudGcBaseGen = new int[3];
+        private static readonly int[] _hudGcNowGen  = new int[3];
+
         // Called from the unified Update() in ContextMusicManager.Keybinds.cs (a
         // MonoBehaviour may declare Update() only once, so the HUD toggle lives here
         // as a helper rather than its own Update). Compiled only with the HUD.
@@ -76,8 +96,44 @@ namespace CMM
             if (Input.GetKeyDown(KeyCode.Keypad8))
             {
                 _threatHudVisible = !_threatHudVisible;
+                if (_threatHudVisible) ArmGcWindow();   // fresh GC window each time it opens
                 CMMConfig.D($"[CMM] Context HUD {(_threatHudVisible ? "shown" : "hidden")}.");
             }
+
+            // Numpad 9 re-arms the GC measurement window without hiding the HUD, so each arm
+            // of an enabled-vs-dormant A/B starts from a clean, comparable baseline.
+            if (_threatHudVisible && Input.GetKeyDown(KeyCode.Keypad9))
+            {
+                ArmGcWindow();
+                CMMConfig.D("[CMM] GC gauge window reset.");
+            }
+
+            // Numpad 7 flips the functionally-dormant A/B arm: CMM's steady-state loops go
+            // no-op (see _functionallyDormant). Re-arm the GC window on the flip so the new
+            // arm's collection counts start clean and are directly comparable.
+            if (_threatHudVisible && Input.GetKeyDown(KeyCode.Keypad7))
+            {
+                _functionallyDormant = !_functionallyDormant;
+                ArmGcWindow();
+                CMMConfig.D($"[CMM] Functionally dormant: {_functionallyDormant} (GC window re-armed).");
+            }
+        }
+
+        // (Re)start the GC measurement window: snapshot the current heap and per-generation
+        // collection counts as the baseline. Boehm-mode Mono reports MaxGeneration 0 (only
+        // gen0 is meaningful); higher gens then read as 0 and simply show +0.
+        private static void ArmGcWindow()
+        {
+            _hudGcBaseTime   = Time.realtimeSinceStartup;
+            _hudGcBaseHeapMB = GC.GetTotalMemory(false) / 1048576f;
+            _hudGcPeakHeapMB = _hudGcBaseHeapMB;
+            int maxGen = Math.Min(GC.MaxGeneration, 2);
+            for (int g = 0; g <= 2; g++)
+            {
+                _hudGcBaseGen[g] = g <= maxGen ? GC.CollectionCount(g) : 0;
+                _hudGcNowGen[g]  = _hudGcBaseGen[g];
+            }
+            _hudGcArmed = true;
         }
 
         // Drawn from the unified OnGUI() in ContextMusicManager.Keybinds.cs (a
@@ -105,6 +161,16 @@ namespace CMM
             {
                 _hudBufNextTime = Time.realtimeSinceStartup + HudBufInterval;
                 _hudHeapMB = GC.GetTotalMemory(false) / 1048576f;
+
+                // Whole-heap GC gauge sample: update the peak and the per-generation
+                // collection counts against the armed baseline. Arms itself if the window
+                // was never started (e.g. HUD forced open without going through the toggle).
+                if (!_hudGcArmed) ArmGcWindow();
+                if (_hudHeapMB > _hudGcPeakHeapMB) _hudGcPeakHeapMB = _hudHeapMB;
+                int maxGen = Math.Min(GC.MaxGeneration, 2);
+                for (int g = 0; g <= 2; g++)
+                    _hudGcNowGen[g] = g <= maxGen ? GC.CollectionCount(g) : _hudGcBaseGen[g];
+
                 if (CmmMixer.Instance != null)
                 {
                     CmmMixer.Instance.GetOutputStats(out int q, out int tgt, out int mn,
@@ -211,9 +277,22 @@ namespace CMM
 
             lines.Add(Row("Source:", source));
 
-            // GC: our per-tick context-scan allocation (the marshalling churn) + process heap.
-            // Near-zero B/tick is the goal — it's what the Lua-marshalling pooling drove down.
-            lines.Add(Row("GC:", $"{_lastScanBytesPerTick:0} B/tick scan  •  heap {_hudHeapMB:0} MB"));
+            // Heap + GC gauge (the enabled-vs-dormant A/B signal). Heap: the whole managed
+            // heap now, its peak since the window was armed, and the drift since arm. GC:
+            // per-generation collections accrued over the window with the gen0 rate — read
+            // gen0/min as the comparison metric. Trailing: CMM's own per-tick scan churn
+            // (near-zero is the goal from the Lua-marshalling pooling). Num9 re-arms.
+            float gcWin = Mathf.Max(0.001f, Time.realtimeSinceStartup - _hudGcBaseTime);
+            int dg0 = _hudGcNowGen[0] - _hudGcBaseGen[0];
+            int dg1 = _hudGcNowGen[1] - _hudGcBaseGen[1];
+            int dg2 = _hudGcNowGen[2] - _hudGcBaseGen[2];
+            float g0PerMin = dg0 * 60f / gcWin;
+            lines.Add(Row("Heap:", $"{_hudHeapMB:0} MB  (peak {_hudGcPeakHeapMB:0}  •  " +
+                                   $"Δ {_hudHeapMB - _hudGcBaseHeapMB:+0;-0;0} MB since arm)"));
+            string armBadge = _functionallyDormant
+                ? "  •  <color=#ffd27f>DORMANT (B)</color>" : "  •  ENABLED (A)";
+            lines.Add(Row("GC:", $"gen0 +{dg0}  gen1 +{dg1}  gen2 +{dg2}  over {Clock(gcWin)}" +
+                                 $"  •  {g0PerMin:0.0} g0/min  •  scan {_lastScanBytesPerTick:0} B/tick{armBadge}"));
 
             // Memory diagnostics on one line: the directory snapshots (every eligible
             // file path per context) plus the normalized (loudness-measured) files held
@@ -233,7 +312,7 @@ namespace CMM
 
             // Dark translucent backdrop so the text stays legible over any scene.
             GUI.DrawTexture(new Rect(x, y, w, h), _hudBgTex, ScaleMode.StretchToFill);
-            GUI.Label(new Rect(x + padX, y + 6f, w - padX * 2f, 22f), "CMM • Context  [Num8]", _hudHeaderStyle);
+            GUI.Label(new Rect(x + padX, y + 6f, w - padX * 2f, 22f), "CMM • Context  [Num8 toggle • Num9 reset GC • Num7 A/B dormant]", _hudHeaderStyle);
             GUI.Label(new Rect(x + padX, y + 6f + headerH, w - padX * 2f, bodyH), bodyContent, _hudBodyStyle);
         }
 

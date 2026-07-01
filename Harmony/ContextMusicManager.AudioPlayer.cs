@@ -190,6 +190,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
+                if (_functionallyDormant) continue;   // A/B dormant arm
                 // Keep the native mixer's master volume in lock-step with the game's
                 // music slider. Sampled here on the main thread (GamePrefs is not safe
                 // to read from the mixer thread) and stored in a volatile the mixer reads.
@@ -345,6 +346,7 @@ namespace CMM
 
             while (true)
             {
+                if (_functionallyDormant) { yield return new WaitForSeconds(0.5f); continue; }   // A/B dormant arm
                 // Menu prewarm: while on the menu, measure a BOUNDED set — one track per
                 // context + a second for the playing one — on a worker pool, then stop
                 // (_menuPrescanComplete). This guarantees every context has a ready,
@@ -1529,6 +1531,7 @@ namespace CMM
         // gates this off without needing to touch every stop site.
         internal static void NativeAdvanceTick()
         {
+            if (_functionallyDormant) return;   // A/B dormant arm: no track auto-advance
             if (!_nativeAdvanceArmed || _advancePending || _pauseDucked) return;
 
             string ctx = _nativeActiveContext;
@@ -1840,6 +1843,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(PresenceScanInterval);
+                if (_functionallyDormant) continue;   // A/B dormant arm
 
                 // Gather the work for this tick. A full rebuild supersedes the
                 // per-context dirty set. Resolve context → directory pairs here on
