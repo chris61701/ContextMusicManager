@@ -69,53 +69,6 @@ namespace CMM
 
         public static bool _gameIsLoading = false;
 
-        // Reused-channel residual quick-fade. When a new context interrupts an
-        // in-flight crossfade, the channel we repurpose for the incoming priority
-        // track may still be playing an audible leftover (the half-arrived previous
-        // track, frozen at whatever volume it reached when its crossfade coroutine
-        // was stopped). Instantly zeroing it clicks. If that residual is above the
-        // threshold we ramp it to silence over this (very short) window first so the
-        // incoming music always fades in cleanly; below it the instant cut is inaudible.
-        private const float ResidualFadeDuration  = 0.12f;
-        private const float ResidualFadeThreshold = 0.1f;
-
-
-        // ── NAudio async decode helper ────────────────────────────────────────
-        // FIX: Split into two phases so disk I/O and CPU decode are each on a
-        // background thread but the main thread yields a frame between them.
-        // This keeps the main thread responsive throughout and avoids a single
-        // large ThreadPool item that could block the pool for 500-800ms on slow
-        // spinning disks or large files.
-        private IEnumerator OpenReaderAsync(string filePath, Action<WaveStream> onComplete)
-        {
-            // Wait until the engine is not mid-load so we don't compete for I/O.
-            float loadWait = 0f;
-            while (_gameIsLoading && loadWait < 8f)
-            {
-                yield return new WaitForSeconds(0.25f);
-                loadWait += 0.25f;
-            }
-            if (loadWait > 0f)
-                CMMConfig.D($"[CMM] Deferred open by {loadWait:F1}s (game was loading)");
-
-            WaveStream reader = null;
-            bool finished = false;
-
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try { reader = AudioDecoder.OpenStreamingReader(filePath); }
-                catch { }
-                finished = true;
-            });
-
-            while (!finished) yield return null;
-
-            if (reader == null)
-                MarkInvalidIfCorrupt(filePath, "Preload: failed to open");
-
-            onComplete(reader);
-        }
-
         // ── Validation ────────────────────────────────────────────────────────
         private IEnumerator ValidateFile(string filePath, Action<bool> callback)
         {
@@ -658,7 +611,6 @@ namespace CMM
         {
             float fade = fadeSeconds >= 0f ? fadeSeconds : CrossFadeDuration;
             CMMConfig.D($"[CMM] Fading to silence ({fade:F1}s).");
-            if (_nextCacheCoroutine != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine); _nextCacheCoroutine = null; }
             if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
             if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
             // The native mixer is the only output — fade it out (covers native→silence
@@ -675,7 +627,6 @@ namespace CMM
         // coroutines first so nothing re-triggers mid-fade.
         internal static void FadeMenuOutputForGameStart(float seconds)
         {
-            if (_nextCacheCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);  _nextCacheCoroutine  = null; }
             if (_trackEndCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);   _trackEndCoroutine   = null; }
             if (_crossFadeCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);  _crossFadeCoroutine  = null; }
 
@@ -1738,30 +1689,6 @@ namespace CMM
             bool has = snap != null && snap.Any(f => !_invalidFiles.Contains(f));
             if (has) _contextsWithFiles.Add(contextName);
             else _contextsWithFiles.Remove(contextName);
-        }
-
-        // Blacklist a file ONLY when it genuinely exists but can't be opened/decoded
-        // (corrupt or unsupported). A file that is missing at open time was moved or
-        // deleted mid-operation — a transient, not corruption: blacklisting it would
-        // permanently exclude a perfectly valid track that is still (or again) on disk,
-        // because _invalidFiles is only cleared when the watcher sees an actual removal.
-        // Returns true if the file was blacklisted.
-        private static bool MarkInvalidIfCorrupt(string filePath, string reason)
-        {
-            try
-            {
-                if (!File.Exists(filePath))
-                {
-                    Log.Warning($"[CMM] {reason}: {Path.GetFileName(filePath)} not on disk — " +
-                                "transient (moved/removed), not blacklisting.");
-                    return false;
-                }
-            }
-            catch { /* path error — fall through and treat as invalid */ }
-
-            _invalidFiles.Add(filePath);
-            Log.Error($"[CMM] {reason}: {Path.GetFileName(filePath)}, marking invalid");
-            return true;
         }
 
         // Marked private so FileWatchLoop can call it for a single context.

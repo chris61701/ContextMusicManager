@@ -54,7 +54,7 @@ namespace CMM
                      int priority = 0, bool once = false, float volume = -1f,
                      int warmup = 0, string warmgroup = null, bool subfolders = false)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,
-                                                 loop, cool, fadeintime, bypass, true, priority, once, volume,
+                                                 loop, cool, fadeintime, bypass, priority, once, volume,
                                                  warmup, warmgroup, subfolders);
 
             Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
@@ -162,7 +162,7 @@ namespace CMM
                 contexts[c.Context] = new Contexts(context: c.Context, path: c.Path, fallback: c.Fallback,
                     canberesumed: c.CanBeResumed, timeuntilcontextstale: c.TimeUntilContextStale, loop: c.Loop,
                     cooldown: c.Cooldown, fadeInDuration: c.FadeInDuration, bypassescooldown: c.BypassesCooldown,
-                    caninterrupt: c.CanInterrupt, priority: c.Priority, playOnce: c.PlayOnce,
+                    priority: c.Priority, playOnce: c.PlayOnce,
                     volumeOverride: c.VolumeOverride, warmup: c.WarmUp, warmGroup: c.WarmGroup,
                     includeSubfolders: true);
 

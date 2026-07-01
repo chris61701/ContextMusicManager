@@ -36,7 +36,6 @@ namespace CMM
         public static CoRoutine CMM_CoRoutines;
         public static ContextMusicManager Instance;
 
-        private static Coroutine _nextCacheCoroutine = null;
         private static Coroutine _trackEndCoroutine = null;
         private static Coroutine _crossFadeCoroutine = null;
         private static Coroutine _vanillaFadeInCoroutine = null;
@@ -50,7 +49,6 @@ namespace CMM
             get
             {
                 int n = 0;
-                if (_nextCacheCoroutine      != null) n++;
                 if (_trackEndCoroutine       != null) n++;
                 if (_crossFadeCoroutine      != null) n++;
                 if (_vanillaFadeInCoroutine  != null) n++;
@@ -65,7 +63,6 @@ namespace CMM
         public static float TrackEndPollInterval = 0.25f;
         public static float CrossFadeDuration = 2f;
         public static float TrackTransitionFadeDuration = 6f;
-        public static float TrackTransitionPreloadLead = 10f;
 
         // Graceful, deliberate fade for the menu↔game boundary (entering a world, exiting
         // back to the menu) — intentionally longer than the in-game CrossFadeDuration.
@@ -186,7 +183,7 @@ namespace CMM
                 _audioConfigHooked = true;
             }
 
-            CMMConfig.D($"[CMM] Initialized! Decoder: CMM_Decoder (native) | Preload: {CMMConfig.PreloadCacheEnabled}");
+            CMMConfig.D("[CMM] Initialized! Decoder: CMM_Decoder (native)");
         }
 
         private static bool _audioConfigHooked = false;
@@ -244,7 +241,7 @@ namespace CMM
             int comparePriority = bypassPriority >= 0 ? bypassPriority : (currentContext?.Priority ?? 0);
             // allows re-triggering a context that was a null-fallback but is now valid
             bool isReloadOfCurrent = currentContext != null && contextIn == currentContext.Context;
-            bool priorityOk = inGame && incoming.CanInterrupt && incoming.Priority > comparePriority;
+            bool priorityOk = inGame && incoming.Priority > comparePriority;
 
             if (!menuOverride && !priorityOk && !isReloadOfCurrent)
             {
@@ -335,7 +332,6 @@ namespace CMM
         public static void TriggerMusic(string contextName)
         {
             CMMConfig.D($"[CMM] TriggerMusic: {contextName}");
-            if (_nextCacheCoroutine != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine); _nextCacheCoroutine = null; }
             if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
             if (_crossFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine); _crossFadeCoroutine = null; }
 
@@ -416,7 +412,6 @@ namespace CMM
                     && _crossFadeCoroutine == null
                     && _trackEndCoroutine == null
                     && !_advancePending          // an off-frame-loop advance is in flight (NativeScheduler)
-                    && _nextCacheCoroutine == null
                     // The native mixer is the output; it's "busy" while a voice is live (or a
                     // start was just dispatched). A PlayOnce stinger / looping track starts no
                     // NativeTrackLoop, so this is the only signal that it's still playing.

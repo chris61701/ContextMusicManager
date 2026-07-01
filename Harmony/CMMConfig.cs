@@ -16,7 +16,6 @@ namespace CMM
             float modifier = volumeOverride >= 0f ? volumeOverride : VolumeModifier;
             return inGameVolume * modifier;
         }
-        public static long HotSwapMaxFileSizeBytes = 100L * 1024 * 1024;
 
         // ── Native audio output (miniaudio) ───────────────────────────────────
         // Music plays through CMM's OWN miniaudio output device + mixer thread
@@ -77,7 +76,6 @@ namespace CMM
         // volume) instead of reloading it and fading in from zero. Set false in
         // Config/settings.xml to fall back to the old reload-from-resume behavior.
         public static bool ReverseFadeReclaim = true;
-        public static bool PreloadCacheEnabled = false;
 
         // Enemy-count thresholds exposed to the decision script as cfg.combatLowThreshold
         // / cfg.combatHighThreshold. The stock context.lua does its combat tiering via

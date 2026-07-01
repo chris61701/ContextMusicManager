@@ -1,4 +1,8 @@
-
+// Compiled ONLY under CMM_LOUDNESS_SELFTEST. Production loudness measurement runs
+// natively (CMM_Decoder.dll cmm_loudness_* — a faithful port of this class); this
+// managed analyzer is kept as the readable reference implementation and is
+// exercised by R128SelfTest against EBU Tech 3341 reference tones.
+#if CMM_LOUDNESS_SELFTEST
 using System;
 using System.Collections.Generic;
 
@@ -283,3 +287,4 @@ namespace CMM
         }
     }
 }
+#endif

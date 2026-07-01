@@ -6,16 +6,6 @@ namespace CMM
 {
     public enum TrackOrderMode { Random, RandomNoRepeat, Sequential }
 
-    // Result of an NAudio decode operation, carried back to the main thread.
-    public class DecodedAudio
-    {
-        public float[] Samples;   // interleaved PCM, range -1..+1
-        public int Channels;
-        public int Frequency;
-        public float LengthSeconds => Channels > 0 && Frequency > 0
-            ? (float)Samples.Length / Channels / Frequency : 0f;
-    }
-
     public class ContextCache
     {
         public float resumePosition;
@@ -67,7 +57,6 @@ namespace CMM
         public int Cooldown { get; private set; }
         public int FadeInDuration { get; private set; }
         public bool BypassesCooldown { get; private set; }
-        public bool CanInterrupt { get; private set; }
         public int Priority { get; private set; }
         public bool PlayOnce { get; private set; }
         // Per-context replacement for the global VolumeModifier. Negative means
@@ -102,7 +91,7 @@ namespace CMM
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
             bool loop = false, int cooldown = 5, int fadeInDuration = 3,
-            bool bypassescooldown = false, bool caninterrupt = false,
+            bool bypassescooldown = false,
             int priority = 0, bool playOnce = false, float volumeOverride = -1f,
             int warmup = 0, string warmGroup = null, bool includeSubfolders = false,
             string link = null)
@@ -116,7 +105,6 @@ namespace CMM
             Cooldown = cooldown;
             FadeInDuration = fadeInDuration;
             BypassesCooldown = bypassescooldown;
-            CanInterrupt = caninterrupt;
             Priority = priority;
             PlayOnce = playOnce;
             VolumeOverride = volumeOverride;

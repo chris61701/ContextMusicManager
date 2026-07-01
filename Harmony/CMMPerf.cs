@@ -156,29 +156,6 @@ namespace CMM
             _txStart = 0;
         }
 
-        // ── Audio-thread PCM callback probe ────────────────────────────────────
-        // The default playback path is a STREAMING AudioClip whose PCMReaderCallback
-        // runs on Unity's AUDIO thread and does on-demand decode + disk paging from the
-        // music library (an exFAT SD card in the field). If a callback can't keep up,
-        // audio glitches AND the contended CPU starves the render thread on a core-light
-        // device — a frame stutter our other probes can't see (it isn't a GC, a measured
-        // span, or a transition). The audio thread must stay cheap and must NOT call
-        // Unity's Log (not thread-safe off the main thread), so this only accumulates via
-        // Interlocked; the main-thread DumpAndReset reports max/avg/slow-count. Feed it
-        // the ReadFloats duration in Stopwatch ticks from the callback.
-        static long _pcmCount, _pcmTotTicks, _pcmMaxTicks, _pcmSlowCount;
-
-        public static void PcmCallback(long elapsedTicks)
-        {
-            if (!Enabled) return;
-            Interlocked.Increment(ref _pcmCount);
-            Interlocked.Add(ref _pcmTotTicks, elapsedTicks);
-            // Racy max — acceptable for a diagnostic; avoids a CAS loop on the audio thread.
-            if (elapsedTicks > Interlocked.Read(ref _pcmMaxTicks)) _pcmMaxTicks = elapsedTicks;
-            if (elapsedTicks * TicksToMs >= CMMConfig.PerfSpikeMs)
-                Interlocked.Increment(ref _pcmSlowCount);
-        }
-
         // ── Per-frame stutter watchdog ─────────────────────────────────────────
         // Called once per frame from Update(). A SUSTAINED stutter is many anomalous
         // frames in a row; the per-span SPIKE probes can't see it because the cost
@@ -287,18 +264,6 @@ namespace CMM
                 any = true;
                 sb.Append($" Interrupted(n={_txInterrupted})");
                 _txInterrupted = 0;
-            }
-            // Audio-thread PCM callback stats (snapshot + reset). A high max/slow count
-            // means the streaming decode/disk read is stalling the audio thread — the
-            // CPU-contention path that starves the render thread on a core-light device.
-            long pc = Interlocked.Exchange(ref _pcmCount, 0);
-            if (pc > 0)
-            {
-                long tot = Interlocked.Exchange(ref _pcmTotTicks, 0);
-                long mx  = Interlocked.Exchange(ref _pcmMaxTicks, 0);
-                long slow = Interlocked.Exchange(ref _pcmSlowCount, 0);
-                any = true;
-                sb.Append($" PCMcb(n={pc} avg={(tot * TicksToMs) / pc:F3} max={mx * TicksToMs:F3} slow={slow})");
             }
             if (any) Log.Out(sb.ToString());
         }

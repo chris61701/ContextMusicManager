@@ -33,8 +33,6 @@
 
   <!-- Fade duration when a track ends naturally and transitions to the next -->
   <TrackTransitionFadeDuration>6.0</TrackTransitionFadeDuration>
-  <!-- Start loading the next clip this many seconds before the current one ends -->
-  <TrackTransitionPreloadLead>10.0</TrackTransitionPreloadLead>
 
   <!-- How often to scan for active context changes (seconds) -->
   <ContextScanCooldown>0.5</ContextScanCooldown>

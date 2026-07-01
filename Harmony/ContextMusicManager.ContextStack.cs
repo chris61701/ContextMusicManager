@@ -31,7 +31,7 @@ namespace CMM
 
         public void InitContexts()
         {
-            // caninterrupt is always true — hardcoded below. Defaults:
+            // Defaults:
             // fallback="Stack", resume=true, stale=120, loop=false, cool=5, fadeintime=5, bypass=false,
             // once=false, warmup=0.  fadeintime = fade-in seconds; warmup = dwell seconds before viable.
             void Add(string name, string path, string fallback = "Stack",
@@ -41,7 +41,7 @@ namespace CMM
                      int warmup = 0, string warmgroup = null, bool subfolders = false,
                      string link = null)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,
-                                                 loop, cool, fadeintime, bypass, true, priority, once, volume,
+                                                 loop, cool, fadeintime, bypass, priority, once, volume,
                                                  warmup, warmgroup, subfolders, link);
 
             Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
@@ -592,7 +592,6 @@ namespace CMM
         // play) on a reader we're about to dispose.
         private static void StopMusicCoroutines()
         {
-            if (_nextCacheCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_nextCacheCoroutine);  _nextCacheCoroutine  = null; }
             if (_trackEndCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine);   _trackEndCoroutine   = null; }
             if (_crossFadeCoroutine  != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);  _crossFadeCoroutine  = null; }
         }

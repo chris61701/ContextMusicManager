@@ -60,7 +60,6 @@ namespace CMM
 
                 ContextMusicManager.CrossFadeDuration           = ReadFloat(root, "CrossFadeDuration",           ContextMusicManager.CrossFadeDuration);
                 ContextMusicManager.TrackTransitionFadeDuration = ReadFloat(root, "TrackTransitionFadeDuration", ContextMusicManager.TrackTransitionFadeDuration);
-                ContextMusicManager.TrackTransitionPreloadLead  = ReadFloat(root, "TrackTransitionPreloadLead",  ContextMusicManager.TrackTransitionPreloadLead);
                 ContextMusicManager.ContextScanCooldown         = ReadFloat(root, "ContextScanCooldown",         ContextMusicManager.ContextScanCooldown);
                 ContextMusicManager.StalenessCheckInterval      = ReadFloat(root, "StalenessCheckInterval",      ContextMusicManager.StalenessCheckInterval);
                 ContextMusicManager.TrackEndPollInterval        = ReadFloat(root, "TrackEndPollInterval",        ContextMusicManager.TrackEndPollInterval);
@@ -124,7 +123,6 @@ namespace CMM
                         cooldown:              IntAttr (el, "cool",     5),
                         fadeInDuration:        IntAttr (el, "fadeintime", 5),
                         bypassescooldown:      BoolAttr(el, "bypass",   false),
-                        caninterrupt:          true,
                         priority:              IntAttr (el, "priority", 0),
                         playOnce:              BoolAttr(el, "once",     false),
                         volumeOverride:        FloatAttr(el, "volume",  -1f),

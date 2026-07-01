@@ -28,17 +28,6 @@ namespace CMM
 
     public static class AudioDecoder
     {
-        // ── Audio-thread heartbeat ────────────────────────────────────────────
-        // Incremented (by sample count) every time Unity's PCMReaderCallback pulls
-        // from one of our streaming clips. The audio thread only invokes these
-        // callbacks while it is actively playing the clip, so a per-tick DELTA on
-        // this counter is the ground truth for "is sound actually being produced",
-        // independent of what AudioSource.volume/isPlaying claim. Read by the
-        // DiagnosticLoop to distinguish a stalled engine (delta == 0 while
-        // isPlaying) from a downstream mute (delta > 0 but inaudible). Volatile +
-        // unguarded: an exact value isn't needed, only whether it's moving.
-        public static long PcmHeartbeat;
-
         private static readonly HashSet<string> _naudioExts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -73,13 +62,6 @@ namespace CMM
 
         // ── OGG codec detection ───────────────────────────────────────────────
 
-        private static long ProfStart() => Stopwatch.GetTimestamp();
-
-        private static void ProfEnd(long t0, string label, float warnMs = 2f)
-        {
-            float ms = (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
-            if (ms > warnMs) CMMConfig.D($"[CMM PERF] {label}: {ms:F2}ms");
-        }
         public static bool IsOpusOgg(string filePath)
         {
             try
@@ -104,150 +86,6 @@ namespace CMM
             catch { return false; }
         }
 
-        private static bool IsOpusOggBytes(byte[] data)
-        {
-            if (data == null || data.Length < 36) return false;
-            for (int i = 0; i <= Math.Min(data.Length - 8, 64); i++)
-            {
-                if (data[i] == 'O' && data[i + 1] == 'p' &&
-                    data[i + 2] == 'u' && data[i + 3] == 's' &&
-                    data[i + 4] == 'H' && data[i + 5] == 'e' &&
-                    data[i + 6] == 'a' && data[i + 7] == 'd')
-                    return true;
-            }
-            return false;
-        }
-
-        // ── Streaming reader factory ──────────────────────────────────────────
-        // Returns an open WaveStream (native reader) for any supported format.
-        // Buffers the file into memory when it fits (HotSwapMaxFileSizeBytes) and opens
-        // from bytes; otherwise opens via the native file-open path. The caller owns the
-        // returned stream and must Dispose() it when the associated AudioClip is destroyed.
-        //
-        // Called on a background thread by OpenReaderAsync.
-        public static WaveStream OpenStreamingReader(string filePath)
-        {
-            if (!Thread.CurrentThread.IsBackground)
-                CMMConfig.D($"[CMM PERF] OpenStreamingReader called on main thread for {Path.GetFileName(filePath)}!");
-
-            // Decode straight from the file via the native readers (CMM_Decoder.dll): the
-            // decoder streams from a native FILE* and keeps all working memory in native
-            // (malloc) heap the GC never scans. The old path here did File.ReadAllBytes —
-            // a multi-MB managed Large-Object-Heap buffer PER TRANSITION, whose Gen2
-            // collection is stop-the-world on the ~2.6 GB in-game Mono heap and hitched the
-            // game at every track change. Those bytes were only ever memcpy'd into the
-            // decoder's OWN native copy (cmm_*_open_memory: malloc + memcpy) and then thrown
-            // away, so opening natively removes the allocation with no change to what is
-            // decoded. Native seeking is reliable across all formats (the historical Opus
-            // resume-seek bug was in the retired managed decoder, not this path).
-            //
-            // Trade-off on slow removable media: playback now streams on demand from the
-            // FILE* instead of a RAM copy, so the audio thread does the disk reads. At ~90
-            // MB/s sequential vs ~0.02–0.1 MB/s playback the read head stays far ahead, and
-            // the OS read-ahead/page cache covers it; only post-seek (resume/loop) pays one
-            // cold seek.
-            //
-            // BUFFERED OPEN (default): read the whole file into a NATIVE buffer, hand it to
-            // the decoder (which copies it into its own private buffer — see cmm_*_open_memory),
-            // and CLOSE the file handle immediately. A streamed-from-disk reader holds the file
-            // open for the WHOLE track, which on Windows pins not just the file but its PARENT
-            // FOLDER (no share flag lets a folder be moved/renamed/deleted while a file inside
-            // is open). Buffering up front means nothing — file or folder — is locked while the
-            // track plays, so the user can freely reorganise the music folders mid-playback.
-            // The buffer lives in NATIVE (AllocHGlobal) memory the GC never scans, read in via a
-            // small reused Gen0 chunk, so there is NO managed Large-Object-Heap allocation — the
-            // exact thing the comment above warns against (never File.ReadAllBytes here).
-            //
-            // Files larger than HotSwapMaxFileSizeBytes are NOT buffered (that would mean a
-            // 100 MB+ native allocation held for the whole song): they fall back to streaming
-            // from an open FILE* below. That one file stays open while it plays — its folder is
-            // pinned for the song's duration — but it is the rare case, and the file itself is
-            // still movable (FILE_SHARE_DELETE); only its parent folder is held.
-            try
-            {
-                long size = new FileInfo(filePath).Length;
-                if (size > 0 && size <= CMMConfig.HotSwapMaxFileSizeBytes)
-                {
-                    WaveStream buffered = OpenBufferedReader(filePath, size);
-                    if (buffered != null) return buffered;
-                    // Buffering failed (alloc/read/decode) — fall through to streaming.
-                }
-            }
-            catch { /* stat failed — fall through to streaming from disk */ }
-
-            return OpenNativeReader(filePath);
-        }
-
-        // Reads the whole file into a native (off-GC-heap) buffer and opens the matching
-        // native reader from it, leaving NO file handle open (so neither the file nor its
-        // folder is locked while the track plays). The file streams in through a small reused
-        // 64 KB Gen0 chunk — no managed Large-Object-Heap allocation — and the decoder makes
-        // its own private copy of the bytes (cmm_*_open_memory), so our buffer is freed the
-        // instant the reader is constructed. Returns null on any failure so OpenStreamingReader
-        // falls back to streaming-from-disk. Runs on the same background thread as the caller.
-        private static WaveStream OpenBufferedReader(string filePath, long size)
-        {
-            IntPtr buf = IntPtr.Zero;
-            try
-            {
-                buf = Marshal.AllocHGlobal(new IntPtr(size));
-                byte[] chunk = new byte[64 * 1024];   // 64 KB < 85 KB LOH threshold → Gen0
-                long off = 0;
-                // Share read+write+delete so copying the file in never blocks another process
-                // (or the user) from moving/deleting it even during this brief read.
-                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read,
-                                               FileShare.ReadWrite | FileShare.Delete, 64 * 1024,
-                                               FileOptions.SequentialScan))
-                {
-                    int n;
-                    while (off < size &&
-                           (n = fs.Read(chunk, 0, (int)Math.Min(chunk.Length, size - off))) > 0)
-                    {
-                        Marshal.Copy(chunk, 0, new IntPtr(buf.ToInt64() + off), n);
-                        off += n;
-                    }
-                }
-                if (off <= 0) return null;
-                // The FileStream is closed now — no handle survives. Pull the first few bytes
-                // back out of the native buffer for Opus-in-Ogg detection, then open from it.
-                byte[] head = new byte[(int)Math.Min(off, 64)];
-                Marshal.Copy(buf, head, 0, head.Length);
-                string ext = Path.GetExtension(filePath).ToLower();
-                return OpenNativeReaderFromPtr(buf, off, ext, head);
-            }
-            catch (Exception ex)
-            {
-                CMMConfig.D($"[CMM] Buffered open failed for {Path.GetFileName(filePath)}: {ex.Message}; streaming instead.");
-                return null;
-            }
-            finally
-            {
-                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
-            }
-        }
-
-        // Opens a native reader for any supported format from a native memory buffer (pointer
-        // + length). Mirrors OpenNativeReaderFromMemory but takes an unmanaged pointer so the
-        // file bytes never touch the GC heap. `head` is the first few bytes, used only to tell
-        // Opus-in-Ogg from Vorbis-in-Ogg. The decoder copies the buffer, so the caller owns and
-        // frees `data`. Returns null for unknown extensions.
-        private static WaveStream OpenNativeReaderFromPtr(IntPtr data, long length, string ext, byte[] head)
-        {
-            bool isOpus = ext == ".opus" ||
-                ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(head));
-            switch (ClassifyReader(ext, isOpus))
-            {
-                case ReaderKind.Opus:      return new NativeOggOpusReader(data, length);
-                case ReaderKind.Flac:      return new NativeFlacReader(data, length);
-                case ReaderKind.Vorbis:    return new NativeVorbisReader(data, length);
-                case ReaderKind.Mp3:       return new NativeMp3Reader(data, length);
-                case ReaderKind.Wav:       return new NativeWavReader(data, length);
-                case ReaderKind.Aac:       return new NativeAacReader(data, length);
-                case ReaderKind.Container: return new NativeContainerReader(data, length);
-                default:                   return WarnNoReader(ext);
-            }
-        }
-
         // Opens a native reader for any supported format directly from a file path
         // (large-file path: no full-file buffer). Returns null for unknown extensions.
         private static WaveStream OpenNativeReader(string filePath)
@@ -264,26 +102,6 @@ namespace CMM
                 case ReaderKind.Wav:       return new NativeWavReader(filePath);
                 case ReaderKind.Aac:       return new NativeAacReader(filePath);
                 case ReaderKind.Container: return new NativeContainerReader(filePath);
-                default:                   return WarnNoReader(ext);
-            }
-        }
-
-        // Opens a native reader for any supported format from an in-memory buffer.
-        // `raw` may be a REUSED buffer larger than the file (loudness sweep pooling);
-        // only the first `length` bytes are decoded. Returns null for unknown extensions.
-        private static WaveStream OpenNativeReaderFromMemory(byte[] raw, int length, string ext)
-        {
-            bool isOpus = ext == ".opus" ||
-                ((ext == ".ogg" || ext == ".oga") && IsOpusOggBytes(raw));
-            switch (ClassifyReader(ext, isOpus))
-            {
-                case ReaderKind.Opus:      return new NativeOggOpusReader(raw, length);
-                case ReaderKind.Flac:      return new NativeFlacReader(raw, length);
-                case ReaderKind.Vorbis:    return new NativeVorbisReader(raw, length);
-                case ReaderKind.Mp3:       return new NativeMp3Reader(raw, length);
-                case ReaderKind.Wav:       return new NativeWavReader(raw, length);
-                case ReaderKind.Aac:       return new NativeAacReader(raw, length);
-                case ReaderKind.Container: return new NativeContainerReader(raw, length);
                 default:                   return WarnNoReader(ext);
             }
         }
@@ -401,11 +219,12 @@ namespace CMM
             string ext = Path.GetExtension(filePath).ToLower();
             try
             {
-                // No size cap: the native decoder streams files larger than
-                // HotSwapMaxFileSizeBytes (Windows: over a raw Win32 handle, race-free and with
-                // a few KB of state), so even the 100 MB+ ambient FLACs measure safely instead of
-                // playing at unity gain. Small files still buffer natively; it's a RAM/speed
-                // tradeoff inside the decoder, not a normalization boundary.
+                // No size cap: the native decoder streams files larger than its buffered-open
+                // limit (CMM_BUFFER_MAX in CMM_Decoder.c; Windows: over a raw Win32 handle,
+                // race-free and with a few KB of state), so even the 100 MB+ ambient FLACs
+                // measure safely instead of playing at unity gain. Small files still buffer
+                // natively; it's a RAM/speed tradeoff inside the decoder, not a
+                // normalization boundary.
                 size = new FileInfo(filePath).Length;
             }
             catch (Exception ex)
@@ -510,73 +329,6 @@ namespace CMM
         // Stopwatch-ticks → milliseconds since `t0`.
         private static float ElapsedMs(long t0)
             => (Stopwatch.GetTimestamp() - t0) * 1000f / Stopwatch.Frequency;
-
-        public static long ClampLong(long value, long min, long max)
-        {
-            if (value < min) return min;
-            if (value > max) return max;
-            return value;
-        }
-
-        // ── Full-decode path (menu music + PreloadCacheEnabled = true) ─────────
-        public static DecodedAudio DecodeFileFromBytes(byte[] rawBytes, string filePath)
-        {
-            try
-            {
-                string ext = System.IO.Path.GetExtension(filePath).ToLower();
-
-                // Every format decodes natively (CMM_Decoder.dll). The native readers are
-                // IeeeFloat WaveStreams, so the shared DecodeWaveStream drain handles
-                // them identically regardless of codec.
-                using (WaveStream reader = OpenNativeReaderFromMemory(rawBytes, rawBytes.Length, ext))
-                {
-                    if (reader == null) return null;
-                    return DecodeWaveStream(reader, filePath);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Warning($"[CMM] DecodeFileFromBytes failed for {Path.GetFileName(filePath)}: {ex.Message}");
-                return null;
-            }
-        }
-
-        private static DecodedAudio DecodeWaveStream(WaveStream reader, string filePath)
-        {
-            var src = reader as IFloatPcmSource;
-            if (src == null)
-            {
-                Log.Warning($"[CMM] '{Path.GetFileName(filePath)}' reader is not a float source — skipped.");
-                return null;
-            }
-
-            int channels = reader.WaveFormat.Channels;
-            int frequency = reader.WaveFormat.SampleRate;
-
-            const long MaxFloats = 48000L * 2 * 60 * 30;
-            long estimatedFloats = (reader.Length > 0 && reader.WaveFormat.BlockAlign > 0)
-                ? (reader.Length / reader.WaveFormat.BlockAlign) * channels : 0;
-            float[] result = new float[Math.Min(Math.Max(estimatedFloats, 65536L), MaxFloats)];
-
-            var buf = new float[65536];
-            int offset = 0, read;
-
-            while ((read = src.ReadFloats(buf, 0, buf.Length)) > 0)
-            {
-                if (offset + read > result.Length)
-                {
-                    long newSize = Math.Min((long)(result.Length * 1.25f) + read, MaxFloats);
-                    Array.Resize(ref result, (int)newSize);
-                }
-                Array.Copy(buf, 0, result, offset, read);
-                offset += read;
-            }
-
-            if (offset == 0 || channels == 0 || frequency == 0) return null;
-            if (result.Length - offset > 65536) Array.Resize(ref result, offset);
-            return new DecodedAudio { Samples = result, Channels = channels, Frequency = frequency };
-        }
-
 
         // ── Quick validate ────────────────────────────────────────────────────
         public static bool QuickValidate(string filePath)

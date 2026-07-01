@@ -1,4 +1,7 @@
-
+// Compiled ONLY under CMM_LOUDNESS_SELFTEST (see ContextMusicManager.Init):
+// production loudness runs natively (CMM_Decoder.dll cmm_loudness_*); this and
+// the managed R128Analyzer it exercises are kept as the reference implementation.
+#if CMM_LOUDNESS_SELFTEST
 using System;
 
 namespace CMM
@@ -123,3 +126,4 @@ namespace CMM
         }
     }
 }
+#endif
