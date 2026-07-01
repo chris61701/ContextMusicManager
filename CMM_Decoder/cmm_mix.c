@@ -116,6 +116,11 @@ static cmm_out* g_out;
 static int      g_busRate = 48000, g_busChannels = 2;   /* bus is fixed stereo */
 static int      g_closeWhenIdle;
 static volatile int g_reinitRequested;
+/* Headless mode (offline stress harness): the output "device" is a ring with NO
+ * ma_device — the caller drains it via cmm_mix_pump_out. Everything else (producer
+ * thread, voices, crossfades, retire/free churn) runs exactly as in-game, so the
+ * mixer's native lifecycle is exercised at compressed speed for leak hunting. */
+static int      g_headless;
 
 static volatile float g_masterVol   = 1.0f;
 static volatile int   g_deep;        /* DeepBuffer (loading) */
@@ -313,7 +318,8 @@ static void open_device_locked(void) {
     g_prevDeep = g_deep;
     g_outGainTarget = 1.0f;
     int err = 0;
-    g_out = cmm_out_open(g_busRate, g_busChannels, g_maxFill, &err);
+    g_out = g_headless ? cmm_out_open_null(g_busRate, g_busChannels, g_maxFill, &err)
+                       : cmm_out_open(g_busRate, g_busChannels, g_maxFill, &err);
 }
 
 static void ensure_device_locked(void) {
@@ -430,11 +436,15 @@ static void start_thread(void) {
 /* ══ Public control ABI (called from the C# control layer) ═════════════════*/
 
 /* Create the mixer + start the producer thread. Idempotent. tightFrames/maxFrames
- * are the tight/deep cushion depths in FRAMES (C# computes them from config). The
- * device opens lazily on the first cmm_mix_add. Returns 0. */
-CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int maxFrames, int* err) {
+ * are the tight/deep cushion depths in FRAMES (C# computes them from config).
+ * headless != 0 opens a NULL output (no ma_device; drain via cmm_mix_pump_out) for
+ * the offline stress harness. The device opens lazily on the first cmm_mix_add.
+ * Returns 0. */
+CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int maxFrames,
+                             int headless, int* err) {
     if (err) *err = 0;
     if (g_started) return 0;
+    g_headless    = headless ? 1 : 0;
     g_busRate     = busRate > 0 ? busRate : 48000;
     g_busChannels = busChannels > 0 ? busChannels : 2;
     g_tightFill   = tightFrames > 0 ? tightFrames : g_busRate / 5;   /* ~200ms default */
@@ -455,6 +465,24 @@ CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int max
     g_started = 1;
     start_thread();
     return 0;
+}
+
+/* Back-compat entry: start a normal (real-device) mixer. */
+CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int maxFrames, int* err) {
+    return cmm_mix_start_ex(busRate, busChannels, tightFrames, maxFrames, 0, err);
+}
+
+/* Headless drain: consume up to `frames` from the output ring (a no-op unless the
+ * mixer was started with headless != 0). This is the harness's stand-in for the
+ * realtime device callback — call it on the sim clock to let the producer keep
+ * rendering (voices advance, fade, and retire → the native alloc/free churn cycles)
+ * at compressed speed. Returns frames actually drained. */
+CMM_API int cmm_mix_pump_out(int frames) {
+    int drained;
+    mix_lock(&g_lock);
+    drained = (g_out && g_headless) ? cmm_out_drain(g_out, frames) : 0;
+    mix_unlock(&g_lock);
+    return drained;
 }
 
 /* Install a track. `dec` (a cmm_decoder* opened by C#) + `kind` name the decoder;

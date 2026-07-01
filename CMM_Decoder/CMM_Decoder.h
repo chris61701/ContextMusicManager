@@ -57,8 +57,12 @@ typedef struct cmm_decoder cmm_decoder;
  *   v13:+ native LOUDNESS analyzer (cmm_loudness_*) — the EBU R128 sweep's K-weighting + gating
  *        moved out of managed C# so the sweep allocates nothing on the GC heap (see cmm_loudness.c).
  *   v14:+ cmm_mix_get_output_stats — live output-ring health (queued/target/min depth, voices,
- *        underruns) for the debug HUD's real-time buffer tracker. */
-#define CMM_DECODER_ABI 14
+ *        underruns) for the debug HUD's real-time buffer tracker.
+ *   v15:+ HEADLESS output for the offline stress harness — cmm_out_open_null / cmm_out_drain and
+ *        cmm_mix_start_ex(headless) / cmm_mix_pump_out: run the real mixer with no ma_device,
+ *        drained on the caller's clock, so the mixer's native lifecycle churns at compressed
+ *        speed for leak hunting (in-game paths unchanged). */
+#define CMM_DECODER_ABI 15
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -287,6 +291,16 @@ CMM_API void cmm_out_reset_gain(cmm_out* o, float target);
 /* Stop the device and free the handle. NULL-safe. */
 CMM_API void cmm_out_close(cmm_out* o);
 
+/* v15 — HEADLESS output for the offline stress harness. Same ring, NO ma_device: the
+ * caller drains it itself via cmm_out_drain, so the mixer producer runs at whatever
+ * pace the caller pumps (compressed), with no audio hardware. Everything else behaves
+ * identically to a real device. cmm_out_close skips device teardown for these. */
+CMM_API cmm_out* cmm_out_open_null(int sampleRate, int channels, int ringFrames, int* err);
+
+/* Consume up to `frames` from a headless ring (services a pending flush first, like the
+ * realtime callback), discarding them. Returns frames consumed. SPSC: one consumer only. */
+CMM_API int cmm_out_drain(cmm_out* o, int frames);
+
 /* ── Format converter (resample + channel map) ────────────────────────────
  * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
  * converter). The mixer gives each voice whose native format differs from the
@@ -327,6 +341,17 @@ CMM_API void cmm_dc_close(cmm_dc* c);
  * cushion depths in FRAMES (the managed side computes them from config). The device
  * opens lazily on the first cmm_mix_add. Returns 0 on success. */
 CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int maxFrames, int* err);
+
+/* v15 — as cmm_mix_start, plus headless!=0 opens a NULL output (no ma_device) drained by
+ * cmm_mix_pump_out. For the offline stress harness (tools/CmmSession): the real producer/
+ * voice/retire loop runs at compressed speed with no audio hardware. Returns 0 on success. */
+CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int maxFrames,
+                             int headless, int* err);
+
+/* v15 — headless drain: consume up to `frames` from the output ring so the producer keeps
+ * rendering (voices advance/fade/retire). No-op (returns 0) unless started headless. Call on
+ * the harness clock as the stand-in for the realtime device callback. */
+CMM_API int cmm_mix_pump_out(int frames);
 
 /* Install a track and crossfade to it. `dec`+`kind` name a decoder the caller opened;
  * srcRate/srcChannels/totalFrames describe it (totalFrames<=0 = unknown). fade = crossfade

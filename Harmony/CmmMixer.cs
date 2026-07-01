@@ -34,6 +34,14 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_mix_start(int busRate, int busChannels, int tightFrames, int maxFrames, out int err);
 
+        // v15 — start with a headless (no-device) output for the offline stress harness, and
+        // drain that ring manually. In-game code never sets headless; these are unused there.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int maxFrames, int headless, out int err);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_mix_pump_out(int frames);
+
         // Install a track + crossfade to it. dec+kind name a decoder the caller opened
         // (AudioDecoder.OpenNativeHandle). Takes ownership of dec (closes it on retire OR on
         // failure). Returns a voice id (0 on failure) to poll via get_state / remaining.
@@ -85,6 +93,19 @@ namespace CMM
         // plays over it (passed as duckOthersTo to Play). The swell-back timing lives native-side.
         internal const float StingerDuckLevel = 0.35f;
 
+        // Headless output for the offline stress harness (tools/CmmSession): when set BEFORE
+        // the first GetOrCreate, the mixer starts with a null output device (no audio hardware)
+        // and the harness drives playback by draining the ring via PumpOut on its sim clock —
+        // so the real producer/voice/retire loop runs at compressed speed. Never set in-game
+        // (hence the pragma: the shipped mod only ever reads its default false).
+#pragma warning disable CS0649
+        internal static bool Headless;
+#pragma warning restore CS0649
+
+        // Drain up to `frames` from the headless output ring (no-op unless started headless).
+        // The harness calls this each sim tick as the stand-in for the realtime device callback.
+        internal int PumpOut(int frames) => NativeMix.cmm_mix_pump_out(frames);
+
         // ── Singleton ─────────────────────────────────────────────────────────
         // The native mixer is a process-wide singleton; this managed instance is just the
         // facade. Creating it starts the native producer thread (cmm_mix_start, idempotent).
@@ -124,11 +145,11 @@ namespace CMM
             int max   = Math.Max(tight,
                                  BusRate * Math.Max(CMMConfig.NativeOutputRingMs, CMMConfig.NativeOutputMaxRingMs) / 1000);
             int err;
-            int rc = NativeMix.cmm_mix_start(BusRate, BusChannels, tight, max, out err);
+            int rc = NativeMix.cmm_mix_start_ex(BusRate, BusChannels, tight, max, Headless ? 1 : 0, out err);
             if (rc != 0)
                 Log.Warning($"[CMM] Native mixer start failed (rc={rc}, err={err}) — custom audio will not play.");
             else
-                Log.Out($"[CMM] Native mixer started: {BusRate}Hz {BusChannels}ch, " +
+                Log.Out($"[CMM] Native mixer started{(Headless ? " (headless)" : "")}: {BusRate}Hz {BusChannels}ch, " +
                         $"ring {tight * 1000 / BusRate}–{max * 1000 / BusRate}ms (adaptive).");
 
             // cmm_mix_start resets master to 1; re-apply anything the control layer set before

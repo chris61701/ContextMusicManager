@@ -153,7 +153,10 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
  *   ringFrames             — ring capacity in frames (<=0 → ~200ms default).
  * Returns a handle, or NULL on failure with *err set to the ma_result (or a
  * small negative for argument/alloc errors). */
-CMM_API cmm_out* cmm_out_open(int sampleRate, int channels, int ringFrames, int* err)
+/* Allocate a cmm_out + init its ring, WITHOUT opening any device (started stays 0).
+ * Shared by cmm_out_open (which then inits + starts a real device) and
+ * cmm_out_open_null (which stops here). */
+static cmm_out* cmm_out_alloc_ring(int sampleRate, int channels, int ringFrames, int* err)
 {
     if (err) *err = 0;
     if (sampleRate <= 0 || channels <= 0) { if (err) *err = -1; return NULL; }
@@ -170,6 +173,13 @@ CMM_API cmm_out* cmm_out_open(int sampleRate, int channels, int ringFrames, int*
     ma_result r = ma_pcm_rb_init(ma_format_f32, (ma_uint32)channels,
                                  (ma_uint32)ringFrames, NULL, NULL, &o->rb);
     if (r != MA_SUCCESS) { if (err) *err = (int)r; free(o); return NULL; }
+    return o;
+}
+
+CMM_API cmm_out* cmm_out_open(int sampleRate, int channels, int ringFrames, int* err)
+{
+    cmm_out* o = cmm_out_alloc_ring(sampleRate, channels, ringFrames, err);
+    if (!o) return NULL;
 
     ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
     cfg.playback.format   = ma_format_f32;
@@ -179,7 +189,7 @@ CMM_API cmm_out* cmm_out_open(int sampleRate, int channels, int ringFrames, int*
     cfg.pUserData         = o;
     /* pContext NULL + no pDeviceID = default endpoint, shared mode. */
 
-    r = ma_device_init(NULL, &cfg, &o->device);
+    ma_result r = ma_device_init(NULL, &cfg, &o->device);
     if (r != MA_SUCCESS) {
         ma_pcm_rb_uninit(&o->rb);
         if (err) *err = (int)r;
@@ -197,6 +207,53 @@ CMM_API cmm_out* cmm_out_open(int sampleRate, int channels, int ringFrames, int*
     }
     o->started = 1;
     return o;
+}
+
+/* Open a HEADLESS output: a ring with NO audio device (started stays 0, so
+ * cmm_out_close skips ma_device_uninit). Used by the offline stress harness
+ * (tools/CmmSession) to run the REAL mixer producer at compressed speed — the
+ * caller drains the ring itself via cmm_out_drain instead of a realtime device
+ * callback, so voices decode / render / retire (exercising the mixer's native
+ * alloc/free churn for leak hunting) without audio hardware or realtime pacing. */
+CMM_API cmm_out* cmm_out_open_null(int sampleRate, int channels, int ringFrames, int* err)
+{
+    return cmm_out_alloc_ring(sampleRate, channels, ringFrames, err);
+}
+
+/* Manually consume up to `frames` from the ring (the headless counterpart to the
+ * realtime callback, minus audio output): service a pending flush, then advance the
+ * read pointer, discarding the frames. Returns the number of frames consumed. SPSC:
+ * call from ONE consumer thread only (the harness pump), exactly as the device
+ * callback is the sole reader in the realtime path. No-op / 0 on a real (started)
+ * device — that path has its own callback consumer. */
+CMM_API int cmm_out_drain(cmm_out* o, int frames)
+{
+    if (!o || frames <= 0) return 0;
+
+    if (o->flush) {
+        o->flush = 0;
+        ma_uint32 avail = ma_pcm_rb_available_read(&o->rb);
+        while (avail > 0) {
+            ma_uint32 n = avail; void* p = NULL;
+            if (ma_pcm_rb_acquire_read(&o->rb, &n, &p) != MA_SUCCESS || n == 0) break;
+            ma_pcm_rb_commit_read(&o->rb, n);
+            avail -= n;
+        }
+        if (o->flushSetGain) {
+            o->flushSetGain = 0;
+            o->gain = o->flushGain; o->gainTarget = o->flushGain; o->gainStep = 0.0f;
+        }
+    }
+
+    int consumed = 0;
+    while (consumed < frames) {
+        ma_uint32 n = (ma_uint32)(frames - consumed);
+        void* readPtr = NULL;
+        if (ma_pcm_rb_acquire_read(&o->rb, &n, &readPtr) != MA_SUCCESS || n == 0) break;
+        ma_pcm_rb_commit_read(&o->rb, n);
+        consumed += (int)n;
+    }
+    return consumed;
 }
 
 /* Enqueue up to `frames` interleaved-f32 frames. Non-blocking: writes only what
