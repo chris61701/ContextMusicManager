@@ -545,7 +545,11 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
             if (reviveFrom != 1.0f) ev->gain *= reviveFrom;   /* keep audible level continuous across revive */
             float to = stinger ? duckOthersTo : 0.0f;
             ev->targetGain = to;
-            ev->gainStep   = compute_step(ev->gain, to, fade);
+            /* fade<=0 must SNAP: compute_step returns 0 there, and a 0 gainStep freezes the
+             * ramp (see mix loop) — the bed would stick at full instead of ducking/fading out.
+             * Mirrors the incoming-voice instant path below. */
+            if (fade <= 0.0f) { ev->gain = to; ev->gainStep = 0.0f; }
+            else              ev->gainStep = compute_step(ev->gain, to, fade);
             ev->ducked     = (stinger && to > 0.0f) ? 1 : 0;
         }
     }

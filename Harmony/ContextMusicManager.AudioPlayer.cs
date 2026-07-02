@@ -1268,14 +1268,15 @@ namespace CMM
                 CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(file));
 
             bool loop = ctx.Loop;
-            // POI_Cleared plays its "area cleared" fanfare OVER the existing music instead of
-            // replacing it (see the duck comment below). The fanfare fades in — and the bed ducks
-            // DOWN — over this window; 1s is gentle without letting full-volume music fight the
-            // fanfare's intro. Death/Spawn stay snappy (0.25s); they cut fully in/out.
+            // PlayOnce stingers (Death / Spawn / POI_Cleared) honor their own fadeintime as the
+            // window their track fades IN over — and, for POI_Cleared, the window the bed ducks
+            // DOWN over (it plays the "area cleared" fanfare OVER the existing music instead of
+            // replacing it; see the duck comment below). fadeintime=0 punches in instantly (native
+            // snaps both the incoming voice and any ducked/outgoing bed on a 0 fade). A small value
+            // like 0.05 avoids a hard-cut click while still feeling instant.
             bool poiCleared = contextName == "POI_Cleared";
             float fade;
-            if (poiCleared) fade = 1f;
-            else if (ctx.PlayOnce) fade = 0.25f;
+            if (ctx.PlayOnce) fade = ctx.FadeInDuration;
             else if (isSameContextSwitchingToNextTrack) fade = Mathf.Max(0.25f, TrackTransitionFadeDuration);
             else fade = ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration;
 

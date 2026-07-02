@@ -66,7 +66,7 @@
        (generic 50-52 AND biome 60-62) is still on the stack during the brief eviction
        window. At 91 the stinger wins over all combat tiers, Blood_Moon (71), and
        Low_Health_Panic (90); only Death (100) supersedes it. -->
-  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="0.1" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="-1" />
+  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="0" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="-1" />
 
   <!-- Infested and non-infested POI contexts share warmgroup="poi" so the clear handoff
        (POI_Infested_Tn -> POI_Tn) is continuous: the joining non-infested context inherits
