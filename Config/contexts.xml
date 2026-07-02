@@ -17,7 +17,8 @@
     stale     - seconds before an abandoned resume position is forgotten  (0 = never resume)
     loop      - loop the clip rather than picking a new track on end
     cool      - seconds before this context can fire again after leaving
-    fadeintime - fade-in duration in seconds (the crossfade ramp when this context's music starts)
+    fadeintime - fade-in duration in seconds (the crossfade ramp when this context's music starts);
+                 fractional values allowed, e.g. 0.5
     warmup    - seconds this context must remain CONTINUOUSLY active before it becomes
                 eligible to trigger music  (0 = trigger immediately; an anti-flicker dwell
                 so momentary contexts don't interrupt what's already playing)
@@ -42,9 +43,9 @@
 <Contexts>
 
   <!-- ── Events ────────────────────────────────── -->
-  <Context name="Death"                      path="events/death"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="1" warmup="0"  warmgroup=""     bypass="true"  priority="100" once="true"  volume="-1" />
+  <Context name="Death"                      path="events/death"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="0.1" warmup="0"  warmgroup=""     bypass="true"  priority="100" once="true"  volume="-1" />
   <Context name="Low_Health_Panic"           path="events/low_health"           subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="90"  once="false" volume="-1" />
-  <Context name="Spawn"                      path="events/spawn"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="1" warmup="0"  warmgroup=""     bypass="true"  priority="45"  once="true"  volume="-1" />
+  <Context name="Spawn"                      path="events/spawn"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="0.1" warmup="0"  warmgroup=""     bypass="true"  priority="45"  once="true"  volume="-1" />
 
   <!-- ── Vehicles ─────────────────────────────── -->
   <Context name="Vehicle_Gyrocopter"         path="vehicle/gyrocopter"          subfolders="false" fallback="Vehicle"           resume="true"  stale="30"  loop="false" cool="5" fadeintime="3" warmup="1"  warmgroup=""     bypass="true"  priority="70"  once="false" volume="-1" />
@@ -65,7 +66,7 @@
        (generic 50-52 AND biome 60-62) is still on the stack during the brief eviction
        window. At 91 the stinger wins over all combat tiers, Blood_Moon (71), and
        Low_Health_Panic (90); only Death (100) supersedes it. -->
-  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="-1" />
+  <Context name="POI_Cleared"                path="events/poi_cleared"          subfolders="false" fallback="Stack"             resume="true"  stale="60"  loop="false" cool="5" fadeintime="0.1" warmup="0"  warmgroup=""     bypass="true"  priority="91"  once="true"  volume="-1" />
 
   <!-- Infested and non-infested POI contexts share warmgroup="poi" so the clear handoff
        (POI_Infested_Tn -> POI_Tn) is continuous: the joining non-infested context inherits

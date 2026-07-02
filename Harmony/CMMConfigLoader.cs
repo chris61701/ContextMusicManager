@@ -121,7 +121,7 @@ namespace CMM
                         timeuntilcontextstale: IntAttr (el, "stale",    120),
                         loop:                  BoolAttr(el, "loop",     false),
                         cooldown:              IntAttr (el, "cool",     5),
-                        fadeInDuration:        IntAttr (el, "fadeintime", 5),
+                        fadeInDuration:        FloatAttr(el, "fadeintime", 5f),
                         bypassescooldown:      BoolAttr(el, "bypass",   false),
                         priority:              IntAttr (el, "priority", 0),
                         playOnce:              BoolAttr(el, "once",     false),

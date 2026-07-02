@@ -1268,8 +1268,14 @@ namespace CMM
                 CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(file));
 
             bool loop = ctx.Loop;
+            // POI_Cleared plays its "area cleared" fanfare OVER the existing music instead of
+            // replacing it (see the duck comment below). The fanfare fades in — and the bed ducks
+            // DOWN — over this window; 1s is gentle without letting full-volume music fight the
+            // fanfare's intro. Death/Spawn stay snappy (0.25s); they cut fully in/out.
+            bool poiCleared = contextName == "POI_Cleared";
             float fade;
-            if (ctx.PlayOnce) fade = 0.25f;
+            if (poiCleared) fade = 1f;
+            else if (ctx.PlayOnce) fade = 0.25f;
             else if (isSameContextSwitchingToNextTrack) fade = Mathf.Max(0.25f, TrackTransitionFadeDuration);
             else fade = ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration;
 
@@ -1291,15 +1297,21 @@ namespace CMM
             // never silences vanilla without a custom track to replace it.
             if (!inGame) FadeOutMenuVanillaIfAudible();
 
-            // A PlayOnce stinger (Spawn / Death / POI_Cleared) OVERRIDES the music underneath:
-            // the bed fades fully OUT, the stinger plays alone. After it ends the resolved context
-            // re-resolves on its own — POI_Cleared → ambient, Spawn → the zone. For Death this is
-            // what produces the wanted SILENCE between the death stinger and the respawn Spawn
-            // stinger: the bed is gone and the scan loop is dead-gated (playerIsDead) so nothing
-            // new resolves until respawn. duckTo = -1 = normal full crossfade-out (NOT a duck —
-            // ducking would swell the bed back when the stinger retires and play music in that gap).
-            // CmmMixer still supports ducking via Play(duckOthersTo>=0); we just don't ask for it.
-            float duckTo = -1f;
+            // A PlayOnce stinger (Spawn / Death / POI_Cleared) plays OVER the music underneath.
+            // Death / Spawn take the bed fully OUT (duckTo -1 = full crossfade-out): Death needs the
+            // SILENCE between the death stinger and the respawn Spawn stinger (bed gone + scan loop
+            // dead-gated until respawn), Spawn a clean hit. POI_Cleared instead DUCKS the bed — it
+            // keeps playing, quieter, under the "area cleared" fanfare and swells back over
+            // STINGER_RESTORE_SEC (0.6s, native) once the fanfare retires, so exploration music
+            // resumes naturally.
+            //
+            // TEMPORARY: duck level forced to 0 for now — the bed is silenced fully under the fanfare
+            // (fades to 0 over `fade`, does NOT swell back, since a 0 target isn't marked ducked). The
+            // intended AUDIBLE duck is 35% (StingerDuckLevel) of POI_Cleared's OWN volume — its
+            // <volume> setting, or the global VolumeModifier when that's unset (-1), matching how
+            // CMMConfig.GetVolume resolves an effective volume. Restore that to re-enable ducking:
+            //   CmmMixer.StingerDuckLevel * (ctx.VolumeOverride >= 0f ? ctx.VolumeOverride : CMMConfig.VolumeModifier)
+            float duckTo = poiCleared ? 0f /* TEMP: duck level 0 = bed silenced; restore to 35% of POI_Cleared volume (see note above) */ : -1f;
 
             // ── Hand the open + Play to the start worker (survives a main-thread freeze) ──
             EnsureNativeWorker();
@@ -1309,8 +1321,11 @@ namespace CMM
                 StartSeconds = startSeconds, Fade = fade, Loop = loop, TrackGain = trackGain,
                 DuckOthersTo = duckTo,
                 // Only a genuine context change may flush a deep cushion. A same-context Next/Prev
-                // must NOT — flushing teleports the outgoing track being crossfaded (jump + swell).
-                SnapTight = !isSameContextSwitchingToNextTrack,
+                // must NOT — flushing teleports the outgoing track being crossfaded (jump + swell) —
+                // and neither may an AUDIBLE POI_Cleared duck (duckTo > 0): the bed keeps playing
+                // under the fanfare, so a flush would skip it forward mid-duck. A duck to 0 (bed
+                // silenced) or a full crossfade-out (-1) may snap for a prompt fanfare.
+                SnapTight = !isSameContextSwitchingToNextTrack && duckTo <= 0f,
             };
             lock (_natQueueLock) _natQueue.Enqueue(req);
             _natSignal.Set();

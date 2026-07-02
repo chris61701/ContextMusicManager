@@ -27,7 +27,6 @@
   <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
   <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
 
-
   <!-- Fade between outgoing and incoming context instead of cutting immediately -->
   <CrossfadeEnabled>true</CrossfadeEnabled>
   <CrossFadeDuration>2.0</CrossFadeDuration>

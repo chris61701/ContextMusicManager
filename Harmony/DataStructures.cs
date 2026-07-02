@@ -55,7 +55,7 @@ namespace CMM
         public int TimeUntilContextStale { get; private set; }
         public bool Loop { get; private set; }
         public int Cooldown { get; private set; }
-        public int FadeInDuration { get; private set; }
+        public float FadeInDuration { get; private set; }
         public bool BypassesCooldown { get; private set; }
         public int Priority { get; private set; }
         public bool PlayOnce { get; private set; }
@@ -94,7 +94,7 @@ namespace CMM
         // readers, which must be kept in sync with each other.
         public Contexts(string context = "None", string path = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
-            bool loop = false, int cooldown = 5, int fadeInDuration = 3,
+            bool loop = false, int cooldown = 5, float fadeInDuration = 3f,
             bool bypassescooldown = false,
             int priority = 0, bool playOnce = false, float volumeOverride = -1f,
             int warmup = 0, string warmGroup = null, bool includeSubfolders = false,

@@ -50,7 +50,7 @@ namespace CMM
         {
             void Add(string name, string path, string fallback = "Stack",
                      bool resume = true, int stale = 120, bool loop = false,
-                     int cool = 5, int fadeintime = 5, bool bypass = false,
+                     int cool = 5, float fadeintime = 5f, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
                      int warmup = 0, string warmgroup = null, bool subfolders = false)
                 => contexts[name] = new Contexts(name, path, fallback, resume, stale,

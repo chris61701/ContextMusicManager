@@ -36,7 +36,7 @@ namespace CMM
             // once=false, warmup=0.  fadeintime = fade-in seconds; warmup = dwell seconds before viable.
             void Add(string name, string path, string fallback = "Stack",
                      bool resume = true, int stale = 120, bool loop = false,
-                     int cool = 5, int fadeintime = 5, bool bypass = false,
+                     int cool = 5, float fadeintime = 5f, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
                      int warmup = 0, string warmgroup = null, bool subfolders = false,
                      string link = null)
