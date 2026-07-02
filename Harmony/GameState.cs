@@ -6,11 +6,11 @@ namespace CMM
     // GAME STATE
     // ─────────────────────────────────────────────────────────────────────────
     // A version-agnostic snapshot of everything the context decision logic needs,
-    // captured once per scan tick by ContextResolver.BuildSnapshot(). All of the
-    // game-version forks (#if GV_A20 / GV_A21 / GV_V3) live in BuildSnapshot; from
-    // here on the data is plain primitives, so the decision layer — and the Lua
-    // script that will eventually own it — never touches a raw game type and stays
-    // identical across A20/A21/3.0.
+    // captured once per scan tick by ContextResolver.BuildSnapshot(). All cross-version
+    // game-API divergence is absorbed by BuildSnapshot's reflection bridges (a single
+    // 3.0-compiled binary runs on A20/A21/2.6/3.0); from here on the data is plain
+    // primitives, so the decision layer — and the Lua script that will eventually own
+    // it — never touches a raw game type and stays identical across all versions.
     //
     // The instance is reused across ticks (ResolveContext runs single-threaded on
     // the main thread, never re-entrant), so neither it nor its Enemies list/items

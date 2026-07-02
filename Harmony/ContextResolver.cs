@@ -10,10 +10,11 @@ namespace CMM
     // ─────────────────────────────────────────────────────────────────────────
     // CONTEXT RESOLVER
     // ─────────────────────────────────────────────────────────────────────────
-    // BuildSnapshot() polls the game into a version-agnostic GameState (ALL game-
-    // version #if GV_* forks live here). The decision logic — turning that snapshot
-    // into active context tokens — lives in the Lua script (see ScriptHost and
-    // Config/context.lua), so ResolveContext() is just "poll, then ask the script".
+    // BuildSnapshot() polls the game into a version-agnostic GameState. Every game-API member
+    // that differs across A20/A21/2.6/3.0 is bound by name at load (the reflection bridges above
+    // BuildSnapshot), so one 3.0-compiled binary runs on all four with no #if GV_* forks. The
+    // decision logic — turning that snapshot into active context tokens — lives in the Lua script
+    // (see ScriptHost and Config/context.lua), so ResolveContext() is just "poll, then ask the script".
 
     public static class ContextResolver
     {
@@ -315,8 +316,9 @@ namespace CMM
         // ─────────────────────────────────────────────────────────────────────
         // STAGE 1 — POLL: game state → version-agnostic GameState
         // ─────────────────────────────────────────────────────────────────────
-        // Every #if GV_* fork lives in this method. Returns null when the world or
-        // primary player isn't available yet; callers treat that as "no contexts".
+        // All cross-version game-API divergence is absorbed by the reflection bridges (declared
+        // above), so this method reads as straight-line version-agnostic code. Returns null when
+        // the world or primary player isn't available yet; callers treat that as "no contexts".
         public static GameState BuildSnapshot()
         {
             var world = GameManager.Instance?.World;

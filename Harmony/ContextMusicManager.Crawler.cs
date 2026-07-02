@@ -31,7 +31,7 @@ namespace CMM
     // of the ACTIVE context's playing file, so a deleted current track still hot-
     // swaps immediately rather than waiting for the crawler to reach its folder.
     //
-    // `cmm rescan <ctx|all>` (CmmConsoleCmd) forces a context's cached state to be
+    // `cmm rescan <ctx|all>` (CmmConsole) forces a context's cached state to be
     // discarded so the next sweep re-lists every folder from scratch.
     public partial class ContextMusicManager
     {
@@ -282,7 +282,7 @@ namespace CMM
             }
         }
 
-        // ── Console command surface (called from CmmConsoleCmd) ─────────────────
+        // ── Console command surface (called from CmmConsole.ExecuteImpl) ────────
         // Returns a human-readable status line for the console.
         public static string RescanCommand(string target)
         {
