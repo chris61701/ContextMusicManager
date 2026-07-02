@@ -265,6 +265,9 @@ CMM_API void cmm_opus_close(cmm_decoder* d)
     if (d->of)  op_free(d->of);
     if (d->buf) free(d->buf);
     if (d->fp)  fclose(d->fp);
+#ifdef _WIN32
+    if (d->fh)  CloseHandle((HANDLE)d->fh);   /* Windows streamed-Opus handle */
+#endif
     free(d);
 }
 
@@ -400,24 +403,99 @@ CMM_API void cmm_vorbis_close(cmm_decoder* d)
  * returned handle is otherwise identical to a *_open_memory one — same read /
  * seek / close functions apply. */
 
-/* opusfile FILE* callbacks (close=NULL: cmm_opus_close owns the handle). */
+/* opusfile FILE* callbacks (close=NULL: cmm_opus_close owns the handle). Used by the
+ * POSIX big-file streaming path; on Windows the raw-HANDLE variants below are used. */
 static int        cmm_op_read(void* s, unsigned char* p, int n) { return (int)fread(p, 1, (size_t)n, (FILE*)s); }
 static int        cmm_op_seek(void* s, opus_int64 off, int whence) { return CMM_FSEEK((FILE*)s, off, whence); }
 static opus_int64 cmm_op_tell(void* s) { return (opus_int64)CMM_FTELL((FILE*)s); }
 static const OpusFileCallbacks CMM_OP_CB = { cmm_op_read, cmm_op_seek, cmm_op_tell, NULL };
 
+#ifdef _WIN32
+/* opusfile callbacks over a raw Win32 HANDLE (userData = the cmm_decoder; d->fh is the
+ * handle) — the big-file STREAMING path, race-free against concurrent opens exactly like
+ * the FLAC HANDLE callbacks (no msvcrt fd table). cmm_opus_close owns the handle. */
+static int cmm_op_read_h(void* s, unsigned char* p, int n)
+{
+    if (n <= 0) return 0;
+    HANDLE h = (HANDLE)((cmm_decoder*)s)->fh;
+    DWORD got = 0;
+    if (!ReadFile(h, p, (DWORD)n, &got, NULL)) return -1;   /* opus contract: <0 = error */
+    return (int)got;                                        /* 0 = EOF */
+}
+static int cmm_op_seek_h(void* s, opus_int64 off, int whence)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)s)->fh;
+    LARGE_INTEGER dist; dist.QuadPart = off;
+    DWORD method = (whence == SEEK_CUR) ? FILE_CURRENT
+                 : (whence == SEEK_END) ? FILE_END : FILE_BEGIN;
+    return SetFilePointerEx(h, dist, NULL, method) ? 0 : -1;
+}
+static opus_int64 cmm_op_tell_h(void* s)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)s)->fh;
+    LARGE_INTEGER zero; zero.QuadPart = 0; LARGE_INTEGER pos;
+    if (!SetFilePointerEx(h, zero, &pos, FILE_CURRENT)) return -1;
+    return (opus_int64)pos.QuadPart;
+}
+static const OpusFileCallbacks CMM_OP_CB_H = { cmm_op_read_h, cmm_op_seek_h, cmm_op_tell_h, NULL };
+#endif /* _WIN32 */
+
 CMM_API cmm_decoder* cmm_opus_open_file(const wchar_t* path, int* channels,
                                         int* sampleRate, long long* totalFrames, int* err)
 {
-    /* Whole-file native buffer + in-memory decode, NOT a streaming msvcrt FILE*:
-     * concurrent opens race msvcrt's fd table (see cmm_read_whole_file /
-     * cmm_flac_open_file). cmm_opus_open_memory copies the buffer, so we free ours. */
     if (err) *err = 0;
+
+    /* BUFFERED path (files ≤ CMM_BUFFER_MAX): decode from a whole-file native buffer read
+     * via raw Win32 (race-free — see cmm_read_whole_file), referenced IN PLACE. No second
+     * copy: op_open_memory keeps this buffer for the stream's life and cmm_opus_close frees
+     * it. (cmm_opus_open_memory still copies — it can't assume it owns a caller's buffer.) */
     long long len = 0;
-    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
-    if (!buf) { if (err) *err = OP_EFAULT; return NULL; }
-    cmm_decoder* d = cmm_opus_open_memory(buf, len, channels, sampleRate, totalFrames, err);
-    free(buf);
+    unsigned char* buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
+    if (buf) {
+        int e = 0;
+        OggOpusFile* of = op_open_memory(buf, (size_t)len, &e);
+        if (!of) { free(buf); if (err) *err = e; return NULL; }
+        cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+        if (!d) { op_free(of); free(buf); if (err) *err = OP_EFAULT; return NULL; }
+        d->kind = CMM_KIND_OPUS; d->of = of; d->buf = buf;
+        d->channels = op_channel_count(of, -1);
+        if (channels)    *channels    = d->channels;
+        if (sampleRate)  *sampleRate  = 48000;            /* Opus always decodes to 48 kHz */
+        if (totalFrames) *totalFrames = (long long)op_pcm_total(of, -1);
+        return d;
+    }
+
+    /* STREAMING path (files > CMM_BUFFER_MAX): stream via callbacks so a very long Opus file
+     * isn't held whole in RAM (mirrors the FLAC big-file path). Windows streams over a RAW
+     * Win32 HANDLE (no msvcrt fd table — race-free); POSIX keeps the plain FILE*. */
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { if (err) *err = OP_EFAULT; return NULL; }
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); if (err) *err = OP_EFAULT; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { CloseHandle(h); if (err) *err = OP_EFAULT; return NULL; }
+    d->fh = (void*)h; d->fsize = sz.QuadPart;   /* set BEFORE op_open — it reads via the callbacks */
+    int e = 0;
+    OggOpusFile* of = op_open_callbacks(d, &CMM_OP_CB_H, NULL, 0, &e);
+    if (!of) { CloseHandle(h); free(d); if (err) *err = e; return NULL; }
+#else
+    FILE* fp = cmm_open_path(path);
+    if (!fp) { if (err) *err = OP_EFAULT; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { fclose(fp); if (err) *err = OP_EFAULT; return NULL; }
+    d->fp = fp;
+    int e = 0;
+    OggOpusFile* of = op_open_callbacks(fp, &CMM_OP_CB, NULL, 0, &e);
+    if (!of) { fclose(fp); free(d); if (err) *err = e; return NULL; }
+#endif
+    d->kind = CMM_KIND_OPUS; d->of = of;
+    d->channels = op_channel_count(of, -1);
+    if (channels)    *channels    = d->channels;
+    if (sampleRate)  *sampleRate  = 48000;
+    if (totalFrames) *totalFrames = (long long)op_pcm_total(of, -1);
     return d;
 }
 
@@ -637,14 +715,32 @@ CMM_API cmm_decoder* cmm_flac_open_file(const wchar_t* path, int* channels,
 CMM_API cmm_decoder* cmm_vorbis_open_file(const wchar_t* path, int* channels,
                                           int* sampleRate, long long* totalFrames, int* err)
 {
-    /* Whole-file native buffer + in-memory decode (see cmm_flac_open_file) — avoids
-     * the concurrent msvcrt FILE* fd-table race. cmm_vorbis_open_memory copies. */
+    /* Whole-file native buffer (raw Win32 — race-free), referenced IN PLACE by stb_vorbis;
+     * cmm_vorbis_close frees it. No second copy (cmm_vorbis_open_memory still copies for its
+     * caller-owned-buffer callers). stb_vorbis has NO pull read/seek callback API, so unlike
+     * FLAC/MP3/WAV/Opus this format has no streaming path — it is always fully buffered.
+     * cmm_read_whole_file already rejects > 2 GiB, so the (int) length cast is safe. */
     if (err) *err = 0;
     long long len = 0;
     unsigned char* buf = cmm_read_whole_file(path, 0, &len);
     if (!buf) { if (err) *err = -1; return NULL; }
-    cmm_decoder* d = cmm_vorbis_open_memory(buf, len, channels, sampleRate, totalFrames, err);
-    free(buf);
+
+    int e = 0;
+    stb_vorbis* v = stb_vorbis_open_memory(buf, (int)len, &e, NULL);
+    if (!v) { free(buf); if (err) *err = e ? e : -1; return NULL; }
+
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { stb_vorbis_close(v); free(buf); if (err) *err = -1; return NULL; }
+
+    stb_vorbis_info info = stb_vorbis_get_info(v);
+    d->kind     = CMM_KIND_VORBIS;
+    d->vorbis   = v;
+    d->buf      = buf;
+    d->channels = info.channels;
+
+    if (channels)    *channels    = info.channels;
+    if (sampleRate)  *sampleRate  = (int)info.sample_rate;       /* native rate, preserved */
+    if (totalFrames) *totalFrames = (long long)stb_vorbis_stream_length_in_samples(v);
     return d;
 }
 
@@ -703,6 +799,9 @@ CMM_API void cmm_mp3_close(cmm_decoder* d)
     if (d->mp3) { drmp3_uninit(d->mp3); free(d->mp3); }
     if (d->buf) free(d->buf);
     if (d->fp)  fclose(d->fp);
+#ifdef _WIN32
+    if (d->fh)  CloseHandle((HANDLE)d->fh);   /* Windows streamed-MP3 handle */
+#endif
     free(d);
 }
 
@@ -759,6 +858,9 @@ CMM_API void cmm_wav_close(cmm_decoder* d)
     if (d->wav) { drwav_uninit(d->wav); free(d->wav); }
     if (d->buf) free(d->buf);
     if (d->fp)  fclose(d->fp);
+#ifdef _WIN32
+    if (d->fh)  CloseHandle((HANDLE)d->fh);   /* Windows streamed-WAV handle */
+#endif
     free(d);
 }
 
@@ -783,17 +885,92 @@ static drmp3_bool32 cmm_drm_tell(void* ud, drmp3_int64* cursor)
     return DRMP3_TRUE;
 }
 
+#ifdef _WIN32
+/* dr_mp3 callbacks over a raw Win32 HANDLE (userData = the cmm_decoder) — the big-file
+ * STREAMING path, race-free like the FLAC HANDLE callbacks. cmm_mp3_close owns the handle. */
+static size_t cmm_drm_read_h(void* ud, void* out, size_t n)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)ud)->fh;
+    size_t done = 0;
+    while (done < n) {
+        size_t remain = n - done;
+        DWORD  want   = remain > (1u << 30) ? (1u << 30) : (DWORD)remain;
+        DWORD  got    = 0;
+        if (!ReadFile(h, (unsigned char*)out + done, want, &got, NULL) || got == 0) break;
+        done += got;
+    }
+    return done;
+}
+static drmp3_bool32 cmm_drm_seek_h(void* ud, int offset, drmp3_seek_origin origin)
+{
+    LARGE_INTEGER dist; dist.QuadPart = offset;
+    DWORD method = (origin == DRMP3_SEEK_CUR) ? FILE_CURRENT
+                 : (origin == DRMP3_SEEK_END) ? FILE_END : FILE_BEGIN;
+    return SetFilePointerEx((HANDLE)((cmm_decoder*)ud)->fh, dist, NULL, method) ? DRMP3_TRUE : DRMP3_FALSE;
+}
+static drmp3_bool32 cmm_drm_tell_h(void* ud, drmp3_int64* cursor)
+{
+    LARGE_INTEGER zero; zero.QuadPart = 0; LARGE_INTEGER pos;
+    if (!SetFilePointerEx((HANDLE)((cmm_decoder*)ud)->fh, zero, &pos, FILE_CURRENT)) return DRMP3_FALSE;
+    *cursor = (drmp3_int64)pos.QuadPart;
+    return DRMP3_TRUE;
+}
+#endif /* _WIN32 */
+
 CMM_API cmm_decoder* cmm_mp3_open_file(const wchar_t* path, int* channels,
                                        int* sampleRate, long long* totalFrames, int* err)
 {
-    /* Whole-file native buffer + in-memory decode (see cmm_flac_open_file) — avoids
-     * the concurrent msvcrt FILE* fd-table race. cmm_mp3_open_memory copies. */
     if (err) *err = 0;
+
+    /* BUFFERED path (files ≤ CMM_BUFFER_MAX): whole-file native buffer (raw Win32 — race-
+     * free), referenced IN PLACE by dr_mp3; cmm_mp3_close frees it. No second copy. */
     long long len = 0;
-    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
-    if (!buf) { if (err) *err = -1; return NULL; }
-    cmm_decoder* d = cmm_mp3_open_memory(buf, len, channels, sampleRate, totalFrames, err);
-    free(buf);
+    unsigned char* buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
+    if (buf) {
+        drmp3* m = (drmp3*)malloc(sizeof(drmp3));
+        if (!m) { free(buf); if (err) *err = -1; return NULL; }
+        if (!drmp3_init_memory(m, buf, (size_t)len, NULL)) { free(m); free(buf); if (err) *err = -1; return NULL; }
+        cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+        if (!d) { drmp3_uninit(m); free(m); free(buf); if (err) *err = -1; return NULL; }
+        d->kind = CMM_KIND_MP3; d->mp3 = m; d->buf = buf; d->channels = (int)m->channels;
+        if (channels)    *channels    = (int)m->channels;
+        if (sampleRate)  *sampleRate  = (int)m->sampleRate;
+        if (totalFrames) *totalFrames = (long long)drmp3_get_pcm_frame_count(m);
+        return d;
+    }
+
+    /* STREAMING path (files > CMM_BUFFER_MAX). Windows: raw Win32 HANDLE. POSIX: FILE*. */
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { if (err) *err = -1; return NULL; }
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); if (err) *err = -1; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { CloseHandle(h); if (err) *err = -1; return NULL; }
+    d->fh = (void*)h; d->fsize = sz.QuadPart;   /* set BEFORE drmp3_init — it reads via the callbacks */
+    drmp3* m = (drmp3*)malloc(sizeof(drmp3));
+    if (!m) { CloseHandle(h); free(d); if (err) *err = -1; return NULL; }
+    if (!drmp3_init(m, cmm_drm_read_h, cmm_drm_seek_h, cmm_drm_tell_h, NULL, d, NULL)) {
+        free(m); CloseHandle(h); free(d); if (err) *err = -1; return NULL;
+    }
+#else
+    FILE* fp = cmm_open_path(path);
+    if (!fp) { if (err) *err = -1; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { fclose(fp); if (err) *err = -1; return NULL; }
+    d->fp = fp;
+    drmp3* m = (drmp3*)malloc(sizeof(drmp3));
+    if (!m) { fclose(fp); free(d); if (err) *err = -1; return NULL; }
+    if (!drmp3_init(m, cmm_drm_read, cmm_drm_seek, cmm_drm_tell, NULL, fp, NULL)) {
+        free(m); fclose(fp); free(d); if (err) *err = -1; return NULL;
+    }
+#endif
+    d->kind = CMM_KIND_MP3; d->mp3 = m; d->channels = (int)m->channels;
+    if (channels)    *channels    = (int)m->channels;
+    if (sampleRate)  *sampleRate  = (int)m->sampleRate;
+    if (totalFrames) *totalFrames = (long long)drmp3_get_pcm_frame_count(m);
     return d;
 }
 
@@ -814,17 +991,93 @@ static drwav_bool32 cmm_drw_tell(void* ud, drwav_int64* cursor)
     return DRWAV_TRUE;
 }
 
+#ifdef _WIN32
+/* dr_wav callbacks over a raw Win32 HANDLE (userData = the cmm_decoder) — the big-file
+ * STREAMING path (uncompressed WAV is the format most likely to exceed CMM_BUFFER_MAX),
+ * race-free like the FLAC HANDLE callbacks. cmm_wav_close owns the handle. */
+static size_t cmm_drw_read_h(void* ud, void* out, size_t n)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)ud)->fh;
+    size_t done = 0;
+    while (done < n) {
+        size_t remain = n - done;
+        DWORD  want   = remain > (1u << 30) ? (1u << 30) : (DWORD)remain;
+        DWORD  got    = 0;
+        if (!ReadFile(h, (unsigned char*)out + done, want, &got, NULL) || got == 0) break;
+        done += got;
+    }
+    return done;
+}
+static drwav_bool32 cmm_drw_seek_h(void* ud, int offset, drwav_seek_origin origin)
+{
+    LARGE_INTEGER dist; dist.QuadPart = offset;
+    DWORD method = (origin == DRWAV_SEEK_CUR) ? FILE_CURRENT
+                 : (origin == DRWAV_SEEK_END) ? FILE_END : FILE_BEGIN;
+    return SetFilePointerEx((HANDLE)((cmm_decoder*)ud)->fh, dist, NULL, method) ? DRWAV_TRUE : DRWAV_FALSE;
+}
+static drwav_bool32 cmm_drw_tell_h(void* ud, drwav_int64* cursor)
+{
+    LARGE_INTEGER zero; zero.QuadPart = 0; LARGE_INTEGER pos;
+    if (!SetFilePointerEx((HANDLE)((cmm_decoder*)ud)->fh, zero, &pos, FILE_CURRENT)) return DRWAV_FALSE;
+    *cursor = (drwav_int64)pos.QuadPart;
+    return DRWAV_TRUE;
+}
+#endif /* _WIN32 */
+
 CMM_API cmm_decoder* cmm_wav_open_file(const wchar_t* path, int* channels,
                                        int* sampleRate, long long* totalFrames, int* err)
 {
-    /* Whole-file native buffer + in-memory decode (see cmm_flac_open_file) — avoids
-     * the concurrent msvcrt FILE* fd-table race. cmm_wav_open_memory copies. */
     if (err) *err = 0;
+
+    /* BUFFERED path (files ≤ CMM_BUFFER_MAX): whole-file native buffer (raw Win32 — race-
+     * free), referenced IN PLACE by dr_wav; cmm_wav_close frees it. No second copy. */
     long long len = 0;
-    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
-    if (!buf) { if (err) *err = -1; return NULL; }
-    cmm_decoder* d = cmm_wav_open_memory(buf, len, channels, sampleRate, totalFrames, err);
-    free(buf);
+    unsigned char* buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
+    if (buf) {
+        drwav* w = (drwav*)malloc(sizeof(drwav));
+        if (!w) { free(buf); if (err) *err = -1; return NULL; }
+        if (!drwav_init_memory(w, buf, (size_t)len, NULL)) { free(w); free(buf); if (err) *err = -1; return NULL; }
+        cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+        if (!d) { drwav_uninit(w); free(w); free(buf); if (err) *err = -1; return NULL; }
+        d->kind = CMM_KIND_WAV; d->wav = w; d->buf = buf; d->channels = (int)w->channels;
+        if (channels)    *channels    = (int)w->channels;
+        if (sampleRate)  *sampleRate  = (int)w->sampleRate;
+        if (totalFrames) *totalFrames = (long long)w->totalPCMFrameCount;
+        return d;
+    }
+
+    /* STREAMING path (files > CMM_BUFFER_MAX). Windows: raw Win32 HANDLE. POSIX: FILE*. */
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { if (err) *err = -1; return NULL; }
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); if (err) *err = -1; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { CloseHandle(h); if (err) *err = -1; return NULL; }
+    d->fh = (void*)h; d->fsize = sz.QuadPart;   /* set BEFORE drwav_init — it reads via the callbacks */
+    drwav* w = (drwav*)malloc(sizeof(drwav));
+    if (!w) { CloseHandle(h); free(d); if (err) *err = -1; return NULL; }
+    if (!drwav_init(w, cmm_drw_read_h, cmm_drw_seek_h, cmm_drw_tell_h, d, NULL)) {
+        free(w); CloseHandle(h); free(d); if (err) *err = -1; return NULL;
+    }
+#else
+    FILE* fp = cmm_open_path(path);
+    if (!fp) { if (err) *err = -1; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { fclose(fp); if (err) *err = -1; return NULL; }
+    d->fp = fp;
+    drwav* w = (drwav*)malloc(sizeof(drwav));
+    if (!w) { fclose(fp); free(d); if (err) *err = -1; return NULL; }
+    if (!drwav_init(w, cmm_drw_read, cmm_drw_seek, cmm_drw_tell, fp, NULL)) {
+        free(w); fclose(fp); free(d); if (err) *err = -1; return NULL;
+    }
+#endif
+    d->kind = CMM_KIND_WAV; d->wav = w; d->channels = (int)w->channels;
+    if (channels)    *channels    = (int)w->channels;
+    if (sampleRate)  *sampleRate  = (int)w->sampleRate;
+    if (totalFrames) *totalFrames = (long long)w->totalPCMFrameCount;
     return d;
 }
 

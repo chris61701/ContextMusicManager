@@ -1011,7 +1011,18 @@ namespace CMM
             {
                 IsBackground = true,
                 Name = "CMM-NativeStart",
-                Priority = System.Threading.ThreadPriority.AboveNormal,
+                // BELOW-NORMAL, not AboveNormal: this worker's one job at a context switch is
+                // to OPEN the decoder (AudioDecoder.OpenNativeHandle) before handing it to the
+                // mixer, and a cold codec open is a CPU burst — worst for Opus, whose seekable
+                // open decodes initial packets + probes the stream. At AboveNormal that burst
+                // PREEMPTED Unity's (Normal-priority) render thread, so the first play of a
+                // slow-opening track hitched the FRAME (the audio never underran — the native
+                // producer thread stays AboveNormal and keeps the output ring full). Dropping
+                // to BelowNormal lets the OS keep the game smooth and merely stretches a cold
+                // open a little under load; the crossfade window hides the slightly later start.
+                // Same rationale as the loudness worker (see StartMeasure). Do NOT raise this to
+                // shave start latency — that reintroduces the frame stutter it exists to avoid.
+                Priority = System.Threading.ThreadPriority.BelowNormal,
             };
             _natWorker.Start();
         }
