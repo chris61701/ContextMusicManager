@@ -15,8 +15,9 @@
 #       _wassert → abort() → the game hard-crashes (STATUS_FATAL_APP_EXIT 0x40000015,
 #       no managed stack — confirmed from a crash dump). Release decoders MUST ship
 #       with asserts off (the upstream-intended config); recoverable errors are already
-#       reported via return values, not assert. Covers dr_flac/mp3/wav, stb_vorbis,
-#       minimp4, opusfile (every TU compiled here).
+#       reported via return values, not assert. Covers dr_flac/mp3/wav, minimp4,
+#       opusfile (every TU compiled here); libvorbis is prebuilt with NDEBUG too
+#       (build_vorbis.sh).
 # ──────────────────────────────────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")"
@@ -32,7 +33,7 @@ INC=(
   -Ithird_party/ogg/include
   -Ibuild/ogg/include          # generated ogg/config_types.h
   -Ithird_party/dr_libs        # dr_flac.h
-  -Ithird_party/stb            # stb_vorbis.c
+  -Ithird_party/vorbis/include # vorbis/vorbisfile.h
   -Ithird_party/fdk-aac/libAACdec/include   # aacdecoder_lib.h
   -Ithird_party/fdk-aac/libSYS/include      # FDK_audio.h / machine_type.h
   -Ithird_party/minimp4        # minimp4.h
@@ -46,7 +47,6 @@ SRC=(
   dr_flac_impl.c
   dr_mp3_impl.c
   dr_wav_impl.c
-  stb_vorbis_impl.c
   minimp4_impl.c
   miniaudio_impl.c             # the one MINIAUDIO_IMPLEMENTATION TU
   cmm_out.c                    # cmm_out_* playback shim
@@ -68,7 +68,7 @@ mkdir -p "$(dirname "$OUT")"
   -DMA_NO_RESOURCE_MANAGER -DMA_NO_NODE_GRAPH \
   "${INC[@]}" \
   "${SRC[@]}" \
-  build/fdk-aac/libfdk-aac.a build/opus/libopus.a build/ogg/libogg.a \
+  build/fdk-aac/libfdk-aac.a build/vorbis/libvorbis.a build/opus/libopus.a build/ogg/libogg.a \
   -lm -lstdc++ -static -fno-stack-protector -mstackrealign
 
 echo "built: $OUT"

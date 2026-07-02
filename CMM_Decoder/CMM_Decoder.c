@@ -98,8 +98,12 @@ static FILE* cmm_open_path(const wchar_t* path)
  * stream (Windows: over a raw Win32 HANDLE — see the FLAC streaming path). This is now
  * purely a RAM-vs-speed tradeoff, NOT a safety boundary: both paths are race-free, so
  * the loudness measure normalizes files of ANY size (the >100 MB ambient tracks stream
- * with a few KB of state instead of a 100 MB buffer). Mirrors HotSwapMaxFileSizeBytes. */
+ * with a few KB of state instead of a 100 MB buffer). Mirrors HotSwapMaxFileSizeBytes.
+ * Overridable at build time (e.g. -DCMM_BUFFER_MAX=1 forces the streaming path for ALL
+ * files, to exercise it in a test build). */
+#ifndef CMM_BUFFER_MAX
 #define CMM_BUFFER_MAX (100LL * 1024 * 1024)
+#endif
 
 /* Whole-file → native buffer via raw Win32 (thread-safe; no msvcrt fd table). Returns
  * NULL (caller falls back to streaming) if the file exceeds maxBytes (>0) or the 2 GiB
@@ -114,10 +118,13 @@ static unsigned char* cmm_read_whole_file(const wchar_t* path, long long maxByte
 /* dr_mp3 / dr_wav prototypes + structs (implementations in dr_mp3_impl.c / dr_wav_impl.c). */
 #include "dr_mp3.h"
 #include "dr_wav.h"
-/* stb_vorbis prototypes (implementation lives in stb_vorbis_impl.c). */
-#define STB_VORBIS_HEADER_ONLY
-#include "stb_vorbis.c"
-#undef STB_VORBIS_HEADER_ONLY
+/* libvorbisfile (ov_*) — the high-level Vorbis file/stream API. Prebuilt into
+ * build/vorbis/libvorbis.a from third_party/vorbis (see build_vorbis.sh); it
+ * pulls in vorbis/codec.h + ogg/ogg.h. Replaces the old header-only stb_vorbis,
+ * which had no pull read/seek callback API and so could not stream. Like
+ * opusfile, ov_open_callbacks lets us stream big files over raw Win32 HANDLE /
+ * FILE* callbacks (race-free — no msvcrt fd table) instead of buffering whole. */
+#include <vorbis/vorbisfile.h>
 
 /* AAC: fdk-aac decoder (libfdk-aac.a) + minimp4 MP4/M4A demuxer. The minimp4
  * IMPLEMENTATION lives in minimp4_impl.c; here we only pull its MP4D_* demux
@@ -143,13 +150,15 @@ struct cmm_decoder {
     int            kind;   /* CMM_KIND_* */
     OggOpusFile*   of;     /* libopusfile handle (opus)    */
     drflac*        flac;   /* dr_flac handle (flac)        */
-    stb_vorbis*    vorbis; /* stb_vorbis handle (vorbis)   */
+    OggVorbis_File* vorbis; /* libvorbisfile handle (vorbis); owned, malloc'd */
     drmp3*         mp3;    /* dr_mp3 handle (mp3)          */
     drwav*         wav;    /* dr_wav handle (wav/aiff)     */
     unsigned char* buf;    /* owned copy of source bytes (memory opens; NULL for file opens) */
     FILE*          fp;     /* owned file handle (POSIX file/streaming opens; NULL otherwise) */
     void*          fh;     /* owned Win32 HANDLE for streamed FLAC (Windows big-file path; NULL otherwise) */
-    long long      fsize;  /* cached file size for the streamed past-EOF seek check (fh path) */
+    long long      fsize;  /* cached file size for the streamed past-EOF seek check (fh path);
+                            * also the buffer length for the Vorbis in-memory callback stream */
+    long long      mpos;   /* read cursor for the Vorbis in-memory callback stream (buf/fsize) */
     int            channels;
 
     /* ── AAC (fdk-aac + minimp4) ──────────────────────────────────────────
@@ -332,7 +341,86 @@ CMM_API void cmm_flac_close(cmm_decoder* d)
     free(d);
 }
 
-/* ── Vorbis (stb_vorbis) ─────────────────────────────────────────────────── */
+/* ── Vorbis (libvorbisfile) ───────────────────────────────────────────────
+ * ov_callbacks mirror opusfile's OpusFileCallbacks: {read, seek, close, tell}.
+ * close is always NULL — the cmm_decoder owns the datasource and cmm_vorbis_close
+ * frees it (buffer / FILE* / HANDLE), exactly like the Opus/FLAC file opens.
+ * Three datasource shapes share these: an in-memory buffer (owned copy for
+ * open_memory, or the whole-file buffer for the ≤cap file path), a raw Win32
+ * HANDLE (Windows big-file streaming), and a FILE* (POSIX big-file streaming). */
+
+/* In-memory stream over d->buf (length d->fsize, cursor d->mpos). */
+static size_t cmm_ov_mread(void* p, size_t size, size_t nmemb, void* ds)
+{
+    cmm_decoder* d = (cmm_decoder*)ds;
+    long long remain = d->fsize - d->mpos;
+    if (remain <= 0 || size == 0) return 0;
+    size_t items = (size_t)(remain / (long long)size);
+    if (items > nmemb) items = nmemb;
+    size_t bytes = items * size;
+    memcpy(p, d->buf + d->mpos, bytes);
+    d->mpos += (long long)bytes;
+    return items;
+}
+static int cmm_ov_mseek(void* ds, ogg_int64_t off, int whence)
+{
+    cmm_decoder* d = (cmm_decoder*)ds;
+    long long base = (whence == SEEK_CUR) ? d->mpos
+                   : (whence == SEEK_END) ? d->fsize : 0;
+    long long np = base + (long long)off;
+    if (np < 0 || np > d->fsize) return -1;
+    d->mpos = np;
+    return 0;
+}
+static long cmm_ov_mtell(void* ds) { return (long)((cmm_decoder*)ds)->mpos; }
+static const ov_callbacks CMM_OV_CB_MEM = { cmm_ov_mread, cmm_ov_mseek, NULL, cmm_ov_mtell };
+
+#ifdef _WIN32
+/* Raw Win32 HANDLE stream (userData = the cmm_decoder; d->fh is the handle) —
+ * race-free against concurrent opens (no msvcrt fd table), like the FLAC/Opus
+ * HANDLE callbacks. cmm_vorbis_close owns the handle. */
+static size_t cmm_ov_read_h(void* p, size_t size, size_t nmemb, void* ds)
+{
+    if (size == 0) return 0;
+    HANDLE h = (HANDLE)((cmm_decoder*)ds)->fh;
+    DWORD got = 0;
+    if (!ReadFile(h, p, (DWORD)(size * nmemb), &got, NULL)) return 0;
+    return (size_t)got / size;   /* complete elements */
+}
+static int cmm_ov_seek_h(void* ds, ogg_int64_t off, int whence)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)ds)->fh;
+    LARGE_INTEGER dist; dist.QuadPart = off;
+    DWORD method = (whence == SEEK_CUR) ? FILE_CURRENT
+                 : (whence == SEEK_END) ? FILE_END : FILE_BEGIN;
+    return SetFilePointerEx(h, dist, NULL, method) ? 0 : -1;
+}
+static long cmm_ov_tell_h(void* ds)
+{
+    HANDLE h = (HANDLE)((cmm_decoder*)ds)->fh;
+    LARGE_INTEGER zero; zero.QuadPart = 0; LARGE_INTEGER pos;
+    if (!SetFilePointerEx(h, zero, &pos, FILE_CURRENT)) return -1;
+    return (long)pos.QuadPart;
+}
+static const ov_callbacks CMM_OV_CB_H = { cmm_ov_read_h, cmm_ov_seek_h, NULL, cmm_ov_tell_h };
+#else
+/* POSIX FILE* stream (datasource = the FILE*; cmm_vorbis_close fcloses it). */
+static int  cmm_ov_fseek(void* ds, ogg_int64_t off, int whence) { return CMM_FSEEK((FILE*)ds, off, whence); }
+static long cmm_ov_ftell(void* ds) { return (long)CMM_FTELL((FILE*)ds); }
+static const ov_callbacks CMM_OV_CB_FP = { fread, cmm_ov_fseek, NULL, cmm_ov_ftell };
+#endif
+
+/* Finish opening: read stream info into the out-params. Shared by every open. */
+static cmm_decoder* cmm_vorbis_finish(cmm_decoder* d, int* channels, int* sampleRate,
+                                      long long* totalFrames)
+{
+    vorbis_info* vi = ov_info(d->vorbis, -1);
+    d->channels = vi ? vi->channels : 0;
+    if (channels)    *channels    = d->channels;
+    if (sampleRate)  *sampleRate  = vi ? (int)vi->rate : 0;   /* native rate, preserved */
+    if (totalFrames) *totalFrames = (long long)ov_pcm_total(d->vorbis, -1);
+    return d;
+}
 
 CMM_API cmm_decoder* cmm_vorbis_open_memory(const unsigned char* data, long long len,
                                             int* channels, int* sampleRate,
@@ -340,59 +428,58 @@ CMM_API cmm_decoder* cmm_vorbis_open_memory(const unsigned char* data, long long
 {
     if (err) *err = 0;
     if (!data || len <= 0) { if (err) *err = -1; return NULL; }
-    /* stb_vorbis_open_memory takes a 32-bit length; reject anything that overflows. */
-    if (len > 0x7fffffffLL) { if (err) *err = -1; return NULL; }
 
-    /* stb_vorbis keeps the buffer for the life of the decoder, so we own a copy —
-     * the caller's buffer may be pooled/overwritten after this returns. */
+    /* Own a copy — the caller's buffer may be pooled/overwritten after this returns. */
     unsigned char* copy = (unsigned char*)malloc((size_t)len);
     if (!copy) { if (err) *err = -1; return NULL; }
     memcpy(copy, data, (size_t)len);
 
-    int e = 0;
-    stb_vorbis* v = stb_vorbis_open_memory(copy, (int)len, &e, NULL);
-    if (!v) { free(copy); if (err) *err = e ? e : -1; return NULL; }
-
     cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { stb_vorbis_close(v); free(copy); if (err) *err = -1; return NULL; }
+    if (!d) { free(copy); if (err) *err = -1; return NULL; }
+    d->kind = CMM_KIND_VORBIS; d->buf = copy; d->fsize = len; d->mpos = 0;
+    d->vorbis = (OggVorbis_File*)calloc(1, sizeof(OggVorbis_File));
+    if (!d->vorbis) { free(copy); free(d); if (err) *err = -1; return NULL; }
 
-    stb_vorbis_info info = stb_vorbis_get_info(v);
-    d->kind     = CMM_KIND_VORBIS;
-    d->of       = NULL;
-    d->flac     = NULL;
-    d->vorbis   = v;
-    d->buf      = copy;
-    d->fp       = NULL;
-    d->channels = info.channels;
-
-    if (channels)    *channels    = info.channels;
-    if (sampleRate)  *sampleRate  = (int)info.sample_rate;       /* native rate, preserved */
-    if (totalFrames) *totalFrames = (long long)stb_vorbis_stream_length_in_samples(v);
-    return d;
+    int e = ov_open_callbacks(d, d->vorbis, NULL, 0, CMM_OV_CB_MEM);
+    if (e < 0) { free(d->vorbis); free(copy); free(d); if (err) *err = e; return NULL; }
+    return cmm_vorbis_finish(d, channels, sampleRate, totalFrames);
 }
 
 CMM_API int cmm_vorbis_read_float(cmm_decoder* d, float* out, int maxFrames)
 {
     if (!d || !d->vorbis || !out || maxFrames <= 0) return 0;
-    /* Returns FRAMES per channel decoded (0 at EOF), looping across Vorbis frames
-     * internally. num_floats is total output capacity in floats. */
-    return stb_vorbis_get_samples_float_interleaved(d->vorbis, d->channels, out,
-                                                    maxFrames * d->channels);
+    int ch = d->channels;
+    /* ov_read_float returns non-interleaved channel pointers and only up to one
+     * packet per call, so loop and interleave until the request is filled or EOF. */
+    int total = 0;
+    while (total < maxFrames) {
+        float** pcm = NULL; int bs = 0;
+        long got = ov_read_float(d->vorbis, &pcm, maxFrames - total, &bs);
+        if (got <= 0) break;                       /* 0 = EOF, <0 = decode error */
+        for (long i = 0; i < got; i++)
+            for (int c = 0; c < ch; c++)
+                out[(long)(total + i) * ch + c] = pcm[c][i];
+        total += (int)got;
+    }
+    return total;
 }
 
 CMM_API int cmm_vorbis_seek(cmm_decoder* d, long long frame)
 {
     if (!d || !d->vorbis) return -1;
-    /* stb_vorbis_seek returns nonzero on success, 0 on failure. */
-    return stb_vorbis_seek(d->vorbis, (unsigned int)frame) ? 0 : -1;
+    /* ov_pcm_seek returns 0 on success, nonzero on failure. */
+    return ov_pcm_seek(d->vorbis, (ogg_int64_t)frame) == 0 ? 0 : -1;
 }
 
 CMM_API void cmm_vorbis_close(cmm_decoder* d)
 {
     if (!d) return;
-    if (d->vorbis) stb_vorbis_close(d->vorbis);
+    if (d->vorbis) { ov_clear(d->vorbis); free(d->vorbis); }  /* close=NULL: we own the datasource */
     if (d->buf)    free(d->buf);
     if (d->fp)     fclose(d->fp);
+#ifdef _WIN32
+    if (d->fh)     CloseHandle((HANDLE)d->fh);
+#endif
     free(d);
 }
 
@@ -715,33 +802,52 @@ CMM_API cmm_decoder* cmm_flac_open_file(const wchar_t* path, int* channels,
 CMM_API cmm_decoder* cmm_vorbis_open_file(const wchar_t* path, int* channels,
                                           int* sampleRate, long long* totalFrames, int* err)
 {
-    /* Whole-file native buffer (raw Win32 — race-free), referenced IN PLACE by stb_vorbis;
-     * cmm_vorbis_close frees it. No second copy (cmm_vorbis_open_memory still copies for its
-     * caller-owned-buffer callers). stb_vorbis has NO pull read/seek callback API, so unlike
-     * FLAC/MP3/WAV/Opus this format has no streaming path — it is always fully buffered.
-     * cmm_read_whole_file already rejects > 2 GiB, so the (int) length cast is safe. */
     if (err) *err = 0;
+
+    /* BUFFERED path (files ≤ CMM_BUFFER_MAX): decode from a whole-file native buffer read
+     * via raw Win32 (race-free), referenced IN PLACE by the in-memory ov_callbacks; no
+     * second copy — cmm_vorbis_close frees it. (cmm_vorbis_open_memory still copies: it
+     * can't assume it owns the caller's buffer.) */
     long long len = 0;
-    unsigned char* buf = cmm_read_whole_file(path, 0, &len);
-    if (!buf) { if (err) *err = -1; return NULL; }
+    unsigned char* buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
+    if (buf) {
+        cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+        if (!d) { free(buf); if (err) *err = -1; return NULL; }
+        d->kind = CMM_KIND_VORBIS; d->buf = buf; d->fsize = len; d->mpos = 0;
+        d->vorbis = (OggVorbis_File*)calloc(1, sizeof(OggVorbis_File));
+        if (!d->vorbis) { free(buf); free(d); if (err) *err = -1; return NULL; }
+        int e = ov_open_callbacks(d, d->vorbis, NULL, 0, CMM_OV_CB_MEM);
+        if (e < 0) { free(d->vorbis); free(buf); free(d); if (err) *err = e; return NULL; }
+        return cmm_vorbis_finish(d, channels, sampleRate, totalFrames);
+    }
 
-    int e = 0;
-    stb_vorbis* v = stb_vorbis_open_memory(buf, (int)len, &e, NULL);
-    if (!v) { free(buf); if (err) *err = e ? e : -1; return NULL; }
-
+    /* STREAMING path (files > CMM_BUFFER_MAX): stream via ov_callbacks so a very long Vorbis
+     * file isn't held whole in RAM (mirrors the FLAC/Opus big-file path). Windows streams
+     * over a RAW Win32 HANDLE (no msvcrt fd table — race-free); POSIX keeps the FILE*. */
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { if (err) *err = -1; return NULL; }
     cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { stb_vorbis_close(v); free(buf); if (err) *err = -1; return NULL; }
-
-    stb_vorbis_info info = stb_vorbis_get_info(v);
-    d->kind     = CMM_KIND_VORBIS;
-    d->vorbis   = v;
-    d->buf      = buf;
-    d->channels = info.channels;
-
-    if (channels)    *channels    = info.channels;
-    if (sampleRate)  *sampleRate  = (int)info.sample_rate;       /* native rate, preserved */
-    if (totalFrames) *totalFrames = (long long)stb_vorbis_stream_length_in_samples(v);
-    return d;
+    if (!d) { CloseHandle(h); if (err) *err = -1; return NULL; }
+    d->kind = CMM_KIND_VORBIS; d->fh = (void*)h;   /* set BEFORE ov_open — it reads via the callbacks */
+    d->vorbis = (OggVorbis_File*)calloc(1, sizeof(OggVorbis_File));
+    if (!d->vorbis) { CloseHandle(h); free(d); if (err) *err = -1; return NULL; }
+    int e = ov_open_callbacks(d, d->vorbis, NULL, 0, CMM_OV_CB_H);
+    if (e < 0) { free(d->vorbis); CloseHandle(h); free(d); if (err) *err = e; return NULL; }
+#else
+    FILE* fp = cmm_open_path(path);
+    if (!fp) { if (err) *err = -1; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { fclose(fp); if (err) *err = -1; return NULL; }
+    d->kind = CMM_KIND_VORBIS; d->fp = fp;
+    d->vorbis = (OggVorbis_File*)calloc(1, sizeof(OggVorbis_File));
+    if (!d->vorbis) { fclose(fp); free(d); if (err) *err = -1; return NULL; }
+    int e = ov_open_callbacks(fp, d->vorbis, NULL, 0, CMM_OV_CB_FP);
+    if (e < 0) { free(d->vorbis); fclose(fp); free(d); if (err) *err = e; return NULL; }
+#endif
+    return cmm_vorbis_finish(d, channels, sampleRate, totalFrames);
 }
 
 /* ── MP3 (dr_mp3) ─────────────────────────────────────────────────────────── */

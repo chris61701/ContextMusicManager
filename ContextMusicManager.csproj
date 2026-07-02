@@ -133,7 +133,7 @@
     <Content Include="THIRD_PARTY_NOTICES.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <!-- Native decode shim (libopusfile + stb_vorbis + dr_flac/mp3/wav behind a thin C ABI).
+    <!-- Native decode shim (libopusfile + libvorbisfile + dr_flac/mp3/wav behind a thin C ABI).
          Deployed next to the mod DLL; NativeOpus.Preload(ModPath) LoadLibrary's it by full
          path at init. Windows x64 today; per-OS builds (.dylib/.so) added here later.
          REQUIRED for ALL formats — there is no managed fallback; a missing binary
@@ -189,7 +189,7 @@
   <ItemGroup>
     <!-- ALL managed audio decoders removed (NAudio + Concentus/CSCore/NVorbis):
          every format now decodes natively in CMM_Decoder.dll (libopusfile /
-         stb_vorbis / dr_flac / dr_mp3 / dr_wav), and the WaveStream/WaveFormat
+         libvorbisfile / dr_flac / dr_mp3 / dr_wav), and the WaveStream/WaveFormat
          base types live in-repo (Harmony/WaveShim.cs). -->
     <Reference Include="LogLibrary">
       <HintPath>$(GameManagedDir)\LogLibrary.dll</HintPath>

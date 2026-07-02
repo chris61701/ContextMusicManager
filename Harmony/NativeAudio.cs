@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
-    // NATIVE AUDIO  (CMM_Decoder.dll — libopusfile + stb_vorbis + dr_flac/mp3/wav + fdk-aac/minimp4)
+    // NATIVE AUDIO  (CMM_Decoder.dll — libopusfile + libvorbisfile + dr_flac/mp3/wav + fdk-aac/minimp4)
     // ─────────────────────────────────────────────────────────────────────────
     // P/Invoke surface for the native decode shim, covering EVERY supported format:
     // Opus / Vorbis / FLAC / MP3 / WAV / AIFF / AAC / Matroska-WebM. Consumers work
@@ -129,7 +129,7 @@ namespace CMM
         public static bool Available => NativeOpus.Available;
     }
 
-    // Vorbis backend (stb_vorbis) in the same CMM_Decoder.dll. Shares NativeOpus's
+    // Vorbis backend (libvorbisfile) in the same CMM_Decoder.dll. Shares NativeOpus's
     // load probe (one DLL, one ABI), so Available just forwards.
     internal static class NativeVorbis
     {

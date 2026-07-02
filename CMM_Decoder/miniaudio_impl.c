@@ -1,6 +1,6 @@
 /* miniaudio_impl.c — the single MINIAUDIO_IMPLEMENTATION translation unit.
  *
- * Kept separate (like dr_flac_impl.c / stb_vorbis_impl.c) so the ~95k-line
+ * Kept separate (like dr_flac_impl.c) so the ~95k-line
  * header is compiled ONCE and not recompiled every time the cmm_out shim is
  * touched. cmm_out.c includes miniaudio.h header-only.
  *

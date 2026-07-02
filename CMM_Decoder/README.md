@@ -22,8 +22,9 @@ initialize them:
 git submodule update --init   # fetch fdk-aac, minimp4, ogg, opus, opusfile
 ```
 
-`third_party/dr_libs`, `third_party/stb`, and `minimp4`'s single header are vendored
-directly (not submodules) and need no init.
+`third_party/dr_libs` and `minimp4`'s single header are vendored directly (not
+submodules) and need no init. `third_party/vorbis` (libvorbis + libvorbisfile) is
+vendored as source and prebuilt once via `build_vorbis.sh` (see below).
 
 Then build the big static libs once (libopus.a / libogg.a / libfdk-aac.a) via cmake —
 that recipe lives in the `native-audio-decode` note, not in this repo — and relink the

@@ -10,7 +10,7 @@
  * .NET GC; the only managed allocation left is the reusable output buffer the
  * caller owns.
  *
- * The ABI is format-agnostic in shape so vorbis/mp3 backends (stb_vorbis /
+ * The ABI is format-agnostic in shape so vorbis/mp3 backends (libvorbisfile /
  * dr_mp3) can be added later behind the same handle pattern without disturbing
  * the managed P/Invoke surface.
  *
@@ -134,13 +134,12 @@ CMM_API int cmm_flac_seek(cmm_decoder* d, long long frame);
 /* Free the decoder and the copied source buffer. NULL-safe. */
 CMM_API void cmm_flac_close(cmm_decoder* d);
 
-/* ── Vorbis (stb_vorbis) ──────────────────────────────────────────────────
+/* ── Vorbis (libvorbisfile) ────────────────────────────────────────────────
  * Same handle/lifetime contract as the others. Like FLAC, Vorbis preserves its
- * NATIVE sample rate, so *sampleRate is read from the stream. stb_vorbis copies
- * nothing of `data` lazily — it keeps the buffer for the life of the decoder —
- * so the shim COPIES it (the caller's pooled buffer may be overwritten/freed
- * immediately after this returns). NOTE: stb_vorbis takes a 32-bit length, so
- * buffers >2 GiB are rejected (no real-world Vorbis music file is that large). */
+ * NATIVE sample rate, so *sampleRate is read from the stream. open_memory COPIES
+ * `data` (the caller's pooled buffer may be overwritten/freed immediately after
+ * this returns) and feeds it to libvorbisfile via in-memory ov_callbacks; the
+ * open_file path streams big files over raw HANDLE/FILE* callbacks like Opus. */
 CMM_API cmm_decoder* cmm_vorbis_open_memory(const unsigned char* data, long long len,
                                             int* channels, int* sampleRate,
                                             long long* totalFrames, int* err);
