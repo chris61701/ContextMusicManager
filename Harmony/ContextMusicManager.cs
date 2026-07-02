@@ -1,4 +1,4 @@
-
+﻿
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -66,7 +66,7 @@ namespace CMM
 
         // Graceful, deliberate fade for the menu↔game boundary (entering a world, exiting
         // back to the menu) — intentionally longer than the in-game CrossFadeDuration.
-        public const float MenuTransitionFade = 5f;
+        public const float MenuTransitionFade = 3f;
         // Graceful fade when the game pauses (entering the ESC menu / inventory in single-player):
         // the music fades out over this window rather than cutting, and fades back in over it on
         // resume. The quit-to-menu teardown reuses the same fade — quitting mid-fade just continues

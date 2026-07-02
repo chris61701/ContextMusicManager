@@ -83,7 +83,10 @@ namespace CMM
                 // Fade the menu music out GRACEFULLY (≈5s) as the world comes up — CONSUMER-side
                 // (output gain) so it's audible through the deep load cushion — tailing into the
                 // Spawn stinger, which reuses the same device and snaps the gain back to full.
-                ContextMusicManager.FadeMenuOutputForGameStart(ContextMusicManager.MenuTransitionFade);
+                // EXPERIMENT: the fade was moved EARLIER, to WorldBuiltMenuFade (fires right after
+                // createWorld, before the player spawns), so the 5s fade has room to finish before
+                // the Spawn stinger instead of landing on top of it. Old trigger kept for reference:
+                //ContextMusicManager.FadeMenuOutputForGameStart(ContextMusicManager.MenuTransitionFade);
                 ContextMusicManager.OnEnterGame();
             }
 
@@ -465,6 +468,44 @@ namespace CMM
             CMMConfig.D("[CMM] Game is loading, from LoadChecker.");
             ContextMusicManager._gameIsLoading = true;
             return true;
+        }
+    }
+
+    // World BUILT, player NOT yet spawned — the earliest post-freeze, pre-spawn seam, chosen
+    // as the new trigger for the graceful menu fade so the ≈5s fade has room to COMPLETE before
+    // the Spawn stinger, instead of landing on top of it (the old trigger fired at the first
+    // Conductor.Update tick, which is at/after spawn — see InGameMusicPatch, now commented out).
+    //
+    // 3.0 fires ModEvents.CreateWorldDone at exactly this point, but that event does NOT exist on
+    // A20/A21 (their ModEvents is a different API shape entirely — referencing it would crash
+    // InitMod on the older alphas). Instead we patch NetPackageWorldInfo.PrepareWorldHashes(), a
+    // public static called at the SAME seam on all three versions: GameManager.StartAsServer runs
+    // it immediately after `yield return createWorld(...)` and before the local player is created
+    // (A20 GameManager.cs:1310, A21:1343, 3.0:2023). Resolved by name via TargetMethod()+Prepare()
+    // so a version missing it simply skips the patch instead of aborting PatchAll.
+    //
+    // SCOPE: this is the SERVER-side load path (single-player / listen host). A pure MP client
+    // never calls PrepareWorldHashes, so it won't fade here — but that path is unchanged by this
+    // experiment (its menu fade still needs the InGameMusicPatch Conductor trigger to be restored).
+    [HarmonyPatch]
+    public class WorldBuiltMenuFade
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(AccessTools.TypeByName("NetPackageWorldInfo"), "PrepareWorldHashes");
+
+        static bool Prepare() => TargetMethod() != null;
+
+        static void Postfix()
+        {
+            // inGame is still false here (player not spawned, Conductor hasn't ticked), and
+            // PrepareWorldHashes runs once per world load, so this fades the menu exactly once.
+            if (ContextMusicManager.inGame) return;
+            // Hold off the vanilla-menu-music auto-retrigger (MenuMusicPatch) for the rest of the
+            // load: without inGame set, that patch would otherwise re-request "Menu" and swell the
+            // music back in over this fade. Cleared when inGame flips (InGameMusicPatch / Patch_GameEnded).
+            ContextMusicManager._menuMusicHold = true;
+            CMMConfig.D("[CMM] World built (PrepareWorldHashes) — fading menu music early for game start.");
+            ContextMusicManager.FadeMenuOutputForGameStart(ContextMusicManager.MenuTransitionFade);
         }
     }
 
