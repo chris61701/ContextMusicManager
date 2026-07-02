@@ -390,8 +390,14 @@
              Query="/CMMSettings/DebugLogging" Value="true" />
     <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
              Query="/CMMSettings/PerfTiming" Value="true" />
+    <!-- Drop the Ctrl/Alt modifier gate so the bare skip/volume keys work for quick
+         testing. The committed settings.xml keeps the release values (Ctrl off / Alt on). -->
+    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
+             Query="/CMMSettings/KeybindRequireCtrl" Value="false" />
+    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
+             Query="/CMMSettings/KeybindRequireAlt" Value="false" />
     <Message Importance="high"
-             Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true" />
+             Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true, keybind modifiers off" />
   </Target>
 
   <!-- Release only: zip the staged mod as
