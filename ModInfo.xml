@@ -1,4 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Single dual-format ModInfo that loads on every supported game version.
+
+     Two mod-loader generations disagree on the layout, and this file satisfies both:
+       * A21 / 1.0 / 2.x / 3.x expect the FLAT "V2" format: fields directly under <xml>,
+         with a mandatory <DisplayName>. Their loader routes on XLinq
+         root.Element("ModInfo") which is NAMESPACE-SENSITIVE, so the <ModInfo> block
+         below (in the urn:cmm-legacy namespace) is invisible to it -> it uses the flat
+         fields. A stray namespaced element is ignored by the V2 field reader.
+       * Alpha 20 expects the LEGACY "V1" format: a nested <ModInfo> element. Its loader
+         matches on XmlNode.Name (the qualified name), which ignores the namespace URI, so
+         it DOES see <ModInfo> and parses it. The flat fields log harmless
+         "Unknown element" warnings there.
+
+     The namespace MUST be a DEFAULT namespace (xmlns=, no prefix) so the element's
+     qualified name stays exactly "ModInfo" for A20; a prefixed name would not match.
+
+     Version is duplicated in both blocks — keep them in sync by hand when bumping. -->
 <xml>
   <Name value="ContextMusicManager"/>
   <DisplayName value="Context Music Manager"/>
@@ -6,4 +23,12 @@
   <Description value="Plays custom music based on context."/>
   <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
   <Version value="1.0.4"/>
+  <!-- Alpha 20 only reads this nested block (see header). Keep Version matched above. -->
+  <ModInfo xmlns="urn:cmm-legacy">
+    <Name value="ContextMusicManager"/>
+    <Description value="Plays custom music based on context."/>
+    <Author value="Velasha"/>
+    <Version value="1.0.4"/>
+    <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
+  </ModInfo>
 </xml>

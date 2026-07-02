@@ -56,8 +56,6 @@
     <GameVersionDefine>GV_A20</GameVersionDefine>
     <!-- Alphas ship 0Harmony in Managed, not Mods\0_TFP_Harmony. -->
     <HarmonyHintPath>$(GameInstallDir)\7DaysToDie_Data\Managed\0Harmony.dll</HarmonyHintPath>
-    <!-- A20 uses the legacy <ModInfo>-root ModInfo format (no <DisplayName>). -->
-    <LegacyModInfo>true</LegacyModInfo>
   </PropertyGroup>
   <PropertyGroup Condition="'$(GameVersion)' == 'Alpha 21.2 b37'">
     <GameInstallDir>H:\_Games\7 Days To Die - Alpha 21.2 b37</GameInstallDir>
@@ -262,7 +260,6 @@
     <None Include=".github\copilot-instructions.md" />
     <None Include="packages.config" />
     <None Include="README.md" />
-    <None Include="ModInfo.A20.xml" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- BeforeBuild/AfterBuild MUST be declared AFTER the targets import, or the SDK's empty
@@ -279,21 +276,6 @@
       <_StaleArtifacts Include="$(OutputPath)*.dll;$(OutputPath)*.pdb;$(OutputPath)*.dll.config" />
     </ItemGroup>
     <Delete Condition="'$(Configuration)' == 'Debug'" Files="@(_StaleArtifacts)" />
-  </Target>
-  <!-- A20 only: overwrite the deployed ModInfo.xml with the legacy nested-<ModInfo> format
-       (A20 expects <xml> root wrapping a <ModInfo> element; the modern format flattens the
-       fields directly under <xml>). Runs after the normal content copy. The Version is
-       synced from the authoritative ModInfo.xml so the two never drift. -->
-  <Target Name="DeployLegacyModInfo" AfterTargets="Build"
-          Condition="'$(LegacyModInfo)' == 'true' And '$(Configuration)' != 'CI'">
-    <XmlPeek XmlInputPath="ModInfo.xml" Query="/xml/Version/@value">
-      <Output TaskParameter="Result" ItemName="_AuthoredVersion" />
-    </XmlPeek>
-    <Copy SourceFiles="ModInfo.A20.xml" DestinationFiles="$(OutputPath)ModInfo.xml"
-          SkipUnchangedFiles="false" OverwriteReadOnlyFiles="true" />
-    <XmlPoke XmlInputPath="$(OutputPath)ModInfo.xml" Query="/xml/ModInfo/Version/@value"
-             Value="@(_AuthoredVersion)" />
-    <Message Importance="high" Text="[CMM] A20 legacy ModInfo deployed (Version @(_AuthoredVersion))" />
   </Target>
   <!-- Scaffold the Music library folder tree from the context definitions so a fresh
        install has a drop-in folder for every context (including the Music root). Reads
@@ -445,21 +427,50 @@
     <Message Importance="high" Text="[CMM] DeployAll complete — deployed to all game Mods folders." />
   </Target>
 
-  <!-- Make a plain Debug build (e.g. the VS Build button, which runs Build with no
-       explicit target) deploy to EVERY install, not just the selected GameVersion.
-       The in-process build already compiled+deployed its own version; here we fan out
-       to the OTHER versions, each as its own clean per-version build (different game
-       references + GV_* symbol force a recompile — you can't copy one DLL to all four).
-       _CMMFanoutChild=true on the children sets CMMDeployAll=false, so they don't
-       re-fan and recurse. Disable the whole thing with -p:CMMDeployAll=false. -->
+  <!-- Make a plain Debug build (e.g. the VS Build button / Ctrl+Shift+B, which runs Build
+       with no explicit target) deploy to EVERY install, not just the selected GameVersion.
+       The in-process build already compiled+deployed its own version; here we fan out to
+       the OTHER versions by COPYING that finished payload into each install's Mods folder.
+       This is valid because the source no longer has any #if GV_* forks — every game-API
+       member that differs across A20/A21/2.6/3.0 is bound by name via reflection (see
+       ContextResolver's version bridges), so one compiled DLL runs on all four. Copying
+       instead of recompiling makes a full four-install deploy near-instant for testing.
+       The payload is now fully uniform across installs — ModInfo.xml is a single
+       dual-format file that A20 and A21/2.x/3.x both accept (see its header), so there
+       is no per-version file to re-apply.
+       _CMMFanoutChild=true on the children sets CMMDeployAll=false, so they don't re-fan
+       and recurse. Disable the whole thing with -p:CMMDeployAll=false. For an authoritative
+       per-version RECOMPILE of every install (e.g. to verify a build actually compiles
+       against each game's assemblies), use -t:DeployAll instead. -->
   <Target Name="DebugFanout" AfterTargets="Build"
           Condition="'$(Configuration)' == 'Debug' And '$(CMMDeployAll)' == 'true'">
-    <Message Importance="high" Text="[CMM] Debug fan-out from '$(GameVersion)' to other installs: @(CMMGameVersions)" />
+    <Message Importance="high" Text="[CMM] Debug fan-out — copying '$(GameVersion)' payload to other installs: @(CMMGameVersions)" />
     <MSBuild Projects="$(MSBuildProjectFullPath)"
-             Targets="Build"
+             Targets="CopyDeploy"
              Condition="'%(CMMGameVersions.Identity)' != '$(GameVersion)'"
-             Properties="Configuration=Debug;GameVersion=%(CMMGameVersions.Identity);_CMMFanoutChild=true" />
-    <Message Importance="high" Text="[CMM] Debug fan-out complete — deployed to all game Mods folders." />
+             Properties="Configuration=Debug;GameVersion=%(CMMGameVersions.Identity);_CMMFanoutChild=true;_CMMCopyFrom=$(OutputPath)" />
+    <Message Importance="high" Text="[CMM] Debug fan-out complete — copied to all game Mods folders." />
+  </Target>
+
+  <!-- Copy a pre-built Debug payload from _CMMCopyFrom into THIS version's Mods folder
+       (evaluated per-version: GameModsDir/OutputPath resolve from the child's GameVersion).
+       Used by DebugFanout to deploy the same DLL to every install without recompiling.
+       Mirrors the source exactly: stale build artifacts and the old Config are cleared
+       first so nothing orphaned lingers. The mod folder holds only our deployed files
+       (the music library lives at MusicPath, elsewhere), so this never touches music. -->
+  <Target Name="CopyDeploy" Condition="'$(_CMMCopyFrom)' != ''">
+    <Error Condition="!Exists('$(_CMMCopyFrom)')" Text="CopyDeploy: source payload not found at '$(_CMMCopyFrom)'." />
+    <MakeDir Directories="$(GameModsDir)" />
+    <RemoveDir Directories="$(OutputPath)Config" />
+    <ItemGroup>
+      <_StaleDeployed Include="$(OutputPath)*.dll;$(OutputPath)*.pdb;$(OutputPath)*.dll.config" />
+      <_CopyPayload Include="$(_CMMCopyFrom)**\*" />
+    </ItemGroup>
+    <Delete Files="@(_StaleDeployed)" />
+    <Copy SourceFiles="@(_CopyPayload)"
+          DestinationFiles="@(_CopyPayload->'$(OutputPath)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="false" OverwriteReadOnlyFiles="true" />
+    <Message Importance="high" Text="[CMM] Copied payload to '$(GameVersion)' ($(OutputPath))" />
   </Target>
 
   <!-- Package release zips for every version in one go:
