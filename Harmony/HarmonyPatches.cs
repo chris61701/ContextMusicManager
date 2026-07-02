@@ -149,7 +149,6 @@ namespace CMM
         }
     }
 
-#if GV_A20
     // ─────────────────────────────────────────────────────────────────────────
     // A20 COMBAT-MUSIC THROTTLE FIX (backport of the A21 FrequencyLimiter rule)
     // ─────────────────────────────────────────────────────────────────────────
@@ -169,9 +168,17 @@ namespace CMM
     // == Panicked), so restoring it can never spuriously force combat — it only undoes
     // the throttle on a real fight. Non-combat sections stay subject to the daily-time
     // setting, as intended.
+    //
+    // A20-ONLY at runtime. FrequencyLimiter exists on all versions (so typeof compiles), but
+    // only A20 throttles Combat AND takes IList<SectionType> (A21+ takes List<SectionType> and
+    // already exempts Combat). Prepare() gates this to A20 — the sole version lacking
+    // EntityAlive.IsSwimming() — so Harmony never binds the IList prefix/postfix against a newer
+    // List<> Filter (a skipped patch class is never signature-checked).
     [HarmonyPatch(typeof(DynamicMusic.FrequencyLimiter), "Filter")]
     public class Patch_A20_FrequencyLimiter_ExemptCombat
     {
+        static bool Prepare() => AccessTools.Method(typeof(EntityAlive), "IsSwimming") == null;
+
         static void Prefix(IList<MusicUtils.Enums.SectionType> _sectionTypes, out bool __state)
         {
             __state = _sectionTypes != null && _sectionTypes.Contains(MusicUtils.Enums.SectionType.Combat);
@@ -183,7 +190,6 @@ namespace CMM
                 __result.Add(MusicUtils.Enums.SectionType.Combat);
         }
     }
-#endif
 
     // On 3.0+, patches Play(); on A20/A21 where Play() doesn't exist, falls back to Update().
     [HarmonyPatch]

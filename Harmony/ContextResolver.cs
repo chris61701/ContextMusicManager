@@ -1,4 +1,7 @@
+using System;
 using System.Collections.Generic;
+using System.Linq.Expressions;
+using System.Reflection;
 using MusicUtils.Enums;
 using UnityEngine;
 
@@ -52,11 +55,11 @@ namespace CMM
         static void OnSleepersCleared(Vector3 pos)
         {
             var world = GameManager.Instance?.World;
-            PrefabInstance pi = world?.GetPOIAtPosition(pos);
+            PrefabInstance pi = PoiAt(world, pos);
             if (pi != null)
             {
                 _poiClearedPending.Add(pi.boundingBoxPosition);
-                CMMConfig.D($"[CMM POI] SleepersCleared FIRED at {pos} → '{pi.prefab?.PrefabName ?? pi.name}' " +
+                CMMConfig.D($"[CMM POI] SleepersCleared FIRED at {pos} → '{(pi.prefab != null ? _prefabName(pi.prefab) : null) ?? pi.name}' " +
                             $"(bbox {pi.boundingBoxPosition}) → POI_Cleared staged.");
             }
             else
@@ -69,20 +72,178 @@ namespace CMM
         // with the QuestEventManager singleton). Called from Patch_GameEnded.
         public static void ResetPoiClearState() => _poiClearedPending.Clear();
 
+        // ── Version bridge: 3.0-only game members, resolved by reflection ────────
+        // Two APIs used below exist only on 3.0:
+        //   • Prefab.SleeperVolumeList — the design sleeper list (a richer "real dungeon"
+        //     test than DifficultyTier).
+        //   • TraderArea.GetTrader()   — a direct area→trader link.
+        // Resolving them by name at load time (null when absent) lets ONE compiled DLL run
+        // on both 2.6 and 3.0: where the member exists (3.0) we call it; where it doesn't
+        // (2.6 / A20 / A21) we fall back to the pre-3.0 logic — so every version behaves
+        // exactly as its dedicated build did. Cost is negligible: the sleeper test runs
+        // only in the MP-client POI fallback, the trader call only while inside a trader
+        // area. Kept out of the alpha #if because reflection references no absent symbol,
+        // so the same source compiles unchanged against every game version.
+        static readonly System.Reflection.FieldInfo _sleeperVolumeListField =
+            typeof(Prefab).GetField("SleeperVolumeList");
+        static System.Reflection.PropertyInfo _sleeperVolumeListCount;  // bound lazily off the live list object
+        static readonly System.Reflection.MethodInfo _getTraderMethod =
+            typeof(TraderArea).GetMethod("GetTrader", System.Type.EmptyTypes);
+
+        // ── Version bridge: members that differ in KIND/ARITY between 2.6 and 3.0 ─────
+        // These compile cleanly per-version but a SINGLE binary compiled against one version
+        // MissingMember-throws on the other (ldfld vs callvirt get_X, or a baked optional-arg
+        // count), so bind each by name at load and dispatch to whatever the loaded assembly has:
+        //   • EntityPlayer.IsFriendOfLocalPlayer — field ≤2.6, property 3.0.
+        //   • TraderInfo.IsOpen                  — property ≤2.6, field 3.0.
+        //   • World.GetPOIAtPosition             — (Vector3,bool) on ≤2.6, (Vector3,FastTags?,
+        //     FastTags?) on 3.0. C# resolves optional-arg defaults at the CALL site, so a
+        //     direct one-arg call binds to only one version's overload.
+        // The bool accessors compile to a typed, allocation-free delegate (these read on the
+        // per-tick scan / MP scan paths); PoiAt reflects the overload (twice a second at most).
+        static readonly Func<EntityPlayer, bool> _isFriendOfLocal = BoolAccessor<EntityPlayer>("IsFriendOfLocalPlayer");
+        static readonly Func<TraderInfo, bool>   _traderIsOpen    = BoolAccessor<TraderInfo>("IsOpen");
+        static readonly MethodInfo _getPoiAtMethod    = ResolveGetPoiAt();
+        static readonly object[]   _getPoiArgsTemplate = BuildPoiArgsTemplate();
+
+        // ── Version bridge: A20/A21 ↔ 2.6/3.0 shape splits (same principle) ───────────
+        //   • World.isEventBloodMoon — private field on the Alphas, public field on 2.6/3.0.
+        //     The Alphas' dedicated builds instead read EntityAlive.IsBloodMoon (a public field on
+        //     all four), so reproduce that split exactly: modern → world flag, alpha → player flag.
+        //   • EntityAlive.IsSwimming() — absent on A20 (present A21+); A20 approximates from the
+        //     public water fields (isSwimming / inWaterPercent), its dedicated-build expression.
+        //   • Prefab.PrefabName — plain field on A20/A21, property on 2.6/3.0.
+        // Each binds against whatever the loaded assembly has; every symbol referenced below exists
+        // on the 3.0 compile target, so the same source compiles unchanged for every game version.
+        static readonly Func<World, EntityAlive, bool> _isBloodMoon = BuildIsBloodMoon();
+        static readonly Func<EntityPlayer, bool>       _isSwimming  = BuildIsSwimming();
+        static readonly Func<Prefab, string>           _prefabName  = StringAccessor<Prefab>("PrefabName");
+
+        // Binds a bool member that is a FIELD on some game versions and a PROPERTY on others
+        // to a typed accessor. Compiled once (no per-call boxing); falls back to boxed
+        // reflection if Expression.Compile is unavailable on the host Mono, or to const-false
+        // if the member is absent (never the case on the 2.6/3.0 targets).
+        static Func<T, bool> BoolAccessor<T>(string member)
+        {
+            PropertyInfo prop = typeof(T).GetProperty(member);
+            FieldInfo    fld  = prop == null ? typeof(T).GetField(member) : null;
+            if (prop == null && fld == null) return _ => false;
+            var e = Expression.Parameter(typeof(T), "e");
+            Expression access = prop != null ? Expression.Property(e, prop) : (Expression)Expression.Field(e, fld);
+            try { return Expression.Lambda<Func<T, bool>>(access, e).Compile(); }
+            catch { return prop != null ? (Func<T, bool>)(t => (bool)prop.GetValue(t)) : (t => (bool)fld.GetValue(t)); }
+        }
+
+        // String counterpart of BoolAccessor: binds a member that is a FIELD on some versions and a
+        // PROPERTY on others (Prefab.PrefabName). Same compile-once / reflection-fallback / null-if-
+        // absent shape.
+        static Func<T, string> StringAccessor<T>(string member)
+        {
+            PropertyInfo prop = typeof(T).GetProperty(member);
+            FieldInfo    fld  = prop == null ? typeof(T).GetField(member) : null;
+            if (prop == null && fld == null) return _ => null;
+            var e = Expression.Parameter(typeof(T), "e");
+            Expression access = prop != null ? Expression.Property(e, prop) : (Expression)Expression.Field(e, fld);
+            try { return Expression.Lambda<Func<T, string>>(access, e).Compile(); }
+            catch { return prop != null ? (Func<T, string>)(t => (string)prop.GetValue(t)) : (t => (string)fld.GetValue(t)); }
+        }
+
+        // Blood-moon flag. 2.6/3.0 expose World.isEventBloodMoon as a PUBLIC field; the Alphas keep it
+        // private and their dedicated builds read EntityAlive.IsBloodMoon instead. Discriminate on the
+        // public field's presence so each version behaves exactly as its own build did.
+        static Func<World, EntityAlive, bool> BuildIsBloodMoon()
+        {
+            var w = Expression.Parameter(typeof(World), "w");
+            var p = Expression.Parameter(typeof(EntityAlive), "p");
+            var worldField  = typeof(World).GetField("isEventBloodMoon", BindingFlags.Instance | BindingFlags.Public);
+            var playerField = typeof(EntityAlive).GetField("IsBloodMoon");
+            Expression body = worldField != null
+                ? Expression.Field(w, worldField)
+                : (Expression)Expression.Field(p, playerField);
+            try { return Expression.Lambda<Func<World, EntityAlive, bool>>(body, w, p).Compile(); }
+            catch
+            {
+                if (worldField != null) return (world, pl) => (bool)worldField.GetValue(world);
+                return (world, pl) => (bool)playerField.GetValue(pl);
+            }
+        }
+
+        // Swimming. A21/2.6/3.0 have EntityAlive.IsSwimming(); A20 does not, so fall back to the public
+        // water fields (isSwimming || inWaterPercent > 0.4f) — A20's exact dedicated-build expression.
+        // Both fields are public on every version, so the fallback compiles against the 3.0 target.
+        static Func<EntityPlayer, bool> BuildIsSwimming()
+        {
+            var p = Expression.Parameter(typeof(EntityPlayer), "p");
+            var method = typeof(EntityPlayer).GetMethod("IsSwimming", Type.EmptyTypes);
+            Expression body;
+            if (method != null)
+                body = Expression.Call(p, method);
+            else
+            {
+                var isSw = typeof(EntityPlayer).GetField("isSwimming");
+                var inW  = typeof(EntityPlayer).GetField("inWaterPercent");
+                body = Expression.OrElse(
+                    Expression.Field(p, isSw),
+                    Expression.GreaterThan(Expression.Field(p, inW), Expression.Constant(0.4f)));
+            }
+            try { return Expression.Lambda<Func<EntityPlayer, bool>>(body, p).Compile(); }
+            catch
+            {
+                if (method != null) return pl => (bool)method.Invoke(pl, null);
+                var isSw = typeof(EntityPlayer).GetField("isSwimming");
+                var inW  = typeof(EntityPlayer).GetField("inWaterPercent");
+                return pl => (bool)isSw.GetValue(pl) || (float)inW.GetValue(pl) > 0.4f;
+            }
+        }
+
+        // World.GetPOIAtPosition regardless of how many optional params the version added
+        // (match by name + Vector3 first param). The args template carries each trailing
+        // optional param's OWN default value, so an invoke reproduces the direct one-arg call.
+        static MethodInfo ResolveGetPoiAt()
+        {
+            foreach (var m in typeof(World).GetMethods())
+                if (m.Name == "GetPOIAtPosition")
+                {
+                    var ps = m.GetParameters();
+                    if (ps.Length >= 1 && ps[0].ParameterType == typeof(Vector3)) return m;
+                }
+            return null;
+        }
+        static object[] BuildPoiArgsTemplate()
+        {
+            var ps = _getPoiAtMethod?.GetParameters();
+            if (ps == null) return null;
+            var a = new object[ps.Length];
+            for (int i = 1; i < ps.Length; i++) a[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
+            return a;
+        }
+        static PrefabInstance PoiAt(World world, Vector3 pos)
+        {
+            if (world == null || _getPoiAtMethod == null || _getPoiArgsTemplate == null) return null;
+            var args = (object[])_getPoiArgsTemplate.Clone();   // main-thread only; clone keeps the two call sites re-entrancy-safe
+            args[0] = pos;
+            return (PrefabInstance)_getPoiAtMethod.Invoke(world, args);
+        }
+
         // "Real dungeon" gate for the MP client fallback, using only client-available
         // design data (sleeper VOLUMES aren't synced, but the prefab's design definition
         // is — clients load it to render the POI). On 3.0 the prefab's SleeperVolumeList
         // is the exact equivalent of the server's sleeperVolumes>0 guard and catches
         // tier-0 dungeons (e.g. abandoned_house_06) that a DifficultyTier>0 test would
-        // miss. A20/A21 have no SleeperVolumeList, so fall back to DifficultyTier>0.
+        // miss. 2.6 / A20 / A21 have no SleeperVolumeList, so fall back to DifficultyTier>0.
         static bool IsRealPoiByDesign(Prefab prefab)
         {
             if (prefab == null) return false;
-#if GV_V3
-            return prefab.SleeperVolumeList != null && prefab.SleeperVolumeList.Count > 0;
-#else
-            return prefab.DifficultyTier > 0;
-#endif
+            if (_sleeperVolumeListField != null)                       // 3.0
+            {
+                object list = _sleeperVolumeListField.GetValue(prefab);
+                if (list == null) return false;
+                if (_sleeperVolumeListCount == null)
+                    _sleeperVolumeListCount = list.GetType().GetProperty("Count");
+                return _sleeperVolumeListCount != null
+                    && (int)_sleeperVolumeListCount.GetValue(list) > 0;
+            }
+            return prefab.DifficultyTier > 0;                          // 2.6 / A20 / A21
         }
 
         // Resolves an entity's config class name (e.g. "zombieBoeFeral") for threat
@@ -94,10 +255,11 @@ namespace CMM
             catch { return null; }
         }
 
-#if !GV_V3
-        // Pre-3.0 TraderArea has no GetTrader(): resolve the trader entity by finding the
-        // EntityTrader whose area is this one (EntityTrader.traderArea is public in all
-        // older versions). Only called when the player is inside a trader area, so the
+        // Pre-3.0 fallback (also compiled into the 3.0/unified build, where it's the
+        // reflection path's fallback but never actually reached): resolve the trader entity
+        // by finding the EntityTrader whose area is this one. EntityTrader.traderArea is a
+        // public field in every supported version (2.6/3.0/A20/A21), so this compiles and
+        // runs anywhere. Only called when the player is inside a trader area, so the
         // entity-list scan is rare. Snapshots the list — the game may mutate it mid-scan.
         static EntityTrader FindTraderForArea(World world, TraderArea area)
         {
@@ -108,7 +270,6 @@ namespace CMM
                     return t;
             return null;
         }
-#endif
 
         // A live, allied player who is "with" the local player: in the local player's
         // party OR an ACL friend, and within PlayerDetectRange. Both IsInPartyOfLocalPlayer
@@ -118,7 +279,7 @@ namespace CMM
         static bool IsNearbyAlly(EntityPlayer other, EntityPlayer local)
         {
             if (other == null || other == local || !other.IsAlive()) return false;
-            if (!other.IsInPartyOfLocalPlayer && !other.IsFriendOfLocalPlayer) return false;
+            if (!other.IsInPartyOfLocalPlayer && !_isFriendOfLocal(other)) return false;
             return Vector3.Distance(local.position, other.position) < CMMConfig.PlayerDetectRange;
         }
 
@@ -133,7 +294,7 @@ namespace CMM
         static bool IsNearbyStranger(EntityPlayer other, EntityPlayer local)
         {
             if (other == null || other == local || !other.IsAlive()) return false;
-            if (other.IsInPartyOfLocalPlayer || other.IsFriendOfLocalPlayer) return false;
+            if (other.IsInPartyOfLocalPlayer || _isFriendOfLocal(other)) return false;
             return Vector3.Distance(local.position, other.position) < CMMConfig.PlayerDetectRange;
         }
 
@@ -147,7 +308,7 @@ namespace CMM
         {
             if (other == null || other == local || !other.IsAlive()) return false;
             if (CMMConfig.CombatShareRequireAlly
-                && !other.IsInPartyOfLocalPlayer && !other.IsFriendOfLocalPlayer) return false;
+                && !other.IsInPartyOfLocalPlayer && !_isFriendOfLocal(other)) return false;
             return Vector3.Distance(local.position, other.position) < CMMConfig.CombatShareRange;
         }
 
@@ -169,28 +330,21 @@ namespace CMM
             var gameState = _gameState;
             gameState.Now   = Time.realtimeSinceStartup;
             gameState.IsDay = world.IsDaytime();
-            // World.isEventBloodMoon is public in 2.6/3.0 but private in A20/A21; the
-            // Alphas fall back to the player's public EntityAlive.IsBloodMoon flag, which
-            // is set while a blood moon is active.
-            gameState.IsBloodMoon =
-#if GV_A20 || GV_A21
-                player.IsBloodMoon;
-#else
-                world.isEventBloodMoon;
-#endif
+            // World.isEventBloodMoon is public in 2.6/3.0 but private in A20/A21; the Alphas read the
+            // player's public EntityAlive.IsBloodMoon flag instead. _isBloodMoon reproduces that split
+            // at runtime (see BuildIsBloodMoon) so one binary matches every version's dedicated build.
+            gameState.IsBloodMoon = _isBloodMoon(world, player);
             gameState.HealthPct = player.Health / (float)player.GetMaxHealth();
 
             // Swimming: in deep enough water to swim (not mere shallow wading). The
             // 8s WarmUp dwell on the context keeps brief dips from interrupting music.
-            // A20: IsSwimming() requires inWaterPercent > 0.7f (head mostly under),
-            // so floating at the surface (head above water, ~0.4–0.65 range) is missed.
-            // inWaterPercent > 0.4f covers waist-deep+; the game's own speed-reduction
-            // starts at 0.3f, so 0.4f safely clears shallow ankle/knee wading.
-#if GV_A20
-            gameState.IsSwimming = player.isSwimming || player.inWaterPercent > 0.4f;
-#else
-            gameState.IsSwimming = player.IsSwimming();
-#endif
+            // A20 has no IsSwimming(): its dedicated build approximated it as
+            // (isSwimming || inWaterPercent > 0.4f). The game's IsSwimming() requires
+            // inWaterPercent > 0.7f (head mostly under), so floating at the surface (head above
+            // water, ~0.4–0.65) is missed; > 0.4f covers waist-deep+ and clears shallow wading
+            // (the game's own speed-reduction starts at 0.3f). _isSwimming picks the method where
+            // present (A21+) and this field expression on A20 (see BuildIsSwimming).
+            gameState.IsSwimming = _isSwimming(player);
 
             gameState.IsPanicked = localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked;
 
@@ -206,15 +360,16 @@ namespace CMM
             TraderArea traderArea = world.GetTraderAreaAt(player.GetBlockPosition());
             if (traderArea != null)
             {
-                // TraderArea.GetTrader() exists only in 3.0; older versions have no
-                // area→trader link, so resolve the trader entity by its area instead.
-                EntityTrader traderEntity =
-#if GV_V3
-                    traderArea.GetTrader();
-#else
-                    FindTraderForArea(world, traderArea);
-#endif
-                if (traderEntity?.TraderInfo?.IsOpen == true)
+                // TraderArea.GetTrader() exists only in 3.0 (resolved via _getTraderMethod);
+                // older versions have no area→trader link, so resolve the trader entity by
+                // its area instead. 3.0 runs its real GetTrader() (owningTrader, then a
+                // bounds scan); 2.6/A20/A21 run the reference-match scan — each identical to
+                // that version's dedicated build.
+                EntityTrader traderEntity = _getTraderMethod != null
+                    ? (EntityTrader)_getTraderMethod.Invoke(traderArea, null)
+                    : FindTraderForArea(world, traderArea);
+                var traderInfo = traderEntity?.TraderInfo;
+                if (traderInfo != null && _traderIsOpen(traderInfo))
                     gameState.TraderName = traderEntity.EntityName?.ToLower() ?? "";
             }
 
@@ -366,7 +521,7 @@ namespace CMM
             gameState.PoiEnemiesRemaining = 0;
             gameState.PoiQuestCleared = false;
             gameState.PoiClearFromQuestOnly = false;
-            PrefabInstance prefab = world?.GetPOIAtPosition(player.position);
+            PrefabInstance prefab = PoiAt(world, player.position);
             // GetPOIAtPosition returns any prefab footprint, including RWG road/gateway
             // tiles and decoration "parts" (all DifficultyTier 0, no sleepers). Those were
             // flooding the stack with POI_T0 in the open world. Require at least one sleeper
@@ -379,7 +534,7 @@ namespace CMM
                 // the prefab XML explicitly sets it (most don't). Fall back to PrefabInstance.name
                 // (locationName.id) so the cleared-POI guard has a stable, non-empty identifier
                 // on all versions.
-                string prefabName = prefab.prefab?.PrefabName;
+                string prefabName = prefab.prefab != null ? _prefabName(prefab.prefab) : null;
                 string currentPoI = !string.IsNullOrEmpty(prefabName) ? prefabName : prefab.name;
                 // One pass instead of four LINQ Count() enumerations (each with its own
                 // delegate). enemiesRemainingInPoi drives the logic; the rest feed the log.
@@ -427,7 +582,7 @@ namespace CMM
                 //   • POI_Cleared → ONLY the quest SleepersCleared one-shot. PoiQuestCleared
                 //     fires it; PoiClearFromQuestOnly tells the script not to derive the
                 //     stinger from the count bouncing to 0.
-                string prefabName = prefab.prefab?.PrefabName;
+                string prefabName = prefab.prefab != null ? _prefabName(prefab.prefab) : null;
                 string currentPoI = !string.IsNullOrEmpty(prefabName) ? prefabName : prefab.name;
                 int tier = prefab.prefab?.DifficultyTier ?? 0;
 
