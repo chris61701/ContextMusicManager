@@ -25,6 +25,13 @@ namespace CMM
         static readonly GameState _gameState = new GameState();
         static readonly List<Entity> _entityScratch = new List<Entity>();
         static readonly List<EnemyInfo> _enemyPool = new List<EnemyInfo>();
+        // Reused entity-list snapshot for the pre-3.0 trader fallback (see FindTraderForArea).
+        // Separate from _entityScratch: the trader scan runs before the enemy scan refills that.
+        static readonly List<Entity> _traderScanScratch = new List<Entity>();
+        // Shared empty result for the "no world / no player yet" scan tick — the callers only
+        // ever read the returned list, so a single immutable-by-contract instance avoids a
+        // per-tick allocation on the load-screen path. NEVER mutate this.
+        static readonly List<string> _noContexts = new List<string>();
 
         // ── POI quest-clear stinger (the only authoritative clear signal) ─────────
         // POI_Cleared fires solely off the quest system's SleepersCleared event — the one
@@ -101,11 +108,19 @@ namespace CMM
         //     FastTags?) on 3.0. C# resolves optional-arg defaults at the CALL site, so a
         //     direct one-arg call binds to only one version's overload.
         // The bool accessors compile to a typed, allocation-free delegate (these read on the
-        // per-tick scan / MP scan paths); PoiAt reflects the overload (twice a second at most).
+        // per-tick scan / MP scan paths); PoiAt likewise runs through a compiled delegate
+        // (_poiAt) so the per-tick POI poll allocates nothing, with the reflection MethodInfo
+        // kept only as the host-Mono compile fallback.
         static readonly Func<EntityPlayer, bool> _isFriendOfLocal = BoolAccessor<EntityPlayer>("IsFriendOfLocalPlayer");
         static readonly Func<TraderInfo, bool>   _traderIsOpen    = BoolAccessor<TraderInfo>("IsOpen");
         static readonly MethodInfo _getPoiAtMethod    = ResolveGetPoiAt();
         static readonly object[]   _getPoiArgsTemplate = BuildPoiArgsTemplate();
+        // Compiled call form of GetPOIAtPosition: a typed Func that bakes each version's
+        // trailing optional args as constants, so the per-tick POI poll runs with NO allocation
+        // (MethodInfo.Invoke clones the args array + boxes the Vector3 on every call). Null when
+        // the method is absent or Expression.Compile is unavailable on the host Mono, in which
+        // case PoiAt falls back to the reflection path.
+        static readonly Func<World, Vector3, PrefabInstance> _poiAt = BuildPoiAt();
 
         // ── Version bridge: A20/A21 ↔ 2.6/3.0 shape splits (same principle) ───────────
         //   • EntityAlive.IsSwimming() — absent on A20 (present A21+); A20 approximates from the
@@ -196,10 +211,38 @@ namespace CMM
             for (int i = 1; i < ps.Length; i++) a[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue : null;
             return a;
         }
+        // Compile GetPOIAtPosition into a typed Func(world, pos), baking each trailing optional
+        // param's OWN default value as a constant — the exact values BuildPoiArgsTemplate carries —
+        // so the compiled call reproduces the direct one-arg call on whatever version's overload we
+        // bound. Zero per-call allocation (no args array, no Vector3 box). Null if the method is
+        // absent or Expression.Compile can't run on the host Mono (→ PoiAt uses the reflection path).
+        static Func<World, Vector3, PrefabInstance> BuildPoiAt()
+        {
+            if (_getPoiAtMethod == null) return null;
+            var ps = _getPoiAtMethod.GetParameters();
+            var world = Expression.Parameter(typeof(World), "w");
+            var pos   = Expression.Parameter(typeof(Vector3), "p");
+            var callArgs = new Expression[ps.Length];
+            callArgs[0] = pos;
+            for (int i = 1; i < ps.Length; i++)
+                callArgs[i] = ps[i].HasDefaultValue
+                    ? Expression.Constant(ps[i].DefaultValue, ps[i].ParameterType)
+                    : (Expression)Expression.Default(ps[i].ParameterType);
+            try
+            {
+                Expression call = Expression.Call(world, _getPoiAtMethod, callArgs);
+                return Expression.Lambda<Func<World, Vector3, PrefabInstance>>(call, world, pos).Compile();
+            }
+            catch { return null; }
+        }
         static PrefabInstance PoiAt(World world, Vector3 pos)
         {
-            if (world == null || _getPoiAtMethod == null || _getPoiArgsTemplate == null) return null;
-            var args = (object[])_getPoiArgsTemplate.Clone();   // main-thread only; clone keeps the two call sites re-entrancy-safe
+            if (world == null) return null;
+            if (_poiAt != null) return _poiAt(world, pos);      // compiled: no per-call allocation
+            // Reflection fallback (Expression.Compile unavailable on the host Mono): clone the
+            // args template per call so the two call sites stay re-entrancy-safe.
+            if (_getPoiAtMethod == null || _getPoiArgsTemplate == null) return null;
+            var args = (object[])_getPoiArgsTemplate.Clone();
             args[0] = pos;
             return (PrefabInstance)_getPoiAtMethod.Invoke(world, args);
         }
@@ -244,7 +287,11 @@ namespace CMM
         {
             var list = world?.Entities?.list;
             if (list == null) return null;
-            foreach (var e in new List<Entity>(list))
+            // Snapshot into a reused scratch list (the game may mutate the live list mid-scan);
+            // main-thread only, like the rest of BuildSnapshot, so one shared buffer is safe.
+            _traderScanScratch.Clear();
+            _traderScanScratch.AddRange(list);
+            foreach (var e in _traderScanScratch)
                 if (e is EntityTrader t && ReferenceEquals(t.traderArea, area))
                     return t;
             return null;
@@ -606,7 +653,7 @@ namespace CMM
             GameState gameState;
             using (CMMPerf.Measure(CMMPerf.Phase.ScanPoll))
                 gameState = BuildSnapshot();
-            if (gameState == null) return new List<string>();
+            if (gameState == null) return _noContexts;
             using (CMMPerf.Measure(CMMPerf.Phase.ScanResolve))
                 return ScriptHost.Resolve(gameState);
         }

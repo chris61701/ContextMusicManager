@@ -58,7 +58,7 @@ namespace CMM
         }
 
         public static TrackOrderMode GlobalTrackOrder = TrackOrderMode.RandomNoRepeat;
-        public static float ContextScanCooldown = 0.5f;
+        public static float ContextScanCooldown = 0.1f;
         public static float StalenessCheckInterval = 5f;
         public static float TrackEndPollInterval = 0.25f;
         public static float CrossFadeDuration = 2f;

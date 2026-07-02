@@ -35,7 +35,7 @@
   <TrackTransitionFadeDuration>6.0</TrackTransitionFadeDuration>
 
   <!-- How often to scan for active context changes (seconds) -->
-  <ContextScanCooldown>0.5</ContextScanCooldown>
+  <ContextScanCooldown>0.1</ContextScanCooldown>
   <!-- How often to check whether cached context data is stale (seconds) -->
   <StalenessCheckInterval>5.0</StalenessCheckInterval>
   <!-- How often to poll for natural track-end detection (seconds) -->
