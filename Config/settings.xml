@@ -4,6 +4,11 @@
   <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
   <VolumeModifier>0.5</VolumeModifier>
 
+  <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
+       Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
+       Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
+  <MusicPath>Music</MusicPath>
+
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back
        at a per-track gain so quiet and loud tracks sit at a consistent perceived
@@ -22,17 +27,13 @@
   <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
   <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
 
-  <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
-       Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
-       Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
-  <MusicPath>Music</MusicPath>
 
   <!-- Fade between outgoing and incoming context instead of cutting immediately -->
   <CrossfadeEnabled>true</CrossfadeEnabled>
   <CrossFadeDuration>2.0</CrossFadeDuration>
 
   <!-- Fade duration when a track ends naturally and transitions to the next -->
-  <TrackTransitionFadeDuration>6.0</TrackTransitionFadeDuration>
+  <TrackTransitionFadeDuration>5.0</TrackTransitionFadeDuration>
 
   <!-- How often to scan for active context changes (seconds) -->
   <ContextScanCooldown>0.1</ContextScanCooldown>
