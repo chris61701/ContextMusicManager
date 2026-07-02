@@ -108,15 +108,13 @@ namespace CMM
         static readonly object[]   _getPoiArgsTemplate = BuildPoiArgsTemplate();
 
         // ── Version bridge: A20/A21 ↔ 2.6/3.0 shape splits (same principle) ───────────
-        //   • World.isEventBloodMoon — private field on the Alphas, public field on 2.6/3.0.
-        //     The Alphas' dedicated builds instead read EntityAlive.IsBloodMoon (a public field on
-        //     all four), so reproduce that split exactly: modern → world flag, alpha → player flag.
         //   • EntityAlive.IsSwimming() — absent on A20 (present A21+); A20 approximates from the
         //     public water fields (isSwimming / inWaterPercent), its dedicated-build expression.
         //   • Prefab.PrefabName — plain field on A20/A21, property on 2.6/3.0.
         // Each binds against whatever the loaded assembly has; every symbol referenced below exists
         // on the 3.0 compile target, so the same source compiles unchanged for every game version.
-        static readonly Func<World, EntityAlive, bool> _isBloodMoon = BuildIsBloodMoon();
+        // (Blood moon needs NO bridge: World.IsWorldEvent(WorldEvent.BloodMoon) is a public method
+        // with the same signature on all four versions, so BuildSnapshot calls it directly.)
         static readonly Func<EntityPlayer, bool>       _isSwimming  = BuildIsSwimming();
         static readonly Func<Prefab, string>           _prefabName  = StringAccessor<Prefab>("PrefabName");
 
@@ -147,26 +145,6 @@ namespace CMM
             Expression access = prop != null ? Expression.Property(e, prop) : (Expression)Expression.Field(e, fld);
             try { return Expression.Lambda<Func<T, string>>(access, e).Compile(); }
             catch { return prop != null ? (Func<T, string>)(t => (string)prop.GetValue(t)) : (t => (string)fld.GetValue(t)); }
-        }
-
-        // Blood-moon flag. 2.6/3.0 expose World.isEventBloodMoon as a PUBLIC field; the Alphas keep it
-        // private and their dedicated builds read EntityAlive.IsBloodMoon instead. Discriminate on the
-        // public field's presence so each version behaves exactly as its own build did.
-        static Func<World, EntityAlive, bool> BuildIsBloodMoon()
-        {
-            var w = Expression.Parameter(typeof(World), "w");
-            var p = Expression.Parameter(typeof(EntityAlive), "p");
-            var worldField  = typeof(World).GetField("isEventBloodMoon", BindingFlags.Instance | BindingFlags.Public);
-            var playerField = typeof(EntityAlive).GetField("IsBloodMoon");
-            Expression body = worldField != null
-                ? Expression.Field(w, worldField)
-                : (Expression)Expression.Field(p, playerField);
-            try { return Expression.Lambda<Func<World, EntityAlive, bool>>(body, w, p).Compile(); }
-            catch
-            {
-                if (worldField != null) return (world, pl) => (bool)worldField.GetValue(world);
-                return (world, pl) => (bool)playerField.GetValue(pl);
-            }
         }
 
         // Swimming. A21/2.6/3.0 have EntityAlive.IsSwimming(); A20 does not, so fall back to the public
@@ -332,10 +310,11 @@ namespace CMM
             var gameState = _gameState;
             gameState.Now   = Time.realtimeSinceStartup;
             gameState.IsDay = world.IsDaytime();
-            // World.isEventBloodMoon is public in 2.6/3.0 but private in A20/A21; the Alphas read the
-            // player's public EntityAlive.IsBloodMoon flag instead. _isBloodMoon reproduces that split
-            // at runtime (see BuildIsBloodMoon) so one binary matches every version's dedicated build.
-            gameState.IsBloodMoon = _isBloodMoon(world, player);
+            // Blood moon: World.IsWorldEvent(WorldEvent.BloodMoon) is a public method on every version
+            // (A20/A21/2.6/3.0) returning the game's authoritative isEventBloodMoon flag. The old Alpha
+            // path read the player's EntityAlive.IsBloodMoon, but that field is only ever set on blood-
+            // moon HORDE ZOMBIES, never the player — so blood moon never registered on A20/A21.
+            gameState.IsBloodMoon = world.IsWorldEvent(World.WorldEvent.BloodMoon);
             gameState.HealthPct = player.Health / (float)player.GetMaxHealth();
 
             // Swimming: in deep enough water to swim (not mere shallow wading). The
