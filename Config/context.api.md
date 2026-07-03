@@ -36,9 +36,21 @@ persists between calls; `reset()` is your hook to clear it when a world unloads.
 | `now` | number | seconds (monotonic); use for your own timers |
 | `isDay` | bool | |
 | `isBloodMoon` | bool | |
+| `hour` | number | time of day, `0..24` (fractional, minute-resolved) — for dawn/dusk/midnight variation |
+| `day` | number | in-game day number (as the game counts) |
 | `healthPct` | number | 0..1 |
+| `staminaPct` | number | 0..1 |
+| `foodPct` | number | 0..1 (fullness) |
+| `waterPct` | number | 0..1 (hydration) |
 | `isSwimming` | bool | |
+| `isCrouching` | bool | sneaking — for a stealth ambient layer |
 | `isPanicked` | bool | game's vanilla "panicked" combat signal |
+| `fallDistance` | number | blocks fallen in the current fall; `0` when grounded or rising (big ⇒ a long plummet) |
+| `rainfall` | number | 0..1 |
+| `snowfall` | number | 0..1 |
+| `windSpeed` | number | raw game units (rises in storms) |
+| `cloudThickness` | number | 0..1 (overcast) |
+| `temperature` | number | degrees (game's Fahrenheit scale) |
 | `vehicleType` | string/nil | lowercased type name (`"minibike"`), nil if not riding |
 | `traderName` | string/nil | lowercased name, nil unless inside an **open** trader |
 | `biome` | string/nil | raw name (`"desert"`); **nil = chunk not loaded yet** |
@@ -51,10 +63,15 @@ persists between calls; `reset()` is your hook to clear it when a world unloads.
 | `poiTier` | number | difficulty tier (0–5; else no `_Tn` suffix) |
 | `poiEnemiesRemaining` | number | live sleepers left (>0 ⇒ infested) |
 | `enemies` | array | see below; pre-filtered to `cfg.enemyDetectRange` |
+| `buffs` | array | active status-effect names (raw, e.g. `"buffInjuryBleeding"`); match with `cmm.hasBuff` |
 
 Each `enemies[i]`: `{ className, distance, isAlert, isTargetingPlayer }`.
 `isTargetingPlayer` implies `isAlert`. `className` is the raw config class name
 (e.g. `"zombieBoeFeral"`) — lowercase it yourself for matching.
+
+`buffs` is a plain string array of the player's active buff names, exactly as the
+game stores them (not lowercased). Prefer `cmm.hasBuff(gameState, "…")` (case-
+insensitive substring) over indexing it yourself.
 
 ## `cfg` (read-only, from settings.xml)
 
@@ -79,6 +96,7 @@ Each `enemies[i]`: `{ className, distance, isAlert, isTargetingPlayer }`.
 |------|---------|--|
 | `cmm.has(str, sub)` | bool | nil-safe, case-insensitive substring test |
 | `cmm.count(gameState, filter)` | number | counts `enemies` passing `filter` |
+| `cmm.hasBuff(gameState, sub)` | bool | case-insensitive substring test over active `buffs` |
 | `cmm.hasFiles(context)` | bool | does this context currently have playable tracks? |
 
 `filter` keys (all optional): `targetingPlayer` (bool), `alert` (bool),

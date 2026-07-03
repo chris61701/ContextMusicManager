@@ -74,10 +74,17 @@ namespace CMM
         // full re-marshal after a (re)compile, when _gameStateTable is a fresh, empty table.
         static bool   _snapshotAllDirty = true;
         static bool   _pIsDay, _pIsBloodMoon, _pIsSwimming, _pIsPanicked, _pNearHome,
-                      _pInPoi, _pPoiQuestCleared, _pPoiClearFromQuestOnly;
-        static float  _pHealthPct;
-        static int    _pAlliesNearby, _pStrangersNearby, _pPoiTier, _pPoiEnemiesRemaining;
+                      _pInPoi, _pPoiQuestCleared, _pPoiClearFromQuestOnly, _pIsCrouching;
+        static float  _pHealthPct, _pHour, _pRainfall, _pSnowfall, _pWindSpeed, _pCloudThickness,
+                      _pTemperature, _pStaminaPct, _pFoodPct, _pWaterPct, _pFallDistance;
+        static int    _pAlliesNearby, _pStrangersNearby, _pPoiTier, _pPoiEnemiesRemaining, _pDay;
         static string _pVehicleType, _pTraderName, _pBiome, _pPoiName, _pPoiId;
+
+        // Buffs array (like _enemiesTable): set into _gameStateTable ONCE, refilled only
+        // when the active-buff set changes tick-to-tick (usually stable), so steady-state
+        // marshalling allocates nothing. _prevBuffNames caches last tick's names for the gate.
+        static Table _buffsTable;
+        static readonly List<string> _prevBuffNames = new List<string>();
 
         // A script is essentially always loaded (on-disk override or embedded default);
         // Active is false only if even the embedded baseline fails to compile (e.g.
@@ -216,9 +223,12 @@ namespace CMM
                 _gameStateTable = new Table(script);
                 _cfgTable       = new Table(script);
                 _enemiesTable   = new Table(script);
+                _buffsTable     = new Table(script);
                 _gameStateTable["enemies"] = _enemiesTable;   // identity persists; contents refilled each tick
+                _gameStateTable["buffs"]   = _buffsTable;     // identity persists; refilled only on change
                 _enemyTablePool.Clear();                      // pooled tables were bound to the previous script
                 _prevEnemyCount = 0;
+                _prevBuffNames.Clear();                       // force a full buffs rewrite against the new table
                 _cfgDirty = true;                             // re-marshal cfg against the new script
                 _snapshotAllDirty = true;                     // fresh _gameStateTable → write every field once
 
@@ -311,6 +321,7 @@ namespace CMM
             var cmm = new Table(script);
             cmm["has"]      = DynValue.NewCallback(Cmm_Has);
             cmm["count"]    = DynValue.NewCallback(Cmm_Count);
+            cmm["hasBuff"]  = DynValue.NewCallback(Cmm_HasBuff);
             cmm["hasFiles"] = DynValue.NewCallback(Cmm_HasFiles);
             script.Globals["cmm"] = cmm;
 
@@ -354,6 +365,25 @@ namespace CMM
                 n++;
             }
             return DynValue.NewNumber(n);
+        }
+
+        // cmm.hasBuff(gameState, sub) -> bool : case-insensitive substring test over the
+        // active-buff names (raw, e.g. "buffInjuryBleeding"). Substring so a script can match
+        // a family ("injury", "infection") or an exact id. nil-safe on both arguments.
+        static DynValue Cmm_HasBuff(ScriptExecutionContext ctx, CallbackArguments args)
+        {
+            Table gameStateT = args.Count > 0 && args[0].Type == DataType.Table ? args[0].Table : null;
+            string sub = args.Count > 1 && args[1].Type == DataType.String ? args[1].String : null;
+            if (gameStateT == null || string.IsNullOrEmpty(sub)) return DynValue.False;
+            DynValue buffsDv = gameStateT.Get("buffs");
+            if (buffsDv.Type != DataType.Table) return DynValue.False;
+            foreach (var pair in buffsDv.Table.Pairs)
+            {
+                string name = pair.Value.Type == DataType.String ? pair.Value.String : null;
+                if (name != null && name.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return DynValue.True;
+            }
+            return DynValue.False;
         }
 
         // cmm.hasFiles(context) -> bool : does this context currently have playable files?
@@ -415,6 +445,30 @@ namespace CMM
                 { t.Set("poiQuestCleared", DynValue.NewBoolean(gameState.PoiQuestCleared)); _pPoiQuestCleared = gameState.PoiQuestCleared; }
             if (all || gameState.PoiClearFromQuestOnly != _pPoiClearFromQuestOnly)
                 { t.Set("poiClearFromQuestOnly", DynValue.NewBoolean(gameState.PoiClearFromQuestOnly)); _pPoiClearFromQuestOnly = gameState.PoiClearFromQuestOnly; }
+            if (all || gameState.IsCrouching != _pIsCrouching)
+                { t.Set("isCrouching", DynValue.NewBoolean(gameState.IsCrouching)); _pIsCrouching = gameState.IsCrouching; }
+            if (all || gameState.Hour != _pHour)
+                { t.Set("hour", DynValue.NewNumber(gameState.Hour)); _pHour = gameState.Hour; }
+            if (all || gameState.Day != _pDay)
+                { t.Set("day", DynValue.NewNumber(gameState.Day)); _pDay = gameState.Day; }
+            if (all || gameState.Rainfall != _pRainfall)
+                { t.Set("rainfall", DynValue.NewNumber(gameState.Rainfall)); _pRainfall = gameState.Rainfall; }
+            if (all || gameState.Snowfall != _pSnowfall)
+                { t.Set("snowfall", DynValue.NewNumber(gameState.Snowfall)); _pSnowfall = gameState.Snowfall; }
+            if (all || gameState.WindSpeed != _pWindSpeed)
+                { t.Set("windSpeed", DynValue.NewNumber(gameState.WindSpeed)); _pWindSpeed = gameState.WindSpeed; }
+            if (all || gameState.CloudThickness != _pCloudThickness)
+                { t.Set("cloudThickness", DynValue.NewNumber(gameState.CloudThickness)); _pCloudThickness = gameState.CloudThickness; }
+            if (all || gameState.Temperature != _pTemperature)
+                { t.Set("temperature", DynValue.NewNumber(gameState.Temperature)); _pTemperature = gameState.Temperature; }
+            if (all || gameState.StaminaPct != _pStaminaPct)
+                { t.Set("staminaPct", DynValue.NewNumber(gameState.StaminaPct)); _pStaminaPct = gameState.StaminaPct; }
+            if (all || gameState.FoodPct != _pFoodPct)
+                { t.Set("foodPct", DynValue.NewNumber(gameState.FoodPct)); _pFoodPct = gameState.FoodPct; }
+            if (all || gameState.WaterPct != _pWaterPct)
+                { t.Set("waterPct", DynValue.NewNumber(gameState.WaterPct)); _pWaterPct = gameState.WaterPct; }
+            if (all || gameState.FallDistance != _pFallDistance)
+                { t.Set("fallDistance", DynValue.NewNumber(gameState.FallDistance)); _pFallDistance = gameState.FallDistance; }
 
             _snapshotAllDirty = false;
 
@@ -440,6 +494,28 @@ namespace CMM
             for (int k = idx; k < _prevEnemyCount; k++)
                 _enemiesTable.Set(k + 1, DynValue.Nil);  // clear last tick's extra slots
             _prevEnemyCount = idx;
+
+            // Buffs: change-gated (the active-buff set is stable most ticks). Rewrite the
+            // array only when the names differ from last tick — otherwise the reused
+            // _buffsTable already holds the right DynValues, so a steady tick allocates
+            // nothing. Comparison is ordinal; the buff list order is stable per source. A
+            // (re)compile forces a rewrite by clearing _prevBuffNames (see TryCompile), so
+            // the fresh _buffsTable is always repopulated.
+            var buffs = gameState.Buffs;
+            bool buffsChanged = buffs.Count != _prevBuffNames.Count;
+            if (!buffsChanged)
+                for (int i = 0; i < buffs.Count; i++)
+                    if (!string.Equals(buffs[i], _prevBuffNames[i], StringComparison.Ordinal))
+                        { buffsChanged = true; break; }
+            if (buffsChanged)
+            {
+                for (int i = 0; i < buffs.Count; i++)
+                    _buffsTable.Set(i + 1, DynValue.NewString(buffs[i]));
+                for (int k = buffs.Count; k < _prevBuffNames.Count; k++)
+                    _buffsTable.Set(k + 1, DynValue.Nil);    // clear last tick's extra slots
+                _prevBuffNames.Clear();
+                _prevBuffNames.AddRange(buffs);              // references only — no per-string alloc
+            }
         }
 
         static void MarshalConfig()

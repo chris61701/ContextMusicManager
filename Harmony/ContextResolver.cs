@@ -133,6 +133,34 @@ namespace CMM
         static readonly Func<EntityPlayer, bool>       _isSwimming  = BuildIsSwimming();
         static readonly Func<Prefab, string>           _prefabName  = StringAccessor<Prefab>("PrefabName");
 
+        // ── Version bridge: weather rain/snow getter RENAME ───────────────────────────
+        // WeatherManager's per-tick precipitation getters were renamed:
+        //   3.0:      GetCurrentRainfallPercent() / GetCurrentSnowfallPercent()  (0..1)
+        //   A20/A21:  GetCurrentRainfallValue()   / GetCurrentSnowfallValue()    (0..1)
+        // Both are no-arg instance floats, so bind whichever the loaded assembly has
+        // (prefer the 3.0 name, fall back to the alpha name) into a compiled accessor.
+        // Wind (GetWindSpeed), temperature (GetTemperature) and cloud thickness
+        // (GetCurrentCloudThicknessPercent) kept their names on every version, so
+        // BuildSnapshot calls those directly — no bridge needed.
+        static readonly Func<WeatherManager, float> _rainfall =
+            FloatGetter<WeatherManager>("GetCurrentRainfallPercent", "GetCurrentRainfallValue");
+        static readonly Func<WeatherManager, float> _snowfall =
+            FloatGetter<WeatherManager>("GetCurrentSnowfallPercent", "GetCurrentSnowfallValue");
+
+        // Binds a no-arg float instance method that was RENAMED across versions to a typed
+        // accessor: tries `primary`, then `fallback`; compiled once (no per-call boxing),
+        // reflection fallback if Expression.Compile is unavailable, const-zero if neither
+        // name exists. Same compile-once / fallback / null-safe shape as BoolAccessor.
+        static Func<T, float> FloatGetter<T>(string primary, string fallback)
+        {
+            MethodInfo m = typeof(T).GetMethod(primary, Type.EmptyTypes)
+                        ?? typeof(T).GetMethod(fallback, Type.EmptyTypes);
+            if (m == null) return _ => 0f;
+            var e = Expression.Parameter(typeof(T), "e");
+            try { return Expression.Lambda<Func<T, float>>(Expression.Call(e, m), e).Compile(); }
+            catch { return t => (float)m.Invoke(t, null); }
+        }
+
         // Binds a bool member that is a FIELD on some game versions and a PROPERTY on others
         // to a typed accessor. Compiled once (no per-call boxing); falls back to boxed
         // reflection if Expression.Compile is unavailable on the host Mono, or to const-false
@@ -375,6 +403,50 @@ namespace CMM
             gameState.IsSwimming = _isSwimming(player);
 
             gameState.IsPanicked = localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked;
+            gameState.IsCrouching = player.IsCrouching;
+
+            // Time of day. WorldTimeToElements has the same (Days,Hours,Minutes) tuple
+            // signature on every supported version, so call it directly. Hour is minute-
+            // resolved so the script can do smooth dawn/dusk transitions, not just IsDay.
+            var (days, hours, minutes) = GameUtils.WorldTimeToElements(world.GetWorldTime());
+            gameState.Day  = days;
+            gameState.Hour = hours + minutes / 60f;
+
+            // Weather. WindSpeed/GetTemperature are static and identically named on every
+            // version; cloud thickness is a same-named instance getter; only the rain/snow
+            // getters were renamed (see _rainfall/_snowfall bridges). WeatherManager.Instance
+            // can be null very early in load — treat that as calm/clear.
+            var weather = WeatherManager.Instance;
+            gameState.WindSpeed      = WeatherManager.GetWindSpeed();
+            gameState.Temperature    = WeatherManager.GetTemperature();
+            gameState.Rainfall       = weather != null ? _rainfall(weather) : 0f;
+            gameState.Snowfall       = weather != null ? _snowfall(weather) : 0f;
+            gameState.CloudThickness = weather != null ? weather.GetCurrentCloudThicknessPercent() : 0f;
+
+            // Player vitals (0..1). Stats is populated for the whole life of a live player,
+            // but guard defensively so a mid-teardown tick can't NRE the scan.
+            var stats = player.Stats;
+            gameState.StaminaPct = stats?.Stamina != null ? stats.Stamina.ValuePercent : 1f;
+            gameState.FoodPct    = stats?.Food    != null ? stats.Food.ValuePercent    : 1f;
+            gameState.WaterPct   = stats?.Water   != null ? stats.Water.ValuePercent   : 1f;
+
+            // Fall distance: blocks fallen in the current fall, 0 when grounded/rising.
+            // Public field on Entity in every version.
+            gameState.FallDistance = player.fallDistance;
+
+            // ── Status effects (buffs) ─────────────────────────────────────────
+            // Snapshot the active buff names. Store the buff objects' OWN name strings
+            // (no ToLower, no copy) so the poll allocates nothing; cmm.hasBuff matches
+            // case-insensitively. EntityAlive.Buffs.ActiveBuffs / BuffValue.BuffName are
+            // present and identically shaped on A20/A21/2.6/3.0.
+            gameState.Buffs.Clear();
+            var activeBuffs = player.Buffs?.ActiveBuffs;
+            if (activeBuffs != null)
+                for (int bi = 0; bi < activeBuffs.Count; bi++)
+                {
+                    string bn = activeBuffs[bi]?.BuffName;
+                    if (!string.IsNullOrEmpty(bn)) gameState.Buffs.Add(bn);
+                }
 
             // Vehicle: store the lowercased type name; the token mapping is a decision.
             gameState.VehicleType = player.AttachedToEntity is EntityVehicle vehicle

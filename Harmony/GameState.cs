@@ -34,6 +34,32 @@ namespace CMM
         public float HealthPct;           // 0..1
         public bool  IsSwimming;
         public bool  IsPanicked;          // normalized ThreatLevel == Panicked (vanilla combat bridge)
+        public bool  IsCrouching;         // sneaking; drives a stealth ambient layer
+
+        // ── Time of day ────────────────────────────────────────────────────
+        // Derived from world.GetWorldTime(); lets the script vary music by dawn/
+        // dusk/midnight instead of only the coarse IsDay flag.
+        public float Hour;                // 0..24 (fractional, minute-resolved)
+        public int   Day;                 // in-game day number (0-based, as the game counts)
+
+        // ── Weather ────────────────────────────────────────────────────────
+        // All 0..1 except WindSpeed/Temperature. Rain/snow getters were renamed
+        // across versions (…Percent on 3.0, …Value on A20/A21) — bridged in the
+        // resolver. The "is it a storm" decision (rain+wind thresholds) stays in
+        // the Lua script so it's user-tunable.
+        public float Rainfall;            // 0..1
+        public float Snowfall;            // 0..1
+        public float WindSpeed;           // raw game units
+        public float CloudThickness;      // 0..1 (overcast)
+        public float Temperature;         // degrees (game's Fahrenheit scale)
+
+        // ── Player vitals / motion ─────────────────────────────────────────
+        public float StaminaPct;          // 0..1
+        public float FoodPct;             // 0..1
+        public float WaterPct;            // 0..1
+        // Blocks the player has fallen in the current fall (0 when grounded or
+        // rising). A big value = a long plummet — cue vertigo/impact beds.
+        public float FallDistance;
 
         public string VehicleType;        // lowercased vehicle type name, or null when not riding
         public string TraderName;         // lowercased trader name, or null unless inside an OPEN trader
@@ -78,5 +104,12 @@ namespace CMM
         // Reused buffer; cleared and refilled each BuildSnapshot. Holds pooled
         // EnemyInfo instances (see ContextResolver), so iteration is alloc-free.
         public readonly List<EnemyInfo> Enemies = new List<EnemyInfo>();
+
+        // Active status-effect (buff) names, RAW as the game stores them
+        // (e.g. "buffInjuryBleeding", "buffOnFire"). Reused buffer, refilled each
+        // tick; the strings are the buff objects' own (no per-tick allocation).
+        // Match case-insensitively via cmm.hasBuff — they are NOT lowercased here
+        // precisely so the poll allocates nothing.
+        public readonly List<string> Buffs = new List<string>();
     }
 }
