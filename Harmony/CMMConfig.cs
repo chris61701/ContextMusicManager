@@ -1,10 +1,30 @@
 
+using System.Collections.Generic;
+using MusicUtils.Enums;
 using UnityEngine;
 
 namespace CMM
 {
     public static class CMMConfig
     {
+        // ── Disabled vanilla DMS sections (Config/settings.xml) ────────────────
+        // Vanilla Dynamic Music sections the user has switched OFF: the game is never
+        // allowed to cut to them while DMS is enabled and CMM is letting vanilla play
+        // (the "Vanilla" fallback). A disabled section obeys its linked context's rules —
+        // the VanillaIf* fallbacks divert to the rest of the CMM stack first (so a POI
+        // theme or your own ambient keeps playing), and only when nothing else is available
+        // does governance play the Exploration ambient in its place (or silence, if
+        // Exploration is disabled too). Populated from the <DisabledVanillaSections> block in
+        // settings.xml — one true/false child per section (see CMMConfigLoader); consulted in
+        // ResolvePlayableContextCore
+        // (ProposedVanillaSectionDisabled / PanicHandoffSectionDisabled) and GovernVanillaSection.
+        // Empty by default (every vanilla section allowed). Main-thread only — read
+        // in the section-governance postfix, rewritten on each settings (re)load.
+        // Disabling a section does NOT suppress CMM's OWN music for the linked
+        // context; it only mutes the game's version.
+        public static readonly HashSet<SectionType> DisabledVanillaSections =
+            new HashSet<SectionType>();
+
         public static float VolumeModifier = 1.0f;
         // A non-negative volumeOverride replaces the global VolumeModifier for this
         // call (used by contexts that set their own volume, e.g. POI_Cleared).

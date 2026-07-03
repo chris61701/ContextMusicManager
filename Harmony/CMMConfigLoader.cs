@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Xml;
+using MusicUtils.Enums;
 
 namespace CMM
 {
@@ -32,6 +33,8 @@ namespace CMM
                 CMMConfig.CrossfadeEnabled   = ReadBool (root, "CrossfadeEnabled",   CMMConfig.CrossfadeEnabled);
                 CMMConfig.ReverseFadeReclaim = ReadBool (root, "ReverseFadeReclaim", CMMConfig.ReverseFadeReclaim);
                 CMMConfig.DebugLogging       = ReadBool (root, "DebugLogging",       CMMConfig.DebugLogging);
+
+                LoadDisabledVanillaSections(root);
 
                 CMMConfig.LoudnessNormalizationEnabled = ReadBool (root, "LoudnessNormalizationEnabled", CMMConfig.LoudnessNormalizationEnabled);
                 CMMConfig.LoudnessTargetLufs           = ReadFloat(root, "LoudnessTargetLufs",           CMMConfig.LoudnessTargetLufs);
@@ -153,6 +156,37 @@ namespace CMM
             {
                 Log.Error($"[CMM] Failed to parse Config/contexts.xml: {ex.Message}");
             }
+        }
+
+        // Parses the <DisabledVanillaSections> block — one child element per vanilla DMS
+        // section (named for its SectionType), whose value is true=disabled / false=enabled
+        // (see CMMConfig.DisabledVanillaSections / GovernVanillaSection). Rebuilds the set
+        // from scratch every load so flipping an entry back to false on hot-reload re-enables
+        // its section. A missing block clears the set (nothing disabled); a child that isn't a
+        // known section name is logged and skipped; None is ignored (silence, never disablable);
+        // a missing/unparseable value counts as false (enabled).
+        private static void LoadDisabledVanillaSections(XmlElement root)
+        {
+            CMMConfig.DisabledVanillaSections.Clear();
+
+            if (!(root.SelectSingleNode("DisabledVanillaSections") is XmlElement parent)) return;
+
+            foreach (XmlNode node in parent.ChildNodes)
+            {
+                if (node.NodeType != XmlNodeType.Element) continue;
+                var el = (XmlElement)node;
+                if (!Enum.TryParse(el.Name, true, out SectionType section))
+                {
+                    Log.Warning($"[CMM] DisabledVanillaSections: unknown section \"{el.Name}\" — ignoring.");
+                    continue;
+                }
+                if (section == SectionType.None) continue;
+                if (bool.TryParse(el.InnerText.Trim(), out bool disabled) && disabled)
+                    CMMConfig.DisabledVanillaSections.Add(section);
+            }
+
+            if (CMMConfig.DisabledVanillaSections.Count > 0)
+                CMMConfig.D($"[CMM] Vanilla sections disabled: {string.Join(", ", CMMConfig.DisabledVanillaSections)}");
         }
 
         // ── Helpers: child-element readers ────────────────────────────────────

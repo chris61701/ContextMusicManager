@@ -238,55 +238,62 @@ namespace CMM
                 string fallback = ctx?.Fallback ?? "Silence";
                 if (fallback == "Vanilla") return "Vanilla";
                 if (fallback == "Stack")
-                {
-                    foreach (ActiveContext active in _contextStack)
-                    {
-                        if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
-                        string resolved = ResolvePlayableContext(active.ContextName);
-                        if (resolved != null) return resolved;
-                    }
-                    return null;
-                }
-                // Resolves to Vanilla only when the game's threat detection is Panicked;
-                // otherwise falls through to Stack so no music change occurs.
+                    return ResolveViaStack();
+                // Resolves to Vanilla only when the game's threat detection is Panicked AND the
+                // vanilla combat/bloodmoon section that handoff would expose isn't disabled. When
+                // it IS disabled the section obeys its linked context's rules: we skip the handoff
+                // and walk the rest of the stack, so our own lower-priority music (e.g. a POI
+                // theme) keeps playing instead of being torn down for a section we'd only mute.
+                // Otherwise falls through to Stack so no music change occurs.
                 if (fallback == "VanillaIfPanicked")
                 {
                     bool dmsEnabled = GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled);
                     var localPlayer = GameManager.Instance?.World?.GetPrimaryPlayer();
-                    if (dmsEnabled && localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked)
+                    bool panicked = dmsEnabled && localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked;
+                    if (panicked && !PanicHandoffSectionDisabled())
                         return "Vanilla";
-                    foreach (ActiveContext active in _contextStack)
-                    {
-                        if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
-                        string resolved = ResolvePlayableContext(active.ContextName);
-                        if (resolved != null) return resolved;
-                    }
-                    return null;
+                    string stacked = ResolveViaStack();
+                    if (stacked != null) return stacked;
+                    // Panicked but the vanilla combat section is disabled and nothing else is on
+                    // the stack: let the Vanilla handoff stand so governance plays the Exploration
+                    // ambient (or silence, if that's disabled too) rather than cutting out here.
+                    return panicked ? "Vanilla" : null;
                 }
-                // Resolves to Vanilla only when DMS is enabled; otherwise falls through
-                // to the stack so ambient/home/etc. keeps playing instead of vanilla.
+                // Resolves to Vanilla only when DMS is enabled AND the section the handoff would
+                // expose isn't disabled. A disabled section obeys its linked context's rules: it
+                // falls through to the stack first (so e.g. your own ambient keeps playing at a
+                // trader whose vanilla music you turned off), landing on the Vanilla handoff only
+                // as a last resort so governance can play Exploration. Otherwise falls through to
+                // the stack so ambient/home/etc. keeps playing instead of vanilla.
                 if (fallback == "VanillaIfDMS")
                 {
-                    if (GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled))
-                    {
-                        // Every VanillaIfDMS context — including the five traders — hands off
-                        // to the warm, muted Conductor via the generic "Vanilla" path: we
-                        // unmute the DMS (edge-triggered) and let the game play its own clip.
-                        // CMM formerly borrowed a trader's vanilla SingleClip and replayed it
-                        // on its own channel; that path was removed once the warm-DMS unmute
-                        // was confirmed to reveal trader music reliably.
+                    bool dmsEnabled = GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled);
+                    // Every VanillaIfDMS context — including the five traders — hands off to the
+                    // warm, muted Conductor via the generic "Vanilla" path: we unmute the DMS
+                    // (edge-triggered) and let the game play its own clip.
+                    if (dmsEnabled && !ProposedVanillaSectionDisabled())
                         return "Vanilla";
-                    }
-                    foreach (ActiveContext active in _contextStack)
-                    {
-                        if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
-                        string resolved = ResolvePlayableContext(active.ContextName);
-                        if (resolved != null) return resolved;
-                    }
-                    return null;
+                    string stacked = ResolveViaStack();
+                    if (stacked != null) return stacked;
+                    return dmsEnabled ? "Vanilla" : null;
                 }
                 if (fallback == "Silence" || fallback == current) return null;
                 current = fallback;
+            }
+            return null;
+        }
+
+        // Walks the active context stack in priority order and returns the first context that
+        // resolves to something playable (its own files, or a nested Vanilla/Stack handoff).
+        // The shared body of the Stack / VanillaIf* fallbacks. Re-entrancy is bounded by the
+        // per-context guard in ResolvePlayableContext.
+        private static string ResolveViaStack()
+        {
+            foreach (ActiveContext active in _contextStack)
+            {
+                if (!DwellSatisfied(active)) continue;   // still warming up — not yet viable
+                string resolved = ResolvePlayableContext(active.ContextName);
+                if (resolved != null) return resolved;
             }
             return null;
         }
@@ -405,6 +412,35 @@ namespace CMM
             _lastGovernedSection = SectionType.None;
             _lastLoggedHold = SectionType.None;
             _pendingVanillaSection = SectionType.None;
+            _gameProposedSection = SectionType.None;
+        }
+
+        // The raw section the game's SectionSelector last proposed (before governance rewrites
+        // it), cached each frame so the resolution layer can tell whether handing off to vanilla
+        // right now would expose a user-disabled section. Set even while CMM owns audio — the
+        // Conductor still runs Select every frame — so it stays current. Location-based sections
+        // (trader/home/exploration) change slowly enough that this one-frame-old value is safe to
+        // read; the fast-changing combat handoff uses PanicHandoffSectionDisabled instead.
+        private static SectionType _gameProposedSection = SectionType.None;
+
+        // True when the vanilla section the game currently wants to play is in the user's disable
+        // list — used by the VanillaIfDMS fallback (its exposed section is location-based).
+        private static bool ProposedVanillaSectionDisabled() =>
+            _gameProposedSection != SectionType.None
+            && CMMConfig.DisabledVanillaSections.Contains(_gameProposedSection);
+
+        // True when the vanilla section a PANIC (combat) handoff would expose is disabled. The
+        // game plays Bloodmoon on a blood moon, otherwise Combat. Reads the game's authoritative
+        // blood-moon flag directly rather than the cached proposal, so it's already correct on the
+        // very frame combat starts and never briefly tears our own music down before the proposal
+        // catches up.
+        private static bool PanicHandoffSectionDisabled()
+        {
+            if (CMMConfig.DisabledVanillaSections.Count == 0) return false;
+            World world = GameManager.Instance?.World;
+            bool bloodMoon = world != null && world.IsWorldEvent(World.WorldEvent.BloodMoon);
+            return CMMConfig.DisabledVanillaSections.Contains(
+                bloodMoon ? SectionType.Bloodmoon : SectionType.Combat);
         }
 
         // Governs the section the game's SectionSelector just picked. Returns what should
@@ -413,6 +449,7 @@ namespace CMM
         // scan loop — no locking needed).
         public static SectionType GovernVanillaSection(SectionType proposed)
         {
+            _gameProposedSection = proposed;
             SectionType previous = _lastGovernedSection;
             SectionType governed = GovernVanillaSectionCore(proposed, previous);
             _lastGovernedSection = governed;
@@ -422,6 +459,27 @@ namespace CMM
         private static SectionType GovernVanillaSectionCore(SectionType proposed, SectionType previous)
         {
             if (!inGame || MusicStates.DefaultMusicEnabled) return proposed;  // CMM off → game controls
+
+            // The game's Conductor autonomously proposed a section the user disabled. By the time
+            // we reach here CMM has already decided to let vanilla play: the VanillaIf* fallbacks
+            // divert to the CMM stack first whenever the exposed section is disabled (so a POI
+            // theme or your own ambient is kept instead), which means nothing on the stack claimed
+            // this moment. With no CMM music available, play the vanilla Exploration ambient in the
+            // suppressed section's place — or silence if Exploration is disabled too. Checked ahead
+            // of the link map so it applies whether or not the section has a linked CMM context.
+            if (proposed != SectionType.None && CMMConfig.DisabledVanillaSections.Contains(proposed))
+            {
+                SectionType fallback = CMMConfig.DisabledVanillaSections.Contains(SectionType.Exploration)
+                    ? SectionType.None
+                    : SectionType.Exploration;
+                if (_lastLoggedHold != proposed)
+                {
+                    _lastLoggedHold = proposed;
+                    CMMConfig.D($"[CMM] Vanilla section {proposed} disabled — falling back to {fallback}.");
+                }
+                _pendingVanillaSection = SectionType.None;
+                return fallback;
+            }
 
             // Which CMM context governs this vanilla section? Unlinked (or None) → defer to the
             // game, and forget any in-flight warmup so the next mapped section starts fresh.

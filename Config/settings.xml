@@ -44,6 +44,25 @@
   <!-- Track pick order within a context folder: Random, RandomNoRepeat, Sequential -->
   <GlobalTrackOrder>RandomNoRepeat</GlobalTrackOrder>
 
+  <!-- ── Disable parts of the game's Dynamic Music System (DMS) ───────────
+       Switch off individual vanilla DMS sections (true = disabled). A disabled
+       section hands back to your CMM music instead of the game's — falling to
+       vanilla Exploration, or silence if that's off too, only when you have
+       nothing for it. Never affects your own CMM tracks. Hot-reloaded. -->
+  <DisabledVanillaSections>
+    <Exploration>false</Exploration>
+    <Suspense>false</Suspense>
+    <Combat>false</Combat>
+    <Bloodmoon>false</Bloodmoon>
+    <HomeDay>false</HomeDay>
+    <HomeNight>false</HomeNight>
+    <TraderJoel>false</TraderJoel>
+    <TraderJen>false</TraderJen>
+    <TraderRekt>false</TraderRekt>
+    <TraderBob>false</TraderBob>
+    <TraderHugh>false</TraderHugh>
+  </DisabledVanillaSections>
+
   <!-- ── Context detection tuning ───────────────────────────────────────
        Max distance (game units) an enemy is counted toward combat/tension state. -->
   <EnemyDetectRange>30</EnemyDetectRange>
