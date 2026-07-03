@@ -78,12 +78,12 @@
       }
     },
     {
-      "label": "Package All (Release zips)",
+      "label": "Package (Release zip)",
       "type": "process",
       "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
       "args": [
         "ContextMusicManager.csproj",
-        "/t:PackageAll",
+        "/t:Package",
         "/v:minimal",
         "/nologo"
       ],
