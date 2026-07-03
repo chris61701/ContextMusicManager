@@ -87,6 +87,12 @@ local TRADERS = { jen = "Trader_Jen", rekt = "Trader_Rekt", bob = "Trader_Bob",
 -- tier 0 = not in combat; 1..#COMBAT_TIERS = combat intensity (only climbs mid-fight).
 local memory = { tier = 0, lastAggro = 0, biome = "", wasInfested = false, lastPoiId = "None" }
 
+-- Reused filter tables for the per-tick cmm.count tension check. Hoisted out of resolve()
+-- so the common (not-in-combat) path doesn't allocate a fresh filter table every tick —
+-- cmm.count only READS the filter, so sharing one instance is safe.
+local FILTER_ANY   = {}
+local FILTER_ALERT = { alert = true }
+
 -- Append a token. The host dedups, so insertion order just expresses intent (earlier = higher).
 local function add(list, token) list[#list + 1] = token end
 
@@ -201,8 +207,8 @@ function resolve(gameState, cfg)
   -- ── Tension / low-health ──────────────────────────────────────────────────
   if inCombat and gameState.healthPct < cfg.healthDangerPct then add(active, "Low_Health_Panic") end
   if not inCombat
-     and cmm.count(gameState, {}) >= 1
-     and cmm.count(gameState, { alert = true }) >= 1 then
+     and cmm.count(gameState, FILTER_ANY) >= 1
+     and cmm.count(gameState, FILTER_ALERT) >= 1 then
     add(active, "Tension")
   end
 

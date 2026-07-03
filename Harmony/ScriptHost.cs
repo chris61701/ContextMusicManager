@@ -65,6 +65,20 @@ namespace CMM
         static readonly List<string> _lastGood = new List<string>();
         static readonly List<string> _tokens   = new List<string>();
 
+        // Per-field marshal cache. MarshalSnapshot writes a Lua DynValue for a scalar field
+        // only when its value changed since last tick — each write boxes the primitive and
+        // allocates a DynValue, and almost every snapshot field is stable tick-to-tick (biome,
+        // isDay, poi*, ...), so this cuts the steady-state per-tick marshal churn from ~20
+        // allocations to ~1 (just `now`, which always advances). The reused _gameStateTable
+        // keeps the previous tick's DynValue for any skipped field. _snapshotAllDirty forces a
+        // full re-marshal after a (re)compile, when _gameStateTable is a fresh, empty table.
+        static bool   _snapshotAllDirty = true;
+        static bool   _pIsDay, _pIsBloodMoon, _pIsSwimming, _pIsPanicked, _pNearHome,
+                      _pInPoi, _pPoiQuestCleared, _pPoiClearFromQuestOnly;
+        static float  _pHealthPct;
+        static int    _pAlliesNearby, _pStrangersNearby, _pPoiTier, _pPoiEnemiesRemaining;
+        static string _pVehicleType, _pTraderName, _pBiome, _pPoiName, _pPoiId;
+
         // A script is essentially always loaded (on-disk override or embedded default);
         // Active is false only if even the embedded baseline fails to compile (e.g.
         // MoonSharp can't run), in which case ResolveContext returns no contexts.
@@ -206,6 +220,7 @@ namespace CMM
                 _enemyTablePool.Clear();                      // pooled tables were bound to the previous script
                 _prevEnemyCount = 0;
                 _cfgDirty = true;                             // re-marshal cfg against the new script
+                _snapshotAllDirty = true;                     // fresh _gameStateTable → write every field once
 
                 _lastLoadError = null;
                 _lastRunError  = null;
@@ -350,28 +365,58 @@ namespace CMM
 
         // ── Marshalling: GameState / CMMConfig → reused Lua tables ──────────
 
+        // Lua nil for a null string, else a string DynValue (avoids the object-indexer's
+        // boxing + FromObject round-trip). Setting a key to nil reads back as nil in Lua,
+        // exactly as the old `t[key] = null` did.
+        static DynValue Str(string s) => s == null ? DynValue.Nil : DynValue.NewString(s);
+
         static void MarshalSnapshot(GameState gameState)
         {
             Table t = _gameStateTable;
-            t["now"]         = gameState.Now;
-            t["isDay"]       = gameState.IsDay;
-            t["isBloodMoon"] = gameState.IsBloodMoon;
-            t["healthPct"]   = gameState.HealthPct;
-            t["isSwimming"]  = gameState.IsSwimming;
-            t["isPanicked"]  = gameState.IsPanicked;
-            t["vehicleType"] = gameState.VehicleType;   // null ⇒ Lua nil
-            t["traderName"]  = gameState.TraderName;
-            t["biome"]       = gameState.Biome;
-            t["nearHome"]    = gameState.NearHome;
-            t["alliesNearby"] = gameState.AlliesNearby;
-            t["strangersNearby"] = gameState.StrangersNearby;
-            t["inPoi"]       = gameState.InPoi;
-            t["poiName"]     = gameState.PoiName;
-            t["poiId"]       = gameState.PoiId;
-            t["poiTier"]     = gameState.PoiTier;
-            t["poiEnemiesRemaining"] = gameState.PoiEnemiesRemaining;
-            t["poiQuestCleared"]     = gameState.PoiQuestCleared;
-            t["poiClearFromQuestOnly"] = gameState.PoiClearFromQuestOnly;
+            bool all = _snapshotAllDirty;
+
+            // `now` advances every tick, so it is always (re)written; every other field is
+            // written only when it changed (see _snapshotAllDirty / the _p* cache above).
+            t.Set("now", DynValue.NewNumber(gameState.Now));
+
+            if (all || gameState.IsDay != _pIsDay)
+                { t.Set("isDay", DynValue.NewBoolean(gameState.IsDay)); _pIsDay = gameState.IsDay; }
+            if (all || gameState.IsBloodMoon != _pIsBloodMoon)
+                { t.Set("isBloodMoon", DynValue.NewBoolean(gameState.IsBloodMoon)); _pIsBloodMoon = gameState.IsBloodMoon; }
+            if (all || gameState.HealthPct != _pHealthPct)
+                { t.Set("healthPct", DynValue.NewNumber(gameState.HealthPct)); _pHealthPct = gameState.HealthPct; }
+            if (all || gameState.IsSwimming != _pIsSwimming)
+                { t.Set("isSwimming", DynValue.NewBoolean(gameState.IsSwimming)); _pIsSwimming = gameState.IsSwimming; }
+            if (all || gameState.IsPanicked != _pIsPanicked)
+                { t.Set("isPanicked", DynValue.NewBoolean(gameState.IsPanicked)); _pIsPanicked = gameState.IsPanicked; }
+            if (all || !string.Equals(gameState.VehicleType, _pVehicleType, StringComparison.Ordinal))
+                { t.Set("vehicleType", Str(gameState.VehicleType)); _pVehicleType = gameState.VehicleType; }
+            if (all || !string.Equals(gameState.TraderName, _pTraderName, StringComparison.Ordinal))
+                { t.Set("traderName", Str(gameState.TraderName)); _pTraderName = gameState.TraderName; }
+            if (all || !string.Equals(gameState.Biome, _pBiome, StringComparison.Ordinal))
+                { t.Set("biome", Str(gameState.Biome)); _pBiome = gameState.Biome; }
+            if (all || gameState.NearHome != _pNearHome)
+                { t.Set("nearHome", DynValue.NewBoolean(gameState.NearHome)); _pNearHome = gameState.NearHome; }
+            if (all || gameState.AlliesNearby != _pAlliesNearby)
+                { t.Set("alliesNearby", DynValue.NewNumber(gameState.AlliesNearby)); _pAlliesNearby = gameState.AlliesNearby; }
+            if (all || gameState.StrangersNearby != _pStrangersNearby)
+                { t.Set("strangersNearby", DynValue.NewNumber(gameState.StrangersNearby)); _pStrangersNearby = gameState.StrangersNearby; }
+            if (all || gameState.InPoi != _pInPoi)
+                { t.Set("inPoi", DynValue.NewBoolean(gameState.InPoi)); _pInPoi = gameState.InPoi; }
+            if (all || !string.Equals(gameState.PoiName, _pPoiName, StringComparison.Ordinal))
+                { t.Set("poiName", Str(gameState.PoiName)); _pPoiName = gameState.PoiName; }
+            if (all || !string.Equals(gameState.PoiId, _pPoiId, StringComparison.Ordinal))
+                { t.Set("poiId", Str(gameState.PoiId)); _pPoiId = gameState.PoiId; }
+            if (all || gameState.PoiTier != _pPoiTier)
+                { t.Set("poiTier", DynValue.NewNumber(gameState.PoiTier)); _pPoiTier = gameState.PoiTier; }
+            if (all || gameState.PoiEnemiesRemaining != _pPoiEnemiesRemaining)
+                { t.Set("poiEnemiesRemaining", DynValue.NewNumber(gameState.PoiEnemiesRemaining)); _pPoiEnemiesRemaining = gameState.PoiEnemiesRemaining; }
+            if (all || gameState.PoiQuestCleared != _pPoiQuestCleared)
+                { t.Set("poiQuestCleared", DynValue.NewBoolean(gameState.PoiQuestCleared)); _pPoiQuestCleared = gameState.PoiQuestCleared; }
+            if (all || gameState.PoiClearFromQuestOnly != _pPoiClearFromQuestOnly)
+                { t.Set("poiClearFromQuestOnly", DynValue.NewBoolean(gameState.PoiClearFromQuestOnly)); _pPoiClearFromQuestOnly = gameState.PoiClearFromQuestOnly; }
+
+            _snapshotAllDirty = false;
 
             // Enemies: reuse the array table (set into t once at compile time) + a pool of
             // per-enemy tables, each wrapped in a DynValue ONCE. A tick only overwrites the four
