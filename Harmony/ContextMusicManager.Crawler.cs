@@ -36,10 +36,12 @@ namespace CMM
     public partial class ContextMusicManager
     {
         // ── Tunables (seconds / counts) ────────────────────────────────────────
-        public static float CrawlChunkInterval = 0.1f;  // pause between directory chunks
-        public static int   CrawlChunkDirs     = 48;     // directories statted per chunk
+        public static float CrawlChunkInterval = 0.1f;  // pause between turns
+        public static int   CrawlChunkDirs     = 48;     // max directories STARTED per turn
+        public static int   CrawlChunkFiles    = 2000;   // max directory entries EXAMINED per turn (bounds a single huge folder)
         public static float CrawlPassPause     = 5f;     // idle between full sweeps
         public static float CrawlStartDelay    = 1f;     // let init settle before first sweep
+        public static float CrawlPartialPublishInterval = 1.5f;  // republish the growing snapshot at most this often during a first sweep
 
         // Per-directory cache: mtime + the supported, non-claimed files sitting
         // DIRECTLY in that directory (top level, not recursive).
@@ -67,13 +69,12 @@ namespace CMM
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool _rescanAll;
 
-        // One directory's worth of off-thread disk results.
-        private struct DirScanResult
+        // A directory whose listing FINISHED this turn — ready to commit to the cache.
+        private struct CompletedDir
         {
-            public bool Ok;            // false = unreadable (ACL/long path/vanished); keep prior node
+            public string   Dir;
             public DateTime Mtime;
-            public string[] Files;     // null = mtime unchanged, reuse cached node's Files
-            public string[] Subdirs;   // immediate children to enqueue
+            public string[] Files;
         }
 
         // ── Main loop ──────────────────────────────────────────────────────────
@@ -94,12 +95,68 @@ namespace CMM
                 // re-lists every folder (mtime skip can't short-circuit unknown dirs).
                 DrainRescanRequests();
 
+                // Round-robin the recursive contexts: one directory-chunk from ctx 1, then a
+                // chunk from ctx 2, then ctx 3, then back to ctx 1. Fair progress — a single
+                // gigantic folder can't starve another context's first snapshot — and, unlike
+                // running the sweeps concurrently, only ONE directory scan is ever in flight, so
+                // N giant contexts don't multiply disk IO: each gets a turn, then a shared pace
+                // pause, holding total load at ~CrawlChunkDirs per CrawlChunkInterval no matter
+                // how many contexts are being swept. Sweeps are cooperative (single main thread,
+                // advancing only at yields) and each owns a distinct CrawlState / cache /
+                // _contextsWithFiles entry, so there's no cross-context data race.
+                var sweeps = new List<SweepState>();
                 foreach (Contexts ctx in targets)
-                    yield return StartCoroutine(CrawlOneContext(ctx));
+                {
+                    SweepState s = BeginSweep(ctx);   // null = folder gone / nothing to walk
+                    if (s != null) sweeps.Add(s);
+                }
+
+                while (sweeps.Count > 0)
+                {
+                    // Every surviving sweep still has work (a stacked dir or one mid-page).
+                    for (int i = 0; i < sweeps.Count; i++)
+                    {
+                        yield return StartCoroutine(StepChunk(sweeps[i]));   // this context's turn
+                        if (SweepFinished(sweeps[i]))
+                            yield return StartCoroutine(FinishSweep(sweeps[i]));
+                        yield return new WaitForSeconds(CrawlChunkInterval); // pace per turn, not per context
+                    }
+                    sweeps.RemoveAll(SweepFinished);   // drop the ones that finished this round
+                }
 
                 yield return new WaitForSeconds(CrawlPassPause);
             }
         }
+
+        // Resumable per-context sweep state so the crawler can round-robin one turn at a time
+        // across several contexts (BeginSweep → repeated StepChunk → FinishSweep). A turn is
+        // bounded in BOTH directories started (CrawlChunkDirs) and directory entries examined
+        // (CrawlChunkFiles), so a single folder holding hundreds of thousands of files is paged
+        // across many turns via the Scan* cursor instead of listed in one blocking call.
+        private sealed class SweepState
+        {
+            public string          ContextName;
+            public string[]        Claimed;
+            public CrawlState      State;
+            public HashSet<string> Seen;
+            public Stack<string>   Stack;
+            public bool            Changed;         // any node added / re-listed / removed this sweep
+            public bool            MarkedHasFiles;
+            public bool            Incremental;     // publish growing partial snapshots this sweep
+            public float           LastPublish;
+
+            // Paged listing of one directory across turns. ScanDir != null ⇒ a directory is
+            // mid-enumeration: ScanEnum is its open lazy file enumerator and ScanFiles the
+            // matching files gathered so far. Left intact between turns when a turn's file
+            // budget is hit before the directory is exhausted.
+            public string              ScanDir;
+            public DateTime            ScanMtime;
+            public List<string>        ScanFiles;
+            public IEnumerator<string> ScanEnum;
+        }
+
+        // A sweep is done only when nothing is stacked AND no directory is still being paged.
+        private static bool SweepFinished(SweepState s) => s.Stack.Count == 0 && s.ScanDir == null;
 
         private static void DrainRescanRequests()
         {
@@ -119,8 +176,11 @@ namespace CMM
             else if (reqs != null) foreach (string n in reqs) _crawl.Remove(n);
         }
 
-        // ── One context's throttled sweep ──────────────────────────────────────
-        private IEnumerator CrawlOneContext(Contexts ctx)
+        // ── Sweep setup (synchronous) ───────────────────────────────────────────
+        // Prime one context's sweep. Returns null when there's nothing to walk (folder gone /
+        // unresolved), having first cleared the context to empty as a side effect. Otherwise
+        // returns a SweepState whose Stack holds the root, ready for the first StepChunk.
+        private SweepState BeginSweep(Contexts ctx)
         {
             string contextName = ctx.Context;
             string root = NormalizedContextDir(ctx.Path);
@@ -134,112 +194,189 @@ namespace CMM
                     empty.directorySnapshot = new string[0];
                     ApplyPresenceFromSnapshot(contextName, empty);
                 }
-                yield break;
+                return null;
             }
 
-            string[] claimed = GetClaimedSubtreePrefixes(contextName);
             if (!_crawl.TryGetValue(contextName, out CrawlState state))
                 _crawl[contextName] = state = new CrawlState();
 
-            var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var stack = new Stack<string>();
-            stack.Push(root);
-            bool changed     = false;   // any node added / re-listed / removed this sweep
-            bool markedHasFiles = false;
+            // First-sweep incremental publish: when the snapshot is still empty, republish a
+            // growing snapshot as directories are discovered so a massive context becomes
+            // playable on a PARTIAL set instead of only when the whole tree has been walked.
+            // Approximate — the authoritative (pruned) snapshot is still published from
+            // state.Dirs in FinishSweep, so correctness doesn't depend on the partials.
+            bool incremental =
+                !cacheMap.TryGetValue(contextName, out ContextCache liveCache)
+                || liveCache.directorySnapshot == null || liveCache.directorySnapshot.Length == 0;
 
-            while (stack.Count > 0)
+            var s = new SweepState
             {
-                // Pull a chunk off the traversal stack.
-                int take = Math.Min(CrawlChunkDirs, stack.Count);
-                var batch = new List<string>(take);
-                for (int i = 0; i < take; i++) batch.Add(stack.Pop());
+                ContextName = contextName,
+                Claimed     = GetClaimedSubtreePrefixes(contextName),
+                State       = state,
+                Seen        = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                Stack       = new Stack<string>(),
+                Incremental = incremental,
+                LastPublish = Time.realtimeSinceStartup,
+            };
+            s.Stack.Push(root);
+            return s;
+        }
 
-                // Read known mtimes for the batch (main thread) so the worker can
-                // decide per directory whether a re-list is needed.
-                int n = batch.Count;
-                var known    = new DateTime[n];
-                var hadNode  = new bool[n];
-                for (int i = 0; i < n; i++)
-                {
-                    if (state.Dirs.TryGetValue(batch[i], out DirNode dn))
-                    {
-                        known[i]   = dn.Mtime;
-                        hadNode[i] = true;
-                    }
-                }
+        // ── One turn of one context's sweep (its round-robin slot) ──────────────
+        // Off the main thread, starts directories (up to CrawlChunkDirs) and pages their files
+        // (up to CrawlChunkFiles entries total), resuming a directory left mid-page by a prior
+        // turn. Then, on the main thread, commits finished directories to the per-dir cache and
+        // does the throttled partial publish. The dual budget means neither a very wide tree nor
+        // a single very large folder can make one turn unbounded — a folder with 300k files is
+        // consumed CrawlChunkFiles at a time across many turns via the Scan* cursor. Leaves the
+        // sweep "finished" (empty stack, no ScanDir) exactly when the whole tree is walked.
+        private IEnumerator StepChunk(SweepState s)
+        {
+            if (SweepFinished(s)) yield break;
 
-                // Disk work off the main thread (stat + list changed dirs + children).
-                var res  = new DirScanResult[n];
-                bool done = false;
-                ThreadPool.QueueUserWorkItem(_ =>
+            CrawlState state = s.State;
+            string[] claimed = s.Claimed;
+
+            var completed = new List<CompletedDir>();
+            bool done = false;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                int fileBudget = CrawlChunkFiles;
+                int dirBudget  = CrawlChunkDirs;
+                while (fileBudget > 0)
                 {
-                    for (int i = 0; i < n; i++)
+                    // Start the next directory unless one is already mid-page.
+                    if (s.ScanDir == null)
                     {
-                        string d = batch[i];
-                        var r = new DirScanResult();
+                        if (dirBudget <= 0 || s.Stack.Count == 0) break;
+                        string d = s.Stack.Pop();
+                        dirBudget--;
+                        s.Seen.Add(d);   // seen even if unreadable → FinishSweep keeps its prior node
+
+                        DateTime mtime;
+                        string[] subs;
                         try
                         {
-                            r.Mtime   = Directory.GetLastWriteTimeUtc(d);
-                            r.Subdirs = Directory.GetDirectories(d);
-                            if (!hadNode[i] || r.Mtime != known[i])
-                                r.Files = Directory.GetFiles(d)
-                                    .Where(f => AudioDecoder.IsSupported(f)
-                                                && !IsClaimedByDeeperContext(f, claimed))
-                                    .ToArray();
-                            r.Ok = true;
+                            mtime = Directory.GetLastWriteTimeUtc(d);
+                            subs  = Directory.GetDirectories(d);
                         }
-                        // One bad folder must not abort the sweep: leave its prior node
-                        // intact and retry it on a later pass (mirrors the presence-scan
-                        // and FileWatchLoop hardening).
-                        catch { r.Ok = false; }
-                        res[i] = r;
+                        // One bad folder must not abort the sweep (ACL/long path/vanished):
+                        // skip it, keep any prior node, retry on a later pass.
+                        catch { continue; }
+
+                        for (int i = 0; i < subs.Length; i++) s.Stack.Push(subs[i]);
+
+                        // mtime unchanged since last sweep → skip the (possibly huge) listing.
+                        if (state.Dirs.TryGetValue(d, out DirNode node) && node.Mtime == mtime)
+                            continue;
+
+                        s.ScanDir   = d;
+                        s.ScanMtime = mtime;
+                        s.ScanFiles = new List<string>();
+                        try { s.ScanEnum = Directory.EnumerateFiles(d).GetEnumerator(); }
+                        catch { s.ScanDir = null; s.ScanFiles = null; continue; }
                     }
-                    done = true;
-                });
-                while (!done) yield return null;
 
-                // Apply on the main thread: update the per-dir cache, enqueue children.
-                for (int i = 0; i < n; i++)
-                {
-                    string d = batch[i];
-                    DirScanResult r = res[i];
-                    seen.Add(d);
-                    if (!r.Ok) continue;
-
-                    if (r.Files != null)
+                    // Page the current directory, spending the remaining file budget on it.
+                    bool exhausted = false;
+                    try
                     {
-                        state.Dirs[d] = new DirNode { Mtime = r.Mtime, Files = r.Files };
-                        changed = true;
+                        while (fileBudget > 0)
+                        {
+                            if (!s.ScanEnum.MoveNext()) { exhausted = true; break; }
+                            fileBudget--;
+                            string f = s.ScanEnum.Current;
+                            if (AudioDecoder.IsSupported(f) && !IsClaimedByDeeperContext(f, claimed))
+                                s.ScanFiles.Add(f);
+                        }
                     }
-
-                    // Flip presence on as soon as the first file is seen, so a huge
-                    // context becomes playable mid-sweep instead of only at the end.
-                    if (!markedHasFiles &&
-                        state.Dirs.TryGetValue(d, out DirNode cur) && cur.Files.Length > 0)
+                    // Enumeration threw mid-directory (deleted/locked): drop this listing,
+                    // keep the prior node, move on.
+                    catch
                     {
-                        markedHasFiles = true;
-                        _contextsWithFiles.Add(contextName);
+                        DisposeScan(s);
+                        continue;
                     }
 
-                    if (r.Subdirs != null)
-                        for (int s = 0; s < r.Subdirs.Length; s++) stack.Push(r.Subdirs[s]);
+                    if (exhausted)
+                    {
+                        completed.Add(new CompletedDir { Dir = s.ScanDir, Mtime = s.ScanMtime, Files = s.ScanFiles.ToArray() });
+                        DisposeScan(s);
+                    }
+                    else break;   // file budget hit mid-directory — resume this dir next turn
                 }
+                done = true;
+            });
+            while (!done) yield return null;
 
-                yield return new WaitForSeconds(CrawlChunkInterval);
+            // ── Apply on the main thread ────────────────────────────────────────
+            // Commit directories whose listing finished this turn.
+            for (int i = 0; i < completed.Count; i++)
+            {
+                CompletedDir cd = completed[i];
+                state.Dirs[cd.Dir] = new DirNode { Mtime = cd.Mtime, Files = cd.Files };
+                s.Changed = true;
+                // Flip presence on as soon as the first file is seen, so a huge context becomes
+                // playable mid-sweep instead of only at the end.
+                if (!s.MarkedHasFiles && cd.Files.Length > 0)
+                {
+                    s.MarkedHasFiles = true;
+                    _contextsWithFiles.Add(s.ContextName);
+                }
             }
 
-            // Drop directories that have disappeared since the last sweep.
-            if (state.Dirs.Count != seen.Count)
+            // Throttled partial publish (first sweep only): assemble a growing snapshot from
+            // every directory listed so far PLUS the in-progress directory's files, so a context
+            // becomes playable long before its walk finishes — including the case where a SINGLE
+            // directory holds hundreds of thousands of files and is still being paged. Assembly
+            // is O(files-so-far) but throttled to CrawlPartialPublishInterval; PickNextFile reads
+            // the reference locklessly, so swapping in the array is safe on the main thread.
+            if (s.Incremental &&
+                (Time.realtimeSinceStartup - s.LastPublish) >= CrawlPartialPublishInterval)
             {
-                var gone = state.Dirs.Keys.Where(k => !seen.Contains(k)).ToList();
+                var files = new List<string>();
+                foreach (DirNode dn in state.Dirs.Values)
+                    if (dn.Files.Length > 0) files.AddRange(dn.Files);
+                if (s.ScanFiles != null && s.ScanFiles.Count > 0) files.AddRange(s.ScanFiles);
+                if (files.Count > 0 && cacheMap.TryGetValue(s.ContextName, out ContextCache pc))
+                {
+                    s.LastPublish = Time.realtimeSinceStartup;
+                    pc.directorySnapshot = files.ToArray();
+                    ApplyPresenceFromSnapshot(s.ContextName, pc);
+                }
+            }
+        }
+
+        // Close the open paged-listing cursor and clear it. Dispose can't be allowed to throw
+        // out of the worker loop (it would abort the whole turn), so it's swallowed.
+        private static void DisposeScan(SweepState s)
+        {
+            try { s.ScanEnum?.Dispose(); } catch { }
+            s.ScanEnum  = null;
+            s.ScanDir   = null;
+            s.ScanFiles = null;
+        }
+
+        // ── Sweep finalize (once the tree is fully walked) ──────────────────────
+        // Prunes directories that vanished since the last sweep, then reassembles and publishes
+        // the authoritative flat snapshot from the per-directory cache.
+        private IEnumerator FinishSweep(SweepState s)
+        {
+            CrawlState state = s.State;
+
+            // Drop directories that have disappeared since the last sweep.
+            if (state.Dirs.Count != s.Seen.Count)
+            {
+                var gone = state.Dirs.Keys.Where(k => !s.Seen.Contains(k)).ToList();
                 if (gone.Count > 0)
                 {
                     foreach (string g in gone) state.Dirs.Remove(g);
-                    changed = true;
+                    s.Changed = true;
                 }
             }
 
-            if (!changed) yield break;
+            if (!s.Changed) yield break;
 
             // Reassemble the flat snapshot from the per-directory cache. References the
             // same string instances already held in DirNode.Files — no path is copied.
@@ -247,7 +384,7 @@ namespace CMM
             foreach (DirNode dn in state.Dirs.Values)
                 if (dn.Files.Length > 0) files.AddRange(dn.Files);
 
-            yield return ApplyCrawlSnapshot(contextName, files.ToArray());
+            yield return ApplyCrawlSnapshot(s.ContextName, files.ToArray());
         }
 
         // Publish a freshly-assembled snapshot and react where the crawler is the only
