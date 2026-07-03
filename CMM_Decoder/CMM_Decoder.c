@@ -189,9 +189,23 @@ struct cmm_decoder {
 
     /* ── Container (Matroska/WebM) ────────────────────────────────────────
      * A .mkv/.webm handle owns a real decoder for the remuxed audio stream:
-     * the audio track is demuxed (matroska.c) and repackaged into a framing an
-     * existing backend reads, then opened here. read/seek/close delegate to it. */
-    struct cmm_decoder* inner;    /* delegate decoder (kind != CONTAINER) */
+     * the audio track is demuxed (matroska.c) and repackaged ON DEMAND into a
+     * framing an existing backend reads, streamed through a lazy pull source so
+     * a multi-GB recording never has to be read whole at open. read/seek/close
+     * delegate to the inner decoder; the container_stream is the byte producer. */
+    struct cmm_decoder*    inner;   /* delegate decoder (kind != CONTAINER) */
+    struct container_stream* cs;    /* lazy remux source feeding `inner` (CONTAINER only) */
+
+    /* ── Streaming ADTS (AAC-in-container) ────────────────────────────────
+     * The AAC backend normally frames a whole in-memory ADTS buffer; when fed
+     * from a container it instead pulls ADTS bytes on demand via src_read into
+     * a small refill window (sbuf), so the mkv audio track is never buffered
+     * whole. src_read == NULL for every non-streaming AAC open. */
+    int  (*src_read)(void* ud, void* dst, int n);
+    void*          src_ud;
+    unsigned char* sbuf;          /* refill window for streaming ADTS */
+    int            scap, slen, spos;
+    int            src_eof;
 };
 
 /* Generous one-frame scratch: HE-AAC frameSize is up to 2048, up to 8 channels. */
@@ -199,13 +213,19 @@ struct cmm_decoder {
 
 /* Upper bound on the MP4 'moov' (index) we will pull into RAM to serve minimp4's
  * open-time sample-table parse from memory instead of a per-read syscall storm.
- * A real music moov (even hours long, plus embedded cover art) is a few MB; past
- * this we skip the cache and fall back to streamed reads (correct, just slower to
- * open). The audio ('mdat') is NEVER buffered — only the index.
+ * A music moov is a few MB, but a LONG VIDEO's is not: a 10 h AAC track carries a
+ * ~36 MB sample table (one stsz/stco/stts entry per ~23 ms access unit), and past
+ * the cap the streamed fallback parses it via millions of tiny fseek+fread calls —
+ * seconds-to-minutes of stall on a multi-GB file (the in-game "video freezes the
+ * game" case). So the cap is sized to comfortably hold even very long videos'
+ * indexes (256 MB ≈ ~70 h of AAC); the box is validated to fit inside the file
+ * before this and freed on close, and 'mdat' (the audio) is NEVER buffered — only
+ * the index. Above the cap we still fall back to streamed reads (correct, just slow
+ * to open — a hard parse guard covers that pathological tail separately).
  * Overridable at build time (e.g. -DCMM_MP4_MOOV_CACHE_MAX=0 disables the cache
  * for an A/B benchmark). */
 #ifndef CMM_MP4_MOOV_CACHE_MAX
-#define CMM_MP4_MOOV_CACHE_MAX (16 * 1024 * 1024)
+#define CMM_MP4_MOOV_CACHE_MAX (256 * 1024 * 1024)
 #endif
 
 CMM_API int CMM_Decoder_abi(void) { return CMM_DECODER_ABI; }
@@ -1304,6 +1324,40 @@ static int cmm_aac_decode_one_au(cmm_decoder* d)
         UINT insize = fb, valid = fb;
         UCHAR* inp = au;
         if (aacDecoder_Fill(d->aac, &inp, &insize, &valid) != AAC_DEC_OK) return -1;
+    } else if (d->src_read) {
+        /* ── Streaming ADTS (container source): pull ADTS bytes on demand into the
+         * refill window (sbuf) and frame them with fdk-aac. Never buffers the whole
+         * track. Mirrors the in-memory loop below but refills from src_read. ── */
+        for (;;) {
+            /* Top up the window: compact any leftover to the front, then read more. */
+            if (!d->src_eof && d->spos >= d->slen) {           /* window drained */
+                d->slen = d->spos = 0;
+                int got = d->src_read(d->src_ud, d->sbuf, d->scap);
+                if (got > 0) d->slen = got; else d->src_eof = 1;
+            } else if (!d->src_eof && d->spos > 0) {           /* leftover + room */
+                memmove(d->sbuf, d->sbuf + d->spos, (size_t)(d->slen - d->spos));
+                d->slen -= d->spos; d->spos = 0;
+                if (d->slen < d->scap) {
+                    int got = d->src_read(d->src_ud, d->sbuf + d->slen, d->scap - d->slen);
+                    if (got > 0) d->slen += got; else d->src_eof = 1;
+                }
+            }
+            if (d->slen > d->spos) {
+                UCHAR* inp = d->sbuf + d->spos;
+                UINT insize = (UINT)(d->slen - d->spos), valid = insize;
+                if (aacDecoder_Fill(d->aac, &inp, &insize, &valid) != AAC_DEC_OK) return -1;
+                d->spos += (int)(insize - valid);             /* bytes consumed */
+            }
+            UINT flags = d->clr_hist ? AACDEC_CLRHIST : 0;
+            err = aacDecoder_DecodeFrame(d->aac, d->i16, CMM_AAC_MAX_SAMPLES, flags);
+            if (err == AAC_DEC_NOT_ENOUGH_BITS) {
+                if (d->src_eof && d->spos >= d->slen) return 0;   /* stream drained → EOF */
+                continue;                                          /* need more bytes */
+            }
+            d->clr_hist = 0;
+            if (err != AAC_DEC_OK) return -1;
+            goto have_frame;
+        }
     } else {
         /* ── Raw ADTS: feed the in-memory buffer; fdk-aac frames it. Loop because
          * a single Fill may not have handed the decoder a whole frame yet. ── */
@@ -1393,6 +1447,16 @@ static int cmm_aac_init(cmm_decoder* d, long long filesize, int* channels,
         UCHAR* dsi = (UCHAR*)d->mp4->track[found].dsi;
         UINT   dsl = d->mp4->track[found].dsi_bytes;
         if (aacDecoder_ConfigRaw(d->aac, &dsi, &dsl) != AAC_DEC_OK) return -1;
+
+        /* The cached moov index has done its only job — feeding MP4D_open's
+         * sample-table parse from RAM. minimp4 now holds the tables (and a copy of
+         * the dsi) in its own arrays, and every read from here on is 'mdat' sample
+         * data (outside the moov offset range), so cmm_mp4_read never touches
+         * moov_buf again. Free it NOW rather than holding it for the whole track's
+         * decode: the allocation is the actual moov size (a few KB for music, tens
+         * of MB for a multi-hour video — never the 256 MB cap), and this keeps that
+         * peak transient to the open, not resident for the life of the reader. */
+        if (d->moov_buf) { free(d->moov_buf); d->moov_buf = NULL; d->moov_off = 0; d->moov_len = 0; }
     } else {
         /* Raw ADTS: operate over an in-memory buffer. (A file open reads the whole
          * file in below; ADTS music files are small, and movies are always MP4.) */
@@ -1603,6 +1667,7 @@ CMM_API void cmm_aac_close(cmm_decoder* d)
     if (d->mp4) { MP4D_close(d->mp4); free(d->mp4); }
     if (d->moov_buf) free(d->moov_buf);
     if (d->aubuf) free(d->aubuf);
+    if (d->sbuf)  free(d->sbuf);   /* streaming-ADTS refill window */
     if (d->i16)   free(d->i16);
     if (d->pcm)   free(d->pcm);
     if (d->buf)   free(d->buf);
@@ -1613,16 +1678,17 @@ CMM_API void cmm_aac_close(cmm_decoder* d)
 /* ── Container: Matroska / WebM (matroska.c demux + remux → existing backend) ──
  * The audio track is demuxed and losslessly repackaged into a stream one of the
  * decoders above already opens (Opus/Vorbis → Ogg; AAC → ADTS; MP3 → raw frames;
- * FLAC → native FLAC), then opened via the matching cmm_*_open_memory. The
- * container handle (kind CONTAINER) holds that inner decoder; read/seek/close
- * delegate to it. Forward-only demux is enough: the inner decoder owns seeking
- * over the fully-remuxed buffer, so no Cues index is needed. */
+ * FLAC → native FLAC), then opened via that backend's CALLBACK path. This is done
+ * lazily — see the container_stream / cstream_read machinery below: the inner
+ * decoder pulls remux bytes on demand, so a multi-GB recording is never read or
+ * buffered whole at open (that eager whole-file remux was the in-game mkv stall).
+ * The CONTAINER handle holds the inner decoder + its streaming source; read/close
+ * delegate, and seek rebuilds the source from offset 0. */
 
-/* Growable byte buffer for the remuxed stream. Capped: the whole remuxed track
- * is held in RAM (and copied once more by the inner *_open_memory decoder), so
- * an unbounded track — e.g. a long movie's audio — could balloon. Music tracks
- * are minutes; ~96 MB is ~90+ min of Opus/Vorbis. Over the cap, the open fails
- * cleanly and the caller falls through to its normal load-failure handling. */
+/* Growable byte buffer for the (incrementally produced) remux stream. The staging
+ * buffer is compacted as the inner decoder consumes it (cstream_read), so it holds
+ * only a page/frame + slack, never the whole track. The cap is a sanity ceiling on
+ * a single pathological unit — normal staging stays in the low KB. */
 #ifndef CMM_MKV_MAX_REMUX
 #define CMM_MKV_MAX_REMUX ((size_t)96 * 1024 * 1024)
 #endif
@@ -1704,240 +1770,271 @@ static int ogg_drain(ogg_stream_state* os, bytebuf* out, int flush)
     return 1;
 }
 
-/* Remux a demuxed Opus track into an Ogg/Opus stream (OpusHead + OpusTags +
- * data pages with exact 48 kHz granulepos). Returns a malloc'd buffer (caller
- * frees) and sets *outlen, or NULL on failure. */
-static unsigned char* remux_opus(mkv_demux* mk, const mkv_audio_info* ai, long long* outlen)
-{
-    if (!ai->codec_private || ai->codec_private_len < 19) return NULL;   /* need OpusHead */
-
-    bytebuf out = {0};
-    ogg_stream_state os;
-    if (ogg_stream_init(&os, 0x434D4D31)) return NULL;   /* serialno 'CMM1' */
-
-    ogg_packet op;
-    /* OpusHead (BOS) — alone on the first page per the Ogg/Opus spec. */
-    op.packet = (unsigned char*)ai->codec_private;
-    op.bytes = ai->codec_private_len;
-    op.b_o_s = 1; op.e_o_s = 0; op.granulepos = 0; op.packetno = 0;
-    ogg_stream_packetin(&os, &op);
-    if (!ogg_drain(&os, &out, 1)) goto fail;
-
-    /* OpusTags — minimal: vendor "CMM", zero user comments. */
-    {
-        unsigned char tags[19];
-        memcpy(tags, "OpusTags", 8);
-        wr_le32(tags + 8, 3); memcpy(tags + 12, "CMM", 3); wr_le32(tags + 15, 0);
-        op.packet = tags; op.bytes = (long)sizeof(tags);
-        op.b_o_s = 0; op.e_o_s = 0; op.granulepos = 0; op.packetno = 1;
-        ogg_stream_packetin(&os, &op);
-        if (!ogg_drain(&os, &out, 1)) goto fail;
-    }
-
-    /* Audio pages. One-packet lookahead so the final packet carries e_o_s and
-     * the running granulepos (exact, via opus_packet_get_nb_samples @48 kHz). */
-    {
-        long long granule = 0, packetno = 2;
-        unsigned char* pend = NULL; int pendlen = 0, pendcap = 0, have = 0;
-        const unsigned char* pkt; int plen; long long tc;
-        int r;
-        while ((r = mkv_next_packet(mk, &pkt, &plen, &tc)) == 1) {
-            if (have) {
-                int ns = opus_packet_get_nb_samples(pend, pendlen, 48000);
-                if (ns <= 0) ns = 960;
-                granule += ns;
-                op.packet = pend; op.bytes = pendlen;
-                op.b_o_s = 0; op.e_o_s = 0; op.granulepos = granule; op.packetno = packetno++;
-                ogg_stream_packetin(&os, &op);
-                if (!ogg_drain(&os, &out, 0)) { free(pend); goto fail; }
-            }
-            if (plen > pendcap) {
-                unsigned char* nb = (unsigned char*)realloc(pend, (size_t)plen);
-                if (!nb) { free(pend); goto fail; }
-                pend = nb; pendcap = plen;
-            }
-            memcpy(pend, pkt, (size_t)plen); pendlen = plen; have = 1;
-        }
-        if (r < 0) { free(pend); goto fail; }
-        if (have) {
-            int ns = opus_packet_get_nb_samples(pend, pendlen, 48000);
-            if (ns <= 0) ns = 960;
-            granule += ns;
-            op.packet = pend; op.bytes = pendlen;
-            op.b_o_s = 0; op.e_o_s = 1; op.granulepos = granule; op.packetno = packetno++;
-            ogg_stream_packetin(&os, &op);
-        }
-        free(pend);
-        if (!ogg_drain(&os, &out, 1)) goto fail;   /* flush remainder incl. EOS page */
-    }
-
-    ogg_stream_clear(&os);
-    *outlen = (long long)out.len;
-    return out.p;
-
-fail:
-    ogg_stream_clear(&os);
-    free(out.p);
-    return NULL;
-}
-
-/* Remux a demuxed Vorbis track into an Ogg/Vorbis stream. The three setup
- * headers live in CodecPrivate (Xiph-laced: count-1, then 255-summed sizes for
- * all but the last). Vorbis has no cheap per-packet sample count, so granulepos
- * is derived from each block's Matroska timestamp (accurate to a block); the
- * final page is bumped to the track duration so the reported length is exact. */
-static unsigned char* remux_vorbis(mkv_demux* mk, const mkv_audio_info* ai, long long* outlen)
-{
-    const unsigned char* cp = ai->codec_private;
-    int cpl = ai->codec_private_len;
-    if (!cp || cpl < 3 || cp[0] != 2) return NULL;   /* need exactly 3 headers */
-
-    int p = 1, s0 = 0, s1 = 0;
-    while (p < cpl && cp[p] == 255) { s0 += 255; p++; } if (p < cpl) s0 += cp[p++];
-    while (p < cpl && cp[p] == 255) { s1 += 255; p++; } if (p < cpl) s1 += cp[p++];
-    long l0 = s0, l1 = s1, l2 = (long)cpl - (p + s0 + s1);
-    if (l2 < 0 || (long)p + s0 + s1 > cpl) return NULL;
-    const unsigned char* h0 = cp + p;
-    const unsigned char* h1 = cp + p + s0;
-    const unsigned char* h2 = cp + p + s0 + s1;
-
-    bytebuf out = {0};
-    ogg_stream_state os;
-    if (ogg_stream_init(&os, 0x434D4D32)) return NULL;   /* serialno 'CMM2' */
-
-    ogg_packet op;
-    op.b_o_s = 1; op.e_o_s = 0; op.granulepos = 0; op.packetno = 0;
-    op.packet = (unsigned char*)h0; op.bytes = l0;
-    ogg_stream_packetin(&os, &op);
-    if (!ogg_drain(&os, &out, 1)) goto fail;             /* id header alone (BOS) */
-
-    op.b_o_s = 0; op.granulepos = 0;
-    op.packet = (unsigned char*)h1; op.bytes = l1; op.packetno = 1; ogg_stream_packetin(&os, &op);
-    op.packet = (unsigned char*)h2; op.bytes = l2; op.packetno = 2; ogg_stream_packetin(&os, &op);
-    if (!ogg_drain(&os, &out, 1)) goto fail;             /* comment + setup */
-
-    {
-        int sr = ai->sample_rate > 0 ? ai->sample_rate : 48000;
-        long long granule = 0, packetno = 3;
-        unsigned char* pend = NULL; int pendlen = 0, pendcap = 0, have = 0;
-        long long pend_tc = 0;
-        const unsigned char* pkt; int plen; long long tc;
-        int r;
-        while ((r = mkv_next_packet(mk, &pkt, &plen, &tc)) == 1) {
-            if (have) {
-                long long g = pend_tc / 1000000000LL * sr +
-                              (pend_tc % 1000000000LL) * sr / 1000000000LL;
-                if (g < granule) g = granule;
-                granule = g;
-                op.packet = pend; op.bytes = pendlen;
-                op.b_o_s = 0; op.e_o_s = 0; op.granulepos = granule; op.packetno = packetno++;
-                ogg_stream_packetin(&os, &op);
-                if (!ogg_drain(&os, &out, 0)) { free(pend); goto fail; }
-            }
-            if (plen > pendcap) {
-                unsigned char* nb = (unsigned char*)realloc(pend, (size_t)plen);
-                if (!nb) { free(pend); goto fail; }
-                pend = nb; pendcap = plen;
-            }
-            memcpy(pend, pkt, (size_t)plen); pendlen = plen; pend_tc = tc; have = 1;
-        }
-        if (r < 0) { free(pend); goto fail; }
-        if (have) {
-            long long g = (long long)(ai->duration_sec > 0 ? ai->duration_sec * sr + 0.5 : 0);
-            if (g <= granule) g = granule + 1;
-            granule = g;
-            op.packet = pend; op.bytes = pendlen;
-            op.b_o_s = 0; op.e_o_s = 1; op.granulepos = granule; op.packetno = packetno++;
-            ogg_stream_packetin(&os, &op);
-        }
-        free(pend);
-        if (!ogg_drain(&os, &out, 1)) goto fail;
-    }
-
-    ogg_stream_clear(&os);
-    *outlen = (long long)out.len;
-    return out.p;
-
-fail:
-    ogg_stream_clear(&os);
-    free(out.p);
-    return NULL;
-}
-
-/* Concatenate every demuxed packet, optionally prefixed by `prefix` bytes.
- * Serves MP3 (raw self-syncing frames → dr_mp3) and FLAC (the CodecPrivate
- * "fLaC"+STREAMINFO header followed by the raw FLAC frame packets → dr_flac). */
-static unsigned char* remux_concat(mkv_demux* mk, const unsigned char* prefix, int prefix_len,
-                                   long long* outlen)
-{
-    bytebuf out = {0};
-    if (prefix_len > 0 && !bb_append(&out, prefix, (size_t)prefix_len)) { free(out.p); return NULL; }
-
-    const unsigned char* pkt; int plen; long long tc;
-    int r;
-    while ((r = mkv_next_packet(mk, &pkt, &plen, &tc)) == 1) {
-        if (!bb_append(&out, pkt, (size_t)plen)) { free(out.p); return NULL; }
-    }
-    if (r < 0 || out.len == 0) { free(out.p); return NULL; }
-    *outlen = (long long)out.len;
-    return out.p;
-}
-
 /* The 11 ADTS sampling-frequency indices (index 15 = explicit rate, unused for
- * the music this targets). Used to map an AAC AudioSpecificConfig rate index. */
+ * the music this targets). Maps an AAC AudioSpecificConfig rate index. */
 static int adts_freq_index(int asc_index) { return (asc_index >= 0 && asc_index <= 12) ? asc_index : 4; }
 
-/* Remux a demuxed AAC track to a raw ADTS stream: each access unit gets a 7-byte
- * ADTS header built from the AudioSpecificConfig in CodecPrivate (objectType,
- * sampling-frequency index, channel config). cmm_aac_open_memory then decodes it
- * through fdk-aac's TT_MP4_ADTS path exactly like a .aac file. */
-static unsigned char* remux_aac(mkv_demux* mk, const mkv_audio_info* ai, long long* outlen)
+/* ─────────────────────────────────────────────────────────────────────────
+ * Container streaming source (lazy pull-remux)
+ * ─────────────────────────────────────────────────────────────────────────
+ * A .mkv/.webm audio track is repackaged into a framing an existing backend
+ * reads (Opus/Vorbis → Ogg; AAC → ADTS; MP3 → raw frames; FLAC → native FLAC)
+ * — but ON DEMAND: the inner decoder pulls bytes through cstream_read, which
+ * demuxes + remuxes just enough of the track to satisfy each read. So the open
+ * touches only the header region + first packet(s) and nothing is buffered
+ * whole, however large the recording. The inner decoder owns PCM-level seeking
+ * within what it has seen; a loop/seek-to-0 rebuilds the source from the start
+ * (the demuxer is forward-only), which is the container_seek path below. */
+
+struct cmm_decoder;                      /* fwd */
+static int cmm_aac_decode_one_au(cmm_decoder* d);   /* fwd (defined above) */
+
+typedef struct container_stream {
+    src_reader     sr;          /* random-access source over fp / mem copy (src_cb) */
+    FILE*          fp;          /* owned file handle (file open); NULL for a memory open */
+    unsigned char* memcopy;     /* owned copy of source bytes (memory open); NULL for a file */
+    mkv_demux*     mk;          /* demuxer over sr; re-openable from offset 0 for seek */
+    long long      filesize;
+    mkv_audio_info ai;          /* codec_private points into mk — refreshed on re-open */
+    int            codec;
+
+    bytebuf        stg;         /* produced-but-unconsumed remux bytes (compacted per read) */
+    size_t         rd;          /* consume cursor into stg */
+    long long      consumed;    /* total bytes handed out (the inner decoder's byte "tell") */
+    int            eof;         /* producer drained the track */
+    int            error;       /* producer / demux error latched */
+    int            hdr_done;    /* setup headers already produced into stg */
+
+    /* Ogg remux state (Opus / Vorbis) — kept live for incremental pageout. */
+    ogg_stream_state os; int os_active;
+    long long      granule, packetno;
+    unsigned char* pend; int pendlen, pendcap, have; long long pend_tc;   /* one-packet lookahead */
+
+    /* ADTS header fields precomputed from CodecPrivate (AAC). */
+    int            aac_profile, aac_fi, aac_chan_cfg;
+} container_stream;
+
+static int cstream_read(void* ud, void* dst, int n);   /* fwd */
+
+/* ── Per-codec incremental producers ─────────────────────────────────────────
+ * Each appends at least one remux unit (header block or one packet's framing)
+ * to cs->stg, or reaches EOF. Returns 1 = progressed, 0 = EOF (final flush done),
+ * <0 = error. cstream_read loops these until a read is satisfiable or EOF. */
+
+static int cs_produce_aac(container_stream* cs)
 {
-    const unsigned char* cp = ai->codec_private;
-    if (!cp || ai->codec_private_len < 2) return NULL;
-
-    /* AudioSpecificConfig: 5 bits objectType, 4 bits freqIndex, 4 bits chanCfg. */
-    int obj_type  = (cp[0] >> 3) & 0x1F;
-    int freq_idx  = ((cp[0] & 0x07) << 1) | ((cp[1] >> 7) & 0x01);
-    int chan_cfg  = (cp[1] >> 3) & 0x0F;
-    if (obj_type < 1) obj_type = 2;                  /* default AAC-LC */
-    if (chan_cfg < 1) chan_cfg = ai->channels > 0 ? ai->channels : 2;
-    int profile = (obj_type - 1) & 0x03;             /* ADTS profile = objectType-1 */
-    int fi = adts_freq_index(freq_idx);
-
-    bytebuf out = {0};
     const unsigned char* pkt; int plen; long long tc;
-    int r;
-    while ((r = mkv_next_packet(mk, &pkt, &plen, &tc)) == 1) {
-        int frame_len = plen + 7;
-        if (frame_len >= (1 << 13)) { free(out.p); return NULL; }   /* exceeds ADTS field */
-        unsigned char h[7];
-        h[0] = 0xFF;
-        h[1] = 0xF1;                                  /* MPEG-4, layer 0, no CRC */
-        h[2] = (unsigned char)((profile << 6) | (fi << 2) | ((chan_cfg >> 2) & 0x01));
-        h[3] = (unsigned char)(((chan_cfg & 0x03) << 6) | ((frame_len >> 11) & 0x03));
-        h[4] = (unsigned char)((frame_len >> 3) & 0xFF);
-        h[5] = (unsigned char)(((frame_len & 0x07) << 5) | 0x1F);
-        h[6] = 0xFC;                                  /* buffer fullness VBR, 1 frame */
-        if (!bb_append(&out, h, 7) || !bb_append(&out, pkt, (size_t)plen)) { free(out.p); return NULL; }
-    }
-    if (r < 0 || out.len == 0) { free(out.p); return NULL; }
-    *outlen = (long long)out.len;
-    return out.p;
+    int r = mkv_next_packet(cs->mk, &pkt, &plen, &tc);
+    if (r < 0)  return -1;
+    if (r == 0) { cs->eof = 1; return 0; }
+    int frame_len = plen + 7;
+    if (frame_len >= (1 << 13)) return -1;             /* exceeds the ADTS length field */
+    unsigned char h[7];
+    h[0] = 0xFF; h[1] = 0xF1;                            /* MPEG-4, layer 0, no CRC */
+    h[2] = (unsigned char)((cs->aac_profile << 6) | (cs->aac_fi << 2) | ((cs->aac_chan_cfg >> 2) & 0x01));
+    h[3] = (unsigned char)(((cs->aac_chan_cfg & 0x03) << 6) | ((frame_len >> 11) & 0x03));
+    h[4] = (unsigned char)((frame_len >> 3) & 0xFF);
+    h[5] = (unsigned char)(((frame_len & 0x07) << 5) | 0x1F);
+    h[6] = 0xFC;
+    if (!bb_append(&cs->stg, h, 7) || !bb_append(&cs->stg, pkt, (size_t)plen)) return -1;
+    return 1;
 }
 
-/* Per-codec remux dispatch. */
-static unsigned char* remux_track(mkv_demux* mk, const mkv_audio_info* ai, long long* outlen)
+static int cs_produce_concat(container_stream* cs, int with_prefix)
 {
-    switch (ai->codec) {
-        case MKV_CODEC_OPUS:   return remux_opus(mk, ai, outlen);
-        case MKV_CODEC_VORBIS: return remux_vorbis(mk, ai, outlen);
-        case MKV_CODEC_AAC:    return remux_aac(mk, ai, outlen);
-        case MKV_CODEC_MP3:    return remux_concat(mk, NULL, 0, outlen);
-        case MKV_CODEC_FLAC:   return remux_concat(mk, ai->codec_private, ai->codec_private_len, outlen);
-        default:               return NULL;
+    if (with_prefix && !cs->hdr_done) {                 /* FLAC: emit "fLaC"+STREAMINFO once */
+        cs->hdr_done = 1;
+        if (cs->ai.codec_private && cs->ai.codec_private_len > 0 &&
+            !bb_append(&cs->stg, cs->ai.codec_private, (size_t)cs->ai.codec_private_len)) return -1;
+        return 1;
+    }
+    const unsigned char* pkt; int plen; long long tc;
+    int r = mkv_next_packet(cs->mk, &pkt, &plen, &tc);
+    if (r < 0)  return -1;
+    if (r == 0) { cs->eof = 1; return 0; }
+    if (!bb_append(&cs->stg, pkt, (size_t)plen)) return -1;
+    return 1;
+}
+
+static int cs_produce_opus(container_stream* cs)
+{
+    if (!cs->hdr_done) {
+        if (!cs->ai.codec_private || cs->ai.codec_private_len < 19) return -1;   /* need OpusHead */
+        if (ogg_stream_init(&cs->os, 0x434D4D31)) return -1;                     /* serialno 'CMM1' */
+        cs->os_active = 1;
+        ogg_packet op;
+        op.packet = (unsigned char*)cs->ai.codec_private; op.bytes = cs->ai.codec_private_len;
+        op.b_o_s = 1; op.e_o_s = 0; op.granulepos = 0; op.packetno = 0;
+        ogg_stream_packetin(&cs->os, &op);
+        if (!ogg_drain(&cs->os, &cs->stg, 1)) return -1;                          /* OpusHead (BOS) */
+        unsigned char tags[19];
+        memcpy(tags, "OpusTags", 8); wr_le32(tags + 8, 3); memcpy(tags + 12, "CMM", 3); wr_le32(tags + 15, 0);
+        op.packet = tags; op.bytes = 19; op.b_o_s = 0; op.granulepos = 0; op.packetno = 1;
+        ogg_stream_packetin(&cs->os, &op);
+        if (!ogg_drain(&cs->os, &cs->stg, 1)) return -1;                          /* OpusTags */
+        cs->granule = 0; cs->packetno = 2; cs->hdr_done = 1;
+        return 1;
+    }
+    const unsigned char* pkt; int plen; long long tc;
+    int r = mkv_next_packet(cs->mk, &pkt, &plen, &tc);
+    if (r < 0) return -1;
+    if (r == 0) {                                       /* flush the pending packet as EOS */
+        if (cs->have) {
+            int ns = opus_packet_get_nb_samples(cs->pend, cs->pendlen, 48000); if (ns <= 0) ns = 960;
+            cs->granule += ns;
+            ogg_packet op; op.packet = cs->pend; op.bytes = cs->pendlen;
+            op.b_o_s = 0; op.e_o_s = 1; op.granulepos = cs->granule; op.packetno = cs->packetno++;
+            ogg_stream_packetin(&cs->os, &op);
+            cs->have = 0;
+        }
+        if (!ogg_drain(&cs->os, &cs->stg, 1)) return -1;
+        cs->eof = 1; return 0;
+    }
+    if (cs->have) {                                     /* previous packet is now known non-final */
+        int ns = opus_packet_get_nb_samples(cs->pend, cs->pendlen, 48000); if (ns <= 0) ns = 960;
+        cs->granule += ns;
+        ogg_packet op; op.packet = cs->pend; op.bytes = cs->pendlen;
+        op.b_o_s = 0; op.e_o_s = 0; op.granulepos = cs->granule; op.packetno = cs->packetno++;
+        ogg_stream_packetin(&cs->os, &op);
+        if (!ogg_drain(&cs->os, &cs->stg, 0)) return -1;
+    }
+    if (plen > cs->pendcap) {
+        unsigned char* nb = (unsigned char*)realloc(cs->pend, (size_t)plen);
+        if (!nb) return -1;
+        cs->pend = nb; cs->pendcap = plen;
+    }
+    memcpy(cs->pend, pkt, (size_t)plen); cs->pendlen = plen; cs->have = 1;
+    return 1;
+}
+
+static int cs_produce_vorbis(container_stream* cs)
+{
+    int sr = cs->ai.sample_rate > 0 ? cs->ai.sample_rate : 48000;
+    if (!cs->hdr_done) {
+        const unsigned char* cp = cs->ai.codec_private; int cpl = cs->ai.codec_private_len;
+        if (!cp || cpl < 3 || cp[0] != 2) return -1;                             /* need 3 headers */
+        int p = 1, s0 = 0, s1 = 0;
+        while (p < cpl && cp[p] == 255) { s0 += 255; p++; } if (p < cpl) s0 += cp[p++];
+        while (p < cpl && cp[p] == 255) { s1 += 255; p++; } if (p < cpl) s1 += cp[p++];
+        long l0 = s0, l1 = s1, l2 = (long)cpl - (p + s0 + s1);
+        if (l2 < 0 || (long)p + s0 + s1 > cpl) return -1;
+        const unsigned char* h0 = cp + p, *h1 = cp + p + s0, *h2 = cp + p + s0 + s1;
+        if (ogg_stream_init(&cs->os, 0x434D4D32)) return -1;                      /* serialno 'CMM2' */
+        cs->os_active = 1;
+        ogg_packet op;
+        op.b_o_s = 1; op.e_o_s = 0; op.granulepos = 0; op.packetno = 0;
+        op.packet = (unsigned char*)h0; op.bytes = l0; ogg_stream_packetin(&cs->os, &op);
+        if (!ogg_drain(&cs->os, &cs->stg, 1)) return -1;                          /* id header (BOS) */
+        op.b_o_s = 0; op.granulepos = 0;
+        op.packet = (unsigned char*)h1; op.bytes = l1; op.packetno = 1; ogg_stream_packetin(&cs->os, &op);
+        op.packet = (unsigned char*)h2; op.bytes = l2; op.packetno = 2; ogg_stream_packetin(&cs->os, &op);
+        if (!ogg_drain(&cs->os, &cs->stg, 1)) return -1;                          /* comment + setup */
+        cs->granule = 0; cs->packetno = 3; cs->hdr_done = 1;
+        return 1;
+    }
+    const unsigned char* pkt; int plen; long long tc;
+    int r = mkv_next_packet(cs->mk, &pkt, &plen, &tc);
+    if (r < 0) return -1;
+    if (r == 0) {                                       /* flush the pending packet as EOS */
+        if (cs->have) {
+            long long g = (long long)(cs->ai.duration_sec > 0 ? cs->ai.duration_sec * sr + 0.5 : 0);
+            if (g <= cs->granule) g = cs->granule + 1;
+            cs->granule = g;
+            ogg_packet op; op.packet = cs->pend; op.bytes = cs->pendlen;
+            op.b_o_s = 0; op.e_o_s = 1; op.granulepos = cs->granule; op.packetno = cs->packetno++;
+            ogg_stream_packetin(&cs->os, &op);
+            cs->have = 0;
+        }
+        if (!ogg_drain(&cs->os, &cs->stg, 1)) return -1;
+        cs->eof = 1; return 0;
+    }
+    if (cs->have) {                                     /* granule from the pending block's timestamp */
+        long long g = cs->pend_tc / 1000000000LL * sr + (cs->pend_tc % 1000000000LL) * sr / 1000000000LL;
+        if (g < cs->granule) g = cs->granule;
+        cs->granule = g;
+        ogg_packet op; op.packet = cs->pend; op.bytes = cs->pendlen;
+        op.b_o_s = 0; op.e_o_s = 0; op.granulepos = cs->granule; op.packetno = cs->packetno++;
+        ogg_stream_packetin(&cs->os, &op);
+        if (!ogg_drain(&cs->os, &cs->stg, 0)) return -1;
+    }
+    if (plen > cs->pendcap) {
+        unsigned char* nb = (unsigned char*)realloc(cs->pend, (size_t)plen);
+        if (!nb) return -1;
+        cs->pend = nb; cs->pendcap = plen;
+    }
+    memcpy(cs->pend, pkt, (size_t)plen); cs->pendlen = plen; cs->pend_tc = tc; cs->have = 1;
+    return 1;
+}
+
+static int cs_produce(container_stream* cs)
+{
+    switch (cs->codec) {
+        case MKV_CODEC_OPUS:   return cs_produce_opus(cs);
+        case MKV_CODEC_VORBIS: return cs_produce_vorbis(cs);
+        case MKV_CODEC_AAC:    return cs_produce_aac(cs);
+        case MKV_CODEC_MP3:    return cs_produce_concat(cs, 0);
+        case MKV_CODEC_FLAC:   return cs_produce_concat(cs, 1);
+        default: cs->error = 1; return -1;
     }
 }
+
+/* Forward-only byte read the inner decoders pull through. Produces just enough
+ * remux to satisfy `n`, serves it, and compacts the consumed prefix so RAM stays
+ * bounded to a page/frame + slack — never the whole track. 0 = end of stream. */
+static int cstream_read(void* ud, void* dst, int n)
+{
+    container_stream* cs = (container_stream*)ud;
+    if (n <= 0) return 0;
+    while ((cs->stg.len - cs->rd) < (size_t)n && !cs->eof && !cs->error) {
+        int r = cs_produce(cs);
+        if (r < 0) { cs->error = 1; break; }
+    }
+    size_t avail = cs->stg.len - cs->rd;
+    size_t take  = (size_t)n < avail ? (size_t)n : avail;
+    if (take) memcpy(dst, cs->stg.p + cs->rd, take);
+    cs->rd += take; cs->consumed += (long long)take;
+    if (cs->rd == cs->stg.len) { cs->stg.len = 0; cs->rd = 0; }            /* fully drained */
+    else if (cs->rd >= (1u << 20)) {                                        /* compact >1 MB consumed */
+        memmove(cs->stg.p, cs->stg.p + cs->rd, cs->stg.len - cs->rd);
+        cs->stg.len -= cs->rd; cs->rd = 0;
+    }
+    return (int)take;
+}
+
+/* ── Inner-decoder read/seek adapters over cstream ──────────────────────────
+ * seek is forward-only (discard); the container relies on the stream head for
+ * setup and rebuilds from 0 for any real seek (cmm_container_seek). */
+static int cs_op_read(void* s, unsigned char* p, int n) { return cstream_read(s, p, n); }
+static const OpusFileCallbacks CS_OP_CB = { cs_op_read, NULL, NULL, NULL };
+
+static size_t cs_ov_read(void* p, size_t sz, size_t nm, void* s)
+{
+    if (sz == 0) return 0;
+    int got = cstream_read(s, p, (int)(sz * nm));
+    return got <= 0 ? 0 : (size_t)got / sz;
+}
+static const ov_callbacks CS_OV_CB = { cs_ov_read, NULL, NULL, NULL };
+
+static int cs_discard_forward(container_stream* cs, int off)
+{
+    unsigned char tmp[4096];
+    while (off > 0) {
+        int want = off < (int)sizeof(tmp) ? off : (int)sizeof(tmp);
+        int got = cstream_read(cs, tmp, want);
+        if (got <= 0) return 0;
+        off -= got;
+    }
+    return 1;
+}
+static size_t       cs_drf_read(void* ud, void* out, size_t n) { int g = cstream_read(ud, out, (int)n); return g <= 0 ? 0 : (size_t)g; }
+static drflac_bool32 cs_drf_seek(void* ud, int off, drflac_seek_origin o)
+{
+    if (o == DRFLAC_SEEK_CUR && off >= 0) return cs_discard_forward((container_stream*)ud, off) ? DRFLAC_TRUE : DRFLAC_FALSE;
+    return DRFLAC_FALSE;                                 /* unseekable: backward / absolute / end */
+}
+static drflac_bool32 cs_drf_tell(void* ud, drflac_int64* cur) { *cur = (drflac_int64)((container_stream*)ud)->consumed; return DRFLAC_TRUE; }
+
+static size_t       cs_drmp3_read(void* ud, void* out, size_t n) { int g = cstream_read(ud, out, (int)n); return g <= 0 ? 0 : (size_t)g; }
 
 /* Free an inner decoder via its codec-specific close. */
 static void close_inner(cmm_decoder* in)
@@ -1953,53 +2050,162 @@ static void close_inner(cmm_decoder* in)
     }
 }
 
-/* Open the inner decoder on the remuxed buffer (it copies the bytes, so we free
- * our buffer immediately after). Fills the out-params from the inner decoder. */
-static cmm_decoder* open_inner(int codec, unsigned char* buf, long long len,
-                               int* channels, int* sampleRate, long long* totalFrames, int* err)
-{
-    cmm_decoder* in = NULL;
-    switch (codec) {
-        case MKV_CODEC_OPUS:   in = cmm_opus_open_memory(buf, len, channels, sampleRate, totalFrames, err); break;
-        case MKV_CODEC_VORBIS: in = cmm_vorbis_open_memory(buf, len, channels, sampleRate, totalFrames, err); break;
-        case MKV_CODEC_AAC:    in = cmm_aac_open_memory(buf, len, channels, sampleRate, totalFrames, err); break;
-        case MKV_CODEC_MP3:    in = cmm_mp3_open_memory(buf, len, channels, sampleRate, totalFrames, err); break;
-        case MKV_CODEC_FLAC:   in = cmm_flac_open_memory(buf, len, channels, sampleRate, totalFrames, err); break;
-        default: if (err) *err = -1; break;
-    }
-    return in;
-}
-
-/* Shared open: demux from `sr`, remux, open the inner decoder. On success the
- * returned handle is CONTAINER with d->inner set. */
-static cmm_decoder* container_open(src_reader* sr, long long filesize,
-                                   int* channels, int* sampleRate, long long* totalFrames, int* err)
+/* Open a streaming AAC (ADTS) inner decoder that pulls its bytes from `cs`.
+ * The refill-fed ADTS branch in cmm_aac_decode_one_au does the framing. */
+static cmm_decoder* cmm_aac_open_stream(container_stream* cs, int* channels,
+                                        int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
-    mkv_demux* mk = mkv_open(src_cb, sr, filesize);
-    if (!mk) { if (err) *err = -1; return NULL; }
-
-    mkv_audio_info ai;
-    mkv_get_audio(mk, &ai);
-
-    long long rlen = 0;
-    unsigned char* remux = remux_track(mk, &ai, &rlen);
-    mkv_close(mk);
-    if (!remux) { if (err) *err = -1; return NULL; }
-
-    int ierr = 0;
-    cmm_decoder* in = open_inner(ai.codec, remux, rlen, channels, sampleRate, totalFrames, &ierr);
-    free(remux);
-    if (!in) { if (err) *err = ierr ? ierr : -1; return NULL; }
-
     cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) {
-        close_inner(in);
-        if (err) *err = -1;
-        return NULL;
+    if (!d) { if (err) *err = -1; return NULL; }
+    d->kind = CMM_KIND_AAC;
+    d->src_read = cstream_read; d->src_ud = cs;
+    d->scap = 32 * 1024;
+    d->sbuf = (unsigned char*)malloc((size_t)d->scap);
+    d->i16  = (short*)malloc(sizeof(short) * CMM_AAC_MAX_SAMPLES);
+    d->pcm  = (float*)malloc(sizeof(float) * CMM_AAC_MAX_SAMPLES);
+    if (!d->sbuf || !d->i16 || !d->pcm) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
+    d->aac = aacDecoder_Open(TT_MP4_ADTS, 1);
+    if (!d->aac) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
+    if (cmm_aac_decode_one_au(d) <= 0) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
+    int sr = 0; { CStreamInfo* info = aacDecoder_GetStreamInfo(d->aac); sr = info ? info->sampleRate : 0; }
+    if (sr <= 0 || d->channels <= 0 || d->frame_size <= 0) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
+    if (channels)    *channels    = d->channels;
+    if (sampleRate)  *sampleRate  = sr;
+    if (totalFrames) *totalFrames = cs->ai.duration_sec > 0 ? (long long)(cs->ai.duration_sec * sr) : 0;
+    return d;
+}
+
+/* Open the inner decoder for the selected codec over the streaming source. */
+static cmm_decoder* open_inner_from_cs(container_stream* cs, int* channels,
+                                       int* sampleRate, long long* totalFrames, int* err)
+{
+    if (err) *err = 0;
+    switch (cs->codec) {
+        case MKV_CODEC_AAC:
+            return cmm_aac_open_stream(cs, channels, sampleRate, totalFrames, err);
+        case MKV_CODEC_OPUS: {
+            cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+            if (!d) { if (err) *err = -1; return NULL; }
+            int e = 0;
+            OggOpusFile* of = op_open_callbacks(cs, &CS_OP_CB, NULL, 0, &e);
+            if (!of) { free(d); if (err) *err = e ? e : -1; return NULL; }
+            d->kind = CMM_KIND_OPUS; d->of = of; d->channels = op_channel_count(of, -1);
+            if (channels)    *channels    = d->channels;
+            if (sampleRate)  *sampleRate  = 48000;
+            if (totalFrames) *totalFrames = cs->ai.duration_sec > 0 ? (long long)(cs->ai.duration_sec * 48000.0) : 0;
+            return d;
+        }
+        case MKV_CODEC_VORBIS: {
+            cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+            if (!d) { if (err) *err = -1; return NULL; }
+            d->kind = CMM_KIND_VORBIS;
+            d->vorbis = (OggVorbis_File*)calloc(1, sizeof(OggVorbis_File));
+            if (!d->vorbis) { free(d); if (err) *err = -1; return NULL; }
+            int e = ov_open_callbacks(cs, d->vorbis, NULL, 0, CS_OV_CB);
+            if (e < 0) { free(d->vorbis); free(d); if (err) *err = e; return NULL; }
+            vorbis_info* vi = ov_info(d->vorbis, -1);
+            d->channels = vi ? vi->channels : 0;
+            if (channels)    *channels    = d->channels;
+            if (sampleRate)  *sampleRate  = vi ? (int)vi->rate : 0;
+            if (totalFrames) *totalFrames = (cs->ai.duration_sec > 0 && vi) ? (long long)(cs->ai.duration_sec * vi->rate) : 0;
+            return d;
+        }
+        case MKV_CODEC_MP3: {
+            cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+            if (!d) { if (err) *err = -1; return NULL; }
+            drmp3* m = (drmp3*)malloc(sizeof(drmp3));
+            if (!m) { free(d); if (err) *err = -1; return NULL; }
+            /* NULL seek/tell → dr_mp3 runs in pure-sequential mode. With them set it
+             * would seek to the stream END at init to scan for ID3v1/APE tags, which a
+             * forward-only container source can't do (→ init fails). We decode forward
+             * only anyway; the container rebuilds from 0 for any real seek. */
+            if (!drmp3_init(m, cs_drmp3_read, NULL, NULL, NULL, cs, NULL)) {
+                free(m); free(d); if (err) *err = -1; return NULL;
+            }
+            d->kind = CMM_KIND_MP3; d->mp3 = m; d->channels = (int)m->channels;
+            if (channels)    *channels    = (int)m->channels;
+            if (sampleRate)  *sampleRate  = (int)m->sampleRate;
+            if (totalFrames) *totalFrames = cs->ai.duration_sec > 0 ? (long long)(cs->ai.duration_sec * m->sampleRate) : 0;
+            return d;
+        }
+        case MKV_CODEC_FLAC: {
+            cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+            if (!d) { if (err) *err = -1; return NULL; }
+            drflac* f = drflac_open(cs_drf_read, cs_drf_seek, cs_drf_tell, cs, NULL);
+            if (!f) { free(d); if (err) *err = -1; return NULL; }
+            d->kind = CMM_KIND_FLAC; d->flac = f; d->channels = (int)f->channels;
+            if (channels)    *channels    = (int)f->channels;
+            if (sampleRate)  *sampleRate  = (int)f->sampleRate;
+            if (totalFrames) *totalFrames = cs->ai.duration_sec > 0 ? (long long)(cs->ai.duration_sec * f->sampleRate)
+                                                                    : (long long)f->totalPCMFrameCount;
+            return d;
+        }
+        default: if (err) *err = -1; return NULL;
     }
-    d->kind  = CMM_KIND_CONTAINER;
-    d->inner = in;
+}
+
+/* Reset the producer state (keep the owned source: fp / memcopy / win). */
+static void cs_teardown_producer(container_stream* cs)
+{
+    if (cs->os_active) { ogg_stream_clear(&cs->os); cs->os_active = 0; }
+    if (cs->pend) { free(cs->pend); cs->pend = NULL; }
+    cs->pendlen = cs->pendcap = cs->have = 0; cs->pend_tc = 0;
+    if (cs->stg.p) { free(cs->stg.p); }
+    cs->stg.p = NULL; cs->stg.len = cs->stg.cap = 0; cs->rd = 0;
+    cs->consumed = 0; cs->eof = cs->error = cs->hdr_done = 0;
+    cs->granule = cs->packetno = 0;
+}
+
+/* (Re)open the demuxer at offset 0 and (re)select the audio track. */
+static int cs_open_demux(container_stream* cs)
+{
+    cs->sr.win_pos = -1; cs->sr.win_len = 0;
+    if (cs->fp) CMM_FSEEK(cs->fp, 0, SEEK_SET);
+    cs->mk = mkv_open(src_cb, &cs->sr, cs->filesize);
+    if (!cs->mk) return -1;
+    mkv_audio_info ai;
+    if (mkv_get_audio(cs->mk, &ai) != 0) { mkv_close(cs->mk); cs->mk = NULL; return -1; }
+    cs->ai = ai; cs->codec = ai.codec;
+    if (ai.codec == MKV_CODEC_AAC) {                    /* precompute the ADTS header fields */
+        const unsigned char* cp = ai.codec_private;
+        if (!cp || ai.codec_private_len < 2) return -1;
+        int obj = (cp[0] >> 3) & 0x1F;
+        int fidx = ((cp[0] & 0x07) << 1) | ((cp[1] >> 7) & 0x01);
+        int ch = (cp[1] >> 3) & 0x0F;
+        if (obj < 1) obj = 2;
+        if (ch < 1)  ch = ai.channels > 0 ? ai.channels : 2;
+        cs->aac_profile  = (obj - 1) & 0x03;
+        cs->aac_fi       = adts_freq_index(fidx);
+        cs->aac_chan_cfg = ch;
+    }
+    return 0;
+}
+
+static void cs_free(container_stream* cs)
+{
+    if (!cs) return;
+    cs_teardown_producer(cs);
+    if (cs->mk)      mkv_close(cs->mk);
+    if (cs->sr.win)  free(cs->sr.win);
+    if (cs->fp)      fclose(cs->fp);
+    if (cs->memcopy) free(cs->memcopy);
+    free(cs);
+}
+
+/* Shared open: (lazily) demux + open the inner decoder over `cs`. On success the
+ * returned handle is CONTAINER with d->inner + d->cs set (it takes ownership of cs). */
+static cmm_decoder* container_open(container_stream* cs, int* channels,
+                                   int* sampleRate, long long* totalFrames, int* err)
+{
+    if (err) *err = 0;
+    if (cs_open_demux(cs) != 0) { if (err) *err = -1; return NULL; }
+    int ierr = 0;
+    cmm_decoder* in = open_inner_from_cs(cs, channels, sampleRate, totalFrames, &ierr);
+    if (!in) { if (err) *err = ierr ? ierr : -1; return NULL; }
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (!d) { close_inner(in); if (err) *err = -1; return NULL; }
+    d->kind = CMM_KIND_CONTAINER; d->inner = in; d->cs = cs;
     return d;
 }
 
@@ -2009,30 +2215,41 @@ CMM_API cmm_decoder* cmm_container_open_memory(const unsigned char* data, long l
 {
     if (err) *err = 0;
     if (!data || len <= 0) { if (err) *err = -1; return NULL; }
-    src_reader sr; sr.buf = data; sr.len = len; sr.fp = NULL;
-    sr.win = NULL; sr.win_pos = -1; sr.win_len = 0;   /* memory path never reads fp */
-    return container_open(&sr, len, channels, sampleRate, totalFrames, err);
+    container_stream* cs = (container_stream*)calloc(1, sizeof(container_stream));
+    if (!cs) { if (err) *err = -1; return NULL; }
+    /* Own a copy: the streamed decode reads the source for the decoder's whole life. */
+    cs->memcopy = (unsigned char*)malloc((size_t)len);
+    if (!cs->memcopy) { free(cs); if (err) *err = -1; return NULL; }
+    memcpy(cs->memcopy, data, (size_t)len);
+    cs->sr.buf = cs->memcopy; cs->sr.len = len; cs->sr.fp = NULL;
+    cs->sr.win = NULL; cs->sr.win_pos = -1; cs->sr.win_len = 0;
+    cs->filesize = len;
+    cmm_decoder* d = container_open(cs, channels, sampleRate, totalFrames, err);
+    if (!d) cs_free(cs);
+    return d;
 }
 
 CMM_API cmm_decoder* cmm_container_open_file(const wchar_t* path, int* channels,
                                              int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
-    /* Serialize the whole open — the remux reads the entire FILE* (see cmm_openlock).
-     * Matroska/WebM is rare in a music library, so full serialization is negligible. */
+    /* Serialize the open (create + header read). Decode reads run unlocked on the
+     * inner decoder's own FILE*, exactly like the AAC/MP4 file path. */
     cmm_openlock();
     FILE* fp = cmm_open_path(path);
     if (!fp) { cmm_openunlock(); if (err) *err = -1; return NULL; }
     long long filesize = 0;
     if (CMM_FSEEK(fp, 0, SEEK_END) == 0) { filesize = (long long)CMM_FTELL(fp); CMM_FSEEK(fp, 0, SEEK_SET); }
     if (filesize <= 0) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
-
-    src_reader sr; sr.buf = NULL; sr.len = filesize; sr.fp = fp;
-    sr.win = (unsigned char*)malloc(SRC_WIN_CAP);   /* OOM → NULL → direct reads, still correct */
-    sr.win_pos = -1; sr.win_len = 0;
-    cmm_decoder* d = container_open(&sr, filesize, channels, sampleRate, totalFrames, err);
-    if (sr.win) free(sr.win);
-    fclose(fp);   /* the whole track was read during remux; inner decodes from memory */
+    container_stream* cs = (container_stream*)calloc(1, sizeof(container_stream));
+    if (!cs) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
+    cs->fp = fp;
+    cs->sr.buf = NULL; cs->sr.len = filesize; cs->sr.fp = fp;
+    cs->sr.win = (unsigned char*)malloc(SRC_WIN_CAP);   /* OOM → NULL → direct reads, still correct */
+    cs->sr.win_pos = -1; cs->sr.win_len = 0;
+    cs->filesize = filesize;
+    cmm_decoder* d = container_open(cs, channels, sampleRate, totalFrames, err);
+    if (!d) cs_free(cs);                                 /* frees fp + win too */
     cmm_openunlock();
     return d;
 }
@@ -2050,22 +2267,42 @@ CMM_API int cmm_container_read_float(cmm_decoder* d, float* out, int maxFrames)
     }
 }
 
+/* Seek by rebuilding the stream from the start (the demuxer is forward-only):
+ * tear down the inner decoder + producer, re-open the demuxer at 0, re-open the
+ * inner, then decode-and-discard forward to the target frame. frame 0 (the mixer's
+ * loop path) is just the rebuild. Returns 0 on success, -1 on failure (the caller
+ * treats a failure as "restart from 0" / "stop looping"). */
 CMM_API int cmm_container_seek(cmm_decoder* d, long long frame)
 {
-    if (!d || !d->inner) return -1;
-    switch (d->inner->kind) {
-        case CMM_KIND_OPUS:   return cmm_opus_seek(d->inner, frame);
-        case CMM_KIND_VORBIS: return cmm_vorbis_seek(d->inner, frame);
-        case CMM_KIND_AAC:    return cmm_aac_seek(d->inner, frame);
-        case CMM_KIND_MP3:    return cmm_mp3_seek(d->inner, frame);
-        case CMM_KIND_FLAC:   return cmm_flac_seek(d->inner, frame);
-        default: return -1;
+    if (!d || !d->cs) return -1;
+    if (frame < 0) frame = 0;
+    if (d->inner) { close_inner(d->inner); d->inner = NULL; }
+    cs_teardown_producer(d->cs);
+    if (d->cs->mk) { mkv_close(d->cs->mk); d->cs->mk = NULL; }
+    if (cs_open_demux(d->cs) != 0) return -1;
+    int ierr = 0;
+    cmm_decoder* in = open_inner_from_cs(d->cs, NULL, NULL, NULL, &ierr);
+    if (!in) return -1;
+    d->inner = in;
+    if (frame > 0) {
+        int ch = in->channels > 0 ? in->channels : 2;
+        float tmp[4096];
+        int chunk = (int)(sizeof(tmp) / sizeof(float)) / ch; if (chunk < 1) chunk = 1;
+        long long todo = frame;
+        while (todo > 0) {
+            int want = todo < chunk ? (int)todo : chunk;
+            int got = cmm_container_read_float(d, tmp, want);
+            if (got <= 0) break;
+            todo -= got;
+        }
     }
+    return 0;
 }
 
 CMM_API void cmm_container_close(cmm_decoder* d)
 {
     if (!d) return;
-    close_inner(d->inner);
+    if (d->inner) close_inner(d->inner);
+    if (d->cs)    cs_free(d->cs);
     free(d);
 }

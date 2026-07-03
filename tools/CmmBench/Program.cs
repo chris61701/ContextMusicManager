@@ -35,7 +35,7 @@ internal static class Program
         AppDomain.MonitoringIsEnabled = true;
 
         int repeats = 5;
-        bool verbose = false, benchOpen = false, verifyFileOpen = false, cold = false;
+        bool verbose = false, benchOpen = false, verifyFileOpen = false, cold = false, probe = false, seektest = false;
         var inputs = new List<string>();
 
         for (int i = 0; i < args.Length; i++)
@@ -47,6 +47,8 @@ internal static class Program
                 case "--open": benchOpen = true; break;
                 case "--verify-fileopen": verifyFileOpen = true; break;
                 case "--cold": cold = true; break;
+                case "--probe": probe = true; break;
+                case "--seektest": seektest = true; break;
                 case "-h": case "--help": Usage(); return 0;
                 default: inputs.Add(args[i]); break;
             }
@@ -54,7 +56,22 @@ internal static class Program
         if (repeats < 1) repeats = 1;
         CMMConfig.DebugLogging = verbose;
 
+        // ── Single-file probe (process-isolated hang detection) ──────────────────
+        // Opens ONE file through the game's native open_file path (same reader the
+        // in-game loudness sweep uses), reads a bounded chunk of PCM to confirm a
+        // decodable audio track, and exits with a distinct code. Meant to be driven
+        // one-process-per-file with an external timeout: a true native demux hang
+        // never returns, so the parent kills THIS process and records it — a hang
+        // can't be caught in-process (Thread.Abort won't interrupt a stuck P/Invoke).
+        //   exit 0 = OK   2 = OPEN-FAIL   3 = ZERO-FRAMES/no-audio   4 = bad-args
+        if (probe)
+        {
+            if (inputs.Count != 1) { Console.WriteLine("PROBE bad-args (need exactly one file)"); return 4; }
+            return Probe(inputs[0]);
+        }
+
         var files = CollectFiles(inputs);
+        if (seektest) return SeekTest(files);
         if (verifyFileOpen) return VerifyFileOpen(files);
         if (cold) return RunCold(files, repeats);
         if (files.Count == 0) { Console.WriteLine("No supported audio files found."); return 1; }
@@ -240,6 +257,102 @@ internal static class Program
             frames += n;
         }
         c.Close(dec);
+        return (frames, peak);
+    }
+
+    // ── Single-file probe ─────────────────────────────────────────────────────
+    // Opens via the same native open_file path the in-game sweep uses (routed by
+    // extension through CodecFor), reads up to ~10 s of PCM to prove a decodable
+    // audio track exists, then closes. Prints one machine-parseable line and returns
+    // a distinct exit code. If the native call hangs, this never returns and the
+    // parent process (with a timeout) records it as HANG.
+    static int Probe(string f)
+    {
+        string ext = Path.GetExtension(f).ToLowerInvariant();
+        Codec c = CodecFor(ext);
+        if (c == null) { Console.WriteLine($"PROBE not-native ext={ext}"); return 2; }
+
+        int err = 0, ch = 0, sr = 0;
+        long total = 0;
+        IntPtr dec = c.OpenFile(f, out ch, out sr, out total, out err);
+        if (dec == IntPtr.Zero)
+        {
+            Console.WriteLine($"PROBE open-fail ext={ext} err={err}");
+            return 2;
+        }
+
+        // Read a bounded chunk (~10 s) — enough to exercise the demux/decode loop
+        // without draining multi-GB video files. A hang inside here also never returns.
+        int channels = Math.Max(1, ch);
+        int rate = sr > 0 ? sr : 48000;
+        long frameCap = (long)rate * 10;
+        var buf = new float[channels * 8192];
+        long frames = 0; float peak = 0f; int n;
+        while (frames < frameCap && (n = c.Read(dec, buf, 8192)) > 0)
+        {
+            int floats = n * channels;
+            for (int i = 0; i < floats; i++) { float a = Math.Abs(buf[i]); if (a > peak) peak = a; }
+            frames += n;
+        }
+        c.Close(dec);
+
+        if (frames == 0)
+        {
+            Console.WriteLine($"PROBE zero-frames ext={ext} ch={ch} sr={sr}");
+            return 3;
+        }
+        Console.WriteLine($"PROBE ok ext={ext} ch={ch} sr={sr} frames={frames} peak={peak:F4}");
+        return 0;
+    }
+
+    // ── Container loop/seek verification ──────────────────────────────────────
+    // Drives cmm_container_seek(0) — the exact call the native mixer makes to LOOP a
+    // track — and asserts the second decode pass is byte-identical to the first
+    // (frame count + sample peak). Also seeks to the midpoint and checks the tail
+    // matches the first pass's tail. Proves the streaming demuxer rebuilds from the
+    // start correctly (no Cues index), so a looped mkv/webm bed doesn't drift or die.
+    static int SeekTest(List<string> files)
+    {
+        int failures = 0;
+        foreach (string f in files)
+        {
+            string ext = Path.GetExtension(f).ToLowerInvariant();
+            if (ext != ".mkv" && ext != ".webm") { Console.WriteLine($"  SKIP (not container): {Path.GetFileName(f)}"); continue; }
+
+            IntPtr dec = NativeContainer.cmm_container_open_file(f, out int ch, out _, out _, out int err);
+            if (dec == IntPtr.Zero) { failures++; Console.WriteLine($"  {Path.GetFileName(f),-30} OPEN FAIL err={err}  FAIL"); continue; }
+
+            (long f1, float p1) = Drain(dec, ch);
+            int s0 = NativeContainer.cmm_container_seek(dec, 0);
+            (long f2, float p2) = Drain(dec, ch);
+            // Mid-seek: rebuild + discard to the midpoint, then drain the tail.
+            long mid = f1 / 2;
+            int sM = NativeContainer.cmm_container_seek(dec, mid);
+            (long f3, float _) = Drain(dec, ch);
+            NativeContainer.cmm_container_close(dec);
+
+            bool loopOk = (s0 == 0) && f1 == f2 && Math.Abs(p1 - p2) < 1e-6f;
+            bool midOk  = (sM == 0) && Math.Abs((f1 - mid) - f3) <= 1152;   // ~1 packet slack
+            bool ok = loopOk && midOk;
+            if (!ok) failures++;
+            Console.WriteLine($"  {Path.GetFileName(f),-28} {ext,-5} pass1[frames={f1} peak={p1:F5}] " +
+                              $"loop[frames={f2} peak={p2:F5}] mid@{mid}[tail={f3}]  {(ok ? "PASS" : "FAIL")}");
+        }
+        Console.WriteLine($"\nseektest: {files.Count - failures}/{files.Count} passed.");
+        return failures == 0 ? 0 : 1;
+    }
+
+    static (long frames, float peak) Drain(IntPtr dec, int channels)
+    {
+        int ch = Math.Max(1, channels);
+        var buf = new float[ch * 8192];
+        long frames = 0; float peak = 0f; int n;
+        while ((n = NativeContainer.cmm_container_read_float(dec, buf, 8192)) > 0)
+        {
+            int floats = n * ch;
+            for (int i = 0; i < floats; i++) { float a = Math.Abs(buf[i]); if (a > peak) peak = a; }
+            frames += n;
+        }
         return (frames, peak);
     }
 
