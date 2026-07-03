@@ -370,18 +370,10 @@ FodyWeavers.xsd
 /CMM_Decoder/*.exe
 /CMM_Decoder/test_out.txt
 /CMM_Decoder/dist/*.a
-temp/Libs/CMM_Decoder.dll
-temp_compilecheckConfig/context.api.md
-temp_compilecheckConfig/context.lua
-temp_compilecheckConfig/contexts.xml
-temp_compilecheckConfig/settings.xml
-temp/ContextMusicManager.dll
-temp/ModInfo.xml
-temp/MoonSharp.Interpreter.dll
-temp/THIRD_PARTY_NOTICES.txt
-temp/Config/context.api.md
-temp/Config/context.lua
-temp/Config/contexts.xml
-temp/Config/settings.xml
-temp_compilecheckModInfo.xml
-tempModInfo.xml
+# Build scratch: staging dirs and stray config/ModInfo copies emitted by the
+# no-deploy / compile-check / per-version build targets. All regenerable — glob
+# the whole family so a new temp*Config/ dir can never be committed by accident.
+/temp/
+temp*Config/
+temp*ModInfo.xml
+UpgradeLog.htm
