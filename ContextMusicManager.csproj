@@ -24,11 +24,14 @@
   </PropertyGroup>
 
   <!-- ── Target game version ─────────────────────────────────────────────
-       Select which installed game version to build/deploy/package against:
+       Select which installed game version to build/deploy against:
          msbuild -p:GameVersion="2.6 b12"
-       Defaults to the current release. Everything version-specific (game-assembly
-       HintPaths, the deploy Mods folder, the release zip name, and a GV_* compile
-       symbol) derives from this one property. Add a version by copying a block below. -->
+       Defaults to the current release. Version-specific BUILD INPUTS (game-assembly
+       HintPaths, the deploy Mods folder, and a GV_* compile symbol) derive from this
+       one property. NOTE: the Release OUTPUT is a SINGLE cross-version zip — one
+       compiled DLL runs on every supported game version (API divergences bridged by
+       reflection; ModInfo.xml is dual-format), so neither the staging folder nor the
+       zip name encodes a version. Add a version by copying a block below. -->
   <PropertyGroup>
     <GameVersion Condition="'$(GameVersion)' == ''">3.0.0 b259</GameVersion>
     <!-- Debug builds rewrite the DEPLOYED settings.xml MusicPath to this; override with
@@ -90,9 +93,11 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <DebugType>none</DebugType>
     <Optimize>true</Optimize>
-    <!-- Release stages to a CLEAN per-version folder (never the live game/music dirs)
-         so the packaged zip contains only the mod, not your music library. -->
-    <OutputPath>$(MSBuildProjectDirectory)\dist\staging\$(GameVersion)\ContextMusicManager\</OutputPath>
+    <!-- Release stages to a CLEAN, version-agnostic folder (never the live game/music
+         dirs) so the packaged zip contains only the mod, not your music library. The
+         whole staging root is wiped in BeforeBuild, so the parent holds only this folder
+         and the zip only ever carries this build. -->
+    <OutputPath>$(MSBuildProjectDirectory)\dist\staging\ContextMusicManager\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>3</WarningLevel>
@@ -150,6 +155,8 @@
     </Content>
     <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\ContextMusicManager.cs" />
+    <Compile Include="Harmony\ContextMusicManager.FileWatch.cs" />
+    <Compile Include="Harmony\ContextMusicManager.ConfigWatch.cs" />
     <Compile Include="Harmony\DataStructures.cs" />
     <Compile Include="Harmony\GameState.cs" />
     <Compile Include="Harmony\CMMConfig.cs" />
@@ -166,6 +173,9 @@
     <Compile Include="Harmony\ScriptHost.cs" />
     <Compile Include="Harmony\ContextMusicManager.ContextStack.cs" />
     <Compile Include="Harmony\ContextMusicManager.AudioPlayer.cs" />
+    <Compile Include="Harmony\ContextMusicManager.Loudness.cs" />
+    <Compile Include="Harmony\ContextMusicManager.Fades.cs" />
+    <Compile Include="Harmony\ContextMusicManager.Presence.cs" />
     <Compile Include="Harmony\ContextMusicManager.Crawler.cs" />
     <Compile Include="Harmony\CmmConsoleCmd.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
@@ -267,9 +277,10 @@
   <Target Name="BeforeBuild">
     <!-- Make sure the deploy target exists (Alpha installs don't ship a Mods folder). -->
     <MakeDir Condition="'$(Configuration)' == 'Debug'" Directories="$(GameModsDir)" />
-    <!-- Release: wipe the per-version staging dir so the zip never carries stale files.
-         Staging is build-generated and holds no music, so a full wipe is safe here. -->
-    <RemoveDir Condition="'$(Configuration)' == 'Release'" Directories="$(OutputPath)" />
+    <!-- Release: wipe the ENTIRE staging root so the zip never carries stale files
+         (including leftover per-version staging dirs from older builds). Staging is
+         build-generated and holds no music, so a full wipe is safe here. -->
+    <RemoveDir Condition="'$(Configuration)' == 'Release'" Directories="$(MSBuildProjectDirectory)\dist\staging" />
     <!-- Debug: clean ONLY stale build artifacts from the deploy dir. Never wipe the
          whole directory in case anything else lives alongside it. -->
     <ItemGroup>
@@ -383,9 +394,11 @@
   </Target>
 
   <!-- Release only: zip the staged mod as
-       'ContextMusicManager V<modversion> for <gameversion>.zip' under dist\.
-       Runs after the Music scaffold target so the empty drop-in tree is included.
-       The mod version is read from ModInfo.xml (its authoritative source). -->
+       'ContextMusicManager V<modversion> for A20-A21-2.6-3.0.zip' under dist\ — ONE
+       cross-version artifact. The version list is spelled out (NOT a range like A20-3.0)
+       to make explicit that 1.x is NOT supported. Runs after the Music scaffold target
+       so the empty drop-in tree is included. The mod version is read from ModInfo.xml
+       (its authoritative source). -->
   <Target Name="PackageRelease" AfterTargets="CreateMusicContextFolders"
           Condition="'$(Configuration)' == 'Release'">
     <XmlPeek XmlInputPath="ModInfo.xml" Query="/xml/Version/@value">
@@ -393,8 +406,8 @@
     </XmlPeek>
     <PropertyGroup>
       <_ModVersion>@(_ModVersionItem)</_ModVersion>
-      <_StageParent>$(MSBuildProjectDirectory)\dist\staging\$(GameVersion)</_StageParent>
-      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion) for $(GameVersion).zip</_ZipPath>
+      <_StageParent>$(MSBuildProjectDirectory)\dist\staging</_StageParent>
+      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion) for A20-A21-2.6-3.0.zip</_ZipPath>
     </PropertyGroup>
     <Delete Files="$(_ZipPath)" />
     <!-- SourceDirectory is the parent of ContextMusicManager\, so the folder itself
@@ -403,9 +416,9 @@
     <Message Importance="high" Text="[CMM] Packaged $(_ZipPath)" />
   </Target>
 
-  <!-- All targetable game versions, in one place. Used by DeployAll / PackageAll to
-       fan a build out across every install. Keep in sync with the GameVersion
-       PropertyGroups near the top. -->
+  <!-- All targetable game versions, in one place. Used by DeployAll (and DebugFanout)
+       to fan a Debug build/deploy out across every install for compile-testing. Keep in
+       sync with the GameVersion PropertyGroups near the top. -->
   <ItemGroup>
     <CMMGameVersions Include="3.0.0 b259" />
     <CMMGameVersions Include="2.6 b12" />
@@ -473,13 +486,18 @@
     <Message Importance="high" Text="[CMM] Copied payload to '$(GameVersion)' ($(OutputPath))" />
   </Target>
 
-  <!-- Package release zips for every version in one go:
-         dotnet msbuild ContextMusicManager.csproj -t:PackageAll -->
-  <Target Name="PackageAll">
-    <Message Importance="high" Text="[CMM] PackageAll — Release zips for all versions: @(CMMGameVersions)" />
+  <!-- Package the single cross-version Release zip in one step, regardless of the
+       currently-active Configuration:
+         dotnet msbuild ContextMusicManager.csproj -t:Package
+       One compiled DLL runs on every supported game version, so this produces exactly
+       ONE artifact: dist\ContextMusicManager V<ver> for A20-A21-2.6-3.0.zip. It builds Release
+       against the default GameVersion (any supported version's assemblies work, since
+       the divergent APIs are reflection-bound); override with -p:GameVersion=... . -->
+  <Target Name="Package">
+    <Message Importance="high" Text="[CMM] Package — building the single cross-version Release zip." />
     <MSBuild Projects="$(MSBuildProjectFullPath)"
              Targets="Build"
-             Properties="Configuration=Release;GameVersion=%(CMMGameVersions.Identity)" />
-    <Message Importance="high" Text="[CMM] PackageAll complete — zips in dist\." />
+             Properties="Configuration=Release" />
+    <Message Importance="high" Text="[CMM] Package complete — zip in dist\." />
   </Target>
 </Project>
