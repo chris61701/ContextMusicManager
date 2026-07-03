@@ -443,6 +443,35 @@ namespace CMM
                 bloodMoon ? SectionType.Bloodmoon : SectionType.Combat);
         }
 
+        // The vanilla section to play in place of a disabled one the game proposed. The game
+        // forces trader/home sections by LOCATION even mid-combat (PlayerTracker checks the
+        // trader area before threat), so blindly falling to Exploration would drop combat music
+        // when you disable a trader you're fighting next to. Instead reproduce what the game
+        // would pick from THREAT alone — Combat/Bloodmoon when panicked, Suspense when spooked —
+        // skipping anything that's itself disabled, and bottoming out at Exploration or silence.
+        // Never returns a trader/home (location) section, so it can't land on another disabled one.
+        private static SectionType SituationalVanillaFallback()
+        {
+            var player = GameManager.Instance?.World?.GetPrimaryPlayer();
+            ThreatLevelType threat = player?.ThreatLevel?.Category ?? ThreatLevelType.Safe;
+
+            if (threat == ThreatLevelType.Panicked)
+            {
+                World world = GameManager.Instance?.World;
+                bool bloodMoon = world != null && world.IsWorldEvent(World.WorldEvent.BloodMoon);
+                SectionType panic = bloodMoon ? SectionType.Bloodmoon : SectionType.Combat;
+                if (!CMMConfig.DisabledVanillaSections.Contains(panic)) return panic;
+            }
+            else if (threat == ThreatLevelType.Spooked)
+            {
+                if (!CMMConfig.DisabledVanillaSections.Contains(SectionType.Suspense))
+                    return SectionType.Suspense;
+            }
+            return CMMConfig.DisabledVanillaSections.Contains(SectionType.Exploration)
+                ? SectionType.None
+                : SectionType.Exploration;
+        }
+
         // Governs the section the game's SectionSelector just picked. Returns what should
         // actually play so a vanilla section obeys the rules of its linked context. Called
         // from a postfix on DynamicMusic.SectionSelector.Select (main thread, same as the
@@ -464,14 +493,14 @@ namespace CMM
             // we reach here CMM has already decided to let vanilla play: the VanillaIf* fallbacks
             // divert to the CMM stack first whenever the exposed section is disabled (so a POI
             // theme or your own ambient is kept instead), which means nothing on the stack claimed
-            // this moment. With no CMM music available, play the vanilla Exploration ambient in the
-            // suppressed section's place — or silence if Exploration is disabled too. Checked ahead
+            // this moment. With no CMM music available, substitute the vanilla section the
+            // situation actually calls for — SituationalVanillaFallback reproduces the game's
+            // THREAT choice (combat/bloodmoon/suspense), so disabling e.g. a trader you're fighting
+            // next to still yields combat music instead of dropping to Exploration. Checked ahead
             // of the link map so it applies whether or not the section has a linked CMM context.
             if (proposed != SectionType.None && CMMConfig.DisabledVanillaSections.Contains(proposed))
             {
-                SectionType fallback = CMMConfig.DisabledVanillaSections.Contains(SectionType.Exploration)
-                    ? SectionType.None
-                    : SectionType.Exploration;
+                SectionType fallback = SituationalVanillaFallback();
                 if (_lastLoggedHold != proposed)
                 {
                     _lastLoggedHold = proposed;
