@@ -76,7 +76,7 @@ namespace CMM
         static bool   _pIsDay, _pIsBloodMoon, _pIsSwimming, _pIsPanicked, _pNearHome,
                       _pInPoi, _pPoiQuestCleared, _pPoiClearFromQuestOnly, _pIsCrouching;
         static float  _pHealthPct, _pHour, _pRainfall, _pSnowfall, _pWindSpeed, _pCloudThickness,
-                      _pTemperature, _pStaminaPct, _pFoodPct, _pWaterPct, _pFallDistance;
+                      _pTemperature, _pStaminaPct, _pFoodPct, _pWaterPct, _pFallDistance, _pFallImpact;
         static int    _pAlliesNearby, _pStrangersNearby, _pPoiTier, _pPoiEnemiesRemaining, _pDay;
         static string _pVehicleType, _pTraderName, _pBiome, _pPoiName, _pPoiId;
 
@@ -469,6 +469,8 @@ namespace CMM
                 { t.Set("waterPct", DynValue.NewNumber(gameState.WaterPct)); _pWaterPct = gameState.WaterPct; }
             if (all || gameState.FallDistance != _pFallDistance)
                 { t.Set("fallDistance", DynValue.NewNumber(gameState.FallDistance)); _pFallDistance = gameState.FallDistance; }
+            if (all || gameState.FallImpact != _pFallImpact)
+                { t.Set("fallImpact", DynValue.NewNumber(gameState.FallImpact)); _pFallImpact = gameState.FallImpact; }
 
             _snapshotAllDirty = false;
 

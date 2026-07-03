@@ -45,7 +45,8 @@ persists between calls; `reset()` is your hook to clear it when a world unloads.
 | `isSwimming` | bool | |
 | `isCrouching` | bool | sneaking — for a stealth ambient layer |
 | `isPanicked` | bool | game's vanilla "panicked" combat signal |
-| `fallDistance` | number | blocks fallen in the current fall; `0` when grounded or rising (big ⇒ a long plummet) |
+| `fallDistance` | number | blocks fallen **while airborne**; `0` when grounded or rising (nonzero ⇒ currently plummeting) |
+| `fallImpact` | number | one-shot: peak blocks of the fall that **just landed** this tick; `0` otherwise — fire an impact stinger |
 | `rainfall` | number | 0..1 |
 | `snowfall` | number | 0..1 |
 | `windSpeed` | number | raw game units (rises in storms) |

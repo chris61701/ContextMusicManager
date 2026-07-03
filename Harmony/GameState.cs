@@ -58,8 +58,16 @@ namespace CMM
         public float FoodPct;             // 0..1
         public float WaterPct;            // 0..1
         // Blocks the player has fallen in the current fall (0 when grounded or
-        // rising). A big value = a long plummet — cue vertigo/impact beds.
+        // rising). A big value = a long plummet — cue a vertigo/airborne bed.
+        // Live value: non-zero only WHILE airborne (the game zeroes it on landing).
         public float FallDistance;
+        // One-shot: the peak distance of the fall that JUST ended this tick — 0
+        // every tick except the one where the player lands. Because the game resets
+        // FallDistance to 0 the frame it lands, a periodic poll can't see the impact
+        // magnitude; the resolver tracks the running peak and emits it here for one
+        // tick on touchdown, so a script can fire an impact stinger. Sub-tick hops
+        // (< ~0.1s airborne) are intentionally ignored.
+        public float FallImpact;
 
         public string VehicleType;        // lowercased vehicle type name, or null when not riding
         public string TraderName;         // lowercased trader name, or null unless inside an OPEN trader

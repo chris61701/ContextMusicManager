@@ -47,6 +47,12 @@ namespace CMM
         static readonly HashSet<Vector3i> _poiClearedPending = new HashSet<Vector3i>();
         static bool _poiClearHooked;
 
+        // Running peak of the player's current fall (blocks). Grows while airborne; on
+        // touchdown (fallDistance back to 0) its value is emitted once as GameState.FallImpact
+        // and reset. See the fall block in BuildSnapshot. Reset on world unload so a fall
+        // interrupted by an unload can't emit a phantom impact in the next world.
+        static float _fallPeak;
+
         // Subscribe (once) to the quest system's sleepers-cleared event. Idempotent and
         // cheap to call every tick — guarded by _poiClearHooked.
         static void EnsurePoiClearHook()
@@ -77,8 +83,13 @@ namespace CMM
         }
 
         // Clears the pending one-shots on world unload (the subscription itself persists
-        // with the QuestEventManager singleton). Called from Patch_GameEnded.
-        public static void ResetPoiClearState() => _poiClearedPending.Clear();
+        // with the QuestEventManager singleton). Called from Patch_GameEnded. Also resets
+        // the fall-peak tracker so an in-progress fall can't emit a phantom impact next world.
+        public static void ResetPoiClearState()
+        {
+            _poiClearedPending.Clear();
+            _fallPeak = 0f;
+        }
 
         // ── Version bridge: 3.0-only game members, resolved by reflection ────────
         // Two APIs used below exist only on 3.0:
@@ -431,8 +442,22 @@ namespace CMM
             gameState.WaterPct   = stats?.Water   != null ? stats.Water.ValuePercent   : 1f;
 
             // Fall distance: blocks fallen in the current fall, 0 when grounded/rising.
-            // Public field on Entity in every version.
-            gameState.FallDistance = player.fallDistance;
+            // Public field on Entity in every version. The game zeroes it on landing, so
+            // the LIVE value only reports an in-progress (airborne) fall.
+            float fall = player.fallDistance;
+            gameState.FallDistance = fall;
+            // Impact one-shot: track the peak of the current fall and, the tick the player
+            // lands (fall drops back to 0), emit that peak once as FallImpact — the impact
+            // magnitude the poll would otherwise miss. Polled at 10 Hz, so any fall lasting
+            // more than a tick is caught near its peak; sub-tick hops never register a peak.
+            gameState.FallImpact = 0f;
+            if (fall > _fallPeak)
+                _fallPeak = fall;
+            else if (fall <= 0f && _fallPeak > 0f)
+            {
+                gameState.FallImpact = _fallPeak;
+                _fallPeak = 0f;
+            }
 
             // ── Status effects (buffs) ─────────────────────────────────────────
             // Snapshot the active buff names. Store the buff objects' OWN name strings
