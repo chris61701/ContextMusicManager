@@ -412,6 +412,9 @@ namespace CMM
             cache.previousPlayedFile = cache.lastPlayedFile;
             cache.playingFile        = file;
             cache.lastPlayedFile     = file;
+#if CMM_DEBUG_HUD
+            cache.playingFilePreMeasured = LoudnessStore.IsMeasured(file);   // HUD: pre-normalized vs on-the-fly
+#endif
             cache.resumePosition     = 0f;
             cache.lastLeftTime       = -1f;
             _nativeActiveContext = contextName;
@@ -576,6 +579,11 @@ namespace CMM
                 cache.previousPlayedFile = ps.PrevFile;
                 cache.playingFile        = ps.NextFile;
                 cache.lastPlayedFile     = ps.NextFile;
+#if CMM_DEBUG_HUD
+                // Pre-staged next tracks are picked + measured while the previous track plays,
+                // so by advance time they're almost always measured (HUD: pre-normalized).
+                cache.playingFilePreMeasured = LoudnessStore.IsMeasured(ps.NextFile);
+#endif
                 cache.resumePosition     = 0f;
                 cache.lastLeftTime       = -1f;
                 cache.stagedFile         = null;

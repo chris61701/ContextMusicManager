@@ -19,6 +19,13 @@ namespace CMM
         // dispatches it). Volume/normalization keys off this, not lastPlayedFile, so the
         // upcoming track's gain is never applied to the track still playing.
         public string playingFile;
+#if CMM_DEBUG_HUD
+        // Diagnostic (debug HUD only): was playingFile already loudness-measured at the instant
+        // it started? true = it began pre-normalized; false = it started at unity gain and had
+        // to be measured on the fly (its real gain settled in a beat later). Captured at start
+        // so the HUD reflects how the track BEGAN, not whether it has since been measured.
+        public bool playingFilePreMeasured;
+#endif
         // The track that played immediately before lastPlayedFile in this context.
         // One-deep (no full history) — drives the "previous track" keybind, which
         // toggles between the two. Captured in StartNativeContext on every advance.

@@ -12,9 +12,10 @@ namespace CMM
     // ─────────────────────────────────────────────────────────────────────────
     // DEBUG HUD
     // ─────────────────────────────────────────────────────────────────────────
-    // A small top-left overlay describing what is playing and WHY. Toggled with
-    // Numpad 8; hidden by default and purely diagnostic — it reads engine state and
-    // never influences playback. Lines, top to bottom:
+    // A small top-left overlay describing what is playing and WHY. Cycled with
+    // Numpad 8 (hidden → compact → expanded → hidden); hidden by default and purely
+    // diagnostic — it reads engine state and never influences playback. Lines, top to
+    // bottom (the last two appear only in the EXPANDED view):
     //   Playing   audible context (+ "(fallback)" when we landed off the resolved
     //             set), then "Time:" elapsed / total and "Codec:" decoded format
     //             (plus "(Volume: NN%)" when the per-track trim is off its 100%
@@ -34,10 +35,18 @@ namespace CMM
     //             flips CMM's steady-state loops on/off for arm B and re-arms the window
     //   Snapshots directory snapshots (every eligible file path per context) plus, on
     //             the same line, the normalized (loudness-measured) files in memory
+    //   Norm      (expanded) whether the audible track started pre-normalized (green) or
+    //             had to be normalized on the fly (red)
+    //   Contexts  (expanded) every OTHER custom-file context, colored by whether its next
+    //             track is ready: green = staged & measured, amber = staged but measuring,
+    //             red = nothing staged yet
 
     public partial class ContextMusicManager
     {
-        private static bool _threatHudVisible = false;
+        // HUD display mode, cycled by Numpad 8: 0 = hidden, 1 = compact (the standard
+        // overlay), 2 = expanded (compact + the loudness diagnostics — the playing track's
+        // pre-normalized/on-the-fly status and every other context's next-track readiness).
+        private static int _hudMode = 0;   // 0 hidden · 1 compact · 2 expanded
 
         private GUIStyle _hudBodyStyle;
         private GUIStyle _hudHeaderStyle;
@@ -51,6 +60,10 @@ namespace CMM
 
         // Red used for context tokens that currently resolve to no playable files.
         private const string HudRed = "#ff6b6b";
+        // Readiness palette (expanded view): the per-context next-track grid and the
+        // playing-track normalized indicator.
+        private const string HudGreen = "#7dff7d";   // ready / pre-normalized
+        private const string HudAmber = "#ffd27f";   // staged but its measurement is still running
 
         // Cached memory/count diagnostics. Recomputed on a throttled timer (not every
         // OnGUI frame): summing string lengths across the directory snapshots is O(files)
@@ -92,17 +105,19 @@ namespace CMM
         // as a helper rather than its own Update). Compiled only with the HUD.
         private void HandleDebugHudToggle()
         {
-            // Numpad 8 toggles the HUD. Cheap per-frame check, no allocation.
+            // Numpad 8 cycles the HUD: hidden → compact → expanded → hidden. Cheap per-frame
+            // check, no allocation.
             if (Input.GetKeyDown(KeyCode.Keypad8))
             {
-                _threatHudVisible = !_threatHudVisible;
-                if (_threatHudVisible) ArmGcWindow();   // fresh GC window each time it opens
-                CMMConfig.D($"[CMM] Context HUD {(_threatHudVisible ? "shown" : "hidden")}.");
+                bool wasHidden = _hudMode == 0;
+                _hudMode = (_hudMode + 1) % 3;
+                if (wasHidden) ArmGcWindow();   // fresh GC window when it (re)opens from hidden
+                CMMConfig.D($"[CMM] Context HUD {(_hudMode == 0 ? "hidden" : _hudMode == 1 ? "compact" : "expanded")}.");
             }
 
             // Numpad 9 re-arms the GC measurement window without hiding the HUD, so each arm
             // of an enabled-vs-dormant A/B starts from a clean, comparable baseline.
-            if (_threatHudVisible && Input.GetKeyDown(KeyCode.Keypad9))
+            if (_hudMode != 0 && Input.GetKeyDown(KeyCode.Keypad9))
             {
                 ArmGcWindow();
                 CMMConfig.D("[CMM] GC gauge window reset.");
@@ -111,7 +126,7 @@ namespace CMM
             // Numpad 7 flips the functionally-dormant A/B arm: CMM's steady-state loops go
             // no-op (see _functionallyDormant). Re-arm the GC window on the flip so the new
             // arm's collection counts start clean and are directly comparable.
-            if (_threatHudVisible && Input.GetKeyDown(KeyCode.Keypad7))
+            if (_hudMode != 0 && Input.GetKeyDown(KeyCode.Keypad7))
             {
                 _functionallyDormant = !_functionallyDormant;
                 ArmGcWindow();
@@ -142,7 +157,7 @@ namespace CMM
         {
             // Runs on the menu too (Menu music is a real context). playerIsDead is an
             // in-game-only state, so only consult it while actually in a game.
-            if (!_threatHudVisible) return;
+            if (_hudMode == 0) return;
             if (inGame && playerIsDead) return;
 
             EnsureHudStyles();
@@ -301,10 +316,37 @@ namespace CMM
                 $"{_hudSnapFiles} files  —  {FmtBytes(_hudSnapBytes)}"
                 + $"  —  Normalized: {_hudNormCount} files  —  {FmtBytes(_hudNormBytes)}"));
 
+            // ── Expanded-only loudness diagnostics ─────────────────────────────
+            if (_hudMode == 2)
+            {
+                // Norm: did the AUDIBLE track start pre-normalized (green) or begin at unity
+                // gain and get measured on the fly (red)? Captured at start time in
+                // cache.playingFilePreMeasured, so it reflects how the track BEGAN — it does
+                // not flip green once a late measurement settles in. Only meaningful while a
+                // real custom track is audible.
+                if (!string.IsNullOrEmpty(playingFile))
+                {
+                    string norm;
+                    if (!CMMConfig.LoudnessNormalizationEnabled)
+                        norm = "<color=#b0b0b0>● normalization off</color>";
+                    else if (cache != null && cache.playingFilePreMeasured)
+                        norm = $"<color={HudGreen}>● pre-normalized</color>";
+                    else
+                        norm = $"<color={HudRed}>● normalized on the fly</color>";
+                    lines.Add(Row("Norm:", norm));
+                }
+
+                // Contexts: every OTHER custom-file context's next-track readiness — green =
+                // a staged track is measured & ready for a stall-free switch-in, amber =
+                // staged but its measurement is still running, red = nothing staged yet.
+                lines.Add(Row("Contexts:", BuildContextReadiness(audible)));
+            }
+
             string body = string.Join("\n", lines);
 
             // ── Draw ───────────────────────────────────────────────────────────
-            const float x = 10f, y = 10f, w = 540f;
+            const float x = 10f, y = 10f;
+            float w = _hudMode == 2 ? 720f : 540f;   // wider so the expanded context grid fits
             const float padX = 12f, headerH = 24f;
             var bodyContent = new GUIContent(body);
             float bodyH = _hudBodyStyle.CalcHeight(bodyContent, w - padX * 2f);
@@ -312,7 +354,9 @@ namespace CMM
 
             // Dark translucent backdrop so the text stays legible over any scene.
             GUI.DrawTexture(new Rect(x, y, w, h), _hudBgTex, ScaleMode.StretchToFill);
-            GUI.Label(new Rect(x + padX, y + 6f, w - padX * 2f, 22f), "CMM • Context  [Num8 toggle • Num9 reset GC • Num7 A/B dormant]", _hudHeaderStyle);
+            GUI.Label(new Rect(x + padX, y + 6f, w - padX * 2f, 22f),
+                $"CMM • Context ({(_hudMode == 2 ? "expanded" : "compact")})  [Num8 cycle • Num9 reset GC • Num7 A/B dormant]",
+                _hudHeaderStyle);
             GUI.Label(new Rect(x + padX, y + 6f + headerH, w - padX * 2f, bodyH), bodyContent, _hudBodyStyle);
         }
 
@@ -367,6 +411,40 @@ namespace CMM
         // A context token, wrapped in red rich-text when it currently has no files.
         private static string ColorToken(string ctx) =>
             ContextHasFiles(ctx) ? ctx : $"<color={HudRed}>{ctx}</color>";
+
+        // Expanded HUD: a colored token per OTHER custom-file context reflecting whether its
+        // NEXT track is ready to play without a loudness stall. Green = a staged pin is
+        // measured (or a resumable context is parked on a live resume it can return to),
+        // amber = a track is staged but its measurement is still running, red = nothing
+        // staged yet. Excludes the audible context (it's the Playing line) and file-less
+        // contexts (Vanilla/Silence). O(contexts) with only dictionary lookups — no I/O.
+        private static string BuildContextReadiness(string audible)
+        {
+            var toks = new List<string>();
+            foreach (var kv in cacheMap)
+            {
+                string name = kv.Key;
+                if (string.Equals(name, audible, StringComparison.OrdinalIgnoreCase)) continue;
+                Contexts ctx = GetContext(name);
+                if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;   // no folder → nothing to stage
+                if (!ContextHasFiles(name)) continue;
+
+                ContextCache c = kv.Value;
+                string color;
+                bool resumeParked = ctx.CanBeResumed && c.resumePosition > 0f
+                                    && !string.IsNullOrEmpty(c.lastPlayedFile);
+                if (resumeParked)
+                    color = HudGreen;                              // returns to its kept (measured) track
+                else if (string.IsNullOrEmpty(c.stagedFile))
+                    color = HudRed;                                // nothing staged yet
+                else if (!CMMConfig.LoudnessNormalizationEnabled || LoudnessStore.IsMeasured(c.stagedFile))
+                    color = HudGreen;                              // staged + normalized (or normalization off)
+                else
+                    color = HudAmber;                              // staged, measurement still in flight
+                toks.Add($"<color={color}>{name}</color>");
+            }
+            return toks.Count > 0 ? string.Join("   ", toks) : "(none)";
+        }
 
         // The containing folder only (filename is shown on its own File line).
         // Relative to the Music dir for the common case; the full absolute folder when
