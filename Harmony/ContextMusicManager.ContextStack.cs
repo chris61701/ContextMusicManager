@@ -327,10 +327,16 @@ namespace CMM
             }
             else
             {
-                // A fade-out to vanilla-muted may still be in flight (files were added
-                // then removed quickly). Cancel it so it can't re-mute after we unmute.
+                // A menu-vanilla fade (out-to-muted, or a prior fade-in) may still be in
+                // flight (files were added then removed quickly). Cancel it so it can't
+                // fight the fade-in we're starting.
                 if (_menuVanillaFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_menuVanillaFadeCoroutine); _menuVanillaFadeCoroutine = null; }
-                MenuMusicPatch.SetMenuMusicMuted(false);
+                // Fade the vanilla title theme back IN over the crossfade window rather than a
+                // bare unmute — an instant unmute blared it back at full volume with no ramp.
+                if (Instance != null && CMM_CoRoutines != null)
+                    _menuVanillaFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeInMenuVanillaCoroutine(CrossFadeDuration));
+                else
+                    MenuMusicPatch.SetMenuMusicMuted(false);
             }
             CMMConfig.D($"[CMM] Vanilla activated ({(inGame ? "in-game" : "menu")})");
         }

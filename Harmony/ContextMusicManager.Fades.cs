@@ -151,6 +151,43 @@ namespace CMM
             _menuVanillaFadeCoroutine = null;
         }
 
+        // ── Menu vanilla fade-IN ──────────────────────────────────────────────
+        // The mirror of FadeOutMenuVanillaCoroutine: when CMM hands the menu BACK to the
+        // vanilla title theme (custom menu music ran out / its files were pulled), ramp the
+        // game's BackgroundMusicMono AudioSources up from 0 instead of snapping them to full
+        // volume with a bare unmute (which blared the vanilla theme back in at full level).
+        // The sources sit MUTED at their natural volume while CMM owns the menu (FadeOut ends
+        // by restoring that volume before muting), so we capture it as the target, unmute,
+        // drop to 0, and Lerp up. UpdateTrack() re-writes volume every frame, so — like the
+        // fade-out — we yield one frame per step so our write lands AFTER it and wins.
+        public IEnumerator FadeInMenuVanillaCoroutine(float duration)
+        {
+            var sources = MenuMusicPatch.GetMenuSources();
+            if (sources == null || sources.Length == 0) { _menuVanillaFadeCoroutine = null; yield break; }
+
+            // Capture the natural (UpdateTrack) target volume BEFORE unmuting, then start from 0.
+            float[] targetVols = sources.Select(s => s != null ? s.volume : 0f).ToArray();
+            MenuMusicPatch.SetMenuMusicMuted(false);
+            for (int i = 0; i < sources.Length; i++)
+                if (sources[i] != null) sources[i].volume = 0f;
+            CMMConfig.D($"[CMM] FadeInMenuVanilla: {sources.Length} source(s) over {duration:F1}s");
+
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = Mathf.Clamp01(elapsed / duration);
+                for (int i = 0; i < sources.Length; i++)
+                    if (sources[i] != null) sources[i].volume = Mathf.Lerp(0f, targetVols[i], t);
+                yield return null;
+            }
+
+            for (int i = 0; i < sources.Length; i++)
+                if (sources[i] != null) sources[i].volume = targetVols[i];
+            CMMConfig.D("[CMM] FadeInMenuVanilla: complete.");
+            _menuVanillaFadeCoroutine = null;
+        }
+
         // Menu cold-start (A20): the mod can load many seconds into the main menu, long
         // after the game's BackgroundMusicMono.Start() already began playing the vanilla
         // title theme — so the Start-postfix mute never caught it and it's still audible

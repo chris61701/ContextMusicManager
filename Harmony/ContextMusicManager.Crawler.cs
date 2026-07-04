@@ -349,6 +349,12 @@ namespace CMM
                     s.LastPublish = Time.realtimeSinceStartup;
                     pc.directorySnapshot = files.ToArray();
                     ApplyPresenceFromSnapshot(s.ContextName, pc);
+                    // Reclaim a recursive Menu from the vanilla bed the moment its FIRST files
+                    // are published — not only when the full sweep finishes. On a huge tree
+                    // (hundreds of thousands of files) FinishSweep is minutes away, so without
+                    // this the menu would sit on vanilla the whole time even though it became
+                    // playable seconds in. Snapshot is set above, so PickNextFile has tracks.
+                    TryReclaimMenuOnVanillaBed(s.ContextName, pc.directorySnapshot.Length);
                 }
             }
         }
@@ -403,25 +409,30 @@ namespace CMM
 
             cache.directorySnapshot = snapshot;
             ApplyPresenceFromSnapshot(contextName, cache);
+            TryReclaimMenuOnVanillaBed(contextName, snapshot.Length);
+        }
 
-            // MENU reclaim (the crawler is the ONLY thing that can do it for a recursive
-            // Menu). On the menu screen ContextScanLoop doesn't run, and a subfolder context
-            // never takes FileWatchLoop's flat "File change in Menu → SendContextUpdate"
-            // reclaim path (it skips the folder walk after the O(1) playing-file ping). So
-            // when custom files reappear for Menu while it has surrendered to the vanilla
-            // bed, nothing else brings its music back. Route through SendContextUpdate so the
-            // vanilla hand-off (DeactivateVanilla + fade) is handled like the flat path.
+        // MENU reclaim (the crawler is the ONLY thing that can do it for a recursive Menu).
+        // On the menu screen ContextScanLoop doesn't run, and a subfolder context never takes
+        // FileWatchLoop's flat "File change in Menu → SendContextUpdate" reclaim path (it skips
+        // the folder walk after the O(1) playing-file ping). So when custom files (re)appear for
+        // Menu while it has surrendered to the vanilla bed, nothing else brings its music back.
+        // Route through SendContextUpdate so the vanilla hand-off (DeactivateVanilla + fade) is
+        // handled like the flat path. Called from BOTH the crawler's incremental partial publish
+        // and the authoritative FinishSweep publish, so a huge Menu tree reclaims as soon as its
+        // first files are discovered rather than only after the whole sweep completes. Once Menu
+        // is the current context the guard below makes repeat calls a no-op.
+        private static void TryReclaimMenuOnVanillaBed(string contextName, int snapshotLength)
+        {
             bool menuVanillaRefill =
-                !inGame && snapshot.Length > 0 &&
+                !inGame && snapshotLength > 0 &&
                 string.Equals(contextName, "Menu", StringComparison.OrdinalIgnoreCase) &&
                 (currentContext == null ||
                  !string.Equals(currentContext.Context, "Menu", StringComparison.OrdinalIgnoreCase));
-            if (menuVanillaRefill)
-            {
-                CMMConfig.D($"[CMM] Crawler: custom files appeared for Menu on the vanilla bed — reclaiming.");
-                if (_pendingContext == "Menu") _pendingContext = null;
-                SendContextUpdate("Menu");
-            }
+            if (!menuVanillaRefill) return;
+            CMMConfig.D("[CMM] Crawler: custom files appeared for Menu on the vanilla bed — reclaiming.");
+            if (_pendingContext == "Menu") _pendingContext = null;
+            SendContextUpdate("Menu");
         }
 
         // ── Console command surface (called from CmmConsole.ExecuteImpl) ────────
