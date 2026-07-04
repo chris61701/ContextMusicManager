@@ -475,7 +475,7 @@ namespace CMM
 
             // Vehicle: store the lowercased type name; the token mapping is a decision.
             gameState.VehicleType = player.AttachedToEntity is EntityVehicle vehicle
-                ? vehicle.GetType().Name.ToLower()
+                ? vehicle.GetType().Name.ToLowerInvariant()
                 : null;
 
             // Trader detection: mirror the game's actual check — player must be inside the
@@ -495,7 +495,7 @@ namespace CMM
                     : FindTraderForArea(world, traderArea);
                 var traderInfo = traderEntity?.TraderInfo;
                 if (traderInfo != null && _traderIsOpen(traderInfo))
-                    gameState.TraderName = traderEntity.EntityName?.ToLower() ?? "";
+                    gameState.TraderName = traderEntity.EntityName?.ToLowerInvariant() ?? "";
             }
 
             // Biome: store the raw name. null when the chunk at the player's position

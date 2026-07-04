@@ -52,7 +52,7 @@ namespace CMM
         // Exposed so callers can log the code path taken.
         public static bool IsOpusFile(string filePath)
         {
-            string ext = System.IO.Path.GetExtension(filePath).ToLower();
+            string ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
             return ext == ".opus"
                 || ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath));
         }
@@ -100,7 +100,7 @@ namespace CMM
             out int channels, out int sampleRate, out long totalFrames)
         {
             kind = -1; channels = 0; sampleRate = 0; totalFrames = 0;
-            string ext = System.IO.Path.GetExtension(filePath).ToLower();
+            string ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
             bool isOpus = ext == ".opus" ||
                 ((ext == ".ogg" || ext == ".oga") && IsOpusOgg(filePath));
 
@@ -192,7 +192,7 @@ namespace CMM
             float hashMs = 0, indexMs = 0, analyzeMs = 0;
 
             long size;
-            string ext = Path.GetExtension(filePath).ToLower();
+            string ext = Path.GetExtension(filePath).ToLowerInvariant();
             try
             {
                 // No size cap: the native decoder streams files larger than its buffered-open
