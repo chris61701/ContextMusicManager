@@ -89,7 +89,7 @@ namespace CMM
                 // same name, so none of the add/remove handling below fires for it.
                 var oldSources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in contexts)
-                    oldSources[kv.Key] = $"{kv.Value?.Path}|{kv.Value?.IncludeSubfolders}";
+                    oldSources[kv.Key] = $"{kv.Value?.Source}|{kv.Value?.IncludeSubfolders}";
 
                 CMMConfigLoader.LoadContexts(ModPath);
 
@@ -120,23 +120,20 @@ namespace CMM
                 foreach (var ctx in contexts.Values)
                 {
                     oldSources.TryGetValue(ctx.Context, out string oldSrc);
-                    string newSrc = $"{ctx.Path}|{ctx.IncludeSubfolders}";
+                    string newSrc = $"{ctx.Source}|{ctx.IncludeSubfolders}";
                     if (string.Equals(oldSrc, newSrc, StringComparison.OrdinalIgnoreCase)) continue;
                     if (cacheMap.TryGetValue(ctx.Context, out var movedCache))
                     {
-                        movedCache.directorySnapshot = null;   // force fresh enumeration of the new folder
-                        movedCache.lastPlayedFile = null;      // old folder's track no longer belongs here
+                        movedCache.directorySnapshot = null;   // force fresh enumeration of the new source
+                        movedCache.lastPlayedFile = null;      // old source's track no longer belongs here
                         movedCache.resumePosition = 0f;
                         movedCache.lastLeftTime = -1f;
                     }
-                    if (!string.IsNullOrEmpty(ctx.Path))
-                        repointed.Add(new PresenceScanItem
-                        {
-                            Name    = ctx.Context,
-                            Dir     = Path.Combine(MusicDirectory, ctx.Path),
-                            Option  = SearchOptionFor(ctx),
-                            Claimed = GetClaimedSubtreePrefixes(ctx.Context),
-                        });
+                    // Covers a flip in EITHER direction (folder→playlist, playlist→folder,
+                    // or a change of playlist file / folder); MakeScanItem branches on the
+                    // new source kind.
+                    if (!string.IsNullOrEmpty(ctx.Source))
+                        repointed.Add(MakeScanItem(ctx));
                 }
 
                 if (repointed.Count > 0)
@@ -148,31 +145,24 @@ namespace CMM
                     // new folder before either the recovery decision here or FileWatchLoop
                     // could act on the change — stranding the swap on the next end-of-track
                     // pick. Doing it synchronously makes the decision below deterministic.
-                    var results = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+                    var results = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
                     bool scanDone = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
                         foreach (var item in repointed)
-                        {
-                            try
-                            {
-                                results[item.Name] = Directory.Exists(item.Dir)
-                                    ? Directory.GetFiles(item.Dir, "*", item.Option)
-                                        .Where(f => AudioDecoder.IsSupported(f)
-                                                    && !IsClaimedByDeeperContext(f, item.Claimed))
-                                        .ToArray()
-                                    : new string[0];
-                            }
-                            catch { results[item.Name] = new string[0]; }
-                        }
+                            results[item.Name] = EnumerateScanItem(item);
                         scanDone = true;
                     });
                     while (!scanDone) yield return null;
 
                     foreach (var kv in results)
                     {
-                        if (cacheMap.TryGetValue(kv.Key, out var c)) c.directorySnapshot = kv.Value;
-                        bool has = kv.Value.Any(f => !_invalidFiles.Contains(f));
+                        if (cacheMap.TryGetValue(kv.Key, out var c))
+                        {
+                            c.directorySnapshot = kv.Value.Files;
+                            c.playlistFiles = kv.Value.PlaylistFiles;
+                        }
+                        bool has = kv.Value.Files.Any(f => !_invalidFiles.Contains(f));
                         if (has) _contextsWithFiles.Add(kv.Key);
                         else _contextsWithFiles.Remove(kv.Key);
                     }

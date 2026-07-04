@@ -86,7 +86,7 @@ namespace CmmScaleBench
 
             if (recursive) EnableRecursiveParents();
 
-            var flatCtx = contexts.Values.Where(c => !string.IsNullOrEmpty(c.Path)).ToList();
+            var flatCtx = contexts.Values.Where(c => !string.IsNullOrEmpty(c.Source)).ToList();
             int folderCount = flatCtx.Count;
 
             Console.WriteLine("CmmScaleBench — main-thread stall finder at folder scale");
@@ -125,7 +125,7 @@ namespace CmmScaleBench
             long made = 0;
             foreach (var ctx in ctxs)
             {
-                string dir = Path.Combine(MusicDirectory, ctx.Path);
+                string dir = Path.Combine(MusicDirectory, ctx.Source);
                 Directory.CreateDirectory(dir);
                 for (int i = 0; i < filesPerFolder; i++)
                 {
@@ -154,9 +154,9 @@ namespace CmmScaleBench
                 _contextsWithFiles.Clear();
                 foreach (var ctx in contexts.Values)
                 {
-                    if (string.IsNullOrEmpty(ctx.Path)) continue;
+                    if (string.IsNullOrEmpty(ctx.Source)) continue;
                     if (ctx.IncludeSubfolders) continue;           // recursive handled by crawler
-                    string d = Path.Combine(MusicDirectory, ctx.Path);
+                    string d = Path.Combine(MusicDirectory, ctx.Source);
                     if (!Directory.Exists(d)) continue;
                     if (EnumerateContextFiles(ctx, d).Length > 0)
                         _contextsWithFiles.Add(ctx.Context);
@@ -171,8 +171,8 @@ namespace CmmScaleBench
             // (2) Per-context single enumeration (what PickNextFile pays when a
             //     snapshot is cold, and what PresenceScanLoop/FileWatch offload).
             {
-                var ctx = flatCtx.OrderByDescending(c => c.Path.Length).First();
-                string d = Path.Combine(MusicDirectory, ctx.Path);
+                var ctx = flatCtx.OrderByDescending(c => c.Source.Length).First();
+                string d = Path.Combine(MusicDirectory, ctx.Source);
                 var sw = Stopwatch.StartNew();
                 int n = EnumerateContextFiles(ctx, d).Length;
                 sw.Stop();
@@ -182,11 +182,11 @@ namespace CmmScaleBench
 
             if (recursive)
             {
-                var rec = contexts.Values.Where(c => c.IncludeSubfolders && !string.IsNullOrEmpty(c.Path))
+                var rec = contexts.Values.Where(c => c.IncludeSubfolders && !string.IsNullOrEmpty(c.Source))
                                          .OrderByDescending(c => Subtree(c).Count).FirstOrDefault();
                 if (rec != null)
                 {
-                    string d = Path.Combine(MusicDirectory, rec.Path);
+                    string d = Path.Combine(MusicDirectory, rec.Source);
 
                     // ContextWriteSignatureUtc — FileWatchLoop's recursive mtime fast-path.
                     var sw1 = Stopwatch.StartNew();
@@ -325,17 +325,17 @@ namespace CmmScaleBench
         static string[] GetClaimedSubtreePrefixes(string contextName)
         {
             Contexts self = GetContext(contextName);
-            if (self == null || string.IsNullOrEmpty(self.Path) || !self.IncludeSubfolders) return _noClaimPrefixes;
-            string selfDir = NormalizedContextDir(self.Path);
+            if (self == null || string.IsNullOrEmpty(self.Source) || !self.IncludeSubfolders) return _noClaimPrefixes;
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return _noClaimPrefixes;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
 
             List<string> prefixes = null;
             foreach (Contexts other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
+                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
                 if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
-                string otherDir = NormalizedContextDir(other.Path);
+                string otherDir = NormalizedContextDir(other.Source);
                 if (otherDir == null) continue;
                 if (otherDir.Length > selfDir.Length && otherDir.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
                     (prefixes ?? (prefixes = new List<string>())).Add(otherDir + Path.DirectorySeparatorChar);
@@ -404,10 +404,10 @@ namespace CmmScaleBench
             foreach (var el in XDocument.Load(xmlPath).Descendants("Context"))
             {
                 string name = (string)el.Attribute("name");
-                string path = (string)el.Attribute("path") ?? "";
+                string path = (string)el.Attribute("source") ?? (string)el.Attribute("path") ?? "";
                 bool sub = ParseBool((string)el.Attribute("subfolders"));
                 if (string.IsNullOrEmpty(name)) continue;
-                contexts[name] = new Contexts(context: name, path: path, includeSubfolders: sub);
+                contexts[name] = new Contexts(context: name, source: path, includeSubfolders: sub);
             }
         }
 
@@ -418,9 +418,9 @@ namespace CmmScaleBench
         {
             foreach (var c in contexts.Values.ToList())
             {
-                if (string.IsNullOrEmpty(c.Path)) continue;
+                if (string.IsNullOrEmpty(c.Source)) continue;
                 if (Subtree(c).Count == 0) continue;
-                contexts[c.Context] = new Contexts(context: c.Context, path: c.Path, fallback: c.Fallback,
+                contexts[c.Context] = new Contexts(context: c.Context, source: c.Source, fallback: c.Fallback,
                     includeSubfolders: true);
             }
         }
@@ -429,13 +429,13 @@ namespace CmmScaleBench
         static List<Contexts> Subtree(Contexts self)
         {
             var list = new List<Contexts>();
-            string selfDir = NormalizedContextDir(self.Path);
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return list;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
             foreach (var other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
-                string od = NormalizedContextDir(other.Path);
+                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
+                string od = NormalizedContextDir(other.Source);
                 if (od != null && od.Length > selfDir.Length && od.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
                     list.Add(other);
             }

@@ -783,26 +783,37 @@ namespace CMM
             // playing a stray root track instead of the menu's own folder. The presence
             // scans and FileWatchLoop already skip empty-path contexts; this is the last
             // enumeration site (the fallback pick) that didn't.
-            if (string.IsNullOrEmpty(ctx.Path)) return null;
+            if (string.IsNullOrEmpty(ctx.Source)) return null;
 
             ContextCache cache = cacheMap[contextName];
 
             string[] files = cache.directorySnapshot;
             if (files == null)
             {
-                // Recursive contexts are populated exclusively by RecursiveCrawlLoop off the
-                // main thread. A null snapshot means the crawler's first sweep hasn't published
-                // yet — never enumerate the tree here: a subfolder context can span hundreds of
-                // thousands of files, and a synchronous walk on the frame thread is a multi-
-                // second freeze (the exact stall the crawler exists to avoid). Read as "not
-                // ready" so the caller falls back to a lower-priority context; the crawler's
-                // incremental publish will make this context playable within a second or two.
-                if (ctx.IncludeSubfolders) return null;
+                if (ctx.IsPlaylist)
+                {
+                    // Playlist source: gather the listed tracks (flat pool; the subfolders
+                    // flag and the recursive crawler don't apply). Cheap single-file read.
+                    files = PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(ctx.Source));
+                    cache.directorySnapshot = files;
+                }
+                else
+                {
+                    // Recursive contexts are populated exclusively by RecursiveCrawlLoop off the
+                    // main thread. A null snapshot means the crawler's first sweep hasn't published
+                    // yet — never enumerate the tree here: a subfolder context can span hundreds of
+                    // thousands of files, and a synchronous walk on the frame thread is a multi-
+                    // second freeze (the exact stall the crawler exists to avoid). Read as "not
+                    // ready" so the caller falls back to a lower-priority context; the crawler's
+                    // incremental publish will make this context playable within a second or two.
+                    if (ctx.IncludeSubfolders) return null;
 
-                string dir = Path.Combine(MusicDirectory, ctx.Path);
-                if (!Directory.Exists(dir)) return null;
-                files = EnumerateContextFiles(ctx, dir);
-                cache.directorySnapshot = files;
+                    string dir = Path.Combine(MusicDirectory, ctx.Source);
+                    if (!Directory.Exists(dir)) return null;
+                    files = EnumerateContextFiles(ctx, dir, out string[] pf);
+                    cache.directorySnapshot = files;
+                    cache.playlistFiles = pf;   // flat folder's in-folder .m3u list (for the watch)
+                }
             }
             else if (_invalidFiles.Count > 0)
             {

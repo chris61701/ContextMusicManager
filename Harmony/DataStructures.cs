@@ -1,4 +1,5 @@
 
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -38,6 +39,12 @@ namespace CMM
         public string stagedFile;
         public int sequentialIndex;
         public string[] directorySnapshot;
+        // For a FLAT FOLDER source: the top-level .m3u/.m3u8 files discovered in the folder
+        // at the last scan. The file-watch change signature folds these files' own mtimes in
+        // (a folder's mtime doesn't change when a contained .m3u is edited in place), so
+        // editing an in-folder playlist hot-reloads. Empty for direct-.m3u and recursive
+        // sources (a direct playlist uses its own mtime; recursion ignores playlists).
+        public string[] playlistFiles;
     }
 
     public class ActiveContext
@@ -56,8 +63,26 @@ namespace CMM
     public class Contexts
     {
         public string Context { get; private set; }
-        public string Path { get; private set; }
+        // The music SOURCE for this context. One of:
+        //   • a folder path relative to MusicDirectory (the historical default),
+        //   • an absolute folder path, or
+        //   • a playlist file (.m3u / .m3u8), relative to MusicDirectory or absolute.
+        // Empty = sentinel (Vanilla / Silence), no audio. Formerly named Path; renamed
+        // because it may now point at a playlist file rather than a folder.
+        public string Source { get; private set; }
         public string Fallback { get; private set; }
+
+        // True when Source names a playlist file (.m3u / .m3u8) rather than a folder.
+        // Playlists are a flat pool of the tracks listed inside; folder-only concepts
+        // (IncludeSubfolders, the recursive crawler, subtree claiming) don't apply.
+        public bool IsPlaylist => IsPlaylistSource(Source);
+
+        // A Source is a playlist when it points at a .m3u/.m3u8 file. Folder sources
+        // never carry that extension, so the distinction is unambiguous without disk I/O.
+        public static bool IsPlaylistSource(string source) =>
+            !string.IsNullOrEmpty(source) &&
+            (source.EndsWith(".m3u",  StringComparison.OrdinalIgnoreCase) ||
+             source.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase));
         public bool CanBeResumed { get; private set; }
         public int TimeUntilContextStale { get; private set; }
         public bool Loop { get; private set; }
@@ -99,7 +124,7 @@ namespace CMM
         // argument explicitly, so these parameter defaults are inert — the effective
         // defaults live in InitContexts' Add helper and the contexts.xml attribute
         // readers, which must be kept in sync with each other.
-        public Contexts(string context = "None", string path = "", string fallback = "None",
+        public Contexts(string context = "None", string source = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
             bool loop = false, int cooldown = 5, float fadeInDuration = 3f,
             bool bypassescooldown = false,
@@ -108,7 +133,7 @@ namespace CMM
             string link = null)
         {
             Context = context;
-            Path = path;
+            Source = source;
             Fallback = fallback;
             CanBeResumed = canberesumed;
             TimeUntilContextStale = timeuntilcontextstale;

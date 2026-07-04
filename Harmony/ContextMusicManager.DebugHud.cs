@@ -426,7 +426,7 @@ namespace CMM
                 string name = kv.Key;
                 if (string.Equals(name, audible, StringComparison.OrdinalIgnoreCase)) continue;
                 Contexts ctx = GetContext(name);
-                if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;   // no folder → nothing to stage
+                if (ctx == null || string.IsNullOrEmpty(ctx.Source)) continue;   // no source → nothing to stage
                 if (!ContextHasFiles(name)) continue;
 
                 ContextCache c = kv.Value;
@@ -454,7 +454,11 @@ namespace CMM
             string absoluteDir = Path.GetDirectoryName(absoluteFile) ?? absoluteFile;
 
             Contexts ctx = GetContext(contextName);
-            bool rooted = ctx != null && !string.IsNullOrEmpty(ctx.Path) && Path.IsPathRooted(ctx.Path);
+            // A playlist's tracks can live anywhere (its own folder is meaningless here),
+            // and an absolute-folder context shows its absolute dir — both display the
+            // track's own folder as-is; only a relative folder context relativizes below.
+            bool rooted = ctx != null && !string.IsNullOrEmpty(ctx.Source) &&
+                          (ctx.IsPlaylist || Path.IsPathRooted(ctx.Source));
             if (rooted) return absoluteDir;
             try
             {

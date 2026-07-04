@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmPlaylistTest — offline scenario harness for `source` = folder / playlist.
+
+       LINKS the mod's real source (no hand-ported copy to drift): DataStructures.cs
+       (Contexts.IsPlaylistSource), PlaylistSource.cs (ReadTracks), SourceScan.cs
+       (EnumerateFolderPoolRaw + the change-signature helpers) and AudioDecoder.cs /
+       NativeAudio.cs (the REAL IsSupported). Shims.cs supplies the handful of
+       non-audio symbols those files reference (same set CmmBench uses) plus a minimal
+       ContextMusicManager.MusicDirectory that PlaylistSource.ResolveFullPath reads.
+
+       So every pool/signature the test computes is produced by the exact code the
+       game runs. Live coroutine reaction (ConfigWatch/FileWatch timing) is NOT covered
+       here — that needs the running game — but the detection (signatures) and
+       re-enumeration (pools) it depends on are.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmPlaylistTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\PlaylistSource.cs"  Link="linked\PlaylistSource.cs" />
+    <Compile Include="..\..\Harmony\SourceScan.cs"      Link="linked\SourceScan.cs" />
+    <Compile Include="..\..\Harmony\AudioDecoder.cs"    Link="linked\AudioDecoder.cs" />
+    <Compile Include="..\..\Harmony\NativeAudio.cs"     Link="linked\NativeAudio.cs" />
+  </ItemGroup>
+
+  <!-- Native decode shim next to the exe so DllImport("CMM_Decoder") resolves if ever
+       touched (this test never decodes — IsSupported is pure managed). -->
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

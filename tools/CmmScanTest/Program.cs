@@ -77,7 +77,7 @@ namespace CmmScanTest
             // Candidate parents: any context whose folder strictly contains another
             // context's folder. Enable recursion on each so claiming engages.
             var parents = contexts.Values
-                .Where(c => !string.IsNullOrEmpty(c.Path) && HasDescendantContext(c))
+                .Where(c => !string.IsNullOrEmpty(c.Source) && HasDescendantContext(c))
                 .ToList();
 
             // Turn on IncludeSubfolders for every such parent (simulates a user who
@@ -88,8 +88,8 @@ namespace CmmScanTest
             var owners = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var ctx in contexts.Values)
             {
-                if (string.IsNullOrEmpty(ctx.Path)) continue;
-                string dir = Path.Combine(MusicDirectory, ctx.Path);
+                if (string.IsNullOrEmpty(ctx.Source)) continue;
+                string dir = Path.Combine(MusicDirectory, ctx.Source);
                 if (!Directory.Exists(dir)) continue;             // mirrors real callers' guard
                 foreach (string f in EnumerateContextFiles(ctx, dir))
                 {
@@ -109,7 +109,7 @@ namespace CmmScanTest
             // the files a naive recursive scan (no claim filter) would also grab from
             // child-context subtrees.
             var demoParent = parents
-                .Select(p => new { p, dir = Path.Combine(MusicDirectory, p.Path) })
+                .Select(p => new { p, dir = Path.Combine(MusicDirectory, p.Source) })
                 .Where(x => Directory.Exists(x.dir))
                 .Select(x => new { x.p, naive = NaiveRecursiveSupported(x.dir).Length, claimed = EnumerateContextFiles(x.p, x.dir).Length })
                 .Where(x => x.naive != x.claimed)
@@ -276,20 +276,20 @@ namespace CmmScanTest
         private static string[] GetClaimedSubtreePrefixes(string contextName)
         {
             Contexts self = GetContext(contextName);
-            if (self == null || string.IsNullOrEmpty(self.Path) || !self.IncludeSubfolders)
+            if (self == null || string.IsNullOrEmpty(self.Source) || !self.IncludeSubfolders)
                 return _noClaimPrefixes;
 
-            string selfDir = NormalizedContextDir(self.Path);
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return _noClaimPrefixes;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
 
             List<string> prefixes = null;
             foreach (Contexts other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
+                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
                 if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
 
-                string otherDir = NormalizedContextDir(other.Path);
+                string otherDir = NormalizedContextDir(other.Source);
                 if (otherDir == null) continue;
                 if (otherDir.Length > selfDir.Length &&
                     otherDir.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
@@ -347,13 +347,13 @@ namespace CmmScanTest
 
         static bool HasDescendantContext(Contexts self)
         {
-            string selfDir = NormalizedContextDir(self.Path);
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return false;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
             foreach (var other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
-                string od = NormalizedContextDir(other.Path);
+                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
+                string od = NormalizedContextDir(other.Source);
                 if (od != null && od.Length > selfDir.Length &&
                     od.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase)) return true;
             }
@@ -366,23 +366,23 @@ namespace CmmScanTest
             foreach (var el in XDocument.Load(xmlPath).Descendants("Context"))
             {
                 string name = (string)el.Attribute("name");
-                string path = (string)el.Attribute("path") ?? "";
+                string path = (string)el.Attribute("source") ?? (string)el.Attribute("path") ?? "";
                 bool sub = ParseBool((string)el.Attribute("subfolders"));
                 if (string.IsNullOrEmpty(name)) continue;
-                contexts[name] = new Contexts(context: name, path: path, includeSubfolders: sub);
+                contexts[name] = new Contexts(context: name, source: path, includeSubfolders: sub);
             }
         }
 
         static Contexts AddContext(string name, string path, bool recursive)
         {
-            var c = new Contexts(context: name, path: path, includeSubfolders: recursive);
+            var c = new Contexts(context: name, source: path, includeSubfolders: recursive);
             contexts[name] = c;
             return c;
         }
 
         // Contexts is immutable (private setters); rebuild the one entry to flip the flag.
         static void SetRecursive(Contexts c, bool on) =>
-            contexts[c.Context] = new Contexts(context: c.Context, path: c.Path, fallback: c.Fallback,
+            contexts[c.Context] = new Contexts(context: c.Context, source: c.Source, fallback: c.Fallback,
                 includeSubfolders: on);
 
         static bool ParseBool(string s) =>

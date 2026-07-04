@@ -158,8 +158,8 @@ namespace CMM
             if (string.IsNullOrEmpty(musicDir) || !Directory.Exists(musicDir)) return;
 
             // Mirror a recursive config: turn on subfolders for parents-of-contexts.
-            foreach (var c in contexts.Values.Where(c => !string.IsNullOrEmpty(c.Path) && HasDescendantContext(c)).ToList())
-                contexts[c.Context] = new Contexts(context: c.Context, path: c.Path, fallback: c.Fallback,
+            foreach (var c in contexts.Values.Where(c => !string.IsNullOrEmpty(c.Source) && HasDescendantContext(c)).ToList())
+                contexts[c.Context] = new Contexts(context: c.Context, source: c.Source, fallback: c.Fallback,
                     canberesumed: c.CanBeResumed, timeuntilcontextstale: c.TimeUntilContextStale, loop: c.Loop,
                     cooldown: c.Cooldown, fadeInDuration: c.FadeInDuration, bypassescooldown: c.BypassesCooldown,
                     priority: c.Priority, playOnce: c.PlayOnce,
@@ -168,8 +168,8 @@ namespace CMM
 
             foreach (var ctx in contexts.Values)
             {
-                if (string.IsNullOrEmpty(ctx.Path)) continue;
-                string dir = Path.Combine(MusicDirectory, ctx.Path);
+                if (string.IsNullOrEmpty(ctx.Source)) continue;
+                string dir = Path.Combine(MusicDirectory, ctx.Source);
                 _index[ctx.Context] = Directory.Exists(dir) ? EnumerateContextFiles(ctx, dir) : Array.Empty<string>();
             }
         }
@@ -465,17 +465,17 @@ namespace CMM
         private static string[] GetClaimedSubtreePrefixes(string contextName)
         {
             Contexts self = GetContext(contextName);
-            if (self == null || string.IsNullOrEmpty(self.Path) || !self.IncludeSubfolders) return _noClaimPrefixes;
-            string selfDir = NormalizedContextDir(self.Path);
+            if (self == null || string.IsNullOrEmpty(self.Source) || !self.IncludeSubfolders) return _noClaimPrefixes;
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return _noClaimPrefixes;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
 
             List<string> prefixes = null;
             foreach (Contexts other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
+                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
                 if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
-                string otherDir = NormalizedContextDir(other.Path);
+                string otherDir = NormalizedContextDir(other.Source);
                 if (otherDir == null) continue;
                 if (otherDir.Length > selfDir.Length && otherDir.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
                     (prefixes ?? (prefixes = new List<string>())).Add(otherDir + Path.DirectorySeparatorChar);
@@ -513,13 +513,13 @@ namespace CMM
 
         private static bool HasDescendantContext(Contexts self)
         {
-            string selfDir = NormalizedContextDir(self.Path);
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return false;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
             foreach (var other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
-                string od = NormalizedContextDir(other.Path);
+                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
+                string od = NormalizedContextDir(other.Source);
                 if (od != null && od.Length > selfDir.Length && od.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
                     return true;
             }

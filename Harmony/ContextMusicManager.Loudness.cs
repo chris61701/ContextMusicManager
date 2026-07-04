@@ -253,7 +253,7 @@ namespace CMM
                 string name = kv.Key;
                 if (string.Equals(name, active, StringComparison.OrdinalIgnoreCase)) continue;
                 Contexts ctx = GetContext(name);
-                if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;   // no folder → nothing to pin
+                if (ctx == null || string.IsNullOrEmpty(ctx.Source)) continue;   // no source → nothing to pin
                 ContextCache cache = kv.Value;
                 if (ctx.CanBeResumed && cache.resumePosition > 0f && cache.lastPlayedFile != null) continue;
                 StageNextFile(name);
@@ -440,7 +440,7 @@ namespace CMM
         {
             foreach (var ctx in contexts.Values)
             {
-                if (string.IsNullOrEmpty(ctx.Path)) continue;
+                if (string.IsNullOrEmpty(ctx.Source)) continue;
                 // Not in cacheMap → BuildMenuPrewarmQueue can't measure it anyway, so
                 // don't block completion on it (that would stall the prescan forever).
                 if (!cacheMap.TryGetValue(ctx.Context, out var cache)) continue;

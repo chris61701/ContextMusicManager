@@ -89,7 +89,7 @@ namespace CMM
             if (ctxName == null) return;
 
             Contexts ctx = GetContext(ctxName);
-            if (ctx == null || string.IsNullOrEmpty(ctx.Path)) return; // no music folder
+            if (ctx == null || string.IsNullOrEmpty(ctx.Source)) return; // no music source
             if (ctx.PlayOnce) return;                                  // stingers aren't skippable
             if (!ContextHasFiles(ctxName)) return;                     // borrowed vanilla / empty
             if (!cacheMap.TryGetValue(ctxName, out ContextCache cache)) return;

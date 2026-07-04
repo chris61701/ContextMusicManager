@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading;
 using UnityEngine;
 
+using static CMM.SourceScan;
+
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
@@ -37,7 +39,66 @@ namespace CMM
             public string Dir;
             public SearchOption Option;
             public string[] Claimed;
+            // Playlist source: gather the tracks LISTED in this .m3u file instead of
+            // scanning Dir. When true, PlaylistFile holds the resolved playlist path and
+            // Dir/Option/Claimed are unused (a playlist is a flat, self-listed pool).
+            public bool IsPlaylist;
+            public string PlaylistFile;
         }
+
+        // Resolve one context's background-scan parameters (folder OR playlist). Must run
+        // on the main thread — GetClaimedSubtreePrefixes reads the shared `contexts` dict.
+        // The returned item is then enumerated off-thread by EnumerateScanItem.
+        private static PresenceScanItem MakeScanItem(Contexts ctx)
+        {
+            if (ctx.IsPlaylist)
+                return new PresenceScanItem
+                {
+                    Name         = ctx.Context,
+                    IsPlaylist   = true,
+                    PlaylistFile = PlaylistSource.ResolveFullPath(ctx.Source),
+                };
+            return new PresenceScanItem
+            {
+                Name    = ctx.Context,
+                Dir     = Path.Combine(MusicDirectory, ctx.Source),
+                Option  = SearchOptionFor(ctx),
+                Claimed = GetClaimedSubtreePrefixes(ctx.Context),
+            };
+        }
+
+        // A scan's output: the eligible tracks plus, for a flat folder, the top-level .m3u
+        // files found (so the change signature can watch them for live edits).
+        private struct ScanResult
+        {
+            public string[] Files;
+            public string[] PlaylistFiles;   // flat folder only; empty otherwise
+        }
+
+        // Enumerate one scan item: a direct-playlist read or a folder scan. For a FLAT
+        // folder the pool is the loose supported files UNIONED with the tracks listed by
+        // every top-level .m3u in it (deduped); a recursive folder ignores playlists.
+        // Pure IO + path string math with no shared-state access, so it is safe to call on
+        // a ThreadPool thread. Never throws and never returns null (a bad folder / unreadable
+        // playlist reads as "no files" and recovers on a later tick).
+        private static ScanResult EnumerateScanItem(PresenceScanItem item)
+        {
+            try
+            {
+                if (item.IsPlaylist)
+                    return new ScanResult { Files = PlaylistSource.ReadTracks(item.PlaylistFile), PlaylistFiles = _noPlaylistFiles };
+                if (!Directory.Exists(item.Dir))
+                    return new ScanResult { Files = new string[0], PlaylistFiles = _noPlaylistFiles };
+                string[] files = EnumerateFolderPoolRaw(item.Dir, item.Option == SearchOption.AllDirectories,
+                                                        item.Claimed, out string[] pf);
+                return new ScanResult { Files = files, PlaylistFiles = pf };
+            }
+            catch { return new ScanResult { Files = new string[0], PlaylistFiles = _noPlaylistFiles }; }
+        }
+
+        // NOTE: the pure folder/playlist enumeration (EnumerateFolderPoolRaw + FullKey) now
+        // lives in SourceScan.cs so the offline test harness links the exact same code. It's
+        // reached here unqualified via `using static CMM.SourceScan;`.
 
         private static SearchOption SearchOptionFor(Contexts ctx) =>
             ctx != null && ctx.IncludeSubfolders
@@ -52,20 +113,22 @@ namespace CMM
         private static string[] GetClaimedSubtreePrefixes(string contextName)
         {
             Contexts self = GetContext(contextName);
-            if (self == null || string.IsNullOrEmpty(self.Path) || !self.IncludeSubfolders)
+            // Claiming is a folder-recursion concern only; a playlist lists its files
+            // explicitly, so it is never a claimer nor claimed-against.
+            if (self == null || string.IsNullOrEmpty(self.Source) || self.IsPlaylist || !self.IncludeSubfolders)
                 return _noClaimPrefixes;
 
-            string selfDir = NormalizedContextDir(self.Path);
+            string selfDir = NormalizedContextDir(self.Source);
             if (selfDir == null) return _noClaimPrefixes;
             string selfPrefix = selfDir + Path.DirectorySeparatorChar;
 
             List<string> prefixes = null;
             foreach (Contexts other in contexts.Values)
             {
-                if (other == self || string.IsNullOrEmpty(other.Path)) continue;
+                if (other == self || string.IsNullOrEmpty(other.Source) || other.IsPlaylist) continue;
                 if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
 
-                string otherDir = NormalizedContextDir(other.Path);
+                string otherDir = NormalizedContextDir(other.Source);
                 if (otherDir == null) continue;
                 // Strictly nested beneath self (a context at the SAME folder is a
                 // pre-existing ambiguity claiming doesn't touch).
@@ -79,43 +142,9 @@ namespace CMM
             return prefixes == null ? _noClaimPrefixes : prefixes.ToArray();
         }
 
-        // True if the file lives under a deeper context's folder (so this context must
-        // not enumerate it). Cheap no-op when there are no claim prefixes.
-        private static bool IsClaimedByDeeperContext(string file, string[] claimedPrefixes)
-        {
-            if (claimedPrefixes.Length == 0) return false;
-            string full;
-            try { full = Path.GetFullPath(file); }
-            catch { return false; }
-            foreach (string p in claimedPrefixes)
-                if (full.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
-        }
-
-        // Folder-change signature for the FileWatchLoop mtime fast-path. A flat
-        // context is just the folder's own write time. A recursive context must also
-        // fold in every subdirectory's write time: adding or removing a file bumps
-        // its PARENT directory's mtime but not any ancestor's, so the root mtime
-        // alone would miss a change made two levels down. Walking directories (not
-        // files) keeps this far cheaper than a full recursive file enumeration.
-        private static DateTime ContextWriteSignatureUtc(string dir, bool includeSubfolders)
-        {
-            if (!Directory.Exists(dir)) return DateTime.MinValue;
-            DateTime t = Directory.GetLastWriteTimeUtc(dir);
-            if (includeSubfolders)
-            {
-                try
-                {
-                    foreach (string sub in Directory.GetDirectories(dir, "*", SearchOption.AllDirectories))
-                    {
-                        DateTime st = Directory.GetLastWriteTimeUtc(sub);
-                        if (st > t) t = st;
-                    }
-                }
-                catch { }
-            }
-            return t;
-        }
+        // NOTE: IsClaimedByDeeperContext, ContextWriteSignatureUtc and PlaylistWriteSignatureUtc
+        // now live in SourceScan.cs (linked into the offline test harness). Reached unqualified
+        // here via `using static CMM.SourceScan;`.
 
         // Resolve a context Path (relative to MusicDirectory, or absolute) to a full,
         // non-separator-terminated directory path for prefix comparisons. Null on error.
@@ -129,17 +158,23 @@ namespace CMM
             catch { return null; }
         }
 
-        // Enumerate a context's eligible files: applies reach (flat vs recursive) and
-        // subtree claiming in one place so every caller stays consistent. Returns full
-        // paths of supported, non-blacklisted, non-claimed files.
-        private static string[] EnumerateContextFiles(Contexts ctx, string dir)
+        // Enumerate a FOLDER context's eligible files: applies reach (flat vs recursive),
+        // subtree claiming, and — for a flat folder — union with its top-level .m3u tracks,
+        // in one place so every caller stays consistent. Returns full paths of supported,
+        // non-blacklisted, non-claimed files. `dir` must exist.
+        private static string[] EnumerateContextFiles(Contexts ctx, string dir) =>
+            EnumerateContextFiles(ctx, dir, out _);
+
+        // Overload that also outputs the flat folder's top-level .m3u files, so a caller
+        // holding the context's cache can record them (cache.playlistFiles) for the
+        // change-signature watch. Empty for recursive folders.
+        private static string[] EnumerateContextFiles(Contexts ctx, string dir, out string[] playlistFiles)
         {
-            string[] claimed = GetClaimedSubtreePrefixes(ctx.Context);
-            return Directory.GetFiles(dir, "*", SearchOptionFor(ctx))
-                .Where(f => AudioDecoder.IsSupported(f)
-                            && !_invalidFiles.Contains(f)
-                            && !IsClaimedByDeeperContext(f, claimed))
-                .ToArray();
+            string[] pool = EnumerateFolderPoolRaw(dir, ctx.IncludeSubfolders,
+                                                   GetClaimedSubtreePrefixes(ctx.Context), out playlistFiles);
+            return _invalidFiles.Count == 0
+                ? pool
+                : pool.Where(f => !_invalidFiles.Contains(f)).ToArray();
         }
 
         // ── File presence check ───────────────────────────────────────────────
@@ -224,16 +259,26 @@ namespace CMM
             _contextsWithFiles.Clear();
             foreach (var ctx in contexts.Values)
             {
-                if (string.IsNullOrEmpty(ctx.Path)) continue;
+                if (string.IsNullOrEmpty(ctx.Source)) continue;
+                if (ctx.IsPlaylist)
+                {
+                    // Playlist source: a cheap single-file read is fine at init.
+                    if (PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(ctx.Source)).Length > 0)
+                        _contextsWithFiles.Add(ctx.Context);
+                    continue;
+                }
                 // Recursive contexts are populated by RecursiveCrawlLoop's first sweep,
                 // not by a synchronous full walk here — that walk would freeze mod load
                 // on a tree with thousands of folders. Their presence flips on as soon
                 // as the crawler sees the first file (a short delay after load).
                 if (ctx.IncludeSubfolders) continue;
-                string d = Path.Combine(MusicDirectory, ctx.Path);
+                string d = Path.Combine(MusicDirectory, ctx.Source);
                 if (!Directory.Exists(d)) continue;
-                if (EnumerateContextFiles(ctx, d).Length > 0)
-                    _contextsWithFiles.Add(ctx.Context);
+                string[] files = EnumerateContextFiles(ctx, d, out string[] pf);
+                // Record the in-folder .m3u list now so the change signature can watch it
+                // from the first tick (before the background presence scan first runs).
+                if (cacheMap.TryGetValue(ctx.Context, out ContextCache cache)) cache.playlistFiles = pf;
+                if (files.Length > 0) _contextsWithFiles.Add(ctx.Context);
             }
             _contextsWithFilesDirty = false;
             _presenceDirty.Clear();
@@ -259,7 +304,7 @@ namespace CMM
                 if (_contextsWithFilesDirty)
                 {
                     names = contexts.Values
-                        .Where(c => !string.IsNullOrEmpty(c.Path))
+                        .Where(c => !string.IsNullOrEmpty(c.Source))
                         .Select(c => c.Context)
                         .ToList();
                     _contextsWithFilesDirty = false;
@@ -280,55 +325,39 @@ namespace CMM
                 foreach (string name in names)
                 {
                     Contexts ctx = GetContext(name);
-                    if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
-                    // Recursive contexts are owned by RecursiveCrawlLoop — never re-walk
-                    // their whole tree here (that's the O(files) cost we're avoiding).
-                    if (ctx.IncludeSubfolders) continue;
-                    toScan.Add(new PresenceScanItem
-                    {
-                        Name    = name,
-                        Dir     = Path.Combine(MusicDirectory, ctx.Path),
-                        Option  = SearchOptionFor(ctx),
-                        Claimed = GetClaimedSubtreePrefixes(name),
-                    });
+                    if (ctx == null || string.IsNullOrEmpty(ctx.Source)) continue;
+                    // Recursive FOLDER contexts are owned by RecursiveCrawlLoop — never
+                    // re-walk their whole tree here (that's the O(files) cost we're
+                    // avoiding). Playlists are flat regardless of the subfolders flag.
+                    if (!ctx.IsPlaylist && ctx.IncludeSubfolders) continue;
+                    toScan.Add(MakeScanItem(ctx));
                 }
                 if (toScan.Count == 0) continue;
 
-                // Enumerate the directories on a background thread.
-                var results = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+                // Enumerate the sources on a background thread. EnumerateScanItem never
+                // throws and never returns null: one unreadable folder / playlist reads as
+                // "no files" (an empty non-null snapshot) so a single failure can't strand
+                // every LATER context in this scan or leave SnapshotsReady unable to latch.
+                var results = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
                 bool done = false;
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     foreach (var item in toScan)
-                    {
-                        try
-                        {
-                            results[item.Name] = Directory.Exists(item.Dir)
-                                ? Directory.GetFiles(item.Dir, "*", item.Option)
-                                    .Where(f => AudioDecoder.IsSupported(f)
-                                                && !IsClaimedByDeeperContext(f, item.Claimed))
-                                    .ToArray()
-                                : new string[0];
-                        }
-                        // One unreadable folder (ACL, removed media, or an over-long path
-                        // under a recursive subfolders="true" context) must not strand every
-                        // LATER context in this scan: a single swallowed throw would leave
-                        // their snapshots null, and SnapshotsReady — which now requires ALL
-                        // contexts enumerated — could then never latch. Give the bad folder
-                        // an empty (non-null) snapshot so it reads as "no files" and recovers
-                        // on a later tick.
-                        catch { results[item.Name] = new string[0]; }
-                    }
+                        results[item.Name] = EnumerateScanItem(item);
                     done = true;
                 });
                 while (!done) yield return null;
 
-                // Apply on the main thread: refresh the snapshot and presence flag.
+                // Apply on the main thread: refresh the snapshot, the in-folder playlist
+                // list (for the change signature), and the presence flag.
                 foreach (var kv in results)
                 {
                     if (cacheMap.TryGetValue(kv.Key, out var cache))
-                        cache.directorySnapshot = kv.Value;
-                    bool has = kv.Value.Any(f => !_invalidFiles.Contains(f));
+                    {
+                        cache.directorySnapshot = kv.Value.Files;
+                        cache.playlistFiles = kv.Value.PlaylistFiles;
+                    }
+                    bool has = kv.Value.Files.Any(f => !_invalidFiles.Contains(f));
                     if (has) _contextsWithFiles.Add(kv.Key);
                     else _contextsWithFiles.Remove(kv.Key);
                 }

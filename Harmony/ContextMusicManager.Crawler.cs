@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading;
 using UnityEngine;
 
+using static CMM.SourceScan;
+
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
@@ -86,9 +88,12 @@ namespace CMM
             {
                 // Resolve the recursive contexts to sweep on the main thread (reads
                 // the shared `contexts` dict).
+                // Playlists are always a flat, self-listed pool — never crawler targets,
+                // even if a subfolders="true" flag was left on them (their source is a
+                // .m3u file, not a directory the crawler could walk).
                 var targets = new List<Contexts>();
                 foreach (Contexts c in contexts.Values)
-                    if (c != null && c.IncludeSubfolders && !string.IsNullOrEmpty(c.Path))
+                    if (c != null && c.IncludeSubfolders && !c.IsPlaylist && !string.IsNullOrEmpty(c.Source))
                         targets.Add(c);
 
                 // Drain manual rescan requests: forget the cached state so the sweep
@@ -183,7 +188,7 @@ namespace CMM
         private SweepState BeginSweep(Contexts ctx)
         {
             string contextName = ctx.Context;
-            string root = NormalizedContextDir(ctx.Path);
+            string root = NormalizedContextDir(ctx.Source);
             if (root == null || !Directory.Exists(root))
             {
                 // Folder gone (or unresolved): clear the context out so it reads empty.
@@ -438,10 +443,10 @@ namespace CMM
                 return $"no context named '{target}'. Subfolder contexts: " +
                        string.Join(", ", RecursiveContextNames());
 
-            if (string.IsNullOrEmpty(ctx.Path))
-                return $"context '{ctx.Context}' has no folder to scan.";
+            if (string.IsNullOrEmpty(ctx.Source))
+                return $"context '{ctx.Context}' has no source to scan.";
 
-            if (ctx.IncludeSubfolders)
+            if (ctx.IncludeSubfolders && !ctx.IsPlaylist)
             {
                 lock (_rescanLock) { _rescanRequests.Add(ctx.Context); }
                 return $"queued rescan of subfolder context '{ctx.Context}'.";
@@ -457,7 +462,7 @@ namespace CMM
         {
             var list = new List<string>();
             foreach (Contexts c in contexts.Values)
-                if (c != null && c.IncludeSubfolders && !string.IsNullOrEmpty(c.Path))
+                if (c != null && c.IncludeSubfolders && !c.IsPlaylist && !string.IsNullOrEmpty(c.Source))
                     list.Add(c.Context);
             list.Sort(StringComparer.OrdinalIgnoreCase);
             return list;

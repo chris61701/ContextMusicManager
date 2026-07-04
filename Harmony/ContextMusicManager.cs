@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading;
 using UnityEngine;
 
+using static CMM.SourceScan;
+
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
@@ -714,14 +716,21 @@ namespace CMM
             if (replacement == null)
             {
                 Contexts ictx = GetContext(contextName);
-                if (ictx != null && !string.IsNullOrEmpty(ictx.Path))
+                if (ictx != null && !string.IsNullOrEmpty(ictx.Source))
                 {
-                    string dir = Path.Combine(MusicDirectory, ictx.Path);
+                    bool isPlaylist = ictx.IsPlaylist;
+                    string dir = isPlaylist ? null : Path.Combine(MusicDirectory, ictx.Source);
+                    string playlistFile = isPlaylist ? PlaylistSource.ResolveFullPath(ictx.Source) : null;
                     string[] fresh = null;
+                    string[] freshPlaylistFiles = _noPlaylistFiles;
                     bool scanDone = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
-                        try { if (Directory.Exists(dir)) fresh = EnumerateContextFiles(ictx, dir); }
+                        try
+                        {
+                            if (isPlaylist) fresh = PlaylistSource.ReadTracks(playlistFile);
+                            else if (Directory.Exists(dir)) fresh = EnumerateContextFiles(ictx, dir, out freshPlaylistFiles);
+                        }
                         catch { }
                         finally { scanDone = true; }
                     });
@@ -730,6 +739,7 @@ namespace CMM
                     if (fresh != null && fresh.Length > 0)
                     {
                         cache.directorySnapshot = fresh;
+                        cache.playlistFiles = freshPlaylistFiles;
                         InvalidateContextFileCache(contextName);
                         CMMConfig.D($"[CMM] Hot-swap: fresh scan found {fresh.Length} file(s) in {contextName} after removal.");
                         replacement = PickExistingReplacement(contextName, goneFile);

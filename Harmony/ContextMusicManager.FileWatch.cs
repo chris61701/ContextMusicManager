@@ -6,6 +6,8 @@ using System.Linq;
 using System.Threading;
 using UnityEngine;
 
+using static CMM.SourceScan;
+
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
@@ -72,7 +74,7 @@ namespace CMM
                 // that files added back are recognized on the next death/spawn event.
                 foreach (var ctx in contexts.Values)
                 {
-                    if (ctx.PlayOnce && !string.IsNullOrEmpty(ctx.Path))
+                    if (ctx.PlayOnce && !string.IsNullOrEmpty(ctx.Source))
                         contextsToWatch.Add(ctx.Context);
                 }
 
@@ -88,13 +90,22 @@ namespace CMM
                     ContextCache cache = cacheMap.TryGetValue(contextName, out var c) ? c : null;
                     if (cache == null) continue;
                     Contexts ctx = GetContext(contextName);
-                    if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
+                    if (ctx == null || string.IsNullOrEmpty(ctx.Source)) continue;
 
-                    string dir = Path.Combine(MusicDirectory, ctx.Path);
+                    // Playlist source: the change signature is the .m3u file's own mtime;
+                    // the fast path below treats it just like a folder mtime. A playlist is
+                    // always flat, so the recursive-crawler branch never applies to it.
+                    bool isPlaylist = ctx.IsPlaylist;
+                    string playlistFile = isPlaylist ? PlaylistSource.ResolveFullPath(ctx.Source) : null;
+                    string dir = isPlaylist ? null : Path.Combine(MusicDirectory, ctx.Source);
+                    // In-folder .m3u files from the last scan, folded into the flat folder's
+                    // change signature so editing one in place hot-reloads (its mtime changes
+                    // but the folder's does not). Null/empty for playlist + recursive sources.
+                    string[] folderPlaylistFiles = cache.playlistFiles;
                     // Reach + ownership for this context, resolved here on the main
                     // thread (claim prefixes read the shared `contexts` dict); the
                     // background stat/scan closures below only use the captured copies.
-                    bool includeSub = ctx.IncludeSubfolders;
+                    bool includeSub = !isPlaylist && ctx.IncludeSubfolders;
                     string[] claimedPrefixes = GetClaimedSubtreePrefixes(contextName);
 
                     bool isActiveContext =
@@ -137,14 +148,23 @@ namespace CMM
                     // ── FAST PATH: single stat (+ one ping for the active context) ──────
                     DateTime currentWriteTime = DateTime.MinValue;
                     bool playingFileGone = false;
+                    bool folderPlaylistChanged = false;
                     bool statDone = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
                         try
                         {
-                            currentWriteTime = ContextWriteSignatureUtc(dir, includeSub);
+                            currentWriteTime = isPlaylist
+                                ? PlaylistWriteSignatureUtc(playlistFile)
+                                : ContextWriteSignatureUtc(dir, includeSub, folderPlaylistFiles);
                             if (!string.IsNullOrEmpty(playingFile))
                                 playingFileGone = !File.Exists(playingFile);
+                            // An in-folder .m3u appearing or vanishing that the max-of-mtimes
+                            // signature can't see (add/remove on exFAT/FAT/network — the folder
+                            // mtime doesn't bump). Only listed on those sloppy filesystems; NTFS
+                            // bumps the folder mtime for both, so it stays a pure O(1) stat there.
+                            if (!isPlaylist && IsSloppyMtimeFilesystem(dir))
+                                folderPlaylistChanged = FolderPlaylistSetChanged(dir, folderPlaylistFiles);
                         }
                         catch { }
                         statDone = true;
@@ -181,7 +201,7 @@ namespace CMM
                         && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(SignatureFreshnessWindow);
 
                     if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
-                        && currentWriteTime == knownTime && !blacklistRetryDue) continue;
+                        && !folderPlaylistChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;
                     lastWriteTimes[contextName] = currentWriteTime;
 
                     // ── FAST REACTION: the ping found the playing file gone ──────────
@@ -220,11 +240,13 @@ namespace CMM
             ContextCache cache = cacheMap.TryGetValue(contextName, out var c) ? c : null;
             if (cache == null) yield break;
             Contexts ctx = GetContext(contextName);
-            if (ctx == null || string.IsNullOrEmpty(ctx.Path)) yield break;
+            if (ctx == null || string.IsNullOrEmpty(ctx.Source)) yield break;
             if (currentContext == null) yield break;
 
-            string dir = Path.Combine(MusicDirectory, ctx.Path);
-            bool includeSub = ctx.IncludeSubfolders;
+            bool isPlaylist = ctx.IsPlaylist;
+            string playlistFile = isPlaylist ? PlaylistSource.ResolveFullPath(ctx.Source) : null;
+            string dir = isPlaylist ? null : Path.Combine(MusicDirectory, ctx.Source);
+            bool includeSub = !isPlaylist && ctx.IncludeSubfolders;
             string[] claimedPrefixes = GetClaimedSubtreePrefixes(contextName);
 
             // ── SLOW PATH: enumerate files ──────────────────────────────────
@@ -241,22 +263,76 @@ namespace CMM
             // the cache check below: a library moved out and back keeps the same
             // size+mtime, so it's accepted without re-decoding every file.
             var keyByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            // The flat folder's top-level .m3u files, refreshed by a successful scan; kept as
+            // the prior value on error so a transient failure doesn't drop the hot-reload watch.
+            string[] discoveredPlaylistFiles = cache.playlistFiles ?? _noPlaylistFiles;
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 try
                 {
-                    if (Directory.Exists(dir))
+                    if (isPlaylist)
                     {
+                        // Direct playlist: the tracks LISTED in the .m3u (files-only, in list
+                        // order). Build the same size+mtime validation keys so a track moved out
+                        // and back isn't re-decoded, matching the folder path's behavior.
+                        currentFiles = PlaylistSource.ReadTracks(playlistFile);
+                        foreach (string f in currentFiles)
+                        {
+                            try
+                            {
+                                var fi = new FileInfo(f);
+                                string nk = norm(f);
+                                keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                            }
+                            catch { }
+                        }
+                        discoveredPlaylistFiles = _noPlaylistFiles;   // direct playlist watches its own file
+                    }
+                    else if (Directory.Exists(dir))
+                    {
+                        // Folder: loose supported files (with free size+mtime keys from the
+                        // listing) plus — when FLAT — the tracks from each top-level .m3u,
+                        // deduped by full path. Recursive folders ignore .m3u entirely.
                         var fis = new DirectoryInfo(dir)
-                            .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
-                            .Where(fi => AudioDecoder.IsSupported(fi.FullName)
-                                         && !IsClaimedByDeeperContext(fi.FullName, claimedPrefixes)).ToArray();
-                        currentFiles = fis.Select(fi => fi.FullName).ToArray();
+                            .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+                        var pool = new List<string>(fis.Length);
+                        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        List<string> m3us = null;
                         foreach (var fi in fis)
                         {
-                            string nk = norm(fi.FullName);
-                            keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                            string fn = fi.FullName;
+                            if (!includeSub && Contexts.IsPlaylistSource(fn))
+                            {
+                                (m3us ?? (m3us = new List<string>())).Add(fn);
+                                continue;
+                            }
+                            if (AudioDecoder.IsSupported(fn) && !IsClaimedByDeeperContext(fn, claimedPrefixes))
+                            {
+                                string nk = norm(fn);
+                                if (seen.Add(nk))
+                                {
+                                    pool.Add(fn);
+                                    keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                                }
+                            }
                         }
+                        if (m3us != null)
+                        {
+                            foreach (string m3u in m3us)
+                                foreach (string t in PlaylistSource.ReadTracks(m3u))
+                                {
+                                    string nk = norm(t);
+                                    if (seen.Add(nk))
+                                    {
+                                        pool.Add(t);
+                                        try { var fi = new FileInfo(t); keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}"; }
+                                        catch { }
+                                    }
+                                }
+                            discoveredPlaylistFiles = m3us.ToArray();
+                        }
+                        else discoveredPlaylistFiles = _noPlaylistFiles;
+                        currentFiles = pool.ToArray();
                     }
                     else currentFiles = new string[0];
                 }
@@ -271,6 +347,10 @@ namespace CMM
                 finally { scanDone = true; }
             });
             while (!scanDone) yield return null;
+
+            // Record the folder's in-folder .m3u list so the change signature keeps watching
+            // them for in-place edits (empty for direct-playlist/recursive; unchanged on error).
+            cache.playlistFiles = discoveredPlaylistFiles;
 
             var currentNorm = currentFiles.Select(norm).ToArray();
             var previousNorm = previousFiles.Select(norm).ToArray();
@@ -487,6 +567,13 @@ namespace CMM
             public string PlayingFile;      // active context only (else null) — the O(1) ping target
             public bool   IsActiveContext;
             public int    SnapshotLength;   // for the empty→filled "previouslyEmpty" gate
+            // Playlist source: the change signature is PlaylistFile's own mtime; Dir/IncludeSub
+            // are unused. The main-thread ApplyFileWatchScan re-derives the playlist read itself.
+            public bool   IsPlaylist;
+            public string PlaylistFile;
+            // Flat folder source: its top-level .m3u files (from cache.playlistFiles), folded
+            // into the folder change signature so an in-place .m3u edit is noticed.
+            public string[] FolderPlaylistFiles;
         }
 
         private const double FwBlacklistRetryInterval = 30.0;   // see FileWatchLoop's BlacklistRetryInterval
@@ -538,7 +625,7 @@ namespace CMM
             // PlayOnce events (Spawn/Death) are never on the stack but still need change
             // detection so files added back are recognized on the next death/spawn.
             foreach (var ctx in contexts.Values)
-                if (ctx.PlayOnce && !string.IsNullOrEmpty(ctx.Path))
+                if (ctx.PlayOnce && !string.IsNullOrEmpty(ctx.Source))
                     contextsToWatch.Add(ctx.Context);
 
             foreach (string contextName in contextsToWatch)
@@ -546,14 +633,18 @@ namespace CMM
                 ContextCache cache = cacheMap.TryGetValue(contextName, out var c) ? c : null;
                 if (cache == null) continue;
                 Contexts ctx = GetContext(contextName);
-                if (ctx == null || string.IsNullOrEmpty(ctx.Path)) continue;
+                if (ctx == null || string.IsNullOrEmpty(ctx.Source)) continue;
 
                 bool isActive = string.Equals(contextName, currentContext.Context, StringComparison.OrdinalIgnoreCase);
+                bool isPlaylist = ctx.IsPlaylist;
                 result.Add(new FileWatchDescriptor
                 {
                     ContextName     = contextName,
-                    Dir             = Path.Combine(MusicDirectory, ctx.Path),
-                    IncludeSub      = ctx.IncludeSubfolders,
+                    IsPlaylist      = isPlaylist,
+                    PlaylistFile    = isPlaylist ? PlaylistSource.ResolveFullPath(ctx.Source) : null,
+                    Dir             = isPlaylist ? null : Path.Combine(MusicDirectory, ctx.Source),
+                    IncludeSub      = !isPlaylist && ctx.IncludeSubfolders,
+                    FolderPlaylistFiles = isPlaylist ? null : cache.playlistFiles,
                     // Active context only: we can't trust the folder mtime for the playing
                     // track (exFAT/network/junction), so we ping that one file (O(1)) instead.
                     PlayingFile     = isActive ? cache.lastPlayedFile : null,
@@ -605,9 +696,19 @@ namespace CMM
                         continue;
                     }
 
-                    // FAST PATH: one directory write-time signature (+ one ping for the active ctx).
-                    DateTime currentWriteTime = ContextWriteSignatureUtc(d.Dir, false);
+                    // FAST PATH: one write-time signature (+ one ping for the active ctx).
+                    // Playlist → the .m3u file's own mtime; folder → the directory mtime,
+                    // plus any in-folder .m3u files' mtimes (for in-place playlist edits).
+                    DateTime currentWriteTime = d.IsPlaylist
+                        ? PlaylistWriteSignatureUtc(d.PlaylistFile)
+                        : ContextWriteSignatureUtc(d.Dir, false, d.FolderPlaylistFiles);
                     bool playingFileGone = !string.IsNullOrEmpty(pf) && PingGone(pf);
+                    // An in-folder .m3u appearing or vanishing the max-of-mtimes signature can't
+                    // see (add/remove on exFAT/FAT/network — the folder mtime doesn't bump). Only
+                    // lists the folder on those sloppy filesystems; NTFS bumps the folder mtime for
+                    // both directions, so this stays a pure O(1) stat there.
+                    bool folderPlaylistChanged = !d.IsPlaylist && IsSloppyMtimeFilesystem(d.Dir)
+                        && FolderPlaylistSetChanged(d.Dir, d.FolderPlaylistFiles);
 
                     bool neverScanned = !_fwLastWriteTimes.TryGetValue(ctxName, out DateTime knownTime);
                     // Never trust the write-time shortcut for an empty dir (a refill can land on
@@ -619,7 +720,7 @@ namespace CMM
                         && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(FwSignatureFreshnessWindow);
 
                     if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
-                        && currentWriteTime == knownTime && !blacklistRetryDue) continue;   // no change — no main hop
+                        && !folderPlaylistChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;   // no change — no main hop
                     _fwLastWriteTimes[ctxName] = currentWriteTime;
 
                     if (d.IsActiveContext && playingFileGone)

@@ -109,6 +109,7 @@ namespace CMM
                 doc.Load(path);
 
                 var built = new Dictionary<string, Contexts>(StringComparer.OrdinalIgnoreCase);
+                bool sawDeprecatedPath = false;
                 foreach (XmlNode node in doc.DocumentElement.ChildNodes)
                 {
                     if (node.NodeType != XmlNodeType.Element || node.Name != "Context") continue;
@@ -116,9 +117,19 @@ namespace CMM
                     string name = el.GetAttribute("name");
                     if (string.IsNullOrEmpty(name)) continue;
 
+                    // `source` is the current attribute (folder OR .m3u playlist). `path`
+                    // is the pre-playlist name kept as a deprecated alias so existing
+                    // configs keep loading; source wins when both are present.
+                    string source = el.GetAttribute("source");
+                    if (string.IsNullOrEmpty(source) && el.HasAttribute("path"))
+                    {
+                        source = el.GetAttribute("path");
+                        sawDeprecatedPath = true;
+                    }
+
                     built[name] = new Contexts(
                         context:               name,
-                        path:                  el.GetAttribute("path"),
+                        source:                source,
                         fallback:              StrAttr(el, "fallback", "Stack"),
                         canberesumed:          BoolAttr(el, "resume",   true),
                         timeuntilcontextstale: IntAttr (el, "stale",    120),
@@ -149,6 +160,11 @@ namespace CMM
                 // Rebuild the vanilla section→context reverse map from the freshly loaded
                 // Link attributes (covers both first load and the hot-reload path).
                 ContextMusicManager.RebuildVanillaLinkMap();
+
+                if (sawDeprecatedPath)
+                    Log.Warning("[CMM] contexts.xml uses the deprecated 'path' attribute on one or " +
+                                "more contexts; rename it to 'source' (a source may be a folder or a " +
+                                ".m3u/.m3u8 playlist).");
 
                 CMMConfig.D($"[CMM] Config/contexts.xml loaded: {built.Count} contexts.");
             }

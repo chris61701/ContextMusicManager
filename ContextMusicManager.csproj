@@ -158,6 +158,8 @@
     <Compile Include="Harmony\ContextMusicManager.FileWatch.cs" />
     <Compile Include="Harmony\ContextMusicManager.ConfigWatch.cs" />
     <Compile Include="Harmony\DataStructures.cs" />
+    <Compile Include="Harmony\PlaylistSource.cs" />
+    <Compile Include="Harmony\SourceScan.cs" />
     <Compile Include="Harmony\GameState.cs" />
     <Compile Include="Harmony\CMMConfig.cs" />
     <Compile Include="Harmony\CMMPerf.cs" />
