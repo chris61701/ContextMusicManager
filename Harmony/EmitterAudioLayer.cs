@@ -407,8 +407,16 @@ namespace CMM
             if (Time.realtimeSinceStartup < _nextPoolCheck) return;
             _nextPoolCheck = Time.realtimeSinceStartup + PoolCheckInterval;
 
+            // An EMPTY pool is the recovery-critical case: a track added to a folder that was empty must
+            // bring the station back. The folder-mtime signature can't be trusted to catch that — Windows
+            // can stamp the empty dir and the re-filled dir with the SAME time when the add lands inside one
+            // filesystem-precision window (FAT/exFAT/network shares are coarser still). This is exactly what
+            // the context FileWatch guards with its `previouslyEmpty` special-case; the pool needs the same
+            // guard or a station whose folder started empty never picks up its first track. So while the
+            // pool is empty, always re-enumerate rather than short-circuit on an unchanged signature.
+            bool poolEmpty = _pool.Length == 0;
             DateTime sig = SourceSignature(src, recursive);
-            if (sig == _poolSig) return;
+            if (!poolEmpty && sig == _poolSig) return;
             _poolSig = sig;
 
             _pool = BuildPool(src, recursive) ?? _pool;   // keep the old pool on a transient read failure

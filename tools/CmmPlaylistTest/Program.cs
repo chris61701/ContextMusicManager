@@ -53,6 +53,7 @@ namespace CMM
             RunChangeDetectionScenarios();
             RunSourceChangeScenarios();
             RunRealMusicScenarios();
+            RunEmitterPoolRecoveryScenarios();
 
             Console.WriteLine();
             Console.WriteLine($"== RESULT: {_pass} passed, {_fail} failed ==");
@@ -338,6 +339,52 @@ namespace CMM
             CheckSet("G4 valid -> invalid (nonexistent) empties pool", "gone_folder", false, Exp());
             CheckSet("G5 invalid -> valid populates pool", "mixed", false,
                 Exp("musicroot/mixed/m1.mp3","musicroot/mixed/m2.m4a"));
+        }
+
+        // ── I. World-emitter pool recovery (empty folder → first track added) ────
+        // The Radio station's pool (EmitterAudioLayer.EnsurePool) watches its folder with the SAME
+        // max-of-mtimes signature the context FileWatch uses. Radio is subfolders="true", so model
+        // the recursive signature. THE BUG: when the folder starts EMPTY and the first track is added
+        // within one filesystem-precision window (or on a sloppy FAT/exFAT/network FS), the folder's
+        // mtime can land on the SAME value it had while empty — so a signature-ONLY gate never
+        // re-enumerates and the station stays silent forever. The context FileWatch already guards
+        // this with its `previouslyEmpty` special-case; the emitter pool copied the mtime shortcut but
+        // not the guard. This reproduces the collision with the REAL SourceScan helpers and checks the
+        // old (buggy) vs new (fixed) EnsurePool gate decision.
+        static void RunEmitterPoolRecoveryScenarios()
+        {
+            Section("I. World-emitter pool recovery (empty folder -> first track added)");
+            const bool recursive = true;   // Radio context is subfolders="true"
+            string dir = Path.Combine(MusicRoot, "radioEmpty");
+            Dir("musicroot/radioEmpty");
+
+            var sig0  = SourceScan.ContextWriteSignatureUtc(dir, recursive);
+            var pool0 = SourceScan.EnumerateFolderPoolRaw(dir, recursive, Array.Empty<string>(), out _);
+            Check("I1 empty folder -> empty pool", pool0.Length == 0, $"pool0={pool0.Length}");
+
+            // Add the first track, then FORCE the empty->refill stamp collision by resetting the dir
+            // mtime to its pre-add value — the exact case FileWatch warns the signature can't see.
+            Touch("musicroot/radioEmpty/first.mp3");
+            try { Directory.SetLastWriteTimeUtc(dir, sig0); } catch { }
+
+            var sig1  = SourceScan.ContextWriteSignatureUtc(dir, recursive);
+            var pool1 = SourceScan.EnumerateFolderPoolRaw(dir, recursive, Array.Empty<string>(), out _);
+            Check("I2 collision reproduced: signature UNCHANGED after the add", sig1 == sig0, $"{sig0:o} -> {sig1:o}");
+            Check("I3 re-enumeration DOES see the new track", pool1.Length == 1, $"pool1={pool1.Length}");
+
+            // The two EnsurePool gate decisions, given (currentPool = pool0 empty, freshSig = sig1):
+            bool oldSkipsRebuild = sig1 == sig0;                            // signature-only (buggy)
+            bool newSkipsRebuild = (pool0.Length != 0) && (sig1 == sig0);   // never skip while empty (fixed)
+            Check("I4 OLD signature-only gate would NOT recover (bug present)", oldSkipsRebuild, "old gate skips rebuild");
+            Check("I5 NEW empty-guard gate DOES recover (fix works)", !newSkipsRebuild && pool1.Length == 1,
+                  $"newSkips={newSkipsRebuild}, recovered={pool1.Length}");
+
+            // Sanity: when the add DOES bump the mtime (NTFS normal case), even the old gate recovered
+            // — so the bug is specific to the empty->refill collision and the fix doesn't regress the
+            // normal path (the empty-guard just makes the same rebuild happen unconditionally-while-empty).
+            try { Directory.SetLastWriteTimeUtc(dir, sig0.AddSeconds(20)); } catch { }
+            var sig2 = SourceScan.ContextWriteSignatureUtc(dir, recursive);
+            Check("I6 normal (non-colliding) add bumps signature", sig2 > sig0, $"{sig0:o} -> {sig2:o}");
         }
 
         static void RunRealMusicScenarios()

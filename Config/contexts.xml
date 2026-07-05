@@ -204,7 +204,7 @@
        auto-activates — no link to a vanilla DMS section and no detection wires it to a game state, so
        the resolver never puts it on the stack. It needs a trigger (a link, or code) before it will play
        as your (non-diegetic) soundtrack. -->
-  <Context name="Radio"                      source="Radio"                       subfolders="true"  fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="10"  once="false" volume="0.5" />
+  <Context name="Radio"                      source="Radio"                       subfolders="false" fallback="Stack"             resume="true"  stale="120" loop="false" cool="5" fadeintime="5" warmup="0"  warmgroup=""     bypass="false" priority="10"  once="false" volume="0.5" />
 
   <!-- ── Menu ──────────────────────────────────────── -->
   <Context name="Menu"                       source="menu"                        subfolders="false" fallback="Vanilla"           resume="false" stale="0"   loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="0"   once="false" volume="-1" />
