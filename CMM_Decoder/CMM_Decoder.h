@@ -61,8 +61,48 @@ typedef struct cmm_decoder cmm_decoder;
  *   v15:+ HEADLESS output for the offline stress harness — cmm_out_open_null / cmm_out_drain and
  *        cmm_mix_start_ex(headless) / cmm_mix_pump_out: run the real mixer with no ma_device,
  *        drained on the caller's clock, so the mixer's native lifecycle churns at compressed
- *        speed for leak hunting (in-game paths unchanged). */
-#define CMM_DECODER_ABI 15
+ *        speed for leak hunting (in-game paths unchanged).
+ *   v16:+ EMITTER voices (cmm_mix_add_emitter / cmm_mix_remove_emitter) — an independent
+ *        positional layer that plays ALONGSIDE the music voices (a diegetic world speaker keeps
+ *        playing while the soundtrack crossfades underneath), exempt from the music crossfade and
+ *        the voice-count eviction. v16 renders them centered; spatialization/coloration follow.
+ *   v17:+ SPATIAL emitters — cmm_mix_add_emitter now takes a world position + min/max distance,
+ *        cmm_mix_set_listener pushes the listener basis (pos + forward + right, straight from the
+ *        camera so there's no handedness ambiguity), and cmm_mix_set_emitter_pos moves a live
+ *        emitter. Emitter voices are mono-downmixed then panned L/R by bearing and attenuated by
+ *        distance (hand-rolled, no HRTF).
+ *   v18:+ MULTI-POINT emitters — cmm_mix_set_emitter_points gives one emitter voice the positions of
+ *        EVERY speaker playing the station; the render sums each point's pan+attenuation, so they are
+ *        all heard at once (a smooth blend, no nearest-only snapping) from a single decode.
+ *   v19:+ per-speaker OCCLUSION gain — cmm_mix_set_emitter_points also takes a per-point gain (walls
+ *        between listener and speaker muffle it), folded into that point's contribution.
+ *   v20:  CONSUMER-SIDE emitter spatialization — no managed-ABI signature change, but the pan/distance/
+ *        occlusion now runs in the audio OUTPUT callback (cmm_out) from the freshest listener state
+ *        (the producer feeds a dry-mono emitter ring + relays the spatial state), so panning tracks
+ *        head movement at output latency (~10ms) instead of behind the ~200ms producer ring cushion.
+ *   v21:+ LIVE emitter TUNING — cmm_mix_set_emitter_tuning(minDist, maxDist, falloffExp, muffle) pushes
+ *        the spatial curve params (full-volume plateau radius, audible range, falloff steepness, and
+ *        distance-muffle low-pass strength) live from config, so they can be dialled in-game without a
+ *        rebuild. The output spatializer reads them each callback in place of the old baked constants.
+ *   v22:+ STEREO WIDTH — cmm_mix_set_emitter_tuning gains a `stereoWidth` (0..1): the pan position is
+ *        scaled by it so a hard-left/right source no longer NULLS the far ear (equal-power puts it at
+ *        cos=0); <1 keeps both ears alive, matching how a source at 90° is still heard on the far side.
+ *   v23:+ EMITTER REVERB — cmm_mix_set_emitter_reverb(wet, room, damp) drives a Freeverb-style room
+ *        reverb on the emitter voice from the managed room probe. The WET path is attenuated by REAL
+ *        distance only (not occlusion), so behind a wall the dry sound drops but the reflections carry
+ *        — the "it bounced / it's in another room" cue. (Relayed via cmm_out_set_emitter_reverb.)
+ *   v24:+ EMITTER MASTER — cmm_mix_set_emitter_master(vol) gives the world-radio its OWN master, separate
+ *        from the music master (g_masterVol). Managed feeds the game music SLIDER × the Radio context's
+ *        volume, so the radio scales only to the slider (+ context level), not VolumeModifier or the
+ *        current music context's volume.
+ *   v25:+ EMITTER CONTINUITY — cmm_mix_add_emitter gains a `startFrame` so a station rejoined mid-song
+ *        seeks to its virtual playhead (the station keeps "broadcasting" on a wall-clock while idle;
+ *        managed computes the offset). Mirrors cmm_mix_add's resume seek. */
+#define CMM_DECODER_ABI 25
+
+/* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
+ * output (consumer-side spatializer). */
+#define CMM_MAX_EMIT_PTS 8
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -300,6 +340,27 @@ CMM_API cmm_out* cmm_out_open_null(int sampleRate, int channels, int ringFrames,
  * realtime callback), discarding them. Returns frames consumed. SPSC: one consumer only. */
 CMM_API int cmm_out_drain(cmm_out* o, int frames);
 
+/* ── Consumer-side emitter spatialization (v20, internal — the mixer calls these) ──
+ * The producer (cmm_mix) feeds the emitter's DRY MONO into a second ring and relays the live
+ * spatial state; the audio callback pans/attenuates/occludes it from that freshest state and adds
+ * it to the output, so head-turn panning is heard at output latency, not behind the ring cushion.
+ * These are not part of the managed ABI (same-DLL cross-TU calls), so they are plain (unexported). */
+
+/* Enqueue up to `frames` mono f32 frames of the emitter's dry signal. Non-blocking; returns frames
+ * accepted (SPSC — the producer is the sole writer, exactly like cmm_out_write). */
+int cmm_out_write_emitter(cmm_out* o, const float* mono, int frames);
+
+/* Relay the live spatial state the callback spatializes with: listener world position + right unit
+ * vector, `count` speaker positions (interleaved xyz) with per-speaker gains, and min/max distance.
+ * count 0 = no emitter audible this block (the callback discards any residual mono). Lock-free. */
+void cmm_out_set_emitter_spatial(cmm_out* o, const float* lisPos3, const float* lisRight3,
+                                 const float* pts, const float* gains, int count,
+                                 float minDist, float maxDist, float falloffExp, float muffle,
+                                 float stereoWidth);
+
+/* Relay the live emitter reverb params (from the managed room probe). wet 0 = off. Lock-free. */
+void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp);
+
 /* ── Format converter (resample + channel map) ────────────────────────────
  * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
  * converter). The mixer gives each voice whose native format differs from the
@@ -362,6 +423,59 @@ CMM_API int cmm_mix_pump_out(int frames);
 CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
                               long long totalFrames, float fade, int loop, long long startFrame,
                               float trackGain, float duckOthersTo, int snapTight);
+
+/* ── Emitter voices (independent positional layer) ────────────────────────
+ * An emitter voice plays ALONGSIDE the music voices instead of crossfading them: cmm_mix_add
+ * fades every existing voice out (a music context change), but an emitter voice is EXEMPT from
+ * that fade and from the voice-count eviction, so a diegetic world speaker keeps playing while
+ * the soundtrack changes underneath — and starting/stopping an emitter never disturbs the music.
+ * Same decoder handoff as cmm_mix_add: the caller opens `dec` (+ `kind`) off the audio thread and
+ * the mixer TAKES OWNERSHIP (frees it on retire or on failure). fadeIn = ramp-up seconds; loop
+ * restarts at EOF; trackGain = per-track loudness gain. Returns an emitter voice id (0 on failure)
+ * to remove via cmm_mix_remove_emitter. v16 renders emitters CENTERED (no spatialization yet). */
+CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
+                                      long long totalFrames, float fadeIn, int loop, float trackGain,
+                                      float posX, float posY, float posZ, float minDist, float maxDist,
+                                      long long startFrame);
+
+/* Fade an emitter voice out over `fade` (<=0 snaps) and retire it. Unknown id is a no-op. */
+CMM_API void cmm_mix_remove_emitter(long long id, float fade);
+
+/* Set the LISTENER basis for emitter spatialization: world position + forward + right unit
+ * vectors (pass them straight from the camera transform — the mixer uses them as-is, so there is
+ * no left/right-handed coordinate ambiguity). Lock-free (like cmm_mix_set_master); the producer
+ * reads them per render block. Call every frame while emitters may be audible. */
+CMM_API void cmm_mix_set_listener(float px, float py, float pz,
+                                  float fx, float fy, float fz,
+                                  float rx, float ry, float rz);
+
+/* Move a live emitter voice to a new world position (e.g. the nearest speaker changed). Unknown
+ * or non-emitter id is a no-op. */
+CMM_API void cmm_mix_set_emitter_pos(long long id, float x, float y, float z);
+
+/* v18/v19 — set the FULL set of speaker positions playing this station: `xyz` holds `count`
+ * interleaved x,y,z triples (clamped to 8), `gains` holds `count` per-speaker gains (occlusion:
+ * 1=clear, <1=muffled; NULL = all clear). The render sums each point's pan+attenuation×gain so every
+ * speaker is heard at once from the one decode. count<=0/xyz NULL silences until the next update. */
+CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains, int count);
+
+/* v21 — set the LIVE spatial-curve tuning applied by the output spatializer, so it can be dialled
+ * in-game from config without a rebuild. minDist = full-volume plateau radius; maxDist = audible
+ * range (silence beyond); falloffExp = steepness of the plateau→range fade (1 = linear amplitude,
+ * >1 steeper near the plateau / more "responsive", <1 gentler); muffle = distance low-pass strength
+ * 0..1 (0 = no distance dulling, higher = duller with distance). Lock-free; call whenever config
+ * changes (cheap to call every tick). Applies to the single shared station. */
+CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float falloffExp, float muffle,
+                                        float stereoWidth);
+
+/* v23 — set the LIVE emitter reverb params from the managed room probe. wet = master wet level
+ * (0 = off), room = size→decay/tail, damp = HF damping (dead room = darker/shorter). All 0..1.
+ * Lock-free; call every probe tick. Applies to the single shared station. */
+CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp);
+
+/* v24 — set the EMITTER (world-radio) master volume, separate from the music master. Feed the game's
+ * music slider × the Radio context's own volume. Clamped to >= 0. Lock-free; call every tick. */
+CMM_API void cmm_mix_set_emitter_master(float vol);
 
 /* Fade ALL voices out over `fade`. closeWhenIdle!=0 closes the device once silent;
  * pass 0 to keep it open for a hand-off (e.g. a menu→game fade into the spawn stinger). */

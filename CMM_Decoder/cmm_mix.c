@@ -82,6 +82,8 @@ static const mix_close_fn CLOSE_FN[KIND_COUNT] = {
 #define CALM_MS              3000
 #define FLUSH_GRACE_MS        750
 #define STINGER_RESTORE_SEC  0.6f
+#define MAX_EMIT_PTS  CMM_MAX_EMIT_PTS  /* shared with cmm_out (the consumer-side spatializer) */
+#define EMIT_MAX_GAIN        1.4f  /* cap on the summed spatial gain (anti-clip among many speakers) */
 
 typedef struct mix_voice {
     long long id;
@@ -101,6 +103,11 @@ typedef struct mix_voice {
     int    ended;               /* reader hit EOF and isn't looping */
     int    isStinger;           /* PlayOnce overlay: restore ducked beds when it retires */
     int    ducked;              /* this voice was DUCKED (not killed) under a stinger */
+    int    isEmitter;           /* independent positional layer: exempt from the music crossfade + eviction */
+    float  emitPts[MAX_EMIT_PTS * 3]; /* emitter: world positions of every speaker playing this station */
+    float  emitPtGain[MAX_EMIT_PTS];  /* emitter: per-speaker gain multiplier (occlusion: 1=clear, <1=muffled) */
+    int    emitPtCount;         /* number of active positions in emitPts */
+    float  emitMinDist, emitMaxDist;  /* emitter: full volume within min; silent beyond max */
 } mix_voice;
 
 /* ── Mixer singleton state (the managed CmmMixer was a singleton too) ──────*/
@@ -123,8 +130,35 @@ static volatile int g_reinitRequested;
 static int      g_headless;
 
 static volatile float g_masterVol   = 1.0f;
+/* Emitter (world-radio) master — DELIBERATELY SEPARATE from g_masterVol. The music master folds in
+ * VolumeModifier and the current context's volume; the diegetic radio must NOT ride those (a quiet
+ * music context shouldn't quiet the radio). Managed sets this to the game's music SLIDER × the Radio
+ * context's own volume, so the radio scales only to the in-game slider (and its context level). */
+static volatile float g_emMasterVol = 1.0f;
 static volatile int   g_deep;        /* DeepBuffer (loading) */
 static volatile int   g_extra;       /* ExtraCushion (post-spawn grace) — excluded from falling-edge flush */
+
+/* Listener basis for emitter spatialization (world pos + forward + right unit vectors, straight
+ * from the camera). Lock-free like g_masterVol: written by cmm_mix_set_listener from the control
+ * thread, read by the producer per render block. A torn read (mid-update) at most yields one
+ * block's slightly-off pan — inaudible. Right defaults to +X so a never-set listener still pans. */
+static volatile float g_lisPos[3];
+static volatile float g_lisFwd[3];
+static volatile float g_lisRight[3] = { 1.0f, 0.0f, 0.0f };
+
+/* Live emitter spatial-curve tuning (see cmm_mix_set_emitter_tuning). Lock-free like the listener;
+ * pushed from config, relayed to the output spatializer each render block. Defaults match the shipped
+ * settings so the first blocks before managed pushes are sane. */
+static volatile float g_emMinDist     = 5.0f;
+static volatile float g_emMaxDist     = 40.0f;
+static volatile float g_emFalloffExp  = 1.5f;
+static volatile float g_emMuffle      = 0.7f;
+static volatile float g_emStereoWidth = 0.85f;
+
+/* Live emitter reverb (room reflection) params, from the managed room probe. wet 0 = off. */
+static volatile float g_emRevWet  = 0.0f;
+static volatile float g_emRevRoom = 0.5f;
+static volatile float g_emRevDamp = 0.5f;
 
 /* adaptive ring state (see cmm_out.c / ComputeFillTargetLocked) */
 static int g_tightFill, g_maxFill, g_lowWater, g_targetFill;
@@ -143,6 +177,7 @@ static int g_wasEmpty;
 static float* g_bus;
 static float* g_voiceStereo;
 static float* g_convTmp;
+static float* g_emitterMono;   /* emitter voices' dry mono for the consumer-side spatializer */
 
 /* ── helpers ──────────────────────────────────────────────────────────────*/
 static float compute_step(float from, float to, float seconds) {
@@ -236,7 +271,13 @@ static int produce_conv(mix_voice* v, int n) {
  * when the voice should be retired. Mirrors CmmMixer.RenderVoiceAdd (bus is stereo). */
 static int render_voice_add(mix_voice* v, int n) {
     int frames = (v->conv == NULL) ? produce_direct(v, n) : produce_conv(v, n);
+    /* Emitter voices are NOT spatialized here: they produce a DRY MONO signal (× fade/track gain)
+     * into g_emitterMono, and the OUTPUT callback (cmm_out) applies the pan/distance/occlusion from
+     * the freshest listener state, so head-turn panning is heard in ~10ms, not behind the ring
+     * cushion. Music voices sum into the stereo bus exactly as before. */
+    int emit = v->isEmitter;
     int f;
+
     for (f = 0; f < frames; f++) {
         if (v->gainStep != 0.0f) {
             v->gain += v->gainStep;
@@ -250,8 +291,13 @@ static int render_voice_add(mix_voice* v, int n) {
         }
         int o = f * g_busChannels;
         float g = v->gain * v->trackGain;
-        g_bus[o]     += g_voiceStereo[o]     * g;
-        g_bus[o + 1] += g_voiceStereo[o + 1] * g;
+        if (emit) {
+            /* Dry mono (accumulated: a brief 2-voice overlap during a start/stop crossfade sums). */
+            g_emitterMono[f] += 0.5f * (g_voiceStereo[o] + g_voiceStereo[o + 1]) * g;
+        } else {
+            g_bus[o]     += g_voiceStereo[o]     * g;
+            g_bus[o + 1] += g_voiceStereo[o + 1] * g;
+        }
     }
 
     /* Advance the ramp across any frames this block couldn't produce (loop reseek /
@@ -377,10 +423,13 @@ static void pump_body(void) {
         if (n < 1) { mix_sleep_ms(2); continue; }
 
         memset(g_bus, 0, (size_t)n * g_busChannels * sizeof(float));
+        memset(g_emitterMono, 0, (size_t)n * sizeof(float));
 
+        int emActive = 0;   /* an emitter voice produced this block (write its mono; retiring voice's last frames count) */
         mix_lock(&g_lock);
         {
             int i;
+            for (i = 0; i < g_voiceCount; i++) if (g_voices[i]->isEmitter) { emActive = 1; break; }
             for (i = g_voiceCount - 1; i >= 0; i--) {
                 if (!render_voice_add(g_voices[i], n)) {
                     int wasStinger = g_voices[i]->isStinger;
@@ -388,6 +437,27 @@ static void pump_body(void) {
                     free(g_voices[i]);
                     remove_at(i);
                     if (wasStinger) restore_ducked_locked();
+                }
+            }
+
+            /* Relay the emitter's live spatial state to the output for consumer-side spatialization.
+             * Pick the newest emitter voice (normally one; a brief two during a start/stop overlap).
+             * dev is valid here (we hold the lock and any closeWhenIdle teardown runs below). */
+            if (dev) {
+                mix_voice* em = NULL;
+                for (i = 0; i < g_voiceCount; i++) if (g_voices[i]->isEmitter) em = g_voices[i];
+                if (em) {
+                    float lp[3] = { g_lisPos[0], g_lisPos[1], g_lisPos[2] };
+                    float lr[3] = { g_lisRight[0], g_lisRight[1], g_lisRight[2] };
+                    /* min/max come from the LIVE tuning globals (not the voice's baked-in values) so
+                     * range + plateau are hot-tunable; falloff + muffle likewise. */
+                    cmm_out_set_emitter_spatial(dev, lp, lr, em->emitPts, em->emitPtGain,
+                                                em->emitPtCount, g_emMinDist, g_emMaxDist,
+                                                g_emFalloffExp, g_emMuffle, g_emStereoWidth);
+                    cmm_out_set_emitter_reverb(dev, g_emRevWet, g_emRevRoom, g_emRevDamp);
+                } else {
+                    cmm_out_set_emitter_spatial(dev, NULL, NULL, NULL, NULL, 0, 1.0f, 2.0f, 1.5f, 0.7f, 0.85f);
+                    cmm_out_set_emitter_reverb(dev, 0.0f, 0.5f, 0.5f);
                 }
             }
         }
@@ -413,6 +483,16 @@ static void pump_body(void) {
             int w = cmm_out_write(dev, g_bus + (size_t)pushed * g_busChannels, n - pushed);
             pushed += w;
             if (pushed < n) mix_sleep_ms(2);
+        }
+
+        /* Emitter DRY mono: apply master (spatialization + clip happen in the output callback) and
+         * enqueue to the emitter ring — ONLY when an emitter voice produced this block, so an idle
+         * emitter ring stays empty and the radio's audio onset isn't delayed behind a cushion of
+         * zeros. No clip here (the callback clips the summed output). */
+        if (emActive) {
+            float emMaster = g_emMasterVol;   /* the radio's OWN master, not the music master */
+            for (i = 0; i < n; i++) g_emitterMono[i] *= emMaster;
+            cmm_out_write_emitter(dev, g_emitterMono, n);
         }
     }
 }
@@ -450,6 +530,7 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_tightFill   = tightFrames > 0 ? tightFrames : g_busRate / 5;   /* ~200ms default */
     g_maxFill     = maxFrames > g_tightFill ? maxFrames : g_tightFill;
     g_masterVol   = 1.0f;
+    g_emMasterVol = 1.0f;
     g_outGainTarget = 1.0f;
     g_minQueued   = 0x7fffffff;
     g_underruns   = 0;
@@ -458,7 +539,8 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_bus         = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_voiceStereo = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_convTmp     = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
-    if (!g_bus || !g_voiceStereo || !g_convTmp) { if (err) *err = -2; return -2; }
+    g_emitterMono = (float*)malloc((size_t)BUS_MAXFRAMES * sizeof(float));
+    if (!g_bus || !g_voiceStereo || !g_convTmp || !g_emitterMono) { if (err) *err = -2; return -2; }
 
     mix_mutex_init(&g_lock);
     g_running = 1;
@@ -542,6 +624,7 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
         int i;
         for (i = 0; i < g_voiceCount; i++) {
             mix_voice* ev = g_voices[i];
+            if (ev->isEmitter) continue;   /* emitters are an independent layer — a music change never fades them */
             if (reviveFrom != 1.0f) ev->gain *= reviveFrom;   /* keep audible level continuous across revive */
             float to = stinger ? duckOthersTo : 0.0f;
             ev->targetGain = to;
@@ -560,12 +643,17 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
 
     g_voices[g_voiceCount++] = v;
 
-    /* Bound overlap: never accumulate beyond MAX_VOICES — drop the most-faded extras. */
-    while (g_voiceCount > MAX_VOICES) {
-        int q = -1, i; float low = 1e30f;
-        for (i = 0; i < g_voiceCount; i++)
+    /* Bound overlap: never accumulate beyond MAX_VOICES MUSIC voices — drop the most-faded
+     * extras. Emitter voices are an independent layer: they neither count toward the limit nor
+     * are eligible for eviction here (the emitter layer manages its own voices). */
+    for (;;) {
+        int i, music = 0, q = -1; float low = 1e30f;
+        for (i = 0; i < g_voiceCount; i++) {
+            if (g_voices[i]->isEmitter) continue;
+            music++;
             if (g_voices[i]->id != id && g_voices[i]->gain < low) { low = g_voices[i]->gain; q = i; }
-        if (q < 0) break;
+        }
+        if (music <= MAX_VOICES || q < 0) break;
         retire_voice(g_voices[q]); free(g_voices[q]); remove_at(q);
     }
 
@@ -578,12 +666,161 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
     return id;
 }
 
+/* v16 — add an EMITTER voice: an independent positional layer that plays ALONGSIDE the music.
+ * Unlike cmm_mix_add it does NOT fade the other voices out and is exempt from the voice-count
+ * eviction — it just appends a voice the emitter layer owns. Takes ownership of `dec` (frees it
+ * on retire or on any failure here). Returns an emitter voice id (0 on failure). */
+CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
+                                      long long totalFrames, float fadeIn, int loop, float trackGain,
+                                      float posX, float posY, float posZ, float minDist, float maxDist,
+                                      long long startFrame) {
+    if (!dec) return 0;
+    if (kind < 0 || kind >= KIND_COUNT) return 0;   /* leak-safe: unknown kind, caller keeps dec */
+
+    mix_voice* v = (mix_voice*)calloc(1, sizeof(mix_voice));
+    if (!v) { CLOSE_FN[kind](dec); return 0; }
+    v->dec = dec; v->readfn = READ_FN[kind]; v->seekfn = SEEK_FN[kind]; v->closefn = CLOSE_FN[kind];
+    v->srcRate = srcRate; v->srcChannels = srcChannels; v->totalFrames = totalFrames;
+    v->loop = loop ? 1 : 0;
+
+    /* Continuity seek: start at the station's virtual playhead so rejoining a station resumes mid-song,
+     * not from 0. Runs on the caller's control thread, off the audio path (mirrors cmm_mix_add). */
+    if (startFrame > 0) {
+        if (totalFrames > 0 && startFrame >= totalFrames) startFrame = 0;
+        if (v->seekfn(dec, startFrame) != 0) startFrame = 0;   /* seek failed → from 0 */
+    } else startFrame = 0;
+    v->framesRead = startFrame;
+    v->trackGain = trackGain > 0.0f ? trackGain : 1.0f;
+    v->trackGainTarget = v->trackGain;
+    v->isEmitter = 1;
+    v->emitPts[0] = posX; v->emitPts[1] = posY; v->emitPts[2] = posZ;
+    v->emitPtGain[0] = 1.0f;                   /* unoccluded until the layer sends real per-speaker gains */
+    v->emitPtCount = 1;                        /* start with the one speaker; the layer adds the rest */
+    v->emitMinDist = minDist > 0.0f ? minDist : 1.0f;
+    v->emitMaxDist = maxDist > v->emitMinDist ? maxDist : v->emitMinDist + 1.0f;
+
+    if (srcRate != g_busRate || srcChannels != g_busChannels) {
+        int derr = 0;
+        v->conv = cmm_dc_open(srcRate, srcChannels, g_busRate, g_busChannels, &derr);
+        if (!v->conv) { v->closefn(dec); free(v); return 0; }
+        v->inBuf = (float*)malloc((size_t)REFILL_FRAMES * srcChannels * sizeof(float));
+        if (!v->inBuf) { cmm_dc_close(v->conv); v->closefn(dec); free(v); return 0; }
+    }
+
+    mix_lock(&g_lock);
+    if (g_voiceCount >= MAX_VOICES_HARD) {   /* no room in the voice array — fail cleanly */
+        mix_unlock(&g_lock);
+        retire_voice(v); free(v);
+        return 0;
+    }
+    ensure_device_locked();
+    g_closeWhenIdle = 0;
+
+    long long id = ++g_nextId;
+    v->id = id;
+    if (fadeIn <= 0.0f) { v->gain = 1.0f; v->gainStep = 0.0f; }
+    else                { v->gain = 0.0f; v->gainStep = compute_step(0.0f, 1.0f, fadeIn); }
+    v->targetGain = 1.0f;
+
+    g_voices[g_voiceCount++] = v;
+    mix_unlock(&g_lock);
+    return id;
+}
+
+/* v16 — fade an emitter voice out over `fade` (<=0 snaps) so it retires next tick. A missing or
+ * non-emitter id is a no-op (the music path never removes voices this way). */
+CMM_API void cmm_mix_remove_emitter(long long id, float fade) {
+    int i;
+    if (id == 0) return;
+    mix_lock(&g_lock);
+    for (i = 0; i < g_voiceCount; i++) {
+        mix_voice* v = g_voices[i];
+        if (v->id != id || !v->isEmitter) continue;
+        v->targetGain = 0.0f;
+        if (fade <= 0.0f) { v->gain = 0.0f; v->gainStep = 0.0f; }
+        else              v->gainStep = compute_step(v->gain, 0.0f, fade);
+        break;
+    }
+    mix_unlock(&g_lock);
+}
+
+/* v17 — push the listener basis for emitter spatialization. Lock-free (see g_lisPos): the
+ * producer reads these per render block. forward/right come straight from the camera transform. */
+CMM_API void cmm_mix_set_listener(float px, float py, float pz,
+                                  float fx, float fy, float fz,
+                                  float rx, float ry, float rz) {
+    g_lisPos[0] = px; g_lisPos[1] = py; g_lisPos[2] = pz;
+    g_lisFwd[0] = fx; g_lisFwd[1] = fy; g_lisFwd[2] = fz;
+    g_lisRight[0] = rx; g_lisRight[1] = ry; g_lisRight[2] = rz;
+}
+
+/* v21 — push the live emitter spatial-curve tuning (see header). Lock-free; the producer relays
+ * these to the output spatializer each block. Clamped so bad config can't NaN/degenerate the curve. */
+CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float falloffExp, float muffle,
+                                        float stereoWidth) {
+    if (minDist < 0.0f) minDist = 0.0f;
+    if (maxDist < minDist + 0.1f) maxDist = minDist + 0.1f;   /* keep span positive */
+    if (falloffExp < 0.05f) falloffExp = 0.05f; else if (falloffExp > 8.0f) falloffExp = 8.0f;
+    if (muffle < 0.0f) muffle = 0.0f; else if (muffle > 1.0f) muffle = 1.0f;
+    if (stereoWidth < 0.0f) stereoWidth = 0.0f; else if (stereoWidth > 1.0f) stereoWidth = 1.0f;
+    g_emMinDist = minDist; g_emMaxDist = maxDist;
+    g_emFalloffExp = falloffExp; g_emMuffle = muffle;
+    g_emStereoWidth = stereoWidth;
+}
+
+/* Live emitter reverb params from the managed room probe (see EmitterAcoustics.ProbeRoom).
+ * wet = master wet level (0 = off), room = size→decay, damp = HF damping. All 0..1. */
+CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp) {
+    if (wet  < 0.0f) wet  = 0.0f; else if (wet  > 1.0f) wet  = 1.0f;
+    if (room < 0.0f) room = 0.0f; else if (room > 1.0f) room = 1.0f;
+    if (damp < 0.0f) damp = 0.0f; else if (damp > 1.0f) damp = 1.0f;
+    g_emRevWet = wet; g_emRevRoom = room; g_emRevDamp = damp;
+}
+
+/* v17 — set a live emitter voice to a SINGLE world position. Missing/non-emitter id = no-op. */
+CMM_API void cmm_mix_set_emitter_pos(long long id, float x, float y, float z) {
+    int i;
+    if (id == 0) return;
+    mix_lock(&g_lock);
+    for (i = 0; i < g_voiceCount; i++) {
+        mix_voice* v = g_voices[i];
+        if (v->id != id || !v->isEmitter) continue;
+        v->emitPts[0] = x; v->emitPts[1] = y; v->emitPts[2] = z;
+        v->emitPtCount = 1;
+        break;
+    }
+    mix_unlock(&g_lock);
+}
+
+/* v18/v19 — set the FULL set of speaker positions playing this station (interleaved xyz, `count`
+ * points, clamped to MAX_EMIT_PTS) plus a per-speaker gain (occlusion: 1=clear, <1=muffled by walls;
+ * `gains` may be NULL for all-clear). The render sums every point's pan+attenuation×gain, so all the
+ * speakers are heard at once. count<=0 (or xyz NULL) silences the spatial output until the next
+ * update. Missing/non-emitter id = no-op. */
+CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains, int count) {
+    int i, k;
+    if (id == 0) return;
+    if (count < 0 || xyz == NULL) count = 0;
+    if (count > MAX_EMIT_PTS) count = MAX_EMIT_PTS;
+    mix_lock(&g_lock);
+    for (i = 0; i < g_voiceCount; i++) {
+        mix_voice* v = g_voices[i];
+        if (v->id != id || !v->isEmitter) continue;
+        for (k = 0; k < count * 3; k++) v->emitPts[k] = xyz[k];
+        for (k = 0; k < count; k++)     v->emitPtGain[k] = gains ? gains[k] : 1.0f;
+        v->emitPtCount = count;
+        break;
+    }
+    mix_unlock(&g_lock);
+}
+
 /* Fade ALL voices out over `fade`. closeWhenIdle!=0 tears the device down once silent
  * (pass 0 to keep it open for a hand-off, e.g. menu→game). Mirrors CmmMixer.Stop. */
 CMM_API void cmm_mix_stop(float fade, int closeWhenIdle) {
     int i;
     mix_lock(&g_lock);
     for (i = 0; i < g_voiceCount; i++) {
+        if (g_voices[i]->isEmitter) continue;   /* independent layer — the emitter layer owns its lifecycle */
         g_voices[i]->targetGain = 0.0f;
         g_voices[i]->gainStep   = compute_step(g_voices[i]->gain, 0.0f, fade);
     }
@@ -591,17 +828,26 @@ CMM_API void cmm_mix_stop(float fade, int closeWhenIdle) {
     mix_unlock(&g_lock);
 }
 
-/* Synchronously retire + discard every voice now (no fade) and flush the queue. */
+/* Synchronously retire + discard every MUSIC voice now (no fade) and flush the queue. Emitter
+ * voices survive (they are an independent layer removed via cmm_mix_remove_emitter); a real device
+ * teardown still frees them via teardown_device_locked. */
 CMM_API void cmm_mix_stop_all_now(void) {
     int i;
     mix_lock(&g_lock);
-    for (i = 0; i < g_voiceCount; i++) { retire_voice(g_voices[i]); free(g_voices[i]); }
-    g_voiceCount = 0;
+    for (i = g_voiceCount - 1; i >= 0; i--) {
+        if (g_voices[i]->isEmitter) continue;
+        retire_voice(g_voices[i]); free(g_voices[i]); remove_at(i);
+    }
     if (g_out) cmm_out_reset(g_out);
     mix_unlock(&g_lock);
 }
 
 CMM_API void cmm_mix_set_master(float vol) { g_masterVol = vol; }
+
+/* v24 — set the EMITTER (world-radio) master, separate from the music master (g_masterVol). Managed
+ * pushes the game's music slider × the Radio context's own volume, so the radio scales only to the
+ * slider (and its context level), not VolumeModifier or the current music context's volume. */
+CMM_API void cmm_mix_set_emitter_master(float vol) { g_emMasterVol = vol < 0.0f ? 0.0f : vol; }
 
 /* Update a live voice's per-track gain in place (loudness settle / trim key). */
 CMM_API int cmm_mix_set_voice_gain(long long id, float trackGain, float rampSeconds) {
