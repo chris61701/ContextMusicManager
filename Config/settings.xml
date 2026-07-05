@@ -9,6 +9,51 @@
        Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
   <MusicPath>Music</MusicPath>
 
+  <WorldEmitterEnabled>true</WorldEmitterEnabled>
+  <WorldEmitterSource>Radio</WorldEmitterSource>   <!-- J:\7D2D Custom Music\Radio, or an .m3u, or an absolute path -->
+  <WorldEmitterRange>100</WorldEmitterRange>
+  <WorldEmitterFade>1.0</WorldEmitterFade>
+  <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
+       MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;
+                    beyond it the volume fades to silence at Range.
+       Falloff:     steepness of the plateau→Range fade. 1 = straight amplitude ramp; >1 steeper
+                    just past the plateau (more change per step / "punchier"); <1 gentler near.
+       Muffle:      how much distance dulls the tone via a low-pass (0 = none, 1 = very muffled far).
+                    The "it's over there" cue, separate from volume. Measured against a FIXED reference
+                    distance (~24 blocks to full dullness), NOT Range — so it stays effective at large
+                    Range, and a wall's virtual distance audibly dulls the tone.
+       Occlusion:   walls make a speaker sound FARTHER (quieter + duller on the same curve), not a hard
+                    cut, so it fades gradually instead of all-or-nothing. WallDistance = blocks of virtual
+                    distance added per solid wall on the line; MaxDistance caps it (a buried speaker stays
+                    faintly audible). Occlusion false = off. -->
+  <WorldEmitterMinDistance>1</WorldEmitterMinDistance>
+  <WorldEmitterFalloff>4</WorldEmitterFalloff>
+  <WorldEmitterMuffle>0.7</WorldEmitterMuffle>
+  <!-- StereoWidth 0..1: how hard a left/right speaker pans. 1 = full pan (far ear can drop to silence);
+       lower keeps the sound in BOTH ears at different volumes (like a real source at 90°). ~0.8 = natural. -->
+  <WorldEmitterStereoWidth>0.8</WorldEmitterStereoWidth>
+  <WorldEmitterOcclusion>true</WorldEmitterOcclusion>
+  <WorldEmitterOcclusionWallDistance>18</WorldEmitterOcclusionWallDistance>
+  <WorldEmitterOcclusionMaxDistance>30</WorldEmitterOcclusionMaxDistance>
+  <!-- PathRouting: when the direct line to a speaker is blocked, flood-fill through open air to find
+       whether sound can reach you another way (around a wall, up a stairwell) and how far it travels,
+       so it routes through openings instead of going near-silent. Deterministic (no ray noise).
+       FloodRadius = how many blocks the air search reaches from the ear (bigger = finds longer ways
+       around, more CPU; capped at 32). Set PathRouting false for direct-line only.
+       NOTE: FloodRadius defaults to 1 (flood effectively OFF → pure straight-line occlusion), which
+       sounds best now that reverb carries the "around the corner" energy. Path routing is slated for
+       removal — the reverb supersedes it. Raise FloodRadius to re-enable the go-around if you want it. -->
+  <WorldEmitterPathRouting>true</WorldEmitterPathRouting>
+  <WorldEmitterFloodRadius>1</WorldEmitterFloodRadius>
+  <!-- Reverb: a room probe (rays from your ear measuring how far and what material the surfaces around
+       you are) estimates how enclosed/big/reflective the space is and adds room reflections to the
+       station. The reflected (wet) sound is NOT muffled by occlusion, so behind a wall the direct sound
+       drops away but the reverb carries — the "it bounced / it's in the next room" cue. A big reflective
+       room (metal warehouse) rings; a small dead one (cloth/dirt) is nearly dry; open air is dry.
+       ReverbWet = master wet level 0..1 (0 = off). Size/decay/damping are estimated automatically. -->
+  <WorldEmitterReverbEnabled>true</WorldEmitterReverbEnabled>
+  <WorldEmitterReverbWet>0.6</WorldEmitterReverbWet>
+
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back
        at a per-track gain so quiet and loud tracks sit at a consistent perceived
