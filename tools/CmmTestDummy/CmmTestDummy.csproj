@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Server-side console commands for the CMM_TestDummy modlet on the dedicated
+       test server (C:\_Games\7D2D Server\Mods\CMM_TestDummy). Build, then copy
+       the DLL into that modlet folder and restart the server. Test-only tooling —
+       never shipped with the mod. -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>CMM_TestDummy</AssemblyName>
+    <RootNamespace>CMMTestDummy</RootNamespace>
+    <LangVersion>7.3</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <ServerManaged>C:\_Games\7D2D Server\7DaysToDieServer_Data\Managed</ServerManaged>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ServerManaged)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ServerManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
