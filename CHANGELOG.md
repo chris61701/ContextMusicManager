@@ -6,6 +6,86 @@ All notable changes to Context Music Manager are documented here.
 
 ### Added
 
+- **World-emitter "Radio" — music through in-world speakers.** Custom music can now play
+  diegetically out of speaker blocks placed in the world, layered additively over the
+  normal soundtrack and heard positionally: per-speaker panning and distance attenuation,
+  occlusion that routes around walls (a material-weighted shortest-path cost field plus a
+  direct-ray fallback), and distance-scaled reverb, all rendered natively (CMM_Decoder
+  ABI 25) and spatialized in the output callback so head-turns are heard in ~10 ms. A
+  station clock keeps the track continuous as you move in and out of range, and the source
+  hot-swaps on disk edits like any other context. Configured through the new inert `Radio`
+  context (source/crossfade/volume) plus `WorldEmitter*` knobs in `settings.xml` (range,
+  min-distance, falloff, wall-distance, reverb, stereo width), all hot-reloaded.
+- **Playlist (`.m3u`/`.m3u8`) sources for contexts.** A context's `path` attribute is
+  renamed to `source` (`path` kept as a deprecated alias) and a source can now be a folder
+  **or** a playlist file. An `.m3u` source is a flat, file-only pool: relative entries
+  resolve against the playlist's folder, absolute paths as-is; blank/`#` lines and
+  missing/invalid entries are skipped. A folder source also auto-unions its top-level
+  `.m3u` files with its loose music (deduped by path); recursive (`subfolders=true`)
+  folders ignore `.m3u`. In-place playlist edits hot-reload, including on filesystems
+  (exFAT/FAT/network) whose folder mtime doesn't move on add/remove.
+- **Per-section disable switches for vanilla Dynamic Music.** A `<DisabledVanillaSections>`
+  block in `settings.xml` (one hot-reloaded `true`/`false` child per section — Combat,
+  Trader, Bloodmoon, etc.) lets you switch off individual vanilla sections while DMS is
+  otherwise enabled. A disabled section defers to its linked context's rules rather than
+  going silent — e.g. with Combat disabled, a POI theme keeps playing through a fight
+  instead of being torn down for vanilla combat music — and only falls to the vanilla
+  Exploration ambient (or silence) when nothing else is on the stack. An empty list leaves
+  default behavior byte-identical.
+- **Richer game-state snapshot for `context.lua`.** The version-agnostic `gameState` passed
+  to the Lua resolver gains weather (rainfall, snowfall, wind speed, cloud thickness,
+  temperature), time of day (minute-resolved hour + day), vitals (stamina/food/water %),
+  stealth (`isCrouching`), active `buffs[]` (with a new `cmm.hasBuff(gameState, sub)`
+  helper), and both a live `fallDistance` and a one-shot `fallImpact` that fires once at
+  touchdown with the peak height of the fall (so landings are detectable by the poll).
+  All fields are change-gated in the marshal, so steady-state resolve allocations stay ~0.
+
+### Changed
+
+- **Massive contexts now crawl incrementally.** A `subfolders=true` context pointed at a
+  huge tree fills its snapshot over time instead of all at once: a growing partial snapshot
+  is published during the sweep so the context becomes playable long before the full walk
+  finishes, recursive contexts are round-robined one file-budgeted turn at a time (so one
+  giant folder can't starve another context's first snapshot), and a single very large
+  folder is paged via a resumable cursor. The main frame thread never enumerates a
+  recursive context, closing a window that could briefly freeze it.
+- **Lower resolve-tick GC.** The per-tick snapshot marshal now caches each scalar field and
+  re-sends only the ones that changed instead of boxing/allocating ~20 values every scan
+  tick (steady roaming tick: ~20 allocations → ~1).
+
+### Fixed
+
+- **Decoder stalls on large video files.** Two container-reader bugs made the in-game music
+  scanner hang on certain large `.mp4`/`.mkv` files. An mp4's oversized `moov` index (e.g.
+  36 MB on a 10 h recording) exceeded the cache cap and was parsed via millions of tiny
+  reads on a multi-GB file (2 GB file: >25 s → 0.7 s). And mkv/webm eagerly demuxed the
+  whole audio track into RAM at open; it now streams on demand (20 GB mkv: ~130 s → 0.2 s,
+  peak working set for an 808 MB decode 17 MB instead of O(size)). Decoded output verified
+  bit-for-bit identical (LUFS matches ffmpeg).
+- **Recursive menu music never left the vanilla bed on a huge tree.** The menu reclaim only
+  ran after a full sweep (minutes away on hundreds of thousands of files); it now also runs
+  on the crawler's incremental partial publish, so custom menu music takes over within
+  seconds. Handing the menu back to vanilla now fades the title theme back in over the
+  crossfade instead of snapping it to full volume.
+- **Wrong/missing context music on Turkish & Azerbaijani locales.** Vehicle-type, trader-name,
+  and file-extension matching used culture-sensitive `ToLower()`, so the Turkish-i rule made
+  strings containing "i" (e.g. `EntityMinibike`) stop matching the ASCII literals. Now uses
+  `ToLowerInvariant`.
+- **Disabled trader dropped combat music to Exploration.** In a trader's area the game
+  proposes the trader section even mid-combat; with the trader disabled, the blind fallback
+  played exploration music during a fight. It now reproduces the section the game would pick
+  from threat alone (Combat/Bloodmoon when panicked, Suspense when spooked), matching CMM's
+  own priority model where combat outranks trader.
+
+### Build
+
+- **VS Code "Package (Release zip)" task** now invokes the single-zip `Package` MSBuild
+  target (was `PackageAll`).
+
+## 1.0.4
+
+### Added
+
 - **Context resolution is now an editable Lua script.** The decision logic that maps the
   game state to a music context lives in `Config/context.lua` instead of being baked into
   the DLL, so the whole policy — priorities, the weighted combat-threat model, day/night and
