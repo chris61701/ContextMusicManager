@@ -60,6 +60,7 @@ internal static class Program
         double loudSlow = 1.0;
         MixerMode mixerMode = MixerMode.Headless;
         double reloadMin = 15.0;
+        bool emitters = true; int emittersPerPoi = 4; float emitterHz = 4f;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -77,6 +78,9 @@ internal static class Program
                 case "--no-loudness": noLoudness = true; break;
                 case "--no-lookahead": lookahead = false; break;
                 case "--loud-slow": loudSlow = double.Parse(args[++i]); break;
+                case "--no-emitters": emitters = false; break;
+                case "--emitters-per-poi": emittersPerPoi = int.Parse(args[++i]); break;
+                case "--emitter-hz": emitterHz = float.Parse(args[++i]); break;
                 case "-v": verbose = true; break;
                 case "-h": case "--help": Usage(); return 0;
                 default: musicDir ??= args[i]; break;
@@ -126,6 +130,11 @@ internal static class Program
             mixerMode = MixerMode.Off;   // no library / --no-decode → nothing to play
         }
 
+        // World-emitter (Radio) workload: speakers "appear" in POIs (possibly several per POI) and
+        // the acoustics (occlusion cost field + room probe) run per decision tick while in range —
+        // the feature's MAIN-THREAD cost. Driven off the session's POI phase (Emitter.cs).
+        var emitterSim = emitters ? new EmitterSim(seed, tick, emittersPerPoi, emitterHz) : null;
+
         int totalTicks = Math.Max(1, (int)(hours * 3600.0 / tick));
         Console.WriteLine($"CmmSession — {hours:F0}h session, tick {tick:F2}s ({totalTicks:N0} ticks), seed {seed}, " +
                           $"day={dayMinutes:F0}min, DMS={(ContextMusicManager.DmsEnabled ? "on" : "off")}");
@@ -133,7 +142,8 @@ internal static class Program
                           $"{(reload != null ? $"  (reload flip every {reloadMin:F0} sim-min, valid↔invalid)" : "")}");
         Console.WriteLine($"  library  : {musicDir} ({(haveLib ? $"{ContextMusicManager.IndexedContexts} contexts / {ContextMusicManager.IndexedFiles} files" : "MISSING — resolve+GC only")})");
         Console.WriteLine($"  mixer    : {mixerMode.ToString().ToLower()}{(mixerMode == MixerMode.Realtime ? " (real device, muted, real-time)" : mixerMode == MixerMode.Headless ? " (null device, drained on sim clock)" : "")}");
-        Console.WriteLine($"  decode   : {(decode && haveLib ? (sweep ? "per-transition native open + first-play R128 sweep" : "per-transition native open") : "off")}\n");
+        Console.WriteLine($"  decode   : {(decode && haveLib ? (sweep ? "per-transition native open + first-play R128 sweep" : "per-transition native open") : "off")}");
+        Console.WriteLine($"  emitters : {(emitterSim != null ? $"on (≤{emittersPerPoi}/POI, {emitterHz:F0}Hz → {emitterSim.RunsPerTick}×/tick, occlusion+reverb)" : "off")}\n");
 
         // ── Preallocate sample buffers BEFORE the heap baseline so they don't skew drift ──
         var resolveMs = new double[totalTicks];
@@ -261,6 +271,10 @@ internal static class Program
             if (allies > mpMaxAllies) mpMaxAllies = allies;
             if (strangers > mpMaxStrangers) mpMaxStrangers = strangers;
             mpPrevAny = anyPlayer;
+
+            // Phase 2b — world-emitter acoustics (Radio speakers in POIs). Its own timing/alloc
+            // accounting lives inside; kept separate from resolve/select so it doesn't skew them.
+            emitterSim?.Tick(gs, SimClock.Now);
 
             // Phase 3 — decode + PLAY on a real transition to a file-backed context.
             if (r.Transitioned)
@@ -419,6 +433,7 @@ internal static class Program
         PrintReload(reload);
         PrintLoudness(loudnessEnabled, readyAt, failedMeas, playsTotal, playsNormalized,
                       unnormCold, unnormFailed, unnormReasons, unnormByExt, unnormSamples);
+        PrintEmitters(emitterSim, totalTicks, tick, resolveMs, selectMs);
         return 0;
     }
 
@@ -568,6 +583,55 @@ internal static class Program
             foreach (var s in samples) Console.WriteLine("     " + s);
         }
         else Console.WriteLine("   → every track was normalized at Play time (prewarm + look-ahead kept up; no failures).");
+    }
+
+    // ── World-emitter (Radio) main-thread cost ──────────────────────────────────
+    static void PrintEmitters(EmitterSim em, int totalTicks, float tick, double[] resolveMs, double[] selectMs)
+    {
+        Console.WriteLine("\n── World-emitter acoustics (Radio speakers in POIs) ──────────────────");
+        if (em == null) { Console.WriteLine("   (emitters off — run without --no-emitters to measure)"); return; }
+
+        double pctInPoi = 100.0 * em.TicksInPoi / Math.Max(1, totalTicks);
+        Console.WriteLine($"   POI visits with speakers: {em.PoiVisits:N0}   ·   in-POI ticks: {em.TicksInPoi:N0} ({pctInPoi:F1}% of session)");
+        double avgPts = em.RunsTotal > 0 ? (double)em.PointCountSum / em.RunsTotal : 0;
+        int maxPts = 0; for (int i = em.PointCountHist.Length - 1; i >= 0; i--) if (em.PointCountHist[i] > 0) { maxPts = i; break; }
+        Console.WriteLine($"   acoustics runs: {em.RunsTotal:N0} ({em.RunsPerTick}×/in-POI-tick)   ·   speakers in range/run: avg {avgPts:F1}, max {maxPts}");
+
+        // Appearance (registry POI block-scan when speakers stream in).
+        if (em.ScanMs.Count > 0)
+        {
+            var s = em.ScanMs.ToArray(); Array.Sort(s);
+            Console.WriteLine($"   appearance scan (POI block sweep): n={s.Length}  p50 {Pct(s, 50):F3}ms  p95 {Pct(s, 95):F3}ms  max {s[s.Length - 1]:F3}ms");
+        }
+
+        // Steady per-run spatialisation cost — the per-frame main-thread hit while in range.
+        if (em.RunMs.Count > 0)
+        {
+            var r = em.RunMs.ToArray(); Array.Sort(r);
+            var occ = em.OccMs.ToArray(); Array.Sort(occ);
+            var room = em.RoomMs.ToArray(); Array.Sort(room);
+            Console.WriteLine($"   per run (occ+reverb): p50 {Pct(r, 50):F4}ms  p95 {Pct(r, 95):F4}ms  p99 {Pct(r, 99):F4}ms  max {r[r.Length - 1]:F4}ms  mean {r.Average():F4}ms");
+            if (r[r.Length - 1] > 20 * Pct(r, 99))
+                Console.WriteLine($"      (max ≫ p99 ⇒ a lone GC pause landed inside one timed span — p99 is the steady per-run cost)");
+            Console.WriteLine($"      occlusion : p50 {Pct(occ, 50):F4}ms  p95 {Pct(occ, 95):F4}ms  max {occ[occ.Length - 1]:F4}ms");
+            Console.WriteLine($"      room probe: p50 {Pct(room, 50):F4}ms  p95 {Pct(room, 95):F4}ms  max {room[room.Length - 1]:F4}ms");
+
+            // Relative hit vs the existing per-tick decision cost (resolve + select).
+            double emPerTick = r.Average() * em.RunsPerTick;
+            double baseline = resolveMs.Average() + selectMs.Average();
+            Console.WriteLine($"   added main-thread cost: {emPerTick:F4}ms per in-POI tick  ·  resolve+select baseline {baseline:F4}ms/tick  →  +{100.0 * emPerTick / Math.Max(1e-9, baseline):F1}%");
+        }
+
+        Console.WriteLine($"   compute allocation: {Mb(em.AllocCompute):F2} MB total over {em.RunsTotal:N0} runs  (≈one-time flood-buffer init on first run; ~0 B/run steady ⇒ no per-run GC)");
+
+        // Scaling: how the per-run cost grows with speakers-in-range, direct-ray (shipped default,
+        // FloodRadius=1) vs the heavy cost-field path (FloodRadius=16, if a user turns routing up).
+        var scale = em.ScaleProbe(4000);
+        Console.WriteLine("   scaling by speakers-in-range (per run, fixed POI):");
+        Console.WriteLine("      speakers   direct-ray(default)   cost-field(flood=16)");
+        foreach (var sc in scale)
+            Console.WriteLine($"        {sc.Count,-8}   {sc.Ms,10:F4}ms          {sc.MsFlood,10:F4}ms");
+        Console.WriteLine("   → decode + mix are OFF-thread (native); this is the whole main-thread footprint.");
     }
 
     // ── Crossfade pressure (jarring transitions) ────────────────────────────────
@@ -726,5 +790,8 @@ internal static class Program
         "  --no-loudness      skip the loudness-normalization model\n" +
         "  --no-lookahead     disable the look-ahead pre-measure\n" +
         "  --loud-slow <f>    x f the modeled measure time (CPU-starved worker)\n" +
+        "  --no-emitters      skip the world-emitter (Radio-in-POI) acoustics workload\n" +
+        "  --emitters-per-poi <n>  max speakers a POI may hold (default 4)\n" +
+        "  --emitter-hz <h>   emitter decision cadence (default 4)\n" +
         "  -v                 verbose\n");
 }

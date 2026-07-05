@@ -40,6 +40,17 @@ namespace CMM
         public static float PlayerHealthDangerThresholdPercent = 0.30f;
         public static float CombatExitDelay = 2f;
         public static float CombatCooldown = 10f;
+
+        // World-emitter (Radio) acoustics — values match the shipped CMMConfig.cs defaults so the
+        // ported EmitterAcoustics (tools/CmmSession/Emitter.cs) walks the same curve/flood the game
+        // does. FloodRadius=1 ⇒ the default shipped path is the direct-ray occlusion (see the note
+        // in EmitterAcoustics.cs). See [[world-emitter-audio]].
+        public static float WorldEmitterRange                     = 100f;
+        public static float WorldEmitterOcclusionWallDistance     = 18f;
+        public static float WorldEmitterOcclusionMaxDistance      = 30f;
+        public static bool  WorldEmitterPathRouting               = true;
+        public static int   WorldEmitterFloodRadius               = 1;
+        public static bool  WorldEmitterReverbEnabled             = true;
     }
 
     // No-op stand-in for the real CMMPerf (Harmony/CMMPerf.cs), which ScriptHost wraps its
@@ -120,6 +131,15 @@ namespace CMM
 
 namespace UnityEngine
 {
+    // Minimal stand-in for the linked CmmMixer's emitter listener/position setters (only .x/.y/.z
+    // are read). The harness's own ported acoustics (Emitter.cs) use plain floats, not this — this
+    // exists solely so CmmMixer.SetListener / SetEmitterPos compile in the headless build.
+    public struct Vector3
+    {
+        public float x, y, z;
+        public Vector3(float x, float y, float z) { this.x = x; this.y = y; this.z = z; }
+    }
+
     internal static class Mathf
     {
         public static int   Clamp(int v, int min, int max)       => v < min ? min : (v > max ? max : v);
