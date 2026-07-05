@@ -28,6 +28,7 @@ namespace CMM
         private readonly Timer _timer;
         private readonly System.Diagnostics.Stopwatch _wall = System.Diagnostics.Stopwatch.StartNew();
         private double _lastWall;
+        private float _animT;       // wall seconds, drives pulses/animation
 
         // ── Speed / run state ──
         private bool _fast;         // false = real-time (audio), true = max (silent free-run)
@@ -45,6 +46,9 @@ namespace CMM
 
         // Player token position in normalized board space [0..1], eased toward the target.
         private PointF _player = new PointF(0.14f, 0.20f);
+        // Eased lighting so day↔night and blood-moon transitions are smooth, not instant.
+        private float _dayLevel = 1f, _bloodLevel = 0f;
+        private Point _mousePt = new Point(-1, -1);
 
         // ── Interactive sandbox ──
         private enum Mode { Autopilot, Manual }
@@ -68,6 +72,7 @@ namespace CMM
             Text = "CmmSessionView";
             BackColor = C(0x08_0606);
             ClientSize = new Size(1360, 820);
+            MinimumSize = new Size(900, 560);
             StartPosition = FormStartPosition.CenterScreen;
             DoubleBuffered = true;
             KeyPreview = true;
@@ -91,6 +96,7 @@ namespace CMM
             double now = _wall.Elapsed.TotalSeconds;
             double dt = now - _lastWall;
             _lastWall = now;
+            _animT = (float)now;
             if (dt > 0.25) dt = 0.25;   // clamp after a stall so we don't spiral
 
             if (!_paused)
@@ -125,6 +131,7 @@ namespace CMM
             }
 
             AnimatePlayer(dt);
+            UpdateLighting(dt);
             Invalidate();
         }
 
@@ -160,6 +167,16 @@ namespace CMM
                                  _player.Y + (target.Y - _player.Y) * k);
         }
 
+        private void UpdateLighting(double dt)
+        {
+            var gs = _gs;
+            float dayTarget = gs == null || gs.IsDay ? 1f : 0f;
+            float bloodTarget = gs != null && gs.IsBloodMoon ? 1f : 0f;
+            float k = (float)Math.Min(1.0, dt * 1.8);
+            _dayLevel += (dayTarget - _dayLevel) * k;
+            _bloodLevel += (bloodTarget - _bloodLevel) * k;
+        }
+
         // ─────────────────────────── input ───────────────────────────
         protected override void OnKeyDown(KeyEventArgs e)
         {
@@ -190,6 +207,15 @@ namespace CMM
             base.OnMouseDown(e);
             foreach (var b in _buttons)
                 if (b.Enabled && b.R.Contains(e.Location)) { Dispatch(b.Id); Invalidate(); break; }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            _mousePt = e.Location;
+            bool over = false;
+            foreach (var b in _buttons) if (b.Enabled && b.R.Contains(e.Location)) { over = true; break; }
+            Cursor = over ? Cursors.Hand : Cursors.Default;
         }
 
         private void SetFast(bool fast)
@@ -324,16 +350,25 @@ namespace CMM
 
         // ─────────────────────────── palette + fonts ───────────────────────────
         static Color C(int rgb) => Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
-        static readonly Color Bg = C(0x0b_0909), Panel = C(0x13_1011), Panel2 = C(0x1b_1618), Line = C(0x2c_2325);
+        static Color A(int a, Color c) => Color.FromArgb(a, c);
+        static Color Lerp(Color x, Color y, float t)
+        {
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            return Color.FromArgb(
+                (int)(x.A + (y.A - x.A) * t), (int)(x.R + (y.R - x.R) * t),
+                (int)(x.G + (y.G - x.G) * t), (int)(x.B + (y.B - x.B) * t));
+        }
+        static readonly Color Bg = C(0x0a_0808), Panel = C(0x14_1113), Panel2 = C(0x0f_0c0d), Line = C(0x2c_2325);
         static readonly Color Ink = C(0xec_e4e0), Muted = C(0x9d_918d), Faint = C(0x6c_6260);
-        static readonly Color Danger = C(0xee_4c2c), DangerDim = C(0x3a_1611), Audio = C(0x45_d0c1), Warn = C(0xe2_ab41), Good = C(0x77_c67c);
+        static readonly Color Danger = C(0xf2_5636), DangerDim = C(0x3a_1611), Audio = C(0x49_d6c6), Warn = C(0xe6_ad44), Good = C(0x7c_cc80);
 
-        private Font _fHeader, _fLabel, _fData, _fDataSm, _fBig, _fBadge;
+        private Font _fHeader, _fLabel, _fData, _fDataSm, _fBig, _fBadge, _fTiny;
         private void BuildFonts()
         {
             _fHeader = new Font("Bahnschrift", 9.5f, FontStyle.Bold);
-            _fLabel = new Font("Bahnschrift", 9f, FontStyle.Regular);
+            _fLabel = new Font("Bahnschrift", 9.25f, FontStyle.Regular);
             _fBadge = new Font("Bahnschrift", 8.5f, FontStyle.Bold);
+            _fTiny = new Font("Bahnschrift", 7.75f, FontStyle.Bold);
             _fBig = new Font("Bahnschrift", 20f, FontStyle.Bold);
             _fData = new Font("Consolas", 9.5f, FontStyle.Regular);
             _fDataSm = new Font("Consolas", 8.25f, FontStyle.Regular);
@@ -342,15 +377,59 @@ namespace CMM
         private readonly Dictionary<Color, SolidBrush> _brushes = new Dictionary<Color, SolidBrush>();
         private SolidBrush B(Color c) { if (!_brushes.TryGetValue(c, out var b)) _brushes[c] = b = new SolidBrush(c); return b; }
 
+        // ── GDI+ shape helpers ──
+        static GraphicsPath RoundRect(RectangleF r, float rad)
+        {
+            var p = new GraphicsPath();
+            float d = rad * 2;
+            if (d > r.Width) d = r.Width;
+            if (d > r.Height) d = r.Height;
+            if (d < 1) { p.AddRectangle(r); return p; }
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+        void FillRound(Graphics g, RectangleF r, float rad, Color c)
+        { using (var p = RoundRect(r, rad)) g.FillPath(B(c), p); }
+        void GradRound(Graphics g, RectangleF r, float rad, Color top, Color bot)
+        {
+            using (var p = RoundRect(r, rad))
+            using (var b = new LinearGradientBrush(new RectangleF(r.X, r.Y, r.Width, r.Height + 1), top, bot, LinearGradientMode.Vertical))
+            { b.WrapMode = WrapMode.TileFlipXY; g.FillPath(b, p); }
+        }
+        void StrokeRound(Graphics g, RectangleF r, float rad, Color c, float w = 1f)
+        { using (var p = RoundRect(r, rad)) using (var pen = new Pen(c, w)) g.DrawPath(pen, p); }
+        void VFill(Graphics g, Rectangle r, Color top, Color bot)
+        {
+            using (var b = new LinearGradientBrush(new Rectangle(r.X, r.Y, r.Width, r.Height + 1), top, bot, LinearGradientMode.Vertical))
+            { b.WrapMode = WrapMode.TileFlipXY; g.FillRectangle(b, r); }
+        }
+        void Glow(Graphics g, float cx, float cy, float radius, Color c, int alpha)
+        {
+            if (radius < 1) return;
+            var rect = new RectangleF(cx - radius, cy - radius, radius * 2, radius * 2);
+            using (var path = new GraphicsPath())
+            {
+                path.AddEllipse(rect);
+                using (var b = new PathGradientBrush(path) { CenterColor = A(alpha, c), SurroundColors = new[] { A(0, c) } })
+                    g.FillEllipse(b, rect);
+            }
+        }
+        float Pulse(float speed, float phase = 0f) => 0.5f + 0.5f * (float)Math.Sin(_animT * speed + phase);
+
         // ─────────────────────────── paint ───────────────────────────
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
             int W = ClientSize.Width, H = ClientSize.Height;
-            int topH = 34, tickerH = 28, stripH = 62, leftW = 250, rightW = 330;
+            int topH = 36, tickerH = 30, stripH = 64, leftW = 252, rightW = 336;
             if (W < 700 || H < 400) { g.Clear(Bg); return; }
             int bodyBottom = H - tickerH - stripH;
 
@@ -363,15 +442,15 @@ namespace CMM
 
             g.Clear(Bg);
             DrawBoard(g, boardR);
-            g.FillRectangle(B(Panel), leftR); g.FillRectangle(B(Panel), rightR);
+            VFill(g, leftR, C(0x16_1315), C(0x0f_0c0d));
+            VFill(g, rightR, C(0x16_1315), C(0x0f_0c0d));
             DrawLeftPanel(g, leftR);
             DrawRightPanel(g, rightR);
             DrawControlStrip(g, stripR);
             DrawTicker(g, tickerR);
             DrawStatus(g, statusR);
 
-            // Panel divider lines.
-            using (var p = new Pen(Line))
+            using (var p = new Pen(A(150, Line)))
             {
                 g.DrawLine(p, leftR.Right, topH, leftR.Right, boardR.Bottom);
                 g.DrawLine(p, rightR.Left, topH, rightR.Left, boardR.Bottom);
@@ -385,40 +464,49 @@ namespace CMM
         private void DrawBoard(Graphics g, Rectangle r)
         {
             var gs = _gs;
-            bool night = gs != null && !gs.IsDay;
-            bool blood = gs != null && gs.IsBloodMoon;
+            bool panicked = gs != null && gs.IsPanicked;
 
-            // Ground: darker at night, red-washed on a blood moon.
-            Color ground = night ? C(0x0a_0807) : C(0x12_0f0d);
+            // Ground: smoothly interpolated day↔night, warmed slightly toward red under a blood moon.
+            Color ground = Lerp(C(0x0b_0a09), C(0x17_1310), _dayLevel);
+            ground = Lerp(ground, C(0x1c_0f0b), _bloodLevel * 0.7f);
             using (var bg = new SolidBrush(ground)) g.FillRectangle(bg, r);
-            if (blood)
-                using (var bm = new PathGradientBrushSafe(r, Color.FromArgb(70, 200, 40, 20), Color.FromArgb(0, 0, 0, 0)))
-                    bm.Fill(g, r);
 
             var inset = Rectangle.Inflate(r, -30, -30);
             PointF Map(PointF n) => new PointF(inset.X + n.X * inset.Width, inset.Y + n.Y * inset.Height);
             float minDim = Math.Min(inset.Width, inset.Height);
 
+            // Blood moon: a red disc high on the board + a broad wash, both scaled by the eased level.
+            if (_bloodLevel > 0.01f)
+            {
+                float ba = _bloodLevel;
+                Glow(g, r.X + r.Width * 0.82f, r.Y + r.Height * 0.16f, minDim * 0.42f, C(0xd0_2c18), (int)(70 * ba));
+                float mr = 10 + minDim * 0.02f;
+                float mx = r.X + r.Width * 0.82f, my = r.Y + r.Height * 0.16f;
+                Glow(g, mx, my, mr * 2.4f, C(0xff_5a30), (int)(150 * ba));
+                using (var mb = new SolidBrush(A((int)(220 * ba), C(0xcf_3a20)))) g.FillEllipse(mb, mx - mr, my - mr, mr * 2, mr * 2);
+            }
+
+            // Travelled route: an animated dashed line from base to where we are now.
+            var pBaseEarly = Map(BasePos);
+            var ppEarly = Map(_player);
+            if (Dist(pBaseEarly, ppEarly) > 24)
+                using (var pen = new Pen(A(38, C(0xc8_a08c)), 1.4f) { DashStyle = DashStyle.Dash, DashPattern = new[] { 2f, 5f }, DashOffset = -_animT * 7f })
+                    g.DrawLine(pen, pBaseEarly, ppEarly);
+
             // Landmarks.
-            var pBase = Map(BasePos);
-            Marker(g, pBase, 7, Ink, "BASE", Faint);
-            foreach (var kv in Traders) Marker(g, Map(kv.Value), 6, Warn, kv.Key, Faint, diamond: true);
+            MarkerBase(g, pBaseEarly);
+            foreach (var kv in Traders) MarkerDiamond(g, Map(kv.Value), kv.Key);
             foreach (var kv in Pois)
             {
                 bool current = gs != null && gs.InPoi && string.Equals(gs.PoiName, kv.Key, StringComparison.OrdinalIgnoreCase);
                 bool infested = current && gs.PoiEnemiesRemaining > 0;
-                Color col = current ? (infested ? Danger : Good) : C(0x4a_3f3d);
-                var p = Map(kv.Value);
-                if (current)
-                    using (var gb = new SolidBrush(Color.FromArgb(infested ? 40 : 30, col)))
-                        g.FillEllipse(gb, p.X - minDim * 0.05f, p.Y - minDim * 0.05f, minDim * 0.10f, minDim * 0.10f);
-                MarkerSquare(g, p, 7, col, kv.Key + (infested ? "  · INFESTED" : ""), current ? col : Faint);
+                MarkerPoi(g, Map(kv.Value), kv.Key, current, infested, minDim);
             }
 
-            // Player + combat.
-            var pp = Map(_player);
-            float ring = minDim * 0.15f;
-            using (var rp = new Pen(Color.FromArgb(40, 232, 224, 220))) g.DrawEllipse(rp, pp.X - ring, pp.Y - ring, ring * 2, ring * 2);
+            // Player detect ring + combat.
+            var pp = ppEarly;
+            float ring = minDim * 0.155f;
+            using (var rp = new Pen(A(panicked ? 55 : 34, panicked ? Danger : Ink), 1f)) g.DrawEllipse(rp, pp.X - ring, pp.Y - ring, ring * 2, ring * 2);
 
             if (gs != null)
             {
@@ -426,46 +514,83 @@ namespace CMM
                 for (int i = 0; i < n; i++)
                 {
                     var en = gs.Enemies[i];
-                    float a = i * 2.39996323f;
-                    float rr = Math.Min(1.25f, en.Distance / 32f) * ring;
-                    float ex = pp.X + (float)Math.Cos(a) * rr, ey = pp.Y + (float)Math.Sin(a) * rr;
-                    Color col = en.IsTargetingPlayer ? Danger : (en.IsAlert ? Warn : Muted);
+                    float ang = i * 2.39996323f + _animT * 0.12f;
+                    float rr = Math.Min(1.22f, en.Distance / 32f) * ring;
+                    float ex = pp.X + (float)Math.Cos(ang) * rr, ey = pp.Y + (float)Math.Sin(ang) * rr;
                     if (en.IsTargetingPlayer)
-                        using (var lp = new Pen(Color.FromArgb(45, 238, 76, 44))) g.DrawLine(lp, ex, ey, pp.X, pp.Y);
-                    g.FillEllipse(B(col), ex - 4, ey - 4, 8, 8);
+                    {
+                        float pl = Pulse(4.2f, i);
+                        using (var lp = new Pen(A(30 + (int)(35 * pl), Danger), 1f)) g.DrawLine(lp, ex, ey, pp.X, pp.Y);
+                        using (var rp = new Pen(A(70 + (int)(90 * pl), Danger), 1.4f)) g.DrawEllipse(rp, ex - 6, ey - 6, 12, 12);
+                        g.FillEllipse(B(Danger), ex - 4, ey - 4, 8, 8);
+                    }
+                    else
+                    {
+                        Color col = en.IsAlert ? Warn : Muted;
+                        g.FillEllipse(B(col), ex - 3.5f, ey - 3.5f, 7, 7);
+                    }
                 }
             }
 
-            // Player token on top.
-            using (var gb = new SolidBrush(Color.FromArgb(40, 244, 237, 233))) g.FillEllipse(gb, pp.X - 13, pp.Y - 13, 26, 26);
-            g.FillEllipse(B(C(0xf4_ede9)), pp.X - 8, pp.Y - 8, 16, 16);
-            g.FillEllipse(B(Bg), pp.X - 3, pp.Y - 3, 6, 6);
+            // Player token: glow (reddens in combat) + pulse ring + core.
+            float gp = Pulse(2.4f);
+            Color glowCol = Lerp(C(0xf4_ede9), Danger, panicked ? 0.7f : 0f);
+            Glow(g, pp.X, pp.Y, 20 + gp * 5, glowCol, panicked ? 70 : 46);
+            using (var pr = new Pen(A(90 + (int)(90 * gp), glowCol), 1.5f)) g.DrawEllipse(pr, pp.X - 12, pp.Y - 12, 24, 24);
+            g.FillEllipse(B(C(0xf6_efeb)), pp.X - 7.5f, pp.Y - 7.5f, 15, 15);
+            g.FillEllipse(B(C(0x14_100f)), pp.X - 3, pp.Y - 3, 6, 6);
 
-            // Board caption.
+            // Edge vignette (ellipse fully contains r so the corners sample the surround, not undefined).
+            using (var path = new GraphicsPath())
+            {
+                path.AddEllipse(r.X - r.Width * 0.32f, r.Y - r.Height * 0.32f, r.Width * 1.64f, r.Height * 1.64f);
+                using (var vb = new PathGradientBrush(path) { CenterColor = A(0, Color.Black), SurroundColors = new[] { A(175, C(0x05_0303)) }, FocusScales = new PointF(0.62f, 0.58f) })
+                    g.FillRectangle(vb, r);
+            }
+
+            // Caption pill.
             if (gs != null)
-                g.DrawString(PhaseLabel(gs), _fLabel, B(Ink), r.X + 12, r.Y + 10);
+            {
+                string cap = PhaseLabel(gs);
+                var sz = g.MeasureString(cap, _fLabel);
+                var pill = new RectangleF(r.X + 12, r.Y + 10, sz.Width + 22, 24);
+                GradRound(g, pill, 12, A(190, C(0x1a_1517)), A(190, C(0x12_0f10)));
+                StrokeRound(g, pill, 12, A(120, Line));
+                g.FillEllipse(B(gs.IsBloodMoon ? Danger : gs.InPoi ? Warn : Audio), pill.X + 11, pill.Y + 9, 6, 6);
+                g.DrawString(cap, _fLabel, B(Ink), pill.X + 24, pill.Y + 4);
+            }
         }
 
-        private void Marker(Graphics g, PointF p, float rad, Color fill, string label, Color labelColor, bool diamond = false)
-        {
-            if (diamond)
-            {
-                var pts = new[] { new PointF(p.X, p.Y - rad), new PointF(p.X + rad, p.Y), new PointF(p.X, p.Y + rad), new PointF(p.X - rad, p.Y) };
-                g.FillPolygon(B(fill), pts);
-            }
-            else
-            {
-                g.FillEllipse(B(fill), p.X - rad, p.Y - rad, rad * 2, rad * 2);
-                using (var pen = new Pen(Bg, 2)) g.DrawEllipse(pen, p.X - rad, p.Y - rad, rad * 2, rad * 2);
-            }
-            CenterLabel(g, label, p.X, p.Y + rad + 3, labelColor);
-        }
+        static float Dist(PointF a, PointF b) { float dx = a.X - b.X, dy = a.Y - b.Y; return (float)Math.Sqrt(dx * dx + dy * dy); }
 
-        private void MarkerSquare(Graphics g, PointF p, float rad, Color fill, string label, Color labelColor)
+        private void MarkerBase(Graphics g, PointF p)
         {
-            g.FillRectangle(B(fill), p.X - rad, p.Y - rad, rad * 2, rad * 2);
-            using (var pen = new Pen(Bg, 2)) g.DrawRectangle(pen, p.X - rad, p.Y - rad, rad * 2, rad * 2);
-            CenterLabel(g, label, p.X, p.Y + rad + 3, labelColor);
+            Glow(g, p.X, p.Y, 16, C(0xe8_e0dc), 30);
+            using (var pen = new Pen(A(120, Ink), 1.4f)) g.DrawEllipse(pen, p.X - 8, p.Y - 8, 16, 16);
+            g.FillEllipse(B(Ink), p.X - 4, p.Y - 4, 8, 8);
+            CenterLabel(g, "BASE", p.X, p.Y + 12, Muted);
+        }
+        private void MarkerDiamond(Graphics g, PointF p, string label)
+        {
+            var pts = new[] { new PointF(p.X, p.Y - 6), new PointF(p.X + 6, p.Y), new PointF(p.X, p.Y + 6), new PointF(p.X - 6, p.Y) };
+            using (var pen = new Pen(A(120, Warn), 1f)) g.DrawPolygon(pen, pts);
+            g.FillPolygon(B(A(210, Warn)), pts);
+            CenterLabel(g, label, p.X, p.Y + 10, Faint);
+        }
+        private void MarkerPoi(Graphics g, PointF p, string label, bool current, bool infested, float minDim)
+        {
+            Color col = current ? (infested ? Danger : Good) : C(0x50_4543);
+            if (current)
+            {
+                float pl = Pulse(2.2f);
+                Glow(g, p.X, p.Y, minDim * 0.06f + pl * 6, col, infested ? 60 : 44);
+                using (var pen = new Pen(A(90 + (int)(90 * pl), col), 1.6f))
+                { float rr = 13 + pl * 5; g.DrawEllipse(pen, p.X - rr, p.Y - rr, rr * 2, rr * 2); }
+            }
+            var sq = new RectangleF(p.X - 7, p.Y - 7, 14, 14);
+            FillRound(g, sq, 3, A(current ? 235 : 200, col));
+            StrokeRound(g, sq, 3, A(160, C(0x14_100f)), 1.6f);
+            CenterLabel(g, label + (infested ? "  · INFESTED" : ""), p.X, p.Y + 12, current ? col : Faint);
         }
 
         private readonly StringFormat _center = new StringFormat { Alignment = StringAlignment.Center };
@@ -486,8 +611,8 @@ namespace CMM
         // ── Left panel: Inputs (GameState) ──
         private void DrawLeftPanel(Graphics g, Rectangle r)
         {
-            int x = r.X + 14, y = r.Y + 10, w = r.Width - 28;
-            Header(g, "INPUTS · GAMESTATE", x, ref y, w);
+            int x = r.X + 16, y = r.Y + 12, w = r.Width - 32;
+            Header(g, "INPUTS · GAMESTATE", Audio, x, ref y, w);
             var gs = _gs;
             if (gs == null) { g.DrawString("waiting for first tick…", _fData, B(Faint), x, y); return; }
 
@@ -496,7 +621,7 @@ namespace CMM
             Row(g, "Biome", gs.Biome ?? "?", x, ref y, w, Ink);
             Row(g, "Phase", ShortPhase(gs), x, ref y, w, Ink);
 
-            y += 6; Sub(g, "THREAT", x, ref y, w);
+            y += 8; Sub(g, "THREAT", x, ref y, w);
             HealthRow(g, gs.HealthPct, x, ref y, w);
             Row(g, "Panicked", gs.IsPanicked ? "YES" : "no", x, ref y, w, gs.IsPanicked ? Danger : Faint);
             int targeting = gs.Enemies.Count(en => en.IsTargetingPlayer);
@@ -505,7 +630,7 @@ namespace CMM
             Row(g, "Targeting", targeting.ToString(), x, ref y, w, targeting > 0 ? Danger : Faint);
             Row(g, "Aware only", alert.ToString(), x, ref y, w, alert > 0 ? Warn : Faint);
 
-            y += 6; Sub(g, "POI", x, ref y, w);
+            y += 8; Sub(g, "POI", x, ref y, w);
             if (gs.InPoi)
             {
                 Row(g, "Tier", "T" + gs.PoiTier, x, ref y, w, Ink);
@@ -514,7 +639,7 @@ namespace CMM
             }
             else Row(g, "Inside POI", "no", x, ref y, w, Faint);
 
-            y += 6; Sub(g, "MULTIPLAYER", x, ref y, w);
+            y += 8; Sub(g, "MULTIPLAYER", x, ref y, w);
             Row(g, "Allies", gs.AlliesNearby.ToString(), x, ref y, w, gs.AlliesNearby > 0 ? Audio : Faint);
             Row(g, "Strangers", gs.StrangersNearby.ToString(), x, ref y, w, gs.StrangersNearby > 0 ? Warn : Faint);
         }
@@ -531,41 +656,65 @@ namespace CMM
         // ── Right panel: Now Playing + Resolution ──
         private void DrawRightPanel(Graphics g, Rectangle r)
         {
-            int x = r.X + 14, y = r.Y + 10, w = r.Width - 28;
-            Header(g, "NOW PLAYING", x, ref y, w);
+            int x = r.X + 16, y = r.Y + 12, w = r.Width - 32;
+            Header(g, "NOW PLAYING", Danger, x, ref y, w);
 
-            using (var card = new SolidBrush(C(0x18_1214)))
-                g.FillRectangle(card, x, y, w, 92);
-            using (var p = new Pen(DangerDim)) g.DrawRectangle(p, x, y, w, 92);
-            g.DrawString(_top, _fBig, B(Danger), new RectangleF(x + 10, y + 6, w - 20, 32), _clip);
-            g.DrawString(_file, _fData, B(Ink), new RectangleF(x + 10, y + 44, w - 20, 18), _clip);
-            string norm = _normalized ? "✓ normalized" : "· unity gain";
-            g.DrawString(norm, _fDataSm, B(_normalized ? Good : Faint), x + 10, y + 68);
+            var card = new RectangleF(x, y, w, 96);
+            GradRound(g, card, 9, C(0x22_1416), C(0x15_0f10));
+            StrokeRound(g, card, 9, A(150, DangerDim));
+            // left accent bar
+            using (var ap = RoundRect(new RectangleF(x + 2, y + 8, 3, 80), 1.5f)) g.FillPath(B(Danger), ap);
+
+            g.DrawString(_top, _fBig, B(Danger), new RectangleF(x + 14, y + 8, w - 28, 32), _clip);
+            g.DrawString(_file, _fData, B(Ink), new RectangleF(x + 14, y + 46, w - 92, 18), _clip);
+
+            // "playing" EQ flourish (only animates when audio is actually flowing).
             int voices = TryVoices();
-            string mix = (_fast ? "muted (max)" : "realtime") + (voices >= 0 ? $" · {voices}v" : "");
-            g.DrawString(mix, _fDataSm, B(_fast ? Faint : Audio), x + w - 10, y + 68, _right);
-            y += 104;
+            bool playing = !_fast && !_paused && voices > 0;
+            DrawEq(g, x + w - 46, y + 40, playing);
 
-            Header(g, "RESOLUTION · ACTIVE STACK", x, ref y, w);
+            string norm = _normalized ? "✓ normalized" : "· unity gain";
+            g.DrawString(norm, _fDataSm, B(_normalized ? Good : Faint), x + 14, y + 70);
+            string mix = (_fast ? "muted · max" : "realtime") + (voices >= 0 ? $" · {voices}v" : "");
+            g.DrawString(mix, _fDataSm, B(_fast ? Faint : Audio), x + w - 14, y + 70, _right);
+            y += (int)card.Height + 16;
+
+            Header(g, "RESOLUTION · ACTIVE STACK", Muted, x, ref y, w);
             var tokens = _runner.LastTokens;
             if (tokens == null || tokens.Count == 0) { g.DrawString("(no active contexts)", _fData, B(Faint), x, y); return; }
 
             var ordered = tokens
                 .Select(t => (name: t, pri: ContextMusicManager.GetContext(t)?.Priority ?? -99))
-                .OrderByDescending(t => t.pri).Take(13).ToList();
+                .OrderByDescending(t => t.pri).Take(14).ToList();
             foreach (var (name, pri) in ordered)
             {
                 bool win = string.Equals(name, _top, StringComparison.OrdinalIgnoreCase);
-                var rowRect = new Rectangle(x, y, w, 20);
+                var row = new RectangleF(x, y, w, 21);
+                // faint priority bar behind each row (0..100 → 0..w)
+                float frac = Math.Max(0.04f, Math.Min(1f, pri / 100f));
+                FillRound(g, new RectangleF(x, y, w * frac, 21), 5, A(win ? 26 : 14, win ? Danger : Ink));
                 if (win)
                 {
-                    using (var wb = new SolidBrush(DangerDim)) g.FillRectangle(wb, rowRect);
-                    using (var wp = new Pen(Color.FromArgb(120, 122, 42, 27))) g.DrawRectangle(wp, rowRect);
+                    float wp = Pulse(2.6f);
+                    Glow(g, x + 8, y + 10, 18, Danger, 22 + (int)(20 * wp));
+                    GradRound(g, row, 5, A(70, DangerDim), A(38, DangerDim));
+                    StrokeRound(g, row, 5, A(150, Danger));
+                    using (var ap = RoundRect(new RectangleF(x + 2, y + 4, 3, 13), 1.5f)) g.FillPath(B(Danger), ap);
                 }
-                g.DrawString(pri.ToString(), _fData, B(win ? Danger : Faint), x + 30, y + 2, _right);
-                g.DrawString(name, _fData, B(win ? Ink : Muted), x + 40, y + 2);
-                if (win) g.DrawString("▶", _fData, B(Danger), x + w - 16, y + 2);
-                y += 22;
+                g.DrawString(pri.ToString(), _fData, B(win ? Danger : Faint), x + 34, y + 3, _right);
+                g.DrawString(name, _fData, B(win ? Ink : Muted), x + 44, y + 3);
+                if (win) g.DrawString("▶", _fData, B(Danger), x + w - 16, y + 3);
+                y += 23;
+            }
+        }
+
+        private void DrawEq(Graphics g, float x, float y, bool playing)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                float h = playing ? 4 + 14 * Pulse(6f + i * 1.7f, i * 1.3f) : 3;
+                var bar = new RectangleF(x + i * 8, y + (18 - h), 5, h);
+                FillRound(g, bar, 2, playing ? A(200, Audio) : A(70, Faint));
             }
         }
 
@@ -581,15 +730,15 @@ namespace CMM
         private int _btnX, _btnRow, _btnY0, _btnRowH, _btnX0, _btnXMax;
         private void DrawControlStrip(Graphics g, Rectangle r)
         {
-            using (var bg = new SolidBrush(C(0x10_0d0e))) g.FillRectangle(bg, r);
+            VFill(g, r, C(0x14_1012), C(0x0d_0a0b));
             _buttons.Clear();
-            _btnX = r.X + 10; _btnX0 = r.X + 10; _btnXMax = r.Right - 8;
-            _btnY0 = r.Y + 8; _btnRow = 0; _btnRowH = 27;
+            _btnX = r.X + 12; _btnX0 = r.X + 12; _btnXMax = r.Right - 10;
+            _btnY0 = r.Y + 9; _btnRow = 0; _btnRowH = 27;
             bool man = _mode == Mode.Manual;
 
             AddBtn(g, "auto", "Autopilot", _mode == Mode.Autopilot, true, seg: true);
             AddBtn(g, "manual", "Manual", man, true, seg: true);
-            _btnX += 14;
+            _btnX += 16;
             AddBtn(g, "loc", "Loc: " + LocNames[_locIdx], false, man);
             AddBtn(g, "biome", "Biome: " + BiomeNames[_biomeIdx], false, man);
             AddBtn(g, "day", "Sky: " + (man ? (_manual.IsDay ? "day" : "night") : "—"), man && !_manual.IsDay, man);
@@ -608,45 +757,53 @@ namespace CMM
         private void AddBtn(Graphics g, string id, string label, bool on, bool enabled, bool seg = false)
         {
             var sz = g.MeasureString(label, _fBadge);
-            int w = (int)sz.Width + 18;
+            int w = (int)sz.Width + 20;
             if (_btnX + w > _btnXMax) { _btnRow++; _btnX = _btnX0; }   // wrap to next row
             int y = _btnY0 + _btnRow * _btnRowH;
-            var rect = new Rectangle(_btnX, y, w, 22);
+            var rect = new Rectangle(_btnX, y, w, 23);
+            bool hover = enabled && rect.Contains(_mousePt);
             Color face = seg ? Audio : Warn;
-            Color faceBg = on ? Color.FromArgb(38, face) : C(0x1b_1618);
-            using (var b = new SolidBrush(faceBg)) g.FillRectangle(b, rect);
-            using (var p = new Pen(enabled ? (on ? face : Line) : C(0x22_1c1e))) g.DrawRectangle(p, rect);
-            Color tc = enabled ? (on ? face : Ink) : C(0x4a_423f);
-            g.DrawString(label, _fBadge, B(tc), _btnX + 9, y + 4);
+
+            if (on) GradRound(g, rect, 6, A(58, face), A(34, face));
+            else if (hover) GradRound(g, rect, 6, C(0x26_2023), C(0x1c_1719));
+            else GradRound(g, rect, 6, C(0x1d_181a), C(0x15_1113));
+            StrokeRound(g, rect, 6, enabled ? (on ? A(200, face) : hover ? A(150, Muted) : A(110, Line)) : A(90, C(0x22_1c1e)));
+
+            Color tc = enabled ? (on ? face : hover ? Ink : C(0xc9_beb9)) : C(0x4a_423f);
+            g.DrawString(label, _fBadge, B(tc), _btnX + 10, y + 4);
             _buttons.Add(new Btn { R = rect, Id = id, Label = label, On = on, Enabled = enabled });
-            _btnX += w + 7;
+            _btnX += w + 8;
         }
 
         // ── Ticker ──
         private void DrawTicker(Graphics g, Rectangle r)
         {
-            g.FillRectangle(B(Panel2), r);
-            int x = r.X + 12; int y = r.Y + 8;
-            g.DrawString("TRANSITIONS", _fBadge, B(Faint), x, y);
-            x += 96;
+            VFill(g, r, C(0x12_0f10), C(0x0c_0a0b));
+            int x = r.X + 14; int y = r.Y + 9;
+            g.DrawString("TRANSITIONS", _fTiny, B(Faint), x, y + 1);
+            x += 92;
+            int idx = 0, total = _ticker.Count;
             foreach (var ev in _ticker.Reverse())
             {
-                string s = $"h{ev.t / 3600.0:F1}  {ev.top}" + (ev.file != null ? $" ← {ev.file}" : "");
+                string s = $"h{ev.t / 3600.0:F1}  {ev.top}" + (ev.file != null ? $"  ←  {ev.file}" : "");
                 var sz = g.MeasureString(s, _fDataSm);
-                if (x + sz.Width > r.Width - 10) break;
-                g.FillEllipse(B(Danger), x, y + 4, 6, 6);
-                g.DrawString(s, _fDataSm, B(Muted), x + 12, y);
-                x += (int)sz.Width + 34;
+                if (x + sz.Width > r.Width - 12) break;
+                int fade = 255 - Math.Min(150, idx * 26);       // newest brightest, older dim
+                bool newest = idx == 0;
+                if (newest) Glow(g, x + 3, y + 7, 8, Danger, 120);
+                g.FillEllipse(B(A(fade, newest ? Danger : Muted)), x, y + 4, 6, 6);
+                g.DrawString(s, _fDataSm, B(A(fade, newest ? Ink : Muted)), x + 12, y);
+                x += (int)sz.Width + 30; idx++;
             }
         }
 
         // ── Status strip ──
         private void DrawStatus(Graphics g, Rectangle r)
         {
-            using (var bg = new SolidBrush(C(0x16_1213))) g.FillRectangle(bg, r);
-            int y = 8;
-            g.DrawString("CmmSessionView", _fHeader, B(Ink), 14, y);
-            int x = 150;
+            VFill(g, r, C(0x1a_1517), C(0x12_0e10));
+            int y = 9;
+            g.DrawString("CmmSessionView", _fHeader, B(Ink), 16, y + 1);
+            int x = 158;
             var gs = _gs;
             if (gs != null)
             {
@@ -656,52 +813,62 @@ namespace CMM
             }
             x = Chip(g, "seed " + _runner.Options.Seed, Faint, x, y);
 
-            // Right-aligned: mode + hints.
+            // Right-aligned: mode badge + key hints.
             string mode = _paused ? "PAUSED" : _mode == Mode.Manual ? "MANUAL" : _fast ? "MAX SPEED" : "REAL-TIME 1×";
             Color mc = _paused ? Warn : _mode == Mode.Manual ? Warn : _fast ? Muted : Audio;
             string hints = "[Space] pause   [Tab] speed   [M] manual   [Esc] quit";
             var hsz = g.MeasureString(hints, _fDataSm);
-            g.DrawString(hints, _fDataSm, B(Faint), r.Width - hsz.Width - 12, y + 1);
+            g.DrawString(hints, _fDataSm, B(Faint), r.Width - hsz.Width - 14, y + 2);
             var msz = g.MeasureString(mode, _fBadge);
-            float mx = r.Width - hsz.Width - msz.Width - 34;
-            using (var mb = new SolidBrush(Color.FromArgb(30, mc))) g.FillRectangle(mb, mx - 6, y - 1, msz.Width + 12, 18);
-            g.DrawString(mode, _fBadge, B(mc), mx, y);
+            var badge = new RectangleF(r.Width - hsz.Width - msz.Width - 40, y - 1, msz.Width + 18, 20);
+            if (!_paused && _mode != Mode.Manual && !_fast) Glow(g, badge.X + badge.Width / 2, badge.Y + 10, 22, mc, 30);
+            GradRound(g, badge, 10, A(46, mc), A(24, mc));
+            StrokeRound(g, badge, 10, A(150, mc));
+            g.DrawString(mode, _fBadge, B(mc), badge.X + 9, y + 1);
         }
 
         private int Chip(Graphics g, string s, Color col, int x, int y)
         {
             var sz = g.MeasureString(s, _fData);
+            var pill = new RectangleF(x - 8, y - 1, sz.Width + 16, 20);
+            FillRound(g, pill, 9, A(70, C(0x24_1e20)));
             g.DrawString(s, _fData, B(col), x, y);
-            return x + (int)sz.Width + 20;
+            return x + (int)sz.Width + 24;
         }
 
         // ── HUD row helpers ──
-        private void Header(Graphics g, string s, int x, ref int y, int w)
+        private void Header(Graphics g, string s, Color accent, int x, ref int y, int w)
         {
-            g.DrawString(s, _fHeader, B(Muted), x, y);
-            using (var p = new Pen(Line)) g.DrawLine(p, x, y + 18, x + w, y + 18);
-            y += 26;
+            using (var ap = RoundRect(new RectangleF(x, y + 1, 3, 12), 1.5f)) g.FillPath(B(accent), ap);
+            g.DrawString(s, _fHeader, B(Muted), x + 9, y);
+            using (var lb = new LinearGradientBrush(new Rectangle(x, y + 19, w, 2), A(120, accent), A(0, accent), 0f))
+            { lb.WrapMode = WrapMode.TileFlipXY; g.FillRectangle(lb, x, y + 19, w, 1); }
+            y += 27;
         }
         private void Sub(Graphics g, string s, int x, ref int y, int w)
         {
-            g.DrawString(s, _fBadge, B(Faint), x, y);
-            y += 18;
+            g.DrawString(s, _fTiny, B(Faint), x, y);
+            y += 17;
         }
         private void Row(Graphics g, string k, string v, int x, ref int y, int w, Color vc)
         {
             g.DrawString(k, _fLabel, B(Muted), x, y);
             g.DrawString(v, _fData, B(vc), x + w, y + 1, _right);
-            y += 22;
+            y += 23;
         }
         private void HealthRow(Graphics g, float pct, int x, ref int y, int w)
         {
             g.DrawString("Health", _fLabel, B(Muted), x, y);
-            int bw = 90, bx = x + w - bw, by = y + 4;
-            g.FillRectangle(B(C(0x24_1d1f)), bx, by, bw, 8);
+            int bw = 92, bx = x + w - bw, by = y + 4;
+            var track = new RectangleF(bx, by, bw, 9);
+            FillRound(g, track, 4.5f, C(0x26_1e20));
             Color hc = pct < 0.33f ? Danger : pct < 0.6f ? Warn : Good;
-            g.FillRectangle(B(hc), bx, by, Math.Max(1, (int)(bw * pct)), 8);
+            float fw = Math.Max(3, bw * pct);
+            using (var p = RoundRect(new RectangleF(bx, by, fw, 9), 4.5f))
+            using (var b = new LinearGradientBrush(new RectangleF(bx, by, fw, 10), A(180, hc), hc, LinearGradientMode.Vertical))
+            { b.WrapMode = WrapMode.TileFlipXY; g.FillPath(b, p); }
             g.DrawString((pct * 100).ToString("0") + "%", _fDataSm, B(hc), bx - 6, y + 1, _right);
-            y += 22;
+            y += 23;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -709,23 +876,9 @@ namespace CMM
             _timer.Stop();
             try { _runner.Stop(); } catch { }
             foreach (var b in _brushes.Values) b.Dispose();
-            _fHeader?.Dispose(); _fLabel?.Dispose(); _fData?.Dispose(); _fDataSm?.Dispose(); _fBig?.Dispose(); _fBadge?.Dispose();
+            _fHeader?.Dispose(); _fLabel?.Dispose(); _fData?.Dispose(); _fDataSm?.Dispose(); _fBig?.Dispose(); _fBadge?.Dispose(); _fTiny?.Dispose();
             _center.Dispose(); _right.Dispose(); _clip.Dispose();
             base.OnFormClosed(e);
-        }
-
-        // Small helper: a radial blood-moon wash (kept out of the hot path when not on a blood moon).
-        private sealed class PathGradientBrushSafe : IDisposable
-        {
-            private readonly GraphicsPath _path; private readonly PathGradientBrush _brush;
-            public PathGradientBrushSafe(Rectangle r, Color center, Color edge)
-            {
-                _path = new GraphicsPath();
-                _path.AddEllipse(r.X + r.Width * 0.45f, r.Y - r.Height * 0.2f, r.Width * 0.7f, r.Height * 0.9f);
-                _brush = new PathGradientBrush(_path) { CenterColor = center, SurroundColors = new[] { edge } };
-            }
-            public void Fill(Graphics g, Rectangle r) => g.FillRectangle(_brush, r);
-            public void Dispose() { _brush.Dispose(); _path.Dispose(); }
         }
     }
 }
