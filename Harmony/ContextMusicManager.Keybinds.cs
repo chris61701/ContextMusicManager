@@ -39,6 +39,11 @@ namespace CMM
             CMMPerf.FrameTick(LiveMusicCoroutineCount);
 
             HandleMusicKeybinds();
+#if GV_V3
+            // World-emitter audio layer (experimental, 3.0 only): self-throttled; no-op unless
+            // enabled + configured. Plays a diegetic station near detected in-world speakers.
+            EmitterAudioLayer.Tick();
+#endif
 #if CMM_DEBUG_HUD
             HandleDebugHudToggle();
 #endif

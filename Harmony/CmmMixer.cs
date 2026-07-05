@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using UnityEngine;
 
 namespace CMM
 {
@@ -48,6 +49,45 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern long cmm_mix_add(IntPtr dec, int kind, int srcRate, int srcChannels,
             long totalFrames, float fade, int loop, long startFrame, float trackGain, float duckOthersTo, int snapTight);
+
+        // v16 — emitter voices: an independent positional layer that plays alongside the music
+        // voices (exempt from the music crossfade + eviction). Same decoder handoff as cmm_mix_add;
+        // takes ownership of dec. Returns an emitter voice id (0 on failure).
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern long cmm_mix_add_emitter(IntPtr dec, int kind, int srcRate, int srcChannels,
+            long totalFrames, float fadeIn, int loop, float trackGain,
+            float posX, float posY, float posZ, float minDist, float maxDist, long startFrame);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_remove_emitter(long id, float fade);
+
+        // v17 — listener basis (pos + forward + right, from the camera) + live emitter reposition.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_listener(float px, float py, float pz,
+            float fx, float fy, float fz, float rx, float ry, float rz);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_pos(long id, float x, float y, float z);
+
+        // v18/v19 — every speaker position playing the station (interleaved xyz) + per-speaker
+        // occlusion gain (1=clear, <1=muffled; may be null for all-clear).
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_points(long id, float[] xyz, float[] gains, int count);
+
+        // v21 — live spatial-curve tuning (plateau, range, falloff steepness, distance-muffle), pushed
+        // from config each tick so it can be dialled in-game without a rebuild.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float falloffExp, float muffle,
+                                                               float stereoWidth);
+
+        // v23 — live emitter reverb (room reflections) from the managed room probe. wet 0 = off.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_reverb(float wet, float room, float damp);
+
+        // v24 — the world-radio's OWN master (game music slider × Radio context volume), separate from
+        // the music master so the radio isn't scaled by VolumeModifier or the current music context.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_master(float vol);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_stop(float fade, int closeWhenIdle);
@@ -182,6 +222,71 @@ namespace CMM
 
         // Playhead + length of a voice, in seconds. active=false (and false return) when the id
         // is unknown — i.e. it finished and was retired, or never existed.
+        // Install an EMITTER voice: an independent positional layer that plays ALONGSIDE the music
+        // voices instead of crossfading them (a diegetic world speaker keeps playing while the
+        // soundtrack changes underneath). `dec`+`kind` name a decoder the caller opened via
+        // AudioDecoder.OpenNativeHandle; the mixer TAKES OWNERSHIP (closes it on retire or failure).
+        // loop restarts at EOF; trackGain is the per-track loudness gain. Returns an emitter voice
+        // id (0 on failure) to stop via RemoveEmitter. v16 renders it centered; spatialization later.
+        public long PlayEmitter(IntPtr dec, int kind, int srcRate, int srcChannels, long totalFrames,
+                                float fadeInSeconds, bool loop, float posX, float posY, float posZ,
+                                float minDist, float maxDist, float trackGain = 1f, long startFrame = 0)
+        {
+            if (dec == IntPtr.Zero) return 0;
+            return NativeMix.cmm_mix_add_emitter(dec, kind, srcRate, srcChannels, totalFrames,
+                                                 fadeInSeconds, loop ? 1 : 0, trackGain,
+                                                 posX, posY, posZ, minDist, maxDist, startFrame);
+        }
+
+        // Fade an emitter voice out (over fadeSeconds; 0 snaps) and retire it. No-op if it's gone.
+        public void RemoveEmitter(long id, float fadeSeconds)
+        {
+            NativeMix.cmm_mix_remove_emitter(id, fadeSeconds);
+        }
+
+        // Push the listener basis (world position + forward + right unit vectors, straight from the
+        // camera transform) for emitter spatialization. Lock-free; call every frame emitters may be
+        // audible. No-op cost when no emitter voice exists (the producer just reads unused globals).
+        public void SetListener(Vector3 pos, Vector3 forward, Vector3 right)
+        {
+            NativeMix.cmm_mix_set_listener(pos.x, pos.y, pos.z, forward.x, forward.y, forward.z,
+                                           right.x, right.y, right.z);
+        }
+
+        // Move a live emitter voice to a new world position (nearest speaker changed). No-op if gone.
+        public void SetEmitterPos(long id, Vector3 pos)
+        {
+            NativeMix.cmm_mix_set_emitter_pos(id, pos.x, pos.y, pos.z);
+        }
+
+        // Set the FULL set of speaker positions playing this station: `xyz` holds `count` interleaved
+        // x,y,z triples and `gains` holds `count` per-speaker occlusion gains (1=clear, <1=muffled by
+        // walls; null = all clear). Caller reuses the buffers to avoid GC. All heard at once from the
+        // one decode. count 0 silences the voice's spatial output until the next update.
+        public void SetEmitterPoints(long id, float[] xyz, float[] gains, int count)
+        {
+            NativeMix.cmm_mix_set_emitter_points(id, xyz, gains, count);
+        }
+
+        // Push the live spatial-curve tuning (full-volume plateau radius, audible range, falloff
+        // steepness, distance-muffle strength). Applies to the shared station; safe to call every tick.
+        public void SetEmitterTuning(float minDist, float maxDist, float falloffExp, float muffle, float stereoWidth)
+        {
+            NativeMix.cmm_mix_set_emitter_tuning(minDist, maxDist, falloffExp, muffle, stereoWidth);
+        }
+
+        // Push the live emitter reverb (room reflections) from the room probe. wet 0 = off. Every tick.
+        public void SetEmitterReverb(float wet, float room, float damp)
+        {
+            NativeMix.cmm_mix_set_emitter_reverb(wet, room, damp);
+        }
+
+        // Push the world-radio's own master (game music slider × Radio context volume). Every tick.
+        public void SetEmitterMaster(float vol)
+        {
+            NativeMix.cmm_mix_set_emitter_master(vol);
+        }
+
         public bool TryGetState(long id, out double positionSec, out double lengthSec, out bool active)
         {
             int act;

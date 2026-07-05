@@ -70,6 +70,62 @@ namespace CMM
         // but the advance waits for a frame). See ContextMusicManager.PreStageNextAdvance.
         public static bool NativePreStageAdvance = true;
 
+        // ── World emitters (in-world speakers/radios — Config/settings.xml) ────
+        // EXPERIMENTAL (3.0 only). When enabled, detected in-world speaker/radio blocks
+        // (see EmitterRegistry) play a shared "station" as an independent positional layer
+        // ALONGSIDE the normal soundtrack — a diegetic radio you hear when near it. v1 is
+        // non-spatial (centered); spatialization + radio coloration come in later phases.
+        //   Source: a folder (relative to the Music dir, or absolute) OR an .m3u playlist,
+        //   exactly like a context source — the pool the station loops through.
+        //   Range: the emitter starts/stops as the NEAREST detected speaker crosses this
+        //   distance (game units) from the listener.
+        public static bool   WorldEmitterEnabled = false;
+        public static string WorldEmitterSource  = "";
+        public static float  WorldEmitterRange   = 100f;
+        // Fade (seconds) when the station starts (a speaker comes in range) / stops (all leave range).
+        public static float  WorldEmitterFade    = 1.0f;
+        // ── Spatial curve (live-tunable; pushed to the native spatializer every tick) ──────────────
+        // MinDistance = full-volume plateau radius (move freely inside it, level flat); past it the
+        // level fades to silence at Range. Falloff = fade steepness (1 = straight amplitude ramp, >1
+        // steeper just past the plateau / more responsive per metre, <1 gentler). Muffle = distance
+        // low-pass strength 0..1 (0 = no dulling with distance, higher = duller far away).
+        public static float  WorldEmitterMinDistance = 1f;
+        public static float  WorldEmitterFalloff     = 4f;
+        public static float  WorldEmitterMuffle      = 0.7f;
+        // Stereo width 0..1: how hard a left/right speaker pans. 1 = full pan (far ear can go silent);
+        // lower keeps the sound in BOTH ears (a source at 90° is still heard on the far side, quieter).
+        public static float  WorldEmitterStereoWidth = 0.8f;
+        // Occlusion: solid blocks between you and a speaker muffle it (volume only for now; a low-pass
+        // comes with the radio-coloration phase). PerBlock = gain multiplier per solid block on the
+        // line of sight (0.5 ≈ −6 dB/block); Floor = the minimum gain however many walls there are.
+        public static bool   WorldEmitterOcclusion         = true;
+        // Occlusion is modelled as VIRTUAL DISTANCE: a wall makes the speaker sound farther (quieter +
+        // duller on the same smooth curve) instead of a hard volume cut — so it fades gradually, not
+        // all-or-nothing. WallDistance = blocks of virtual distance added per solid wall on the line;
+        // MaxDistance caps it so a deeply-buried speaker stays faintly audible rather than vanishing.
+        public static float  WorldEmitterOcclusionWallDistance = 18f;
+        public static float  WorldEmitterOcclusionMaxDistance  = 30f;
+        // Path routing: when a speaker's direct line is blocked, FLOOD-FILL through open air (a portal
+        // search) to find whether sound has a real way around the wall / up the stairwell, and how far
+        // it has to travel — so it routes through openings instead of slamming to the floor gain. This
+        // is deterministic (no ray noise). FloodRadius = how many blocks the air search reaches from
+        // the ear (bigger = finds longer ways around, more CPU). Set PathRouting false for direct-only.
+        // TODO(remove path routing): the reverb stage now carries "around the corner" energy (the wet
+        // path ignores occlusion), which is what the flood was faking — and running BOTH double-counts
+        // and sounds worse. Default is FloodRadius=1 (flood effectively off → pure straight-line
+        // occlusion), which the user preferred by ear. Slated to rip out the flood entirely (RunField /
+        // the Dijkstra in EmitterAcoustics) and drop PathRouting/FloodRadius once confirmed. See the
+        // matching TODO in EmitterAcoustics.cs and [[world-emitter-audio]].
+        public static bool   WorldEmitterPathRouting = true;
+        public static int    WorldEmitterFloodRadius = 1;
+        // Reverb: a room probe (rays from the ear, hit distance + material) estimates how enclosed,
+        // big and reflective the space is and drives a reverb on the station's reflections. The wet
+        // (reflected) path is NOT attenuated by occlusion, so behind a wall the direct sound drops but
+        // the reverb carries — the "it bounced / it's in another room" cue. ReverbWet = master wet
+        // level 0..1 (0 = dry). Room size / decay / damping are estimated automatically per space.
+        public static bool   WorldEmitterReverbEnabled = true;
+        public static float  WorldEmitterReverbWet     = 0.6f;
+
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track
         // gain (target − measured, in dB) folded into the volume multiplier. See

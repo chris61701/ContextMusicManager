@@ -292,6 +292,17 @@ namespace CMM
 
             lines.Add(Row("Source:", source));
 
+            // Emitters: world speaker/radio detection registry (Phase 2, POI-scoped — no audio yet).
+            // Self-throttled; the line reports how many emitter blocks are tracked, plus the nearest
+            // and its distance, so you can walk a POI and watch them appear/update/drop.
+#if GV_V3
+            if (inGame)
+            {
+                EmitterRegistry.Poll();
+                lines.Add(Row("Emitters:", EmitterRegistry.HudLine()));
+            }
+#endif
+
             // Heap + GC gauge (the enabled-vs-dormant A/B signal). Heap: the whole managed
             // heap now, its peak since the window was armed, and the drift since arm. GC:
             // per-generation collections accrued over the window with the gen0 rate — read

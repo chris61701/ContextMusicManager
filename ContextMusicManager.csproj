@@ -181,6 +181,9 @@
     <Compile Include="Harmony\ContextMusicManager.Crawler.cs" />
     <Compile Include="Harmony\CmmConsoleCmd.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
+    <Compile Include="Harmony\EmitterRegistry.cs" />
+    <Compile Include="Harmony\EmitterAudioLayer.cs" />
+    <Compile Include="Harmony\EmitterAcoustics.cs" />
     <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />
     <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

@@ -82,6 +82,22 @@ namespace CMM
                 CMMConfig.NativeScheduler = ReadBool(root, "NativeScheduler", CMMConfig.NativeScheduler);
                 CMMConfig.NativePreStageAdvance = ReadBool(root, "NativePreStageAdvance", CMMConfig.NativePreStageAdvance);
 
+                CMMConfig.WorldEmitterEnabled = ReadBool  (root, "WorldEmitterEnabled", CMMConfig.WorldEmitterEnabled);
+                CMMConfig.WorldEmitterSource  = ReadString(root, "WorldEmitterSource",  CMMConfig.WorldEmitterSource);
+                CMMConfig.WorldEmitterRange   = ReadFloat (root, "WorldEmitterRange",   CMMConfig.WorldEmitterRange);
+                CMMConfig.WorldEmitterFade    = ReadFloat (root, "WorldEmitterFade",    CMMConfig.WorldEmitterFade);
+                CMMConfig.WorldEmitterMinDistance = ReadFloat(root, "WorldEmitterMinDistance", CMMConfig.WorldEmitterMinDistance);
+                CMMConfig.WorldEmitterFalloff     = ReadFloat(root, "WorldEmitterFalloff",     CMMConfig.WorldEmitterFalloff);
+                CMMConfig.WorldEmitterMuffle      = ReadFloat(root, "WorldEmitterMuffle",      CMMConfig.WorldEmitterMuffle);
+                CMMConfig.WorldEmitterStereoWidth = ReadFloat(root, "WorldEmitterStereoWidth", CMMConfig.WorldEmitterStereoWidth);
+                CMMConfig.WorldEmitterOcclusion         = ReadBool (root, "WorldEmitterOcclusion",         CMMConfig.WorldEmitterOcclusion);
+                CMMConfig.WorldEmitterOcclusionWallDistance = ReadFloat(root, "WorldEmitterOcclusionWallDistance", CMMConfig.WorldEmitterOcclusionWallDistance);
+                CMMConfig.WorldEmitterOcclusionMaxDistance  = ReadFloat(root, "WorldEmitterOcclusionMaxDistance",  CMMConfig.WorldEmitterOcclusionMaxDistance);
+                CMMConfig.WorldEmitterPathRouting       = ReadBool (root, "WorldEmitterPathRouting",       CMMConfig.WorldEmitterPathRouting);
+                CMMConfig.WorldEmitterFloodRadius       = ReadInt  (root, "WorldEmitterFloodRadius",       CMMConfig.WorldEmitterFloodRadius);
+                CMMConfig.WorldEmitterReverbEnabled     = ReadBool (root, "WorldEmitterReverbEnabled",     CMMConfig.WorldEmitterReverbEnabled);
+                CMMConfig.WorldEmitterReverbWet         = ReadFloat(root, "WorldEmitterReverbWet",         CMMConfig.WorldEmitterReverbWet);
+
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);
                 CMMConfig.PerfFrameSpikeFactor = ReadFloat(root, "PerfFrameSpikeFactor", CMMConfig.PerfFrameSpikeFactor);
