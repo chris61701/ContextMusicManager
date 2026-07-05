@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($scratch = \"C:\\\\Users\\\\chris\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-chris-source-repos-ContextMusicManager\\\\bcad0e37-0cb5-4c11-8c54-6b9385db7bec\\\\scratchpad\\\\bin_a20\"; dotnet build \"C:\\\\Users\\\\chris\\\\source\\\\repos\\\\ContextMusicManager\\\\ContextMusicManager.csproj\" -c Debug \"-p:GameVersion=Alpha 20.7 b1\" -p:CMMDeployAll=false \"-p:OutputPath=$scratch\" -p:EnableDebugHud=true -v minimal -nologo 2>&1 | Select-Object -Last 8)",
+      "PowerShell($scratch = \"C:\\\\Users\\\\chris\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-chris-source-repos-ContextMusicManager\\\\bcad0e37-0cb5-4c11-8c54-6b9385db7bec\\\\scratchpad\\\\bin\"; dotnet build \"C:\\\\Users\\\\chris\\\\source\\\\repos\\\\ContextMusicManager\\\\ContextMusicManager.csproj\" -c Debug \"-p:GameVersion=3.0.0 b259\" -p:CMMDeployAll=false \"-p:OutputPath=$scratch\" -p:EnableDebugHud=true -v minimal -nologo 2>&1 | Select-Object -Last 6)",
+      "PowerShell($scratch = \"C:\\\\Users\\\\chris\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-chris-source-repos-ContextMusicManager\\\\bcad0e37-0cb5-4c11-8c54-6b9385db7bec\\\\scratchpad\\\\bin_a20\"; dotnet build \"C:\\\\Users\\\\chris\\\\source\\\\repos\\\\ContextMusicManager\\\\ContextMusicManager.csproj\" -c Debug \"-p:GameVersion=Alpha 20.7 b1\" -p:CMMDeployAll=false \"-p:OutputPath=$scratch\" -p:EnableDebugHud=true -v minimal -nologo 2>&1 | Select-Object -Last 6)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"C:\\\\Users\\\\chris\\\\source\\\\repos\\\\ContextMusicManager\\\\ContextMusicManager.csproj\" /p:Configuration=CI /p:GameVersion=\"Alpha 20.7 b1\" /t:Build /v:minimal /nologo)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"C:\\\\Users\\\\chris\\\\source\\\\repos\\\\ContextMusicManager\\\\ContextMusicManager.csproj\" /p:Configuration=Release /p:GameVersion=\"Alpha 20.7 b1\" /t:Build /v:minimal /nologo)",
+      "Bash(git --no-pager diff *)",
+      "Bash(git --no-pager log *)",
+      "Bash(git --no-pager show *)",
+      "Bash(git --no-pager status *)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\chris\\.claude\\projects\\c--Users-chris-source-repos-ContextMusicManager\\memory"
+    ]
+  }
+}
