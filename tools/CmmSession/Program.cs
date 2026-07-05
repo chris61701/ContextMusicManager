@@ -13,7 +13,9 @@ using CMM;
 // (Engine.cs) + real per-transition native decode (AudioDecoder.OpenNativeHandle) +
 // the REAL native mixer (CmmMixer / cmm_mix_*, driven headless) — to surface slow
 // accumulation (managed-heap AND native-RSS leaks) and performance regressions that
-// only hours of play reveal. It reports:
+// only hours of play reveal. The per-tick drive lives in the shared SessionRunner
+// (SessionRunner.cs), which the top-down viewer (tools/CmmSessionView) also uses; this
+// file parses the CLI, drives the runner, and accumulates + prints the report:
 //   • Memory: per-phase managed allocation (resolve / select / decode), GC counts,
 //     managed-heap drift AND process working-set (RSS) drift — the latter catches
 //     NATIVE leaks in the mixer/decoders that never touch the GC heap.
@@ -44,114 +46,63 @@ using CMM;
 
 internal static class Program
 {
-    enum MixerMode { Off, Headless, Realtime }
-
-    // Loudness target the harness normalizes toward (mirrors the shipped policy's intent);
-    // only used to derive a representative per-track gain to feed the mixer.
-    const double LoudnessTargetLufs = -14.0;
-
     static int Main(string[] args)
     {
         AppDomain.MonitoringIsEnabled = true;   // precise per-AppDomain allocation tracking
 
-        string musicDir = null;
-        double hours = 24; float tick = 0.5f, dayMinutes = 60f; int seed = 1;
-        bool decode = true, sweep = false, verbose = false, noLoudness = false, lookahead = true;
-        double loudSlow = 1.0;
-        MixerMode mixerMode = MixerMode.Headless;
-        double reloadMin = 15.0;
-        bool emitters = true; int emittersPerPoi = 4; float emitterHz = 4f;
-
+        var opt = new SessionOptions();
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
-                case "--hours": hours = double.Parse(args[++i]); break;
-                case "--tick": tick = float.Parse(args[++i]); break;
-                case "--day-minutes": dayMinutes = float.Parse(args[++i]); break;
-                case "--seed": seed = int.Parse(args[++i]); break;
-                case "--mixer": mixerMode = ParseMixer(args[++i]); break;
-                case "--reload-min": reloadMin = double.Parse(args[++i]); break;
-                case "--no-decode": decode = false; break;
-                case "--sweep": sweep = true; break;
-                case "--no-dms": ContextMusicManager.DmsEnabled = false; break;
-                case "--no-loudness": noLoudness = true; break;
-                case "--no-lookahead": lookahead = false; break;
-                case "--loud-slow": loudSlow = double.Parse(args[++i]); break;
-                case "--no-emitters": emitters = false; break;
-                case "--emitters-per-poi": emittersPerPoi = int.Parse(args[++i]); break;
-                case "--emitter-hz": emitterHz = float.Parse(args[++i]); break;
-                case "-v": verbose = true; break;
+                case "--hours": opt.Hours = double.Parse(args[++i]); break;
+                case "--tick": opt.Tick = float.Parse(args[++i]); break;
+                case "--day-minutes": opt.DayMinutes = float.Parse(args[++i]); break;
+                case "--seed": opt.Seed = int.Parse(args[++i]); break;
+                case "--mixer": opt.MixerMode = ParseMixer(args[++i]); break;
+                case "--reload-min": opt.ReloadMin = double.Parse(args[++i]); break;
+                case "--no-decode": opt.Decode = false; break;
+                case "--sweep": opt.Sweep = true; break;
+                case "--no-dms": opt.DmsEnabled = false; break;
+                case "--no-loudness": opt.NoLoudness = true; break;
+                case "--no-lookahead": opt.Lookahead = false; break;
+                case "--loud-slow": opt.LoudSlow = double.Parse(args[++i]); break;
+                case "--no-emitters": opt.Emitters = false; break;
+                case "--emitters-per-poi": opt.EmittersPerPoi = int.Parse(args[++i]); break;
+                case "--emitter-hz": opt.EmitterHz = float.Parse(args[++i]); break;
+                case "-v": opt.Verbose = true; break;
                 case "-h": case "--help": Usage(); return 0;
-                default: musicDir ??= args[i]; break;
+                default: opt.MusicDir ??= args[i]; break;
             }
         }
-        if (musicDir == null) musicDir = @"C:\_Games\CMM_TestMusic";
-        CMMConfig.DebugLogging = verbose;
-        Log.Quiet = !verbose;   // silence ScriptHost's per-load chatter unless -v
+        if (opt.MusicDir == null) opt.MusicDir = @"C:\_Games\CMM_TestMusic";
 
-        string repoRoot = FindRepoRoot();
-        bool haveLib = Directory.Exists(musicDir);
-
-        // ── Reload virtualization: run ScriptHost against a TEMP copy of context.lua we can
-        // safely flip between valid and invalid, so the real repo file is never touched. Falls
-        // back to loading straight from the repo when virtualization is off / repo not found. ──
-        var reload = ReloadHarness.Setup(reloadMin, repoRoot, tick);
-        string loadDir = reload?.WorkDir ?? repoRoot ?? Directory.GetCurrentDirectory();
-
-        // MoonSharp's static init logs a harmless NRE headless; mute just over Load.
-        var savedOut = Console.Out; var savedErr = Console.Error;
-        Console.SetOut(TextWriter.Null); Console.SetError(TextWriter.Null);
-        try { ScriptHost.Load(loadDir); }
-        finally { Console.SetOut(savedOut); Console.SetError(savedErr); }
-        if (!ScriptHost.Active)
+        // ── Build the session (setup + warmup happen in the ctor, before the baseline below) ──
+        var runner = new SessionRunner(opt);
+        if (!runner.ScriptActive)
         {
             Console.WriteLine("FATAL: no resolver loaded (MoonSharp/context.lua failed). Aborting.");
             return 1;
         }
-        ContextMusicManager.InitContexts();
-        ContextMusicManager.BuildFileIndex(haveLib ? musicDir : null);
 
-        // ── Native mixer (the real cmm_mix_* producer/voice/retire loop) ──
-        // headless: a null output device we drain on the sim clock → the mixer churns at
-        //           compressed speed (leak/perf), no audio hardware, silent by nature.
-        // realtime: the real device, MASTER VOLUME 0 (muted) → faithful underrun-under-GC
-        //           timing, but bound to the wall clock (short soaks only).
-        CmmMixer mixer = null;
-        int pumpFramesPerTick = (int)(48000 * tick);
-        if (mixerMode != MixerMode.Off && haveLib && decode)
-        {
-            if (mixerMode == MixerMode.Headless) CmmMixer.Headless = true;
-            mixer = CmmMixer.GetOrCreate();
-            if (mixerMode == MixerMode.Realtime) CmmMixer.MasterVolume = 0f;   // muted
-        }
-        else if (mixerMode != MixerMode.Off)
-        {
-            mixerMode = MixerMode.Off;   // no library / --no-decode → nothing to play
-        }
+        int totalTicks = runner.TotalTicks;
+        float tick = opt.Tick;
+        double hours = opt.Hours;
+        var mixerMode = runner.MixerMode;
 
-        // World-emitter (Radio) workload: speakers "appear" in POIs (possibly several per POI) and
-        // the acoustics (occlusion cost field + room probe) run per decision tick while in range —
-        // the feature's MAIN-THREAD cost. Driven off the session's POI phase (Emitter.cs).
-        var emitterSim = emitters ? new EmitterSim(seed, tick, emittersPerPoi, emitterHz) : null;
-
-        int totalTicks = Math.Max(1, (int)(hours * 3600.0 / tick));
-        Console.WriteLine($"CmmSession — {hours:F0}h session, tick {tick:F2}s ({totalTicks:N0} ticks), seed {seed}, " +
-                          $"day={dayMinutes:F0}min, DMS={(ContextMusicManager.DmsEnabled ? "on" : "off")}");
+        Console.WriteLine($"CmmSession — {hours:F0}h session, tick {tick:F2}s ({totalTicks:N0} ticks), seed {opt.Seed}, " +
+                          $"day={opt.DayMinutes:F0}min, DMS={(ContextMusicManager.DmsEnabled ? "on" : "off")}");
         Console.WriteLine($"  script   : {(ScriptHost.UsingEmbeddedDefault ? "embedded default" : "Config/context.lua")}" +
-                          $"{(reload != null ? $"  (reload flip every {reloadMin:F0} sim-min, valid↔invalid)" : "")}");
-        Console.WriteLine($"  library  : {musicDir} ({(haveLib ? $"{ContextMusicManager.IndexedContexts} contexts / {ContextMusicManager.IndexedFiles} files" : "MISSING — resolve+GC only")})");
-        Console.WriteLine($"  mixer    : {mixerMode.ToString().ToLower()}{(mixerMode == MixerMode.Realtime ? " (real device, muted, real-time)" : mixerMode == MixerMode.Headless ? " (null device, drained on sim clock)" : "")}");
-        Console.WriteLine($"  decode   : {(decode && haveLib ? (sweep ? "per-transition native open + first-play R128 sweep" : "per-transition native open") : "off")}");
-        Console.WriteLine($"  emitters : {(emitterSim != null ? $"on (≤{emittersPerPoi}/POI, {emitterHz:F0}Hz → {emitterSim.RunsPerTick}×/tick, occlusion+reverb)" : "off")}\n");
+                          $"{(runner.Reload != null ? $"  (reload flip every {opt.ReloadMin:F0} sim-min, valid↔invalid)" : "")}");
+        Console.WriteLine($"  library  : {opt.MusicDir} ({(runner.HaveLib ? $"{ContextMusicManager.IndexedContexts} contexts / {ContextMusicManager.IndexedFiles} files" : "MISSING — resolve+GC only")})");
+        Console.WriteLine($"  mixer    : {mixerMode.ToString().ToLower()}{(mixerMode == SessionMixerMode.Realtime ? " (real device, muted, real-time)" : mixerMode == SessionMixerMode.Headless ? " (null device, drained on sim clock)" : "")}");
+        Console.WriteLine($"  decode   : {(opt.Decode && runner.HaveLib ? (opt.Sweep ? "per-transition native open + first-play R128 sweep" : "per-transition native open") : "off")}");
+        Console.WriteLine($"  emitters : {(runner.Emitter != null ? $"on (≤{opt.EmittersPerPoi}/POI, {opt.EmitterHz:F0}Hz → {runner.Emitter.RunsPerTick}×/tick, occlusion+reverb)" : "off")}\n");
 
         // ── Preallocate sample buffers BEFORE the heap baseline so they don't skew drift ──
+        // (decode telemetry + the loudness model live in the runner, allocated in its ctor above.)
         var resolveMs = new double[totalTicks];
         var selectMs = new double[totalTicks];
-        var decodeMs = new List<double>(totalTicks / 4 + 16);
-        var decodeByExt = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
-        var decodeErrByExt = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var measured = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var transitionsByTop = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         // Crossfade-pressure tracking.
@@ -162,62 +113,21 @@ internal static class Program
 
         // Per-track PLAY accounting: what played, and for how long (sim-seconds between the
         // transition that started it and the one that replaced it). Load time is tracked per
-        // format (decodeByExt) + overall (decodeMs).
+        // format (runner.DecodeByExt) + overall (runner.DecodeMs).
         var playStats = new Dictionary<string, PlayStat>(StringComparer.OrdinalIgnoreCase);
         string curFile = null; double curFileStart = 0;
 
-        var gen = new SessionGenerator(seed, tick, dayMinutes);
-
-        // ── Loudness-normalization model (mirrors the shipped policy, timing-aware) ──
-        bool loudnessEnabled = !noLoudness && haveLib;
-        var readyAt = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        var trackGain = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);  // file -> loudness gain (1 until measured)
-        var failedMeas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        double workerFree = 0.0;
+        // ── Loudness report tally (the timing-aware model itself lives in the runner) ──
         long playsTotal = 0, playsNormalized = 0;
         int unnormCold = 0, unnormFailed = 0;
         var unnormByExt = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var unnormReasons = new Dictionary<string, int>();
         var unnormSamples = new List<string>();
 
-        // Runs a measurement of `f` on the single background worker (or the menu prewarm when
-        // background:false). Stores the derived loudness gain so a normalized play feeds the
-        // mixer the real per-track gain. Returns true on success.
-        bool Measure(string f, double atSim, bool background)
-        {
-            if (f == null) return false;
-            if (readyAt.ContainsKey(f)) return true;
-            if (failedMeas.Contains(f)) return false;
-            long t0 = Stopwatch.GetTimestamp();
-            TrackLoudness m;
-            try { m = AudioDecoder.MeasureLoudness(f); }
-            catch { m = new TrackLoudness { Ok = false }; }
-            if (!m.Ok) { failedMeas.Add(f); return false; }
-            trackGain[f] = LoudGain(m);
-            if (background)
-            {
-                double dur = (Stopwatch.GetTimestamp() - t0) * loudSlow / Stopwatch.Frequency;
-                double start = Math.Max(atSim, workerFree);
-                workerFree = start + dur;
-                readyAt[f] = workerFree;
-            }
-            else readyAt[f] = 0.0;  // prewarmed on the menu — ready from session start
-            return true;
-        }
-
-        // Menu prewarm: measure one track per context before the session.
-        if (loudnessEnabled)
-            foreach (var kv in ContextMusicManager.Index)
-                if (kv.Value.Length > 0) Measure(kv.Value[0], 0.0, background: false);
-
         // ── Multiplayer proximity tally ──
         long mpTicksAllies = 0, mpTicksStrangers = 0, mpTicksAny = 0, mpTicksInCombat = 0, mpTicksOutCombat = 0;
         int mpEnters = 0, mpMaxAllies = 0, mpMaxStrangers = 0;
         bool mpPrevAny = false;
-
-        // Warm up the script + JIT + mixer so the baseline is steady-state.
-        SimClock.Now = 0f;
-        ScriptHost.Resolve(gen.Next());
 
         var proc = Process.GetCurrentProcess();
         long allocResolve = 0, allocSelect = 0, allocDecode = 0;
@@ -225,7 +135,7 @@ internal static class Program
         long heapBaseline = GC.GetTotalMemory(true);
         long rssBaseline = WorkingSet(proc);
         var heapCheckpoints = new List<(double pct, long heap, long rss, double simHour)>();
-        int transitions = 0, decodes = 0, decodeErrors = 0;
+        int transitions = 0;
         long allocStart = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
         var wall = Stopwatch.StartNew();
 
@@ -235,26 +145,15 @@ internal static class Program
 
         for (int t = 0; t < totalTicks; t++)
         {
-            SimClock.Now = (t + 1) * tick;
-            GameState gs = gen.Next();
+            // ── Advance one tick through the real decision + decode + mixer path ──
+            TickOutcome o = runner.Tick();
+            GameState gs = o.State;
 
-            // ── Sim-time hot-reload flip (valid ↔ invalid context.lua + a config bump) ──
-            reload?.MaybeFlip(SimClock.Now);
-
-            // Phase 1 — resolve (linked ScriptHost: Lua marshal + decision).
-            long a0 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
-            long ts = Stopwatch.GetTimestamp();
-            List<string> tokens = ScriptHost.Resolve(gs);
-            resolveMs[t] = Ms(ts);
-            long a1 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
-            allocResolve += a1 - a0;
-
-            // Phase 2 — select (ported stack/fallback/warmup gate).
-            ts = Stopwatch.GetTimestamp();
-            var r = ContextMusicManager.Tick(tokens, gs);
-            selectMs[t] = Ms(ts);
-            long a2 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
-            allocSelect += a2 - a1;
+            resolveMs[t] = o.ResolveMs;
+            selectMs[t] = o.SelectMs;
+            allocResolve += o.AllocResolve;
+            allocSelect += o.AllocSelect;
+            allocDecode += o.AllocDecode;
 
             // ── Multiplayer proximity tally ──
             int allies = gs.AlliesNearby, strangers = gs.StrangersNearby;
@@ -272,15 +171,11 @@ internal static class Program
             if (strangers > mpMaxStrangers) mpMaxStrangers = strangers;
             mpPrevAny = anyPlayer;
 
-            // Phase 2b — world-emitter acoustics (Radio speakers in POIs). Its own timing/alloc
-            // accounting lives inside; kept separate from resolve/select so it doesn't skew them.
-            emitterSim?.Tick(gs, SimClock.Now);
-
-            // Phase 3 — decode + PLAY on a real transition to a file-backed context.
-            if (r.Transitioned)
+            // ── Transition bookkeeping + play/loudness accounting on a real transition ──
+            if (o.Transitioned)
             {
                 transitions++;
-                transitionsByTop[r.Top] = transitionsByTop.TryGetValue(r.Top, out int c) ? c + 1 : 1;
+                transitionsByTop[o.Top] = transitionsByTop.TryGetValue(o.Top, out int c) ? c + 1 : 1;
 
                 float nowT = SimClock.Now;
                 if (prevTransTime >= 0f)
@@ -291,101 +186,39 @@ internal static class Program
                 }
                 transitionTimes.Add(nowT);
                 prevTransTime = nowT;
-                var topCtx = ContextMusicManager.GetContext(r.Top);
+                var topCtx = ContextMusicManager.GetContext(o.Top);
                 prevFadeWindow = Math.Max(ContextMusicManager.CrossFadeDuration, topCtx?.FadeInDuration ?? 0);
 
-                if (haveLib && r.Top != "Vanilla" && r.Top != "Silence")
+                if (o.PlayedFile != null)
                 {
-                    string file = ContextMusicManager.PickFile(r.Top);
-                    if (file != null)
+                    // Close out the previously-playing track's duration (sim-seconds it was up).
+                    AccountPlay(playStats, ref curFile, ref curFileStart, o.PlayedFile, nowT);
+
+                    // ── Loudness: was this track normalized when Play fired? (decision made in the runner) ──
+                    if (runner.LoudnessEnabled)
                     {
-                        // Close out the previously-playing track's duration (sim-seconds it was up).
-                        AccountPlay(playStats, ref curFile, ref curFileStart, file, nowT);
-
-                        // ── Loudness: was this track normalized when Play fired? ──
-                        bool normalized = false;
-                        if (loudnessEnabled)
+                        playsTotal++;
+                        if (o.Normalized) playsNormalized++;
+                        else
                         {
-                            playsTotal++;
-                            double now = SimClock.Now;
-                            string reason = null;
-                            if (failedMeas.Contains(file)) { normalized = false; reason = "measurement FAILED — unity gain (every play)"; }
-                            else if (readyAt.TryGetValue(file, out double ra) && ra <= now) normalized = true;
-                            else if (readyAt.ContainsKey(file)) { normalized = false; reason = "look-ahead still measuring when Play fired (churn outran the worker)"; }
-                            else { normalized = false; reason = "first need — not pre-measured, measured on demand after Play"; }
-
-                            if (normalized) playsNormalized++;
-                            else
-                            {
-                                string uext = Path.GetExtension(file).ToLowerInvariant();
-                                unnormByExt[uext] = unnormByExt.TryGetValue(uext, out int uc) ? uc + 1 : 1;
-                                unnormReasons[reason] = unnormReasons.TryGetValue(reason, out int rc) ? rc + 1 : 1;
-                                if (reason.StartsWith("measurement FAILED")) unnormFailed++; else unnormCold++;
-                                if (unnormSamples.Count < 25)
-                                    unnormSamples.Add($"h{now / 3600.0,5:F1}  {r.Top,-24} {Path.GetFileName(file),-32} {reason}");
-                            }
-
-                            Measure(file, now, background: true);
-                            if (lookahead) Measure(ContextMusicManager.PeekNextFile(r.Top), now, background: true);
-                        }
-
-                        if (decode)
-                        {
-                            long d0 = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
-                            ts = Stopwatch.GetTimestamp();
-                            try
-                            {
-                                if (sweep && measured.Add(file))
-                                    AudioDecoder.MeasureLoudness(file);
-
-                                // Open the REAL native decoder handle (the same call the in-game
-                                // control layer makes) — this is the per-transition LOAD cost.
-                                int kind, ch, sr; long total;
-                                IntPtr dec = AudioDecoder.OpenNativeHandle(file, out kind, out ch, out sr, out total);
-                                double ms = Ms(ts);
-
-                                if (dec == IntPtr.Zero) { decodeErrors++; BumpExt(decodeErrByExt, file); if (verbose) Console.WriteLine($"  OPEN FAIL {Path.GetFileName(file)}"); }
-                                else
-                                {
-                                    if (mixer != null)
-                                    {
-                                        // Hand the decoder to the real mixer: it crossfades, owns + closes it.
-                                        bool loop = topCtx?.Loop ?? true;
-                                        float fade = Math.Max(ContextMusicManager.CrossFadeDuration, topCtx?.FadeInDuration ?? 0f);
-                                        float duck = (topCtx?.PlayOnce ?? false) ? CmmMixer.StingerDuckLevel : -1f;
-                                        float gain = normalized && trackGain.TryGetValue(file, out float gv) ? gv : 1f;
-                                        mixer.Play(dec, kind, sr, ch, total, fade, loop, 0, gain, duck, snapTight: true);
-                                    }
-                                    else
-                                    {
-                                        AudioDecoder.CloseNativeHandle(dec, kind);   // off mode: measured open cost only
-                                    }
-
-                                    decodeMs.Add(ms);
-                                    string ext = Path.GetExtension(file).ToLowerInvariant();
-                                    if (!decodeByExt.TryGetValue(ext, out var l)) decodeByExt[ext] = l = new List<double>();
-                                    l.Add(ms);
-                                    decodes++;
-                                    if (verbose) Console.WriteLine($"  [{r.Top}] {Path.GetFileName(file)} open {ms:F2}ms");
-                                }
-                            }
-                            catch (Exception ex) { decodeErrors++; BumpExt(decodeErrByExt, file); if (verbose) Console.WriteLine($"  DECODE ERR {Path.GetFileName(file)}: {ex.Message}"); }
-                            allocDecode += AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize - d0;
+                            string reason = o.UnnormReason;
+                            string uext = Path.GetExtension(o.PlayedFile).ToLowerInvariant();
+                            unnormByExt[uext] = unnormByExt.TryGetValue(uext, out int uc) ? uc + 1 : 1;
+                            unnormReasons[reason] = unnormReasons.TryGetValue(reason, out int rc) ? rc + 1 : 1;
+                            if (reason.StartsWith("measurement FAILED")) unnormFailed++; else unnormCold++;
+                            if (unnormSamples.Count < 25)
+                                unnormSamples.Add($"h{SimClock.Now / 3600.0,5:F1}  {o.Top,-24} {Path.GetFileName(o.PlayedFile),-32} {reason}");
                         }
                     }
                 }
             }
 
-            // ── Drive the mixer output ──
-            if (mixerMode == MixerMode.Headless)
-            {
-                mixer.PumpOut(pumpFramesPerTick);              // drain the null ring on the sim clock
-            }
-            else if (mixerMode == MixerMode.Realtime)
+            // ── Drive the realtime mixer pacing + output-health sampling (headless drains inside Tick) ──
+            if (mixerMode == SessionMixerMode.Realtime)
             {
                 // Pace the sim to the wall clock so Play cadence matches real playback, and
                 // sample the real device's buffer health (underruns here are meaningful).
-                mixer.GetOutputStats(out _, out _, out int minQ, out int voices, out _, out int under, out int busRate);
+                runner.Mixer.GetOutputStats(out _, out _, out int minQ, out int voices, out _, out int under, out int busRate);
                 if (under > mixUnderruns) mixUnderruns = under;
                 if (voices > mixMaxVoices) mixMaxVoices = voices;
                 if (voices > 0 && busRate > 0) { int mq = minQ * 1000 / busRate; if (mq < mixMinQueuedMs) mixMinQueuedMs = mq; }
@@ -398,9 +231,9 @@ internal static class Program
             // WorkingSet drift → NATIVE leak signal, e.g. the mixer/decoders).
             if (t == totalTicks / 4 || t == totalTicks / 2 || t == 3 * totalTicks / 4 || t == totalTicks - 1)
             {
-                if (mixerMode == MixerMode.Headless && mixer != null)
+                if (mixerMode == SessionMixerMode.Headless && runner.Mixer != null)
                 {
-                    mixer.GetOutputStats(out _, out _, out _, out int voices, out _, out int under, out _);
+                    runner.Mixer.GetOutputStats(out _, out _, out _, out int voices, out _, out int under, out _);
                     if (voices > mixMaxVoices) mixMaxVoices = voices;
                     mixUnderruns = under;   // cumulative (artifact in headless — see report)
                 }
@@ -411,29 +244,28 @@ internal static class Program
 
         // Final track's play duration.
         AccountPlay(playStats, ref curFile, ref curFileStart, null, SimClock.Now);
-        if (mixer != null) mixer.StopAllNow();
+        runner.Stop();
         wall.Stop();
-        reload?.Cleanup();
 
         long allocTotal = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize - allocStart;
-        Report(totalTicks, tick, hours, gen.WorldDay, wall.Elapsed.TotalSeconds,
-               transitions, decodes, decodeErrors, transitionsByTop,
-               resolveMs, selectMs, decodeMs, decodeByExt,
+        Report(totalTicks, tick, hours, runner.Generator.WorldDay, wall.Elapsed.TotalSeconds,
+               transitions, runner.DecodeCount, runner.DecodeErrors, transitionsByTop,
+               resolveMs, selectMs, runner.DecodeMs, runner.DecodeByExt,
                allocResolve, allocSelect, allocDecode, allocTotal,
                GC.CollectionCount(0) - g0, GC.CollectionCount(1) - g1, GC.CollectionCount(2) - g2,
                heapBaseline, rssBaseline, heapCheckpoints);
 
-        PrintLoadHistogram(decodeMs, decodeErrByExt);
+        PrintLoadHistogram(runner.DecodeMs, runner.DecodeErrByExt);
         PrintPlayAccounting(playStats, hours);
         PrintCrossfadePressure(gaps, jarring, transitionTimes);
         PrintMixer(mixerMode, mixUnderruns, mixMaxVoices, mixMinQueuedMs);
-        PrintSharedCombat(gen, totalTicks);
+        PrintSharedCombat(runner.Generator, totalTicks);
         PrintMultiplayer(mpTicksAny, mpTicksAllies, mpTicksStrangers, mpTicksInCombat, mpTicksOutCombat,
                          mpEnters, mpMaxAllies, mpMaxStrangers, totalTicks, transitionsByTop);
-        PrintReload(reload);
-        PrintLoudness(loudnessEnabled, readyAt, failedMeas, playsTotal, playsNormalized,
+        PrintReload(runner.Reload);
+        PrintLoudness(runner.LoudnessEnabled, runner.ReadyCount, runner.FailedCount, playsTotal, playsNormalized,
                       unnormCold, unnormFailed, unnormReasons, unnormByExt, unnormSamples);
-        PrintEmitters(emitterSim, totalTicks, tick, resolveMs, selectMs);
+        PrintEmitters(runner.Emitter, totalTicks, tick, resolveMs, selectMs);
         return 0;
     }
 
@@ -472,14 +304,8 @@ internal static class Program
             Console.WriteLine($"     {Path.GetFileName(kv.Key),-40} {kv.Value.Plays,4}×  {FmtDur(kv.Value.SimSeconds),8}  {FmtDur(kv.Value.Plays > 0 ? kv.Value.SimSeconds / kv.Value.Plays : 0),8}");
     }
 
-    static void BumpExt(Dictionary<string, int> d, string file)
-    {
-        string ext = Path.GetExtension(file).ToLowerInvariant();
-        d[ext] = d.TryGetValue(ext, out int c) ? c + 1 : 1;
-    }
-
     // ── Load-time distribution (ASCII histogram) ────────────────────────────────
-    static void PrintLoadHistogram(List<double> loadMs, Dictionary<string, int> errByExt)
+    static void PrintLoadHistogram(IReadOnlyList<double> loadMs, IReadOnlyDictionary<string, int> errByExt)
     {
         Console.WriteLine("\n── Load-time distribution (native decoder open, per transition) ──────");
         if (errByExt.Count > 0)
@@ -501,12 +327,12 @@ internal static class Program
     }
 
     // ── Mixer output health ─────────────────────────────────────────────────────
-    static void PrintMixer(MixerMode mode, int underruns, int maxVoices, int minQueuedMs)
+    static void PrintMixer(SessionMixerMode mode, int underruns, int maxVoices, int minQueuedMs)
     {
         Console.WriteLine("\n── Native mixer (cmm_mix_*) output health ────────────────────────────");
-        if (mode == MixerMode.Off) { Console.WriteLine("   (mixer off — resolve/select/decode only)"); return; }
+        if (mode == SessionMixerMode.Off) { Console.WriteLine("   (mixer off — resolve/select/decode only)"); return; }
         Console.WriteLine($"   mode: {mode.ToString().ToLower()}   ·   peak concurrent voices: {maxVoices}");
-        if (mode == MixerMode.Realtime)
+        if (mode == SessionMixerMode.Realtime)
         {
             Console.WriteLine($"   min queued depth: {(minQueuedMs == int.MaxValue ? "n/a" : minQueuedMs + "ms")}   ·   underruns: {underruns}" +
                               (underruns > 0 ? "  ← ring ran dry under load (investigate)" : "  ← never starved"));
@@ -563,14 +389,14 @@ internal static class Program
         Console.WriteLine($"   music fired     : Online_Stranger ×{os}   Online_Friend ×{of}");
     }
 
-    static void PrintLoudness(bool enabled, Dictionary<string, double> readyAt, HashSet<string> failed,
+    static void PrintLoudness(bool enabled, int readyCount, int failedCount,
         long playsTotal, long playsNormalized, int unnormCold, int unnormFailed,
         Dictionary<string, int> reasons, Dictionary<string, int> byExt, List<string> samples)
     {
         Console.WriteLine("\n── Loudness normalization (missing / un-normalized playback) ─────────");
         if (!enabled) { Console.WriteLine("   (normalization model off)"); return; }
         long unnorm = playsTotal - playsNormalized;
-        Console.WriteLine($"   measured    : {readyAt.Count + failed.Count:N0} tracks ({failed.Count} FAILED)  ·  prewarm + single worker + look-ahead");
+        Console.WriteLine($"   measured    : {readyCount + failedCount:N0} tracks ({failedCount} FAILED)  ·  prewarm + single worker + look-ahead");
         Console.WriteLine($"   track plays : {playsTotal:N0}   normalized {playsNormalized:N0} ({(playsTotal > 0 ? 100.0 * playsNormalized / playsTotal : 0):F1}%)   MISSING {unnorm:N0} ({(playsTotal > 0 ? 100.0 * unnorm / playsTotal : 0):F1}%)");
         Console.WriteLine($"   split       : {unnormCold:N0} cold (normalized on later plays)  ·  {unnormFailed:N0} measurement FAILED (unity gain forever)");
         foreach (var kv in reasons.OrderByDescending(k => k.Value))
@@ -665,7 +491,7 @@ internal static class Program
     // ── Core report (latency + allocation + heap/RSS drift) ─────────────────────
     static void Report(int ticks, float tick, double hours, int worldDay, double wallSec,
         int transitions, int decodes, int decodeErrors, Dictionary<string, int> byTop,
-        double[] resolveMs, double[] selectMs, List<double> decodeMs, Dictionary<string, List<double>> decodeByExt,
+        double[] resolveMs, double[] selectMs, IReadOnlyList<double> decodeMs, IReadOnlyDictionary<string, List<double>> decodeByExt,
         long allocResolve, long allocSelect, long allocDecode, long allocTotal,
         int g0, int g1, int g2, long heapBaseline, long rssBaseline,
         List<(double pct, long heap, long rss, double simHour)> chk)
@@ -719,37 +545,27 @@ internal static class Program
         : drift < 1.0 ? "FLAT — no leak"
         : "grew once then PLATEAUED (buffers/caches) — no ongoing leak";
 
-    static void PrintLatency(string label, double[] samples)
+    static void PrintLatency(string label, IReadOnlyList<double> samples)
     {
-        if (samples.Length == 0) { Console.WriteLine($"   {label}: (none)"); return; }
-        var s = (double[])samples.Clone(); Array.Sort(s);
+        if (samples.Count == 0) { Console.WriteLine($"   {label}: (none)"); return; }
+        var s = samples.ToArray(); Array.Sort(s);
         Console.WriteLine($"   {label}: p50 {Pct(s, 50),7:F3}ms  p95 {Pct(s, 95),7:F3}ms  p99 {Pct(s, 99),7:F3}ms  max {s[s.Length - 1],7:F3}ms  mean {s.Average(),7:F3}ms");
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
-    static MixerMode ParseMixer(string s)
+    static SessionMixerMode ParseMixer(string s)
     {
         switch (s.ToLowerInvariant())
         {
-            case "off": return MixerMode.Off;
-            case "headless": return MixerMode.Headless;
-            case "realtime": case "real": return MixerMode.Realtime;
-            default: Console.WriteLine($"(unknown --mixer '{s}', using headless)"); return MixerMode.Headless;
+            case "off": return SessionMixerMode.Off;
+            case "headless": return SessionMixerMode.Headless;
+            case "realtime": case "real": return SessionMixerMode.Realtime;
+            default: Console.WriteLine($"(unknown --mixer '{s}', using headless)"); return SessionMixerMode.Headless;
         }
-    }
-
-    static float LoudGain(TrackLoudness m)
-    {
-        if (!m.Ok) return 1f;
-        double g = Math.Pow(10.0, (LoudnessTargetLufs - m.Lufs) / 20.0);
-        double peakLimit = m.Peak > 0.0 ? 1.0 / m.Peak : 4.0;   // linear-peak clip guard
-        if (g > peakLimit) g = peakLimit;
-        return (float)Math.Max(0.05, Math.Min(4.0, g));
     }
 
     static long WorkingSet(Process p) { p.Refresh(); return p.WorkingSet64; }
 
-    static double Ms(long startTicks) => (Stopwatch.GetTimestamp() - startTicks) * 1000.0 / Stopwatch.Frequency;
     static double Mb(long bytes) => bytes / 1024.0 / 1024.0;
     static string Sign(double v) => (v >= 0 ? "+" : "") + v.ToString("F2");
 
@@ -765,14 +581,6 @@ internal static class Program
         if (sorted.Length == 0) return 0;
         int idx = (int)Math.Ceiling(p / 100.0 * sorted.Length) - 1;
         return sorted[Math.Max(0, Math.Min(sorted.Length - 1, idx))];
-    }
-
-    static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
-        for (int i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "ContextMusicManager.csproj"))) return dir.FullName;
-        return null;
     }
 
     static void Usage() => Console.WriteLine(
