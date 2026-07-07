@@ -82,7 +82,7 @@ namespace CMM
 
         // v23 — live emitter reverb (room reflections) from the managed room probe. wet 0 = off.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_emitter_reverb(float wet, float room, float damp);
+        internal static extern void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan);
 
         // v24 — the world-radio's OWN master (game music slider × Radio context volume), separate from
         // the music master so the radio isn't scaled by VolumeModifier or the current music context.
@@ -276,9 +276,9 @@ namespace CMM
         }
 
         // Push the live emitter reverb (room reflections) from the room probe. wet 0 = off. Every tick.
-        public void SetEmitterReverb(float wet, float room, float damp)
+        public void SetEmitterReverb(float wet, float room, float damp, float rangeMult, float pan)
         {
-            NativeMix.cmm_mix_set_emitter_reverb(wet, room, damp);
+            NativeMix.cmm_mix_set_emitter_reverb(wet, room, damp, rangeMult, pan);
         }
 
         // Push the world-radio's own master (game music slider × Radio context volume). Every tick.

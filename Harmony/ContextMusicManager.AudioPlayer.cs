@@ -549,6 +549,19 @@ namespace CMM
             if (CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(nextFile))
                 CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(nextFile));
 
+            // N-ahead: also pre-measure a few MORE of this context's tracks so a chain of short tracks can't
+            // outrun the measurement (the exact next is measured above; these top it up to LoudnessMeasureAhead).
+            // Sampled from the snapshot directly — side-effect-free, so it never disturbs PickNextFile's
+            // no-repeat history. RequestPrewarm no-ops on already-measured / in-flight files.
+            int extra = CMMConfig.LoudnessMeasureAhead - 1;
+            if (extra > 0 && CMMConfig.LoudnessNormalizationEnabled
+                && cache.directorySnapshot != null && cache.directorySnapshot.Length > 1)
+            {
+                string[] snap = cache.directorySnapshot;
+                for (int k = 0; k < extra; k++)
+                    RequestPrewarm(snap[UnityEngine.Random.Range(0, snap.Length)]);
+            }
+
             var ps = new PreStagedAdvance
             {
                 Context = contextName,

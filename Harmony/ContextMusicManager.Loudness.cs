@@ -172,7 +172,19 @@ namespace CMM
         // delayed by one (low-priority) decode pass. That delay is intentional — see
         // StartMeasure: we favor a smooth frame rate over an instant start, so an
         // unscanned track waits to begin rather than stuttering the game as it scans.
-        private IEnumerator EnsureLoudnessMeasured(string filePath)
+        // Static entry so ANY source can ask that `file` be measured AHEAD of play — background,
+        // dedup'd (cache + in-flight), settles into whatever live voice ends up playing it. No-op if
+        // off, already measured, or already in flight. Used by the N-ahead look-ahead on both the main
+        // context player and the world-emitter station.
+        internal static void RequestPrewarm(string file)
+        {
+            if (!CMMConfig.LoudnessNormalizationEnabled || string.IsNullOrEmpty(file)) return;
+            if (LoudnessStore.IsMeasured(file)) return;
+            if (_loudnessInFlight.ContainsKey(file)) return;
+            CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(file));
+        }
+
+        private static IEnumerator EnsureLoudnessMeasured(string filePath)
         {
             if (!CMMConfig.LoudnessNormalizationEnabled || string.IsNullOrEmpty(filePath)) yield break;
 
@@ -198,8 +210,10 @@ namespace CMM
             {
                 LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak);
                 CMMConfig.D($"[CMM] Loudness (block) {Path.GetFileName(filePath)}: {res.Lufs:F1} LUFS");
-                // If this is the track already playing (started un-normalized), settle the gain in.
+                // If this is the track already playing (started un-normalized), settle the gain in —
+                // for the main context voice AND the world-emitter voice (whichever is airing it).
                 SettleTrackGainIntoLiveVoice(filePath);
+                EmitterAudioLayer.SettleLoudness(filePath);
             }
         }
 
@@ -283,6 +297,10 @@ namespace CMM
             // Protect tracks mid-measure (their path isn't in a cache field yet) so a sweep
             // can't evict a measurement the instant before its track is loaded.
             foreach (var p in _loudnessInFlight.Keys) _loudnessKeepScratch.Add(p);
+            // The world-emitter station's voice + up-next queue aren't context cache entries, so protect
+            // them too — otherwise the sweep evicts what the station's look-ahead just measured, and the
+            // per-tick prewarm re-decodes it forever.
+            EmitterAudioLayer.AppendLoudnessKeep(_loudnessKeepScratch);
 
             LoudnessStore.RetainOnly(_loudnessKeepScratch);
         }

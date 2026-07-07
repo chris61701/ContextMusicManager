@@ -39,6 +39,7 @@ namespace CMM
                 CMMConfig.LoudnessNormalizationEnabled = ReadBool (root, "LoudnessNormalizationEnabled", CMMConfig.LoudnessNormalizationEnabled);
                 CMMConfig.LoudnessTargetLufs           = ReadFloat(root, "LoudnessTargetLufs",           CMMConfig.LoudnessTargetLufs);
                 CMMConfig.LoudnessMaxBoostDb           = ReadFloat(root, "LoudnessMaxBoostDb",           CMMConfig.LoudnessMaxBoostDb);
+                CMMConfig.LoudnessMeasureAhead         = ReadInt  (root, "LoudnessMeasureAhead",         CMMConfig.LoudnessMeasureAhead);
 
                 CMMConfig.EnemyDetectRange                = ReadFloat(root, "EnemyDetectRange",                 CMMConfig.EnemyDetectRange);
                 CMMConfig.PlayerDetectRange                = ReadFloat(root, "PlayerDetectRange",                CMMConfig.PlayerDetectRange);
@@ -93,10 +94,17 @@ namespace CMM
                 CMMConfig.WorldEmitterOcclusion         = ReadBool (root, "WorldEmitterOcclusion",         CMMConfig.WorldEmitterOcclusion);
                 CMMConfig.WorldEmitterOcclusionWallDistance = ReadFloat(root, "WorldEmitterOcclusionWallDistance", CMMConfig.WorldEmitterOcclusionWallDistance);
                 CMMConfig.WorldEmitterOcclusionMaxDistance  = ReadFloat(root, "WorldEmitterOcclusionMaxDistance",  CMMConfig.WorldEmitterOcclusionMaxDistance);
+                CMMConfig.WorldEmitterOcclusionHardStop     = ReadFloat(root, "WorldEmitterOcclusionHardStop",     CMMConfig.WorldEmitterOcclusionHardStop);
                 CMMConfig.WorldEmitterPathRouting       = ReadBool (root, "WorldEmitterPathRouting",       CMMConfig.WorldEmitterPathRouting);
                 CMMConfig.WorldEmitterFloodRadius       = ReadInt  (root, "WorldEmitterFloodRadius",       CMMConfig.WorldEmitterFloodRadius);
+                CMMConfig.WorldEmitterOcclusionDirectional = ReadBool (root, "WorldEmitterOcclusionDirectional", CMMConfig.WorldEmitterOcclusionDirectional);
                 CMMConfig.WorldEmitterReverbEnabled     = ReadBool (root, "WorldEmitterReverbEnabled",     CMMConfig.WorldEmitterReverbEnabled);
                 CMMConfig.WorldEmitterReverbWet         = ReadFloat(root, "WorldEmitterReverbWet",         CMMConfig.WorldEmitterReverbWet);
+                CMMConfig.WorldEmitterReverbDecay       = ReadFloat(root, "WorldEmitterReverbDecay",       CMMConfig.WorldEmitterReverbDecay);
+                CMMConfig.WorldEmitterReverbRange       = ReadFloat(root, "WorldEmitterReverbRange",       CMMConfig.WorldEmitterReverbRange);
+                CMMConfig.WorldEmitterReverbOcclusion   = ReadFloat(root, "WorldEmitterReverbOcclusion",   CMMConfig.WorldEmitterReverbOcclusion);
+                CMMConfig.WorldEmitterReverbRangeMult   = ReadFloat(root, "WorldEmitterReverbRangeMult",   CMMConfig.WorldEmitterReverbRangeMult);
+                CMMConfig.WorldEmitterReverbPan         = ReadFloat(root, "WorldEmitterReverbPan",         CMMConfig.WorldEmitterReverbPan);
 
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);

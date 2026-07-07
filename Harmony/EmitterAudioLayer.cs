@@ -29,6 +29,14 @@ namespace CMM
         private static float _nextPoolCheck; // throttles the change-signature stat (recursive folders are pricey)
         private const float PoolCheckInterval = 2f;   // matches the context file-watch cadence
         private static readonly System.Random _rng = new System.Random();
+        // Loudness normalization for the diegetic station. _voiceTrack is the file the live voice is
+        // playing (so a measurement that lands after Start can settle its gain in); _voiceGainApplied is
+        // the gain currently on the voice. _stationUpNext is the pre-picked, pre-MEASURED queue of the next
+        // few tracks (LoudnessMeasureAhead deep) so an advance plays an already-normalized track — no
+        // on-demand decode while airing.
+        private static string _voiceTrack;
+        private static float  _voiceGainApplied = 1f;
+        private static readonly List<string> _stationUpNext = new List<string>();
 
         // ── Station clock (continuity) ──────────────────────────────────────────────────────────────
         // The station "keeps broadcasting" on a wall-clock playhead even while out of range, so rejoining
@@ -58,7 +66,20 @@ namespace CMM
         // Decision + point-set refresh cadence (4 Hz). The listener itself is pushed every frame; this
         // only governs how fast start/stop and the in-range speaker SET react as you move.
         private const float TickInterval = 0.25f;
+        private const float DoorTickInterval = 0.05f;   // ~20 Hz while a door is mid-swing (tight fade/mute timing)
         private static float _nextTick;
+        private static bool  _forceRefresh;    // an acoustic change (door toggle) fired → run the next refresh a frame early instead of waiting up to 250 ms (main-thread only)
+        private static float _nextReverbLog;   // throttle for the reverb diagnostic (DebugLogging only)
+
+        // True while the station voice is live. Read by the door hook so it only pokes when there's something to update.
+        internal static bool HasActiveVoice => _voiceId != 0;
+
+        // Called from the door Harmony hook (Patch_DoorAcousticChange) the instant a door's open/closed state
+        // flips. Just requests that the 4 Hz decision/occlusion tick run on the next frame rather than waiting
+        // out the interval — so the occlusion re-floods with the door's new state immediately and the ~1 s
+        // native gain glide starts WITH the swing instead of finishing after it.
+        internal static void NotifyAcousticChange() => _forceRefresh = true;
+        private static float _revWetSmooth, _revRoomSmooth;   // reverb inertia (EMA of the pushed wet/room)
 
         internal static void Tick()
         {
@@ -79,24 +100,31 @@ namespace CMM
             {
                 PushListener(player);
 
-                // Per-frame destruction/range re-check so smashing a speaker cuts the station promptly
-                // instead of waiting for the 4 Hz decision tick below. Only revalidates the already-
-                // tracked speakers (cheap); the POI enumeration/scan stays throttled in Poll(). If the
-                // speakers feeding the voice are gone (destroyed) or all out of range, stop now.
+                // Per-frame destruction re-check so smashing a speaker cuts the station promptly instead of
+                // waiting for the 4 Hz decision tick below. Only revalidates the already-tracked speakers
+                // (cheap); the POI enumeration/scan stays throttled in Poll().
+                // We release the voice ONLY when the speakers are truly GONE (destroyed / chunk unloaded,
+                // Count == 0) — NOT merely because we walked out of range. Walking out of range keeps the
+                // voice WARM: the native distance falloff clamps it to silence past WorldEmitterRange
+                // (cmm_out att = 0 for dEff ≥ max), and the per-frame PushListener above keeps that current
+                // as we move. That way re-entering range is seamless — no re-open + mid-song re-seek, which
+                // was a main-thread hitch (a far dr_mp3 seek scans from 0; ~133 ms at 105 s in).
                 World w = GameManager.Instance?.World;
                 if (w != null)
                 {
                     EmitterRegistry.RefreshSnapshot(w, player.position);
-                    if (EmitterRegistry.Count == 0 || EmitterRegistry.NearestDist > CMMConfig.WorldEmitterRange)
-                    {
-                        Stop();
-                        return;
-                    }
+                    if (EmitterRegistry.Count == 0) { Stop(); return; }
                 }
             }
 
+            // A door toggled since the last tick (hook set the flag) → collapse the up-to-250 ms wait so the
+            // occlusion re-floods with the door's new open/closed state this frame.
+            if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; }
             if (Time.realtimeSinceStartup < _nextTick) return;
-            _nextTick = Time.realtimeSinceStartup + TickInterval;
+            // While a door is mid-swing, refresh fast (~20 Hz) so its openness is sampled tightly — the fade
+            // starts promptly on open and the mute is precise on close — instead of in 250 ms steps. Back to
+            // 4 Hz once all doors settle (rooms/speaker-set change slowly; the flood cost stays bounded).
+            _nextTick = Time.realtimeSinceStartup + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
 
             // Push the live spatial-curve tuning from config (hot-reloaded), so edits to plateau /
             // range / falloff / muffle in settings.xml apply in-game without a restart.
@@ -109,31 +137,49 @@ namespace CMM
             if (_voiceId == 0) StationSyncIdle();
             else MaintainPlayingStation(player);
 
-            EmitterRegistry.Poll();
-            bool inRange = EmitterRegistry.Count > 0
-                           && EmitterRegistry.NearestDist <= CMMConfig.WorldEmitterRange;
+            MaintainUpNext();   // keep the next few tracks pre-picked + measured so an advance is normalized
 
-            if (inRange && _voiceId == 0) Start(player, StartFade());
-            else if (!inRange && _voiceId != 0) Stop();
-            else if (_voiceId != 0)
+            EmitterRegistry.Poll();
+            bool hasEmitter = EmitterRegistry.Count > 0;
+            float nearest = EmitterRegistry.NearestDist;
+            bool inRange = hasEmitter && nearest <= CMMConfig.WorldEmitterRange;
+            // The wet reverb reaches farther than the dry (out to range × ReverbRangeMult), so the voice is
+            // still "doing something audible" in that outer ring even when the dry has faded to 0. Run the
+            // room probe + occlusion out to whichever is larger; past THAT everything is truly silent and we
+            // let the warm voice keep decoding untouched (cheap — no flood, no probe).
+            float audibleR = CMMConfig.WorldEmitterRange;
+            if (CMMConfig.WorldEmitterReverbEnabled)
+                audibleR *= Mathf.Max(1f, CMMConfig.WorldEmitterReverbRangeMult);
+            bool audible = hasEmitter && nearest <= audibleR;
+
+            if (_voiceId == 0)
             {
-                if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(_voiceId, out _, out _, out _))
-                {
-                    // The voice retired while still in range = the current track finished. The decoder's
-                    // EOF is the authoritative "track over" signal, so advance the station clock past it
-                    // and play the next track (short fade, near-seamless) — never loop one song.
-                    CMMConfig.D("[CMM] World emitter: track ended → next track.");
-                    _voiceId = 0;
-                    ForceAdvanceStation();
-                    Start(player, AdvanceFade);
-                }
-                else
-                {
-                    int count = BuildPointBuffer(player);   // all in-range speakers + their occlusion
-                    CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, count);
-                    PushReverb(player);                     // probe the room + drive the reverb
-                }
+                if (inRange) Start(player, StartFade());
             }
+            else if (!hasEmitter)
+            {
+                Stop();   // speakers gone (destroyed / chunk unloaded) → release the warm voice
+            }
+            else if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(_voiceId, out _, out _, out _))
+            {
+                // The voice retired = the current track finished (decoder EOF is authoritative). Advance the
+                // station clock and start the next track. We do this even while out of range so the warm
+                // voice stays on the SAME timeline as reality — the next re-entry rejoins seamlessly instead
+                // of having to seek far into a mid-song offset. The fresh track opens at ~frame 0 (cheap).
+                CMMConfig.D("[CMM] World emitter: track ended → next track.");
+                _voiceId = 0;
+                ForceAdvanceStation();
+                Start(player, AdvanceFade);
+            }
+            else if (audible)
+            {
+                int count = BuildPointBuffer(player);   // all in-range speakers + their occlusion
+                CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, count);
+                PushReverb(player);                     // probe the room + drive the reverb
+            }
+            // else: voice live but out of the whole audible radius — keep it warm and in sync, but skip the
+            // occlusion flood + room probe. Distance falloff (updated by the per-frame PushListener) holds
+            // it silent; re-entry resumes the heavy update with no re-open/re-seek.
         }
 
         // Fill _pts/_ptGain with the world-centre and occlusion gain of every detected speaker within
@@ -217,14 +263,35 @@ namespace CMM
             World world = GameManager.Instance?.World;
             if (!CMMConfig.WorldEmitterReverbEnabled || world == null)
             {
-                CmmMixer.Instance?.SetEmitterReverb(0f, 0.5f, 0.5f);
+                CmmMixer.Instance?.SetEmitterReverb(0f, 0.5f, 0.5f, 1f, 0f);
                 return;
             }
             Vector3 ear = ListenerWorldPos(player);
-            EmitterAcoustics.ProbeRoom(ear, world, out float avgDist, out float reflect, out float openFrac);
-            EmitterAcoustics.ComputeReverb(avgDist, reflect, openFrac, out float wet, out float room, out float damp);
-            wet *= CMMConfig.WorldEmitterReverbWet;   // master level
-            CmmMixer.Instance?.SetEmitterReverb(wet, room, damp);
+            EmitterAcoustics.ProbeRoom(ear, world, out float avgDist, out float roomSize, out float reflect, out float openFrac, out bool roofed);
+            // Prefer the FLOOD's connected-air extent for room SIZE: it walks around corners/tunnels, so a
+            // winding corridor reads its real length instead of the ray probe's short sightline. Take whichever
+            // sees the larger space (rays can reach farther than the flood box in a straight open shot).
+            // Enclosure & reflectivity stay from the ray probe — those it measures fine. Only when the flood ran.
+            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && EmitterAcoustics.AirCellCount > 0)
+                roomSize = Mathf.Max(roomSize, EmitterAcoustics.AirRoomSize);
+            EmitterAcoustics.ComputeReverb(roomSize, reflect, openFrac, roofed, out float wet, out float room, out float damp);
+            wet  *= CMMConfig.WorldEmitterReverbWet;     // LEVEL lever
+            // Fade the wet when the speakers are SOLID-sealed off (no air path) so reflections don't leak
+            // through a wall; ReverbSeal=0 (an open corridor/corner) leaves it untouched so the wet still
+            // carries around bends. WorldEmitterReverbOcclusion scales how hard the seal bites.
+            wet  *= 1f - CMMConfig.WorldEmitterReverbOcclusion * EmitterAcoustics.ReverbSeal;
+            room *= CMMConfig.WorldEmitterReverbDecay;   // TAIL-length lever (independent of level)
+            // Reverb has inertia — a box you step behind for a moment shouldn't snap the room off. EMA the
+            // pushed wet/room (~1.5 s glide at the 4 Hz tick) so the reverb eases as the space changes.
+            _revWetSmooth  += (wet  - _revWetSmooth)  * 0.18f;
+            _revRoomSmooth += (room - _revRoomSmooth) * 0.18f;
+            if (Time.realtimeSinceStartup >= _nextReverbLog)
+            {
+                _nextReverbLog = Time.realtimeSinceStartup + 1.5f;
+                CMMConfig.D($"[CMM] Reverb: enc={1f - openFrac:0.00} rayS={avgDist:0.0} airSize={EmitterAcoustics.AirRoomSize:0.0} airCells={EmitterAcoustics.AirCellCount} size={roomSize:0.0} reflect={reflect:0.00} " +
+                            $"roofed={roofed} seal={EmitterAcoustics.ReverbSeal:0.00} nearest={EmitterRegistry.NearestDist:0.0}m → wet={_revWetSmooth:0.00} room={_revRoomSmooth:0.00} damp={damp:0.00}");
+            }
+            CmmMixer.Instance?.SetEmitterReverb(_revWetSmooth, _revRoomSmooth, damp, CMMConfig.WorldEmitterReverbRangeMult, CMMConfig.WorldEmitterReverbPan);
         }
 
         // The listener's world-space position (camera ear), matching block coords. Used for occlusion
@@ -288,13 +355,19 @@ namespace CMM
             Vector3 pos = NearestWorldPos();
             // min/max here seed the voice; the live spatializer actually uses the tuning globals
             // (PushTuning), so range/plateau stay hot-tunable while a voice is playing.
+            // Normalize the diegetic station too: apply the track's loudness gain (1.0 if off / not yet
+            // measured). If it isn't measured, play un-normalized now and request a measure — SettleLoudness
+            // eases the gain in the moment it lands. The N-ahead queue means this is usually already ready.
+            float trackGain = LoudnessStore.GetTrackGain(file);
             long id = CmmMixer.GetOrCreate().PlayEmitter(dec, kind, srcRate, srcCh, total,
                                                          fadeIn, loop: false,
                                                          pos.x, pos.y, pos.z,
                                                          CMMConfig.WorldEmitterMinDistance, CMMConfig.WorldEmitterRange,
-                                                         trackGain: 1f, startFrame: startFrame);
+                                                         trackGain: trackGain, startFrame: startFrame);
             if (id == 0) return;
             _voiceId = id;
+            _voiceTrack = file; _voiceGainApplied = trackGain;
+            ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if it wasn't measured yet
             PushTuning();           // apply the curve before the first render block
             PushEmitterMaster();    // set the radio level before the first block
             PushListener(player);   // prime the listener so the very first render block is already positioned
@@ -354,12 +427,23 @@ namespace CMM
             try { return File.Exists(file); } catch { return true; }
         }
 
-        // Put a fresh random track on air at wall-time `airedAt`, probing its length for the clock.
+        // Put the next track on air at wall-time `airedAt`, probing its length for the clock. Prefers the
+        // pre-picked (already-measured) up-next queue so an advance airs a normalized track; falls back to a
+        // fresh random pick when the queue is empty (e.g. drained by a long out-of-range catch-up) or the
+        // popped track has since left the pool.
         private static void PickStationTrack(float airedAt)
         {
             EnsurePool();
             _stationAiredAt = airedAt;
-            _stationTrack = (_pool != null && _pool.Length > 0) ? _pool[_rng.Next(_pool.Length)] : null;
+            _stationTrack = null;
+            while (_stationUpNext.Count > 0 && _stationTrack == null)
+            {
+                string cand = _stationUpNext[0];
+                _stationUpNext.RemoveAt(0);
+                if (PoolContains(cand)) _stationTrack = cand;   // else it left the pool — skip it
+            }
+            if (_stationTrack == null && _pool != null && _pool.Length > 0)
+                _stationTrack = _pool[_rng.Next(_pool.Length)];
             _stationFrames = 0; _stationRate = 0;
             if (_stationTrack != null) ProbeLength(_stationTrack, out _stationFrames, out _stationRate);
         }
@@ -399,6 +483,7 @@ namespace CMM
                 _poolSource = src;
                 _poolSig = SourceSignature(src, recursive);
                 _stationTrack = null;   // source changed → restart the station
+                _stationUpNext.Clear();  // the queued upcoming tracks belong to the old source
                 return;
             }
 
@@ -468,6 +553,49 @@ namespace CMM
             CmmMixer.Instance?.RemoveEmitter(_voiceId, StopFade);
             CMMConfig.D("[CMM] World emitter station stopped.");
             _voiceId = 0;
+            _voiceTrack = null;
+        }
+
+        // A measurement for `file` just landed — if the live station voice is airing that exact track,
+        // ease its loudness gain in (it started at whatever gain was known at Start, often neutral 1.0).
+        // Called from the shared loudness pipeline (ContextMusicManager.EnsureLoudnessMeasured). Main-thread.
+        internal static void SettleLoudness(string file)
+        {
+            if (_voiceId == 0 || string.IsNullOrEmpty(file)) return;
+            if (!string.Equals(_voiceTrack, file, StringComparison.OrdinalIgnoreCase)) return;
+            float g = LoudnessStore.GetTrackGain(file);
+            if (Mathf.Abs(g - _voiceGainApplied) < 1e-4f) return;
+            _voiceGainApplied = g;
+            CmmMixer.Instance?.SetVoiceTrackGain(_voiceId, g, 0.2f);   // short ramp = ease, no lurch
+        }
+
+        // The station's loudness working set — the on-air track(s) plus the whole pre-measured up-next
+        // queue — appended to the loudness eviction keep-set so RetainOnly does NOT drop measurements the
+        // station is about to use. Without this the look-ahead prewarm and the per-tick sweep fight: each
+        // tick prewarms the queue, the sweep evicts it (the emitter voice is not a context cache entry),
+        // and next tick re-decodes it — a runaway re-measure loop. Main-thread only, like the sweep.
+        internal static void AppendLoudnessKeep(List<string> dst)
+        {
+            if (_voiceTrack != null)   dst.Add(_voiceTrack);
+            if (_stationTrack != null) dst.Add(_stationTrack);
+            for (int i = 0; i < _stationUpNext.Count; i++) dst.Add(_stationUpNext[i]);
+        }
+
+        // Keep the pre-picked up-next queue filled LoudnessMeasureAhead deep and request a background
+        // measurement for the airing track + every queued track, so an advance always plays an
+        // already-normalized track (no on-demand decode). Cheap + dedup'd: RequestPrewarm no-ops on
+        // already-measured / in-flight files. Called each tick.
+        private static void MaintainUpNext()
+        {
+            if (!CMMConfig.LoudnessNormalizationEnabled) return;
+            if (_pool == null || _pool.Length == 0) return;
+            int ahead = CMMConfig.LoudnessMeasureAhead;
+            if (ahead < 0) ahead = 0;
+            while (_stationUpNext.Count < ahead)
+                _stationUpNext.Add(_pool[_rng.Next(_pool.Length)]);
+            if (_stationTrack != null) ContextMusicManager.RequestPrewarm(_stationTrack);
+            for (int i = 0; i < _stationUpNext.Count; i++)
+                ContextMusicManager.RequestPrewarm(_stationUpNext[i]);
         }
 
         // ── Config via the "Radio" context ──────────────────────────────────────────────────────────

@@ -23,28 +23,39 @@
                     distance (~24 blocks to full dullness), NOT Range — so it stays effective at large
                     Range, and a wall's virtual distance audibly dulls the tone.
        Occlusion:   walls make a speaker sound FARTHER (quieter + duller on the same curve), not a hard
-                    cut, so it fades gradually instead of all-or-nothing. WallDistance = blocks of virtual
-                    distance added per solid wall on the line; MaxDistance caps it (a buried speaker stays
-                    faintly audible). Occlusion false = off. -->
+                    cut, so it fades gradually instead of all-or-nothing. Two curves shape it:
+                    WallDistance = virtual blocks a full solid wall adds. MaxDistance = the SOFT-KNEE floor
+                    (tanh): stacking walls muffles with DIMINISHING RETURNS toward this, never silent by
+                    muffle alone (a box you stand behind stays audible). HardStop = virtual blocks of
+                    SOLID actually crossed at which it cuts to TRUE silence (a sealed thick vault goes
+                    dead) — keyed to material only, so an open-air detour never triggers it; denser
+                    material seals in fewer blocks. Occlusion false = off. -->
   <WorldEmitterMinDistance>1</WorldEmitterMinDistance>
-  <WorldEmitterFalloff>4</WorldEmitterFalloff>
-  <WorldEmitterMuffle>0.7</WorldEmitterMuffle>
+  <WorldEmitterFalloff>2.5</WorldEmitterFalloff>
+  <WorldEmitterMuffle>0.9</WorldEmitterMuffle>
   <!-- StereoWidth 0..1: how hard a left/right speaker pans. 1 = full pan (far ear can drop to silence);
        lower keeps the sound in BOTH ears at different volumes (like a real source at 90°). ~0.8 = natural. -->
   <WorldEmitterStereoWidth>0.8</WorldEmitterStereoWidth>
   <WorldEmitterOcclusion>true</WorldEmitterOcclusion>
-  <WorldEmitterOcclusionWallDistance>18</WorldEmitterOcclusionWallDistance>
+  <WorldEmitterOcclusionWallDistance>35</WorldEmitterOcclusionWallDistance>
   <WorldEmitterOcclusionMaxDistance>30</WorldEmitterOcclusionMaxDistance>
+  <WorldEmitterOcclusionHardStop>68</WorldEmitterOcclusionHardStop>
   <!-- PathRouting: when the direct line to a speaker is blocked, flood-fill through open air to find
        whether sound can reach you another way (around a wall, up a stairwell) and how far it travels,
        so it routes through openings instead of going near-silent. Deterministic (no ray noise).
        FloodRadius = how many blocks the air search reaches from the ear (bigger = finds longer ways
        around, more CPU; capped at 32). Set PathRouting false for direct-line only.
-       NOTE: FloodRadius defaults to 1 (flood effectively OFF → pure straight-line occlusion), which
-       sounds best now that reverb carries the "around the corner" energy. Path routing is slated for
-       removal — the reverb supersedes it. Raise FloodRadius to re-enable the go-around if you want it. -->
+       A speaker beyond FloodRadius blocks routes to the box edge then straight-lines the rest (boundary
+       blend), so there's no volume snap at the edge. Set PathRouting false for direct-line only (A/B).
+       NOTE: a BIG FloodRadius follows a hallway around a corner and keeps the direct sound alive, which
+       masks the reverb; a small one lets the dry fade so reverb blooms. Default 8 is a middle ground —
+       dial toward 1 for reverb-forward, toward 24 for routing-forward. Hot-reloads live. -->
   <WorldEmitterPathRouting>true</WorldEmitterPathRouting>
-  <WorldEmitterFloodRadius>1</WorldEmitterFloodRadius>
+  <WorldEmitterFloodRadius>12</WorldEmitterFloodRadius>
+  <!-- Directional occlusion: when the straight line to a speaker runs through solid rock, the sound is
+       re-aimed to arrive from the OPEN ROUTE (down the corridor) instead of straight through the wall.
+       Only the direction changes; loudness/muffle are unchanged. Needs PathRouting on. Hot-reloads. -->
+  <WorldEmitterOcclusionDirectional>true</WorldEmitterOcclusionDirectional>
   <!-- Reverb: a room probe (rays from your ear measuring how far and what material the surfaces around
        you are) estimates how enclosed/big/reflective the space is and adds room reflections to the
        station. The reflected (wet) sound is NOT muffled by occlusion, so behind a wall the direct sound
@@ -53,6 +64,29 @@
        ReverbWet = master wet level 0..1 (0 = off). Size/decay/damping are estimated automatically. -->
   <WorldEmitterReverbEnabled>true</WorldEmitterReverbEnabled>
   <WorldEmitterReverbWet>0.6</WorldEmitterReverbWet>
+  <!-- ReverbDecay: tail LENGTH 0..1, independent of Wet (level). Lower = shorter/tighter reverb, higher
+       = a longer ring. Wet = how loud the reflections are; Decay = how long they hang. Hot-reloads. -->
+  <WorldEmitterReverbDecay>0.6</WorldEmitterReverbDecay>
+  <!-- ReverbRange: how far (blocks) the room probe reaches before a surface reads as "open sky". Enclosure
+       and room size are measured against this, so a space BIGGER than it reads as outdoors and goes dry
+       (why a large cave lost its reverb). Raise it for big caverns; cost is longer ray marches per reverb
+       tick (cheap at the few-Hz rate). Hot-reloads. -->
+  <WorldEmitterReverbRange>64</WorldEmitterReverbRange>
+  <!-- ReverbOcclusion 0..1: how much a SOLID wall between you and the speakers mutes the reverb. 0 = wet
+       carries through anything (a radio outside a sealed room bleeds in); 1 = a fully walled-off speaker's
+       reverb is silenced. Keyed to the flood's SOLID cost, so reflections still carry around an open-air
+       corner (no material crossed). Winding corridors the flood can't route read as sealed, so keep it
+       moderate. Hot-reloads. -->
+  <WorldEmitterReverbOcclusion>0.5</WorldEmitterReverbOcclusion>
+  <!-- ReverbRangeMult (≥1): the reverb reaches this many times FARTHER than the dry Range, so a brief step
+       past the dry range in a connected cave doesn't drop the tail. Safe outdoors (no enclosure = no wet, so
+       a bigger reach carries nothing). 1 = reverb stops at the dry range; 1.5–2 bridges cave dips. Hot-reloads. -->
+  <WorldEmitterReverbRangeMult>1.5</WorldEmitterReverbRangeMult>
+  <!-- ReverbPan 0..1: how much the reverb is panned toward the source's traced (air-route) bearing. 0 = fully
+       diffuse (surrounds you); 1 = fully located. A middle value keeps the reverb spacious but leans it toward
+       the source, so at distance — where the wet dominates the faded dry — you can still tell which way the
+       sound comes from (in a cave, down the tunnel toward the radio). Hot-reloads. -->
+  <WorldEmitterReverbPan>0.5</WorldEmitterReverbPan>
 
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back
@@ -71,6 +105,11 @@
   <LoudnessNormalizationEnabled>true</LoudnessNormalizationEnabled>
   <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
   <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
+  <!-- MeasureAhead: how many upcoming tracks to keep loudness-measured AHEAD of playback, per source
+       (the context player and the world-emitter radio each keep this many ready). Higher = more tracks
+       pre-normalized so nothing decodes on-demand while playing (smoother on huge / slow-storage
+       libraries), at a little more background decoding. Default 3. Hot-reloads. -->
+  <LoudnessMeasureAhead>3</LoudnessMeasureAhead>
 
   <!-- Fade between outgoing and incoming context instead of cutting immediately -->
   <CrossfadeEnabled>true</CrossfadeEnabled>

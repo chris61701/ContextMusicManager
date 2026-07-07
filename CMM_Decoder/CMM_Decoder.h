@@ -359,7 +359,7 @@ void cmm_out_set_emitter_spatial(cmm_out* o, const float* lisPos3, const float* 
                                  float stereoWidth);
 
 /* Relay the live emitter reverb params (from the managed room probe). wet 0 = off. Lock-free. */
-void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp);
+void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, float rangeMult, float pan);
 
 /* ── Format converter (resample + channel map) ────────────────────────────
  * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
@@ -470,8 +470,10 @@ CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float fall
 
 /* v23 — set the LIVE emitter reverb params from the managed room probe. wet = master wet level
  * (0 = off), room = size→decay/tail, damp = HF damping (dead room = darker/shorter). All 0..1.
+ * rangeMult (≥1) = wet audible range as a multiple of the dry range (reverb reaches farther than the dry).
+ * pan (0..1) = how much the diffuse reverb is panned toward the source's traced bearing (0 = diffuse).
  * Lock-free; call every probe tick. Applies to the single shared station. */
-CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp);
+CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan);
 
 /* v24 — set the EMITTER (world-radio) master volume, separate from the music master. Feed the game's
  * music slider × the Radio context's own volume. Clamped to >= 0. Lock-free; call every tick. */

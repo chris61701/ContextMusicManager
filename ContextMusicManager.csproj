@@ -184,6 +184,7 @@
     <Compile Include="Harmony\EmitterRegistry.cs" />
     <Compile Include="Harmony\EmitterAudioLayer.cs" />
     <Compile Include="Harmony\EmitterAcoustics.cs" />
+    <Compile Include="Harmony\EmitterDoorHook.cs" />
     <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />
     <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -234,6 +235,10 @@
     </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(GameManagedDir)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">

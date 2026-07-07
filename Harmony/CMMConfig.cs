@@ -101,23 +101,39 @@ namespace CMM
         public static bool   WorldEmitterOcclusion         = true;
         // Occlusion is modelled as VIRTUAL DISTANCE: a wall makes the speaker sound farther (quieter +
         // duller on the same smooth curve) instead of a hard volume cut — so it fades gradually, not
-        // all-or-nothing. WallDistance = blocks of virtual distance added per solid wall on the line;
-        // MaxDistance caps it so a deeply-buried speaker stays faintly audible rather than vanishing.
+        // all-or-nothing. WallDistance = blocks of virtual distance a FULL solid wall adds on the path.
+        // Two curves shape it (see EmitterAcoustics.ComputeOcclusion):
+        //  • MaxDistance is the SOFT-KNEE ceiling: the total detour is passed through maxDist·tanh(x/maxDist)
+        //    so stacking walls gives DIMINISHING RETURNS and asymptotes to an audible floor — never silent
+        //    by muffle/detour alone (a box you stand behind stays audible).
+        //  • HardStop is a separate cut keyed ONLY to SOLID material actually transmitted through: once the
+        //    through-solid virtual distance reaches HardStop the gain is pushed past range → true silence
+        //    (a sealed thick vault goes dead), smoothstepped in from 55% so the dead-zone edge isn't a cliff.
+        //    A long OPEN-AIR detour has zero solid cost, so it never triggers this. Denser materials reach
+        //    HardStop in fewer blocks (metal ~2½, stone ~3, wood ~5 walls at the defaults).
         public static float  WorldEmitterOcclusionWallDistance = 18f;
         public static float  WorldEmitterOcclusionMaxDistance  = 30f;
+        public static float  WorldEmitterOcclusionHardStop      = 48f;
         // Path routing: when a speaker's direct line is blocked, FLOOD-FILL through open air (a portal
         // search) to find whether sound has a real way around the wall / up the stairwell, and how far
         // it has to travel — so it routes through openings instead of slamming to the floor gain. This
         // is deterministic (no ray noise). FloodRadius = how many blocks the air search reaches from
         // the ear (bigger = finds longer ways around, more CPU). Set PathRouting false for direct-only.
-        // TODO(remove path routing): the reverb stage now carries "around the corner" energy (the wet
-        // path ignores occlusion), which is what the flood was faking — and running BOTH double-counts
-        // and sounds worse. Default is FloodRadius=1 (flood effectively off → pure straight-line
-        // occlusion), which the user preferred by ear. Slated to rip out the flood entirely (RunField /
-        // the Dijkstra in EmitterAcoustics) and drop PathRouting/FloodRadius once confirmed. See the
-        // matching TODO in EmitterAcoustics.cs and [[world-emitter-audio]].
+        // NOTE (2026-07-05): path routing was briefly slated for removal, then re-enabled (BoundaryBlend
+        // smooths the search-box edge). But routing and REVERB fight: a big FloodRadius follows an open
+        // hallway around a corner, keeping the DRY alive where it should fade — which masks the wet reverb
+        // cue (the dry drop is what lets reverb bloom down a hallway). So the default is a MIDDLE value:
+        // routing reaches nearby obstacles (kills the block-shadow) but a speaker far around a corner
+        // falls out of the box → BoundaryBlend straight-lines the remainder through the wall → dry drops →
+        // reverb blooms. Hot-reloadable: dial 1 (reverb-forward) ↔ 24 (routing-forward) live to taste.
         public static bool   WorldEmitterPathRouting = true;
-        public static int    WorldEmitterFloodRadius = 1;
+        public static int    WorldEmitterFloodRadius = 8;
+        // DIRECTIONAL occlusion: when the direct line to a speaker runs through solid rock, re-aim the
+        // virtual source to the direction the sound actually ARRIVES from — the air route the flood found
+        // (down the corridor), not the straight-through-the-wall bearing. Distance/attenuation are
+        // unchanged (those already follow the air path); only the PAN is rotated, blended in by how much
+        // rock the direct line crosses. Needs PathRouting on (uses the flood field). Hot-reloadable.
+        public static bool   WorldEmitterOcclusionDirectional = true;
         // Reverb: a room probe (rays from the ear, hit distance + material) estimates how enclosed,
         // big and reflective the space is and drives a reverb on the station's reflections. The wet
         // (reflected) path is NOT attenuated by occlusion, so behind a wall the direct sound drops but
@@ -125,6 +141,32 @@ namespace CMM
         // level 0..1 (0 = dry). Room size / decay / damping are estimated automatically per space.
         public static bool   WorldEmitterReverbEnabled = true;
         public static float  WorldEmitterReverbWet     = 0.6f;
+        // ReverbDecay = tail-LENGTH lever 0..1 (scales the auto room-size → Freeverb feedback), separate
+        // from Wet (LEVEL). Lower = shorter/tighter reverb, higher = a longer ring. Two independent knobs:
+        // Wet says how loud the reflections are, Decay says how long they hang.
+        public static float  WorldEmitterReverbDecay   = 0.6f;
+        // ReverbRange = how far (blocks) the room probe's rays reach before a surface reads as "open sky".
+        // This is what enclosure/size are measured against — a space BIGGER than this reads as outdoors and
+        // the reverb fades out (why a large cave went dry). Raise it so big caverns register as enclosed;
+        // the cost is longer ray marches per reverb tick (14 rays), which is cheap at the few-Hz reverb rate.
+        public static float  WorldEmitterReverbRange   = 64f;
+        // ReverbOcclusion 0..1: how much a SOLID seal between you and the speakers mutes the reverb. 0 = wet
+        // ignores occlusion (reflections carry through anything — a radio outside a sealed vault bleeds in);
+        // 1 = a fully walled-off speaker's reverb is silenced. Because it keys off the flood's SOLID cost,
+        // reflections still carry around an open-air corner/corridor (no solid crossed) — only real material
+        // blocks them. Winding corridors the flood can't route read as sealed, so keep this moderate.
+        public static float  WorldEmitterReverbOcclusion = 0.5f;
+        // ReverbRangeMult (≥1): the reverb's audible reach as a multiple of the dry Range. The reflections
+        // carry FARTHER than the direct sound, so a brief step past the dry range in a connected cave doesn't
+        // drop the tail (it fades continuously past the dry edge instead of cutting at it). Safe in the open:
+        // with no enclosure the wet is ~0, so a bigger reach multiplies nothing. 1 = reverb stops at the dry
+        // range (old behaviour); ~1.5–2 bridges out-of-range dips in a cave. Hot-reloads.
+        public static float  WorldEmitterReverbRangeMult = 1.5f;
+        // ReverbPan 0..1: how much the (otherwise diffuse) reverb is PANNED toward the source's traced air-route
+        // bearing. 0 = fully diffuse (reflections surround you); 1 = fully located. A middle value keeps the
+        // spacious reverb but leans it toward the source, so at distance — where the wet dominates the faded
+        // dry — you can still tell which way the sound is coming from (in a cave, down the tunnel). Hot-reloads.
+        public static float  WorldEmitterReverbPan = 0.5f;
 
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track
@@ -145,6 +187,12 @@ namespace CMM
         // menu, one track per context is pre-measured (the bounded prewarm in
         // MenuPrescanDrain) so every context has a ready, normalized track for its first
         // play. Each track is only ever measured once (cached in Cache/loudness.xml).
+        // MeasureAhead: how many upcoming tracks to keep measured AHEAD of playback (per source —
+        // the main context player and the world-emitter station each keep this many ready). Higher =
+        // more tracks pre-normalized so nothing measures on-demand while playing (smoother on huge /
+        // slow-storage libraries), at the cost of a little more background decoding. 0 = measure only
+        // the track about to play. Hot-reloadable.
+        public static int LoudnessMeasureAhead = 3;
 
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
