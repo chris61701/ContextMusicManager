@@ -114,6 +114,14 @@ namespace CMM
         public static float  WorldEmitterOcclusionWallDistance = 18f;
         public static float  WorldEmitterOcclusionMaxDistance  = 30f;
         public static float  WorldEmitterOcclusionHardStop      = 48f;
+        // Cap (virtual blocks/second) on how fast a speaker's occlusion may RISE from MOVEMENT — walking
+        // out a doorway / behind a thick wall can flip the routed cost from near-clear to fully-blocked in
+        // one 4 Hz tick, and the native glide is deliberately fast for big jumps (door tuning), so the dry
+        // HARD-CUT instead of fading (log 2026-07-08 08:28:51: extra 6.8→98.4 in one tick leaving a store).
+        // With the cap, movement-driven cutoffs fade out over ~a second. DOOR events bypass it (their
+        // fast, precise response is tuned separately), and occlusion DROPS are never capped — sound
+        // ARRIVING should track the event. 0 disables the cap (old behavior).
+        public static float  WorldEmitterOcclusionFadeRate      = 50f;
         // Path routing: when a speaker's direct line is blocked, FLOOD-FILL through open air (a portal
         // search) to find whether sound has a real way around the wall / up the stairwell, and how far
         // it has to travel — so it routes through openings instead of slamming to the floor gain. This

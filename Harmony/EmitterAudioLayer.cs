@@ -63,6 +63,37 @@ namespace CMM
         private static readonly float[] _ptGain = new float[MaxPoints];   // per-speaker occlusion gain
         private static readonly float[] _ptDist = new float[MaxPoints];
 
+        // The most recent point-set push (count + when). A track ADVANCE retires and re-adds the native
+        // voice; seeding the new voice from this (same speakers, same ear, ≤ a tick old) keeps its
+        // occlusion continuous instead of starting unoccluded until the next flood lands — which burst
+        // a fully-walled speaker into the open for ~a quarter second on every advance.
+        private static int   _lastPtPushCount;
+        private static float _lastPtPushAt = -999f;
+
+        // ── Placement fade-in ("birth" ramp) ────────────────────────────────────────────────────────
+        // First-seen time per tracked speaker position. A speaker that APPEARS while the station voice
+        // is already live (a radio the player just placed next to an already-playing set) used to pop
+        // into the point set at full spatial gain. Instead its published occlusion gain carries a
+        // decaying extra virtual distance — born fully out of range, reaching its true value over the
+        // start fade — so a placed radio fades in like a fresh station start does. Keyed by block pos,
+        // pruned when the speaker leaves the snapshot (destroyed/unloaded), so re-placing re-births.
+        private static readonly Dictionary<Vector3i, float> _speakerFirstSeen = new Dictionary<Vector3i, float>();
+        private static readonly List<Vector3i> _birthScratch = new List<Vector3i>();
+
+        // ── Movement fade-out (occlusion rise limiter) ─────────────────────────────────────────────
+        // Last PUBLISHED occlusion extra per speaker, so a movement-driven RISE can be rate-limited
+        // (WorldEmitterOcclusionFadeRate, virtual blocks/s). Walking out a doorway flips the routed
+        // cost from near-clear to fully-blocked in ONE 4 Hz tick, and the native glide is deliberately
+        // fast for big jumps (door tuning) — so the dry HARD-CUT instead of fading (log 2026-07-08
+        // 08:28:51: extra 6.8→98.4 in one tick leaving a store; the lingering reverb was all that
+        // remained, which is why it read as "the reverb cut out"). Door events bypass the cap (their
+        // fast, tuned response must land with the swing); occlusion DROPS are never capped — sound
+        // ARRIVING should track the event, and the fade-in paths (fresh-start muted seed, birth ramp)
+        // are all falls. Keyed by block pos like the birth map; pruned with it.
+        private struct PublishedExtra { public float Value; public float At; }
+        private static readonly Dictionary<Vector3i, PublishedExtra> _publishedExtra = new Dictionary<Vector3i, PublishedExtra>();
+        private static float _doorEventAt = -999f;   // last door toggle (see NotifyAcousticChange)
+
         // Decision + point-set refresh cadence (4 Hz). The listener itself is pushed every frame; this
         // only governs how fast start/stop and the in-range speaker SET react as you move.
         private const float TickInterval = 0.25f;
@@ -97,7 +128,13 @@ namespace CMM
         // flips. Just requests that the 4 Hz decision/occlusion tick run on the next frame rather than waiting
         // out the interval — so the occlusion re-floods with the door's new state immediately and the ~1 s
         // native gain glide starts WITH the swing instead of finishing after it.
-        internal static void NotifyAcousticChange() => _forceRefresh = true;
+        internal static void NotifyAcousticChange()
+        {
+            _forceRefresh = true;
+            // Stamp the toggle so the occlusion fade-rate limiter stands aside: a door slam's settled
+            // (post-animation) flood lands within this window and must keep its tuned instant mute.
+            _doorEventAt = Time.realtimeSinceStartup;
+        }
         private static float _revWetSmooth, _revRoomSmooth;   // reverb inertia (EMA of the pushed carry/room)
         private static float _revLocSmooth;                   // LOCAL bus level EMA (same inertia as the carry)
         private static float _lastRevPush;                    // realtime of the previous push (dt for the EMAs)
@@ -169,6 +206,7 @@ namespace CMM
             MaintainUpNext();   // keep the next few tracks pre-picked + measured so an advance is normalized
 
             EmitterRegistry.Poll();
+            MaintainBirths();   // stamp newly-appeared speakers / prune gone ones (placement fade-in)
             bool hasEmitter = EmitterRegistry.Count > 0;
             float nearest = EmitterRegistry.NearestDist;
             bool inRange = hasEmitter && nearest <= CMMConfig.WorldEmitterRange;
@@ -183,7 +221,7 @@ namespace CMM
 
             if (_voiceId == 0)
             {
-                if (inRange) Start(player, StartFade());
+                if (inRange) Start(player, StartFade(), fresh: true);
             }
             else if (!hasEmitter)
             {
@@ -198,7 +236,7 @@ namespace CMM
                 CMMConfig.D("[CMM] World emitter: track ended → next track.");
                 _voiceId = 0;
                 ForceAdvanceStation();
-                Start(player, AdvanceFade);
+                Start(player, AdvanceFade, fresh: false);
             }
             else if (audible)
             {
@@ -227,6 +265,7 @@ namespace CMM
                         else
                         {
                             CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, 0);
+                            RecordPtPush(0);
                             PushReverb(player);
                         }
                     }
@@ -235,7 +274,9 @@ namespace CMM
                 {
                     // Occlusion off / direct-line only: cheap, stays synchronous.
                     int count = BuildPointBuffer(player);   // all in-range speakers + their occlusion
+                    PostProcessGains(count);                // birth fade-in + movement rise limiter
                     CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, count);
+                    RecordPtPush(count);
                     PushReverb(player);                     // probe the room + drive the reverb
                 }
             }
@@ -249,6 +290,7 @@ namespace CMM
                 // reverb tail rings out — and drop any in-flight flood (it was built for the dead set).
                 _occlPending = false;
                 CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, 0);
+                RecordPtPush(0);
             }
         }
 
@@ -258,9 +300,114 @@ namespace CMM
         private static void FinishOcclusion(EntityPlayerLocal player, World w)
         {
             EmitterAcoustics.OcclusionFinish(_occlEar, _pts, _occlCount, _ptGain, w);
+            PostProcessGains(_occlCount);   // birth fade-in + movement rise limiter
             CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, _occlCount);
+            RecordPtPush(_occlCount);
             PushReverb(player);
             _occlPending = false;
+        }
+
+        // Shape the freshly-computed per-speaker gains before they're published: the placement
+        // fade-in first (it inflates a new speaker's extra), then the movement rise limiter (it
+        // caps how fast any published extra may climb tick-to-tick).
+        private static void PostProcessGains(int count)
+        {
+            ApplyBirthFades(count);
+            LimitOcclusionRise(count);
+        }
+
+        // Rate-limit occlusion RISES (see _publishedExtra). Falls pass through untouched; door
+        // events bypass entirely (mid-swing or within 1 s of a toggle — the settled post-slam
+        // flood lands in that window); a speaker not published for >2 s republishes as-is (it was
+        // beyond the audible fringe, where everything is silent anyway).
+        private static void LimitOcclusionRise(int count)
+        {
+            if (count <= 0) return;
+            float rate = CMMConfig.WorldEmitterOcclusionFadeRate;
+            float now = Time.realtimeSinceStartup;
+            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f;
+            for (int i = 0; i < count; i++)
+            {
+                Vector3i key = SlotKey(i);
+                if (rate > 0f && !doorWindow
+                    && _publishedExtra.TryGetValue(key, out PublishedExtra prev)
+                    && now - prev.At < 2f && _ptGain[i] > prev.Value)
+                {
+                    float cap = prev.Value + rate * Mathf.Clamp(now - prev.At, 0.02f, 1f);
+                    if (_ptGain[i] > cap) _ptGain[i] = cap;
+                }
+                _publishedExtra[key] = new PublishedExtra { Value = _ptGain[i], At = now };
+            }
+        }
+
+        // Block position of point slot i (inverse of WritePoint's +0.5 centring).
+        private static Vector3i SlotKey(int i) =>
+            new Vector3i(Mathf.FloorToInt(_pts[i * 3]), Mathf.FloorToInt(_pts[i * 3 + 1]), Mathf.FloorToInt(_pts[i * 3 + 2]));
+
+        // Remember the latest point-set push so a track advance can seed the replacement voice from it
+        // (occlusion continuity across the retire/re-add) instead of starting unoccluded.
+        private static void RecordPtPush(int count)
+        {
+            _lastPtPushCount = count;
+            _lastPtPushAt = Time.realtimeSinceStartup;
+        }
+
+        // Stamp speakers newly appeared in the registry snapshot and prune ones that left (destroyed /
+        // unloaded), so ApplyBirthFades can grade a just-placed radio in instead of popping it. Tiny sets;
+        // runs on the 4 Hz decision tick.
+        private static void MaintainBirths()
+        {
+            float now = Time.realtimeSinceStartup;
+            var snap = EmitterRegistry.Snapshot;
+            for (int i = 0; i < snap.Count; i++)
+                if (!_speakerFirstSeen.ContainsKey(snap[i].Pos)) _speakerFirstSeen.Add(snap[i].Pos, now);
+            if (_speakerFirstSeen.Count == snap.Count) return;   // nothing left the set
+            _birthScratch.Clear();
+            foreach (var kv in _speakerFirstSeen)
+            {
+                bool present = false;
+                for (int i = 0; i < snap.Count; i++)
+                    if (snap[i].Pos.Equals(kv.Key)) { present = true; break; }
+                if (!present) _birthScratch.Add(kv.Key);
+            }
+            for (int i = 0; i < _birthScratch.Count; i++)
+            {
+                _speakerFirstSeen.Remove(_birthScratch[i]);
+                _publishedExtra.Remove(_birthScratch[i]);   // limiter state follows the same lifetime
+            }
+        }
+
+        // A speaker that appeared while the station voice is live fades in rather than popping: its
+        // published occlusion gain (virtual distance, blocks) carries a decaying extra that starts at
+        // the full audible range (silent) and reaches 0 over the start fade. The native adaptive glide
+        // smooths the 4 Hz steps. In-place on _ptGain, which every caller recomputes per push.
+        private static void ApplyBirthFades(int count)
+        {
+            if (count <= 0 || _speakerFirstSeen.Count == 0) return;
+            float dur = StartFade();
+            if (dur <= 0f) return;
+            float now = Time.realtimeSinceStartup;
+            float range = CMMConfig.WorldEmitterRange;
+            for (int i = 0; i < count; i++)
+            {
+                Vector3i key = SlotKey(i);
+                if (!_speakerFirstSeen.TryGetValue(key, out float t0)) continue;
+                float age = now - t0;
+                if (age >= dur) continue;
+                _ptGain[i] += (1f - age / dur) * range;
+            }
+        }
+
+        // Mark every currently-tracked speaker's birth as already elapsed. Used when the station voice
+        // itself starts FRESH — its own fade-in covers the entrance, and stacking the birth ramp on top
+        // would double-fade the radio that triggered the start.
+        private static void ExpireBirths()
+        {
+            if (_speakerFirstSeen.Count == 0) return;
+            _birthScratch.Clear();
+            foreach (var kv in _speakerFirstSeen) _birthScratch.Add(kv.Key);
+            float expired = Time.realtimeSinceStartup - 3600f;
+            for (int i = 0; i < _birthScratch.Count; i++) _speakerFirstSeen[_birthScratch[i]] = expired;
         }
 
         // Fill _pts/_ptGain with the world-centre and occlusion gain of every detected speaker within
@@ -447,7 +594,11 @@ namespace CMM
         // unlike the gentle WorldEmitterFade used when the station first comes into range.
         private const float AdvanceFade = 0.2f;
 
-        private static void Start(EntityPlayerLocal player, float fadeIn)
+        // fresh = the station is COMING INTO EXISTENCE (first radio in range, or a replacement after the
+        // voice was released) rather than continuing (track advance / airing-file hot-swap). Fresh starts
+        // clear the native acoustic state — a destroyed radio's still-ringing reverb tail must not be
+        // re-voiced under the new voice's fade-in — and skip the birth ramp (the voice fade covers it).
+        private static void Start(EntityPlayerLocal player, float fadeIn, bool fresh)
         {
             StationSyncIdle();                 // bring the station's on-air track up to the current moment
             if (_stationTrack == null)
@@ -493,6 +644,16 @@ namespace CMM
             // measured). If it isn't measured, play un-normalized now and request a measure — SettleLoudness
             // eases the gain in the moment it lands. The N-ahead queue means this is usually already ready.
             float trackGain = LoudnessStore.GetTrackGain(file);
+            // Fresh start: wipe the native acoustic render state BEFORE the new voice exists, so the
+            // previous station's reverb tail / stale slews can't bleed under it (the "I hear some audio
+            // before the new radio fades in" report — a destroy→place inside the ~2 s tail window
+            // re-voiced the old track's leftover reverb energy at full wet gain). The birth ramps are
+            // expired too: the voice's own fade-in covers the entrance.
+            if (fresh)
+            {
+                CmmMixer.GetOrCreate().ResetEmitterAcoustics();
+                ExpireBirths();
+            }
             long id = CmmMixer.GetOrCreate().PlayEmitter(dec, kind, srcRate, srcCh, total,
                                                          fadeIn, loop: false,
                                                          pos.x, pos.y, pos.z,
@@ -501,6 +662,28 @@ namespace CMM
             if (id == 0) return;
             _voiceId = id;
             _voiceTrack = file; _voiceGainApplied = trackGain;
+            // Seed the voice's occlusion before its first audible block. A new native voice defaults to
+            // ONE unoccluded point; until the first flood lands (~0.1-0.5 s) a walled-in speaker rendered
+            // as if in the open — the "quick burst of audio at distance" on every advance/appearance.
+            // Advance/hot-swap: carry the last landed point set (same speakers, same ear, ≤ a tick old)
+            // straight onto the new voice. Fresh start (no landed field yet): seed MUTED — virtual
+            // distance ≥ range ⇒ silent — and let the first flood glide the true value in (the start
+            // fade masks the beat of silence). Either way, force the decision tick + flood to run on the
+            // next frame instead of waiting out the 4 Hz interval.
+            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting)
+            {
+                if (!fresh && _lastPtPushCount > 0 && Time.realtimeSinceStartup - _lastPtPushAt < 1f)
+                {
+                    CmmMixer.Instance?.SetEmitterPoints(id, _pts, _ptGain, _lastPtPushCount);
+                }
+                else
+                {
+                    WritePoint(0, EmitterRegistry.NearestPos);
+                    _ptGain[0] = CMMConfig.WorldEmitterRange;   // muted until the first flood lands
+                    CmmMixer.Instance?.SetEmitterPoints(id, _pts, _ptGain, 1);
+                }
+                _forceRefresh = true;
+            }
             ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if it wasn't measured yet
             PushTuning();           // apply the curve before the first render block
             PushEmitterMaster();    // set the radio level before the first block
@@ -551,7 +734,7 @@ namespace CMM
             CMMConfig.D($"[CMM] World emitter: airing track gone ({(airing != null ? Path.GetFileName(airing) : "null")}) — hot-swapping (interrupt).");
             Stop();                       // cut the voice on the vanished track (short StopFade, click-free)
             ForceAdvanceStation();        // fresh track on air, effective now
-            Start(player, AdvanceFade);   // start it (short fade)
+            Start(player, AdvanceFade, fresh: false);   // start it (short fade; station continues)
         }
 
         // File.Exists, treating a transient IO error (an external move/delete mid-stat) as "present" so a

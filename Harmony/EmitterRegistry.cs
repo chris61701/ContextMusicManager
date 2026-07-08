@@ -44,8 +44,19 @@ namespace CMM
         internal struct Emitter { public Vector3i Pos; public string Name; public float Dist; }
 
         // Scan + cache a POI once we come within this many blocks of its bounding box; drop it from
-        // the cache once we're farther than this (it's out of any plausible audible range).
-        private const float PoiScanRange = 64f;
+        // the cache once we're farther than this. MUST cover the station's whole audible reach: this
+        // was a flat 64 while WorldEmitterRange was 100 (reverb ×1.5 ⇒ 150), so POI speakers were
+        // forgotten — and the station HARD-CUT (Count==0 → Stop) — at ~64 m while still clearly
+        // audible, and popped into existence there on the way in. Now derived from live config each
+        // poll: the dry range × the reverb reach, plus a small margin, floored at the old 64.
+        private const float PoiScanRangeMin = 64f;
+        private static float PoiKeepRange()
+        {
+            float r = CMMConfig.WorldEmitterRange;
+            if (CMMConfig.WorldEmitterReverbEnabled)
+                r *= Mathf.Max(1f, CMMConfig.WorldEmitterReverbRangeMult);
+            return Mathf.Max(PoiScanRangeMin, r + 8f);
+        }
 
         // Guard against a pathologically huge (modded) POI hitching the frame — skip scanning any
         // whose clamped voxel volume exceeds this. Vanilla traders sit well under it.
@@ -126,9 +137,10 @@ namespace CMM
             deco.GetWorldPrefabs(_prefabScratch);
             _nearIds.Clear();
             float now = Time.realtimeSinceStartup;
+            float keepRange = PoiKeepRange();
             foreach (PrefabInstance pi in _prefabScratch)
             {
-                if (DistanceToBox(pp, pi.boundingBoxPosition, pi.boundingBoxSize) > PoiScanRange) continue;
+                if (DistanceToBox(pp, pi.boundingBoxPosition, pi.boundingBoxSize) > keepRange) continue;
                 _nearIds.Add(pi.id);
                 if (_oversizedIds.Contains(pi.id)) continue;        // known too big — never rescan/re-log
                 if (_scanActive) continue;                          // budget: one scan in flight

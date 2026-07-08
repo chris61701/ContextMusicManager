@@ -550,13 +550,23 @@ namespace CMM
             float m = MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null);
             if (b.shape != null && !b.shape.IsSolidCube)
             {
-                // Partial shapes split by the shape's own LightOpacity (from shapes.xml, byte 0|255):
-                // 0 = the artists marked it as passing light — holed cubes, empty window plates,
-                // "destroyed" wall pieces — geometry with THROUGH-openings that still blocks movement,
-                // so sound mostly passes too. Opaque partials (solid halves, wedges, ramps) keep the
-                // half-wall rate. Doors never take the 0.2 path (model-entity shapes default to 255;
-                // their opening is DamageOpenness/swing, handled by the caller).
-                m *= b.shape.LightOpacity == 0 ? 0.2f : 0.5f;
+                // Partial shapes split by the artists' LightOpacity marker (shapes.xml, 0|255):
+                // 0 = marked as passing light — plates/trim, poles, frames, holed cubes, "destroyed"
+                // wall pieces (526 of 2263 shapes) — thin or holed geometry that blocks movement but
+                // mostly passes sound. Opaque partials (solid halves, wedges, ramps — unset ⇒ 255)
+                // keep the half-wall rate.
+                // READ THE BLOCK's resolved lightOpacity, NOT shape.LightOpacity: BlockShapeNew never
+                // receives the shapes.xml value (only billboard/grass/water shape CLASSES hardcode 0);
+                // the shape XML's property is merged into the variant BLOCK's properties and lands on
+                // Block.lightOpacity at Init (decompile: ShapesFromXml.LoadProperties(props, shapeElem)
+                // → Block.Init reads PropLightOpacity). Reading the shape field made this discount DEAD
+                // for every shapes.xml partial — a woodShapes:plateHalf trim plate flat on a wall was
+                // charged half a wood wall PER CELL (8.75 virtual blocks at WallDistance 35), which is
+                // why decorative trim audibly blocked sound (user report 2026-07-08).
+                // Model entities (doors/hatches) are excluded regardless of their block XML: a thin
+                // door leaf SEALS its opening — its acoustics are the damage/swing logic, never the
+                // light marker.
+                m *= (b.lightOpacity == 0 && !(b.shape is BlockShapeModelEntity)) ? 0.2f : 0.5f;
             }
             return m;
         }

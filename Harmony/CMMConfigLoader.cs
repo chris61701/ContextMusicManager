@@ -95,6 +95,7 @@ namespace CMM
                 CMMConfig.WorldEmitterOcclusionWallDistance = ReadFloat(root, "WorldEmitterOcclusionWallDistance", CMMConfig.WorldEmitterOcclusionWallDistance);
                 CMMConfig.WorldEmitterOcclusionMaxDistance  = ReadFloat(root, "WorldEmitterOcclusionMaxDistance",  CMMConfig.WorldEmitterOcclusionMaxDistance);
                 CMMConfig.WorldEmitterOcclusionHardStop     = ReadFloat(root, "WorldEmitterOcclusionHardStop",     CMMConfig.WorldEmitterOcclusionHardStop);
+                CMMConfig.WorldEmitterOcclusionFadeRate     = ReadFloat(root, "WorldEmitterOcclusionFadeRate",     CMMConfig.WorldEmitterOcclusionFadeRate);
                 CMMConfig.WorldEmitterPathRouting       = ReadBool (root, "WorldEmitterPathRouting",       CMMConfig.WorldEmitterPathRouting);
                 CMMConfig.WorldEmitterFloodRadius       = ReadInt  (root, "WorldEmitterFloodRadius",       CMMConfig.WorldEmitterFloodRadius);
                 CMMConfig.WorldEmitterOcclusionDirectional = ReadBool (root, "WorldEmitterOcclusionDirectional", CMMConfig.WorldEmitterOcclusionDirectional);

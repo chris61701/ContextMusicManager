@@ -93,6 +93,15 @@ struct cmm_out {
     volatile float emMuffle;       /* distance low-pass strength 0..1 (live tuning) */
     volatile float emStereoWidth;  /* pan width 0..1: 1 = full hard pan, <1 keeps the far ear alive */
     float emGainsSmooth[CMM_MAX_EMIT_PTS];  /* per-point occlusion VIRTUAL DISTANCE slewed at audio rate (anti-pop) */
+    int   emPrevPtCount;        /* slots active last callback: a slot activating fresh INITIALIZES its
+                                 * smooth state from the target instead of gliding from whatever stale
+                                 * value the previous voice/point-set left behind (the "burst of audio
+                                 * at the wrong level when a radio starts / re-enters range" bug). */
+    volatile int emAcousticReset; /* producer-raised: clear ALL emitter render state (reverb tails, LPF,
+                                 * pan/mix slews, slot smooth state) before the next block. Serviced on
+                                 * the callback thread, which owns that state. Set when a NEW station
+                                 * voice starts fresh so a destroyed radio's leftover reverb energy is
+                                 * never re-voiced under the replacement. */
     float emPtsSmooth[CMM_MAX_EMIT_PTS * 3]; /* per-point WORLD POSITION slewed at audio rate. Directional
                                     * occlusion re-aims a speaker to its air-route bearing; that target can flip
                                     * in one 4Hz tick when the line-of-sight opens/closes around a corner. Panning
@@ -199,7 +208,18 @@ static void cmm_emitter_gains(cmm_out* o, float* gL, float* gR, float* bright, f
         float tpx = o->emPts[p*3], tpy = o->emPts[p*3+1], tpz = o->emPts[p*3+2];
         float spx = o->emPtsSmooth[p*3], spy = o->emPtsSmooth[p*3+1], spz = o->emPtsSmooth[p*3+2];
         float jx = tpx - spx, jy = tpy - spy, jz = tpz - spz;
-        if (jx*jx + jy*jy + jz*jz > 1024.0f) { spx = tpx; spy = tpy; spz = tpz; }   /* >32 blocks → snap */
+        /* A slot that was INACTIVE last callback carries stale smooth state from whatever point
+         * (possibly a different speaker, a different voice entirely) last occupied it. Rendering
+         * from that state played a burst at the WRONG level/position while the glide caught up.
+         * Initialize a freshly-activated slot from its target instead — position AND gain. The
+         * >32-block jump keeps its position snap; it now snaps the occlusion gain too (same
+         * "this is a different speaker" signal — gliding the gain from another speaker's
+         * occlusion was just a quieter version of the same bug). */
+        int freshSlot = (p >= o->emPrevPtCount);
+        if (freshSlot || jx*jx + jy*jy + jz*jz > 1024.0f) {
+            spx = tpx; spy = tpy; spz = tpz;
+            o->emGainsSmooth[p] = o->emGains[p];
+        }
         else { const float k = 0.06f; spx += jx*k; spy += jy*k; spz += jz*k; }       /* ~200ms ease */
         o->emPtsSmooth[p*3] = spx; o->emPtsSmooth[p*3+1] = spy; o->emPtsSmooth[p*3+2] = spz;
 
@@ -290,6 +310,7 @@ static void cmm_emitter_gains(cmm_out* o, float* gL, float* gR, float* bright, f
         }
     }
     bestWet = o->emRevWet * bestWetAtt;
+    o->emPrevPtCount = count;   /* slots ≥ count are inactive → re-init from target when they return */
     float mag = sqrtf(totalL*totalL + totalR*totalR);
     if (mag > 1.4f) { float s = 1.4f / mag; totalL *= s; totalR *= s; }
     if (bestBright < 0.0f) bestBright = 0.0f; else if (bestBright > 1.0f) bestBright = 1.0f;
@@ -363,6 +384,22 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
      * head-turn is heard within a callback (~10ms), not behind the producer's ring cushion. The mono
      * ring is drained in lockstep with the music each callback. */
     if (o->hasEmRing) {
+        /* Acoustic-state reset (producer-raised when a NEW station voice starts fresh): clear the
+         * reverb tails + every render-state slew so nothing from the previous voice — a destroyed
+         * radio's still-ringing reverb energy, a stale occlusion glide, the held out-of-range tail —
+         * bleeds under the new one. Serviced here because this thread owns all of this state. The
+         * ~460KB of comb/allpass memsets in cmm_reverb_init run well under a millisecond. */
+        if (o->emAcousticReset) {
+            o->emAcousticReset = 0;
+            cmm_reverb_init(&o->reverb, o->sampleRate);
+            cmm_reverb_init(&o->reverbLocal, o->sampleRate);
+            o->emRevHold = 0.0f; o->emRevLast = 0.0f; o->emRevMix = 0.0f;
+            o->emRevLocMix = 0.0f; o->emRevLocHold = 0.0f;
+            o->emRevLpL = 0.0f; o->emRevLpR = 0.0f; o->emRevLpCoef = 1.0f;
+            o->emRevPanSmooth = 0.0f; o->emRevDepthSm = o->emRevDepth;
+            o->emLpf = 0.0f; o->emLpfCoef = 1.0f;
+            o->emPrevPtCount = 0;   /* every slot re-inits its smooth state from target */
+        }
         float gL, gR, bright, wet, wetPan;
         cmm_emitter_gains(o, &gL, &gR, &bright, &wet, &wetPan);
         int audible = (o->emPtCount > 0) && (gL != 0.0f || gR != 0.0f);
@@ -817,6 +854,16 @@ void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, f
     o->emRevWet = wet; o->emRevRoom = room; o->emRevDamp = damp; o->emRevRangeMult = rangeMult; o->emRevPan = pan;
     o->emRevDepth = depth; o->emRevDepthAmt = depthAmt;
     o->emRevLocWet = localWet;
+}
+
+/* v30 — request a full emitter acoustic-state reset (reverb tails, LPF/pan/mix slews, per-slot
+ * smooth state). Just raises a flag; the audio callback — which owns that state — services it
+ * before the next block. Raised when a NEW station voice starts fresh (not a track advance), so
+ * a destroyed radio's still-ringing reverb energy is never re-voiced under the replacement. */
+void cmm_out_emitter_reset(cmm_out* o)
+{
+    if (!o) return;
+    o->emAcousticReset = 1;
 }
 
 /* v26 — relay the live radio-coloration params from config. All 0..1; all 0 = clean bypass. Lock-free

@@ -114,8 +114,13 @@ typedef struct cmm_decoder cmm_decoder;
  *        seal-gated + depth-graded + route-panned by the managed side.
  *   v29:  CARRY range curve reshaped (no interface change): the wet's distance attenuation is now a
  *        power decay over the whole reach (exponent = dry falloff × 0.5) instead of flat-until-85% —
- *        kills the constant-loudness reverb plateau that trailed the player after the dry died. */
-#define CMM_DECODER_ABI 29
+ *        kills the constant-loudness reverb plateau that trailed the player after the dry died.
+ *   v30:+ EMITTER ACOUSTIC RESET (cmm_mix_emitter_reset_acoustics): clears the emitter's reverb tails
+ *        + LPF/pan/mix slews + per-slot smooth state before a FRESH station voice starts, so a
+ *        destroyed radio's still-ringing reverb never re-voices under its replacement. Also (no
+ *        interface change) a freshly-activated point slot now initializes its smoothed occlusion/
+ *        position from the target instead of gliding from the previous occupant's stale state. */
+#define CMM_DECODER_ABI 30
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -384,6 +389,11 @@ void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, f
 /* Relay the live radio-coloration params (v26). All 0..1; all 0 = clean bypass. Lock-free. */
 void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice);
 
+/* Request a full emitter acoustic-state reset (v30): reverb tails, LPF/pan/mix slews, per-slot
+ * smooth state — serviced by the audio callback before its next block. Called when a NEW station
+ * voice starts fresh so nothing from the previous voice bleeds under it. Lock-free flag. */
+void cmm_out_emitter_reset(cmm_out* o);
+
 /* ── Format converter (resample + channel map) ────────────────────────────
  * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
  * converter). The mixer gives each voice whose native format differs from the
@@ -463,6 +473,11 @@ CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, i
 
 /* Fade an emitter voice out over `fade` (<=0 snaps) and retire it. Unknown id is a no-op. */
 CMM_API void cmm_mix_remove_emitter(long long id, float fade);
+
+/* v30 — reset the emitter layer's acoustic render state (reverb tails, LPF/pan/mix slews, per-slot
+ * smooth state). Call BEFORE adding a station voice that starts FRESH (not a track advance) so the
+ * previous voice's leftover reverb energy / stale slews never bleed under the new one. */
+CMM_API void cmm_mix_emitter_reset_acoustics(void);
 
 /* Set the LISTENER basis for emitter spatialization: world position + forward + right unit
  * vectors (pass them straight from the camera transform — the mixer uses them as-is, so there is

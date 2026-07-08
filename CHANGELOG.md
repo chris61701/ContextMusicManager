@@ -55,6 +55,43 @@ All notable changes to Context Music Manager are documented here.
 
 ### Fixed
 
+- **World-emitter radio transitions cleaned up (CMM_Decoder ABI 30).** Four related fixes to
+  how the station starts, stops, and hands over between speakers:
+  - *Ghost audio when replacing a destroyed radio.* Destroying a radio and placing another
+    within the ~2 s reverb-tail window re-voiced the old track's leftover reverb energy at
+    full wet gain under the new voice's fade-in. A fresh station start now resets the native
+    acoustic state (reverb tails, tone/pan/mix slews) before the new voice exists. A track
+    advance deliberately keeps the tail — the room hasn't changed.
+  - *Burst of un-muffled audio at distance on track change / station start.* A new native
+    voice was seeded unoccluded until the first occlusion flood landed (~0.1–0.5 s), so an
+    indoor speaker 50 m away played "in the open" for a beat. A track advance now carries
+    the last landed occlusion set straight onto the new voice; a fresh start seeds muted and
+    lets the first flood glide the true value in under the start fade.
+  - *Hard cut at ~64 m from POI speakers.* The registry forgot POI speakers past a flat 64 m
+    while the audible range is 100 m (reverb 150 m), so walking away hard-cut the station
+    mid-audibility and walking in popped it into existence. The keep radius now derives from
+    the configured range × reverb reach.
+  - *Placed radios pop in at full volume when the station is already playing.* A speaker that
+    appears while the voice is live now fades in over the Radio context's `fadeintime`
+    (a decaying virtual-distance ramp on its published occlusion gain) instead of popping.
+    Stale per-slot smoothing in the native spatializer — which glided a re-activated point
+    from whatever the previous occupant left behind — now initializes from the true target.
+  - *Decorative trim / plates / poles / frames blocked sound like half a wall.* The occlusion
+    model's "artist marked it as passing light" discount (thin or holed partial shapes,
+    `LightOpacity 0` in shapes.xml — 526 of 2263 shapes, including all plate/trim pieces)
+    never fired: it read `shape.LightOpacity`, which the game never populates for shapes.xml
+    shapes (the value lands on the block's own `lightOpacity` field instead). A wood
+    `plateHalf` used as wall trim was charged half a wood wall per cell. Now reads the
+    block's resolved value: trim, poles, frames and holed pieces drop to a fifth of a wall;
+    solid halves/wedges/ramps and doors are unchanged.
+  - *Hard cut walking out of a building.* Crossing a doorway/threshold could flip the routed
+    occlusion from near-clear to fully-blocked in one 4 Hz tick, and the big-jump glide
+    (tuned for door slams) muted the radio in ~50 ms — a hard cut, leaving only the reverb
+    tail. Movement-driven occlusion **rises** are now rate-limited (new hot-reloaded
+    `WorldEmitterOcclusionFadeRate`, virtual blocks/s, default 50 ⇒ ~a one-second fade-out;
+    0 restores the old instant behavior). Door events bypass the cap (their tuned fast
+    response is unchanged) and occlusion drops are never capped — sound arriving still
+    tracks the event.
 - **Decoder stalls on large video files.** Two container-reader bugs made the in-game music
   scanner hang on certain large `.mp4`/`.mkv` files. An mp4's oversized `moov` index (e.g.
   36 MB on a 10 h recording) exceeded the cache cap and was parsed via millions of tiny

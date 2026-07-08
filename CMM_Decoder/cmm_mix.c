@@ -759,6 +759,17 @@ CMM_API void cmm_mix_remove_emitter(long long id, float fade) {
     mix_unlock(&g_lock);
 }
 
+/* v30 — reset the emitter layer's ACOUSTIC render state (reverb tails, LPF/pan/mix slews, per-slot
+ * smooth state) before a NEW station voice starts fresh. Without this a station stopped and restarted
+ * within the reverb-tail window (destroy a radio, place another) re-voiced the OLD track's leftover
+ * reverb energy at full wet gain under the new voice's fade-in. Not called on a track advance —
+ * there the room is unchanged and the tail's continuity is exactly what we want. */
+CMM_API void cmm_mix_emitter_reset_acoustics(void) {
+    mix_lock(&g_lock);
+    if (g_out) cmm_out_emitter_reset(g_out);
+    mix_unlock(&g_lock);
+}
+
 /* v17 — push the listener basis for emitter spatialization. Lock-free (see g_lisPos): the
  * producer reads these per render block. forward/right come straight from the camera transform. */
 CMM_API void cmm_mix_set_listener(float px, float py, float pz,

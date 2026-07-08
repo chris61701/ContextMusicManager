@@ -61,6 +61,11 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_remove_emitter(long id, float fade);
 
+        // v30 — reset the emitter acoustic render state (reverb tails, slews, per-slot smooth state)
+        // before a FRESH station voice starts, so the previous voice's leftovers never bleed under it.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_emitter_reset_acoustics();
+
         // v17 — listener basis (pos + forward + right, from the camera) + live emitter reposition.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_listener(float px, float py, float pz,
@@ -252,6 +257,14 @@ namespace CMM
         public void RemoveEmitter(long id, float fadeSeconds)
         {
             NativeMix.cmm_mix_remove_emitter(id, fadeSeconds);
+        }
+
+        // Reset the emitter layer's acoustic render state (reverb tails, LPF/pan/mix slews, per-slot
+        // smooth state). Call BEFORE a station voice that starts FRESH (not a track advance) so a
+        // destroyed radio's still-ringing reverb / stale slews never bleed under the replacement.
+        public void ResetEmitterAcoustics()
+        {
+            NativeMix.cmm_mix_emitter_reset_acoustics();
         }
 
         // Push the listener basis (world position + forward + right unit vectors, straight from the
