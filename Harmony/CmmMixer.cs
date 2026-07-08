@@ -80,9 +80,19 @@ namespace CMM
         internal static extern void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float falloffExp, float muffle,
                                                                float stereoWidth);
 
-        // v23 — live emitter reverb (room reflections) from the managed room probe. wet 0 = off.
+        // v23 — live emitter reverb (room reflections) from the managed room probe.
+        // v27 adds depth (air-route blocks to the station) + depthAmt (0..1 grading strength): the wet
+        // gets quieter/darker/more damped the deeper you are from the source.
+        // v28 splits the buses: wet = CARRY (seal-gated next-room cue), localWet = LOCAL (your room
+        // ringing off the arriving occluded signal — inherits every dry occlusion rule natively).
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan);
+        internal static extern void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan,
+                                                               float depth, float depthAmt, float localWet);
+
+        // v26 — live radio coloration ("through a speaker"): soft-clip drive, static-hiss bed,
+        // band-pass voicing blend. All 0..1; all 0 = clean bypass.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice);
 
         // v24 — the world-radio's OWN master (game music slider × Radio context volume), separate from
         // the music master so the radio isn't scaled by VolumeModifier or the current music context.
@@ -275,10 +285,18 @@ namespace CMM
             NativeMix.cmm_mix_set_emitter_tuning(minDist, maxDist, falloffExp, muffle, stereoWidth);
         }
 
-        // Push the live emitter reverb (room reflections) from the room probe. wet 0 = off. Every tick.
-        public void SetEmitterReverb(float wet, float room, float damp, float rangeMult, float pan)
+        // Push the live emitter reverb (room reflections) from the room probe. Every tick.
+        // wet = CARRY bus level; localWet = LOCAL bus level (see the v28 split);
+        // depth = air-route blocks to the station; depthAmt = how much depth grades the carry (0 = flat).
+        public void SetEmitterReverb(float wet, float room, float damp, float rangeMult, float pan, float depth, float depthAmt, float localWet)
         {
-            NativeMix.cmm_mix_set_emitter_reverb(wet, room, damp, rangeMult, pan);
+            NativeMix.cmm_mix_set_emitter_reverb(wet, room, damp, rangeMult, pan, depth, depthAmt, localWet);
+        }
+
+        // Push the live radio coloration (soft-clip drive, static bed, band-pass voicing). Every tick.
+        public void SetEmitterColor(float drive, float staticLvl, float voice)
+        {
+            NativeMix.cmm_mix_set_emitter_color(drive, staticLvl, voice);
         }
 
         // Push the world-radio's own master (game music slider × Radio context volume). Every tick.

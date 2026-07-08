@@ -102,9 +102,18 @@ namespace CMM
                 CMMConfig.WorldEmitterReverbWet         = ReadFloat(root, "WorldEmitterReverbWet",         CMMConfig.WorldEmitterReverbWet);
                 CMMConfig.WorldEmitterReverbDecay       = ReadFloat(root, "WorldEmitterReverbDecay",       CMMConfig.WorldEmitterReverbDecay);
                 CMMConfig.WorldEmitterReverbRange       = ReadFloat(root, "WorldEmitterReverbRange",       CMMConfig.WorldEmitterReverbRange);
-                CMMConfig.WorldEmitterReverbOcclusion   = ReadFloat(root, "WorldEmitterReverbOcclusion",   CMMConfig.WorldEmitterReverbOcclusion);
+                CMMConfig.WorldEmitterReverbCarry       = ReadFloat(root, "WorldEmitterReverbCarry",       CMMConfig.WorldEmitterReverbCarry);
+                CMMConfig.WorldEmitterDoorGapFull       = ReadFloat(root, "WorldEmitterDoorGapFull",       CMMConfig.WorldEmitterDoorGapFull);
+                CMMConfig.WorldEmitterDoorGapFullOpen   = ReadFloat(root, "WorldEmitterDoorGapFullOpen",   CMMConfig.WorldEmitterDoorGapFullOpen);
+                CMMConfig.WorldEmitterDoorGapClosed     = ReadFloat(root, "WorldEmitterDoorGapClosed",     CMMConfig.WorldEmitterDoorGapClosed);
+                CMMConfig.WorldEmitterDoorSealTypes     = ReadString(root, "WorldEmitterDoorSealTypes",    CMMConfig.WorldEmitterDoorSealTypes);
+                CMMConfig.WorldEmitterDoorGapOverrides  = ReadString(root, "WorldEmitterDoorGapOverrides", CMMConfig.WorldEmitterDoorGapOverrides);
                 CMMConfig.WorldEmitterReverbRangeMult   = ReadFloat(root, "WorldEmitterReverbRangeMult",   CMMConfig.WorldEmitterReverbRangeMult);
                 CMMConfig.WorldEmitterReverbPan         = ReadFloat(root, "WorldEmitterReverbPan",         CMMConfig.WorldEmitterReverbPan);
+                CMMConfig.WorldEmitterReverbDepth       = ReadFloat(root, "WorldEmitterReverbDepth",       CMMConfig.WorldEmitterReverbDepth);
+                CMMConfig.WorldEmitterColorDrive        = ReadFloat(root, "WorldEmitterColorDrive",        CMMConfig.WorldEmitterColorDrive);
+                CMMConfig.WorldEmitterColorStatic       = ReadFloat(root, "WorldEmitterColorStatic",       CMMConfig.WorldEmitterColorStatic);
+                CMMConfig.WorldEmitterColorVoice        = ReadFloat(root, "WorldEmitterColorVoice",        CMMConfig.WorldEmitterColorVoice);
 
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);

@@ -61,6 +61,7 @@ namespace CMM
         // the first scan — chunk reset/regeneration respawning speakers, admin edits — get picked up.
         // Rescans share the one-scan-per-poll budget with newly-streamed POIs.
         private const float RescanInterval = 8f;
+        private static bool _proxToggle;   // ScanProximity runs on alternate polls (see Poll step 3)
 
         // Player-proximity scan (for placed emitters that live OUTSIDE any POI, e.g. a ham radio the
         // player sets down): each poll, sweep a small box around the player for target blocks. Half-
@@ -112,30 +113,31 @@ namespace CMM
 
             Vector3 pp = player.position;
 
+            // 0) Advance any in-progress amortized POI scan by one time slice. Scans used to walk a
+            //    POI's whole volume (≤400k GetBlocks) in ONE frame — a 50-90 ms main-thread gulp every
+            //    RescanInterval near big POIs (the rhythmic in-POI stutter, log 2026-07-07). Results
+            //    commit only on completion; the old cache stays live meanwhile, so nothing flickers.
+            ContinueScan(world);
+
             // 1) Enumerate world POIs; scan the ones we're near — either not yet cached, or cached but
-            //    STALE (older than RescanInterval, so respawned/chunk-reset blocks get picked up). At
-            //    most one scan per poll (new OR rescan) so several don't stack into one frame.
+            //    STALE (older than RescanInterval, so respawned/chunk-reset blocks get picked up). One
+            //    scan in flight at a time, advanced a slice per poll.
             _prefabScratch.Clear();
             deco.GetWorldPrefabs(_prefabScratch);
             _nearIds.Clear();
-            bool scannedThisPoll = false;
             float now = Time.realtimeSinceStartup;
             foreach (PrefabInstance pi in _prefabScratch)
             {
                 if (DistanceToBox(pp, pi.boundingBoxPosition, pi.boundingBoxSize) > PoiScanRange) continue;
                 _nearIds.Add(pi.id);
                 if (_oversizedIds.Contains(pi.id)) continue;        // known too big — never rescan/re-log
+                if (_scanActive) continue;                          // budget: one scan in flight
                 bool cached = _poiCache.ContainsKey(pi.id);
                 bool stale  = cached && (!_poiScanTime.TryGetValue(pi.id, out float t) || now - t > RescanInterval);
                 if (cached && !stale) continue;                     // fresh enough
-                if (scannedThisPoll) continue;                      // budget: one scan per poll
                 if (!world.IsChunkAreaLoaded(pi.boundingBoxPosition.ToVector3())) continue;  // wait until loaded
 
-                var hits = new List<Emitter>();
-                ScanPoi(world, pi, hits);                           // replaces the old list ⇒ respawned blocks appear, removed ones drop
-                _poiCache[pi.id] = hits;
-                _poiScanTime[pi.id] = now;
-                scannedThisPoll = true;
+                if (StartScan(pi)) ContinueScan(world);             // first slice immediately (small POIs finish here)
             }
 
             // 2) Forget POIs we've moved away from (frees their cache; they rescan if we return).
@@ -143,10 +145,14 @@ namespace CMM
             foreach (var kv in _poiCache)
                 if (!_nearIds.Contains(kv.Key)) _dropIds.Add(kv.Key);
             foreach (int id in _dropIds) { _poiCache.Remove(id); _poiScanTime.Remove(id); }
+            // Abort an in-flight scan whose POI left range (its commit would just be dropped anyway).
+            if (_scanActive && !_nearIds.Contains(_scanPiId)) { _scanActive = false; _scanHits.Clear(); }
 
             // 3) Sweep a small box around the player for placed emitters that live outside any POI
-            //    (a ham radio you set down). Cheap + always fresh, so placement/removal is prompt.
-            ScanProximity(world, pp);
+            //    (a ham radio you set down). Every OTHER poll (2 Hz): the box is ~21k block reads, a
+            //    couple of ms — halving the standing cost while keeping placement discovery prompt.
+            _proxToggle = !_proxToggle;
+            if (_proxToggle) ScanProximity(world, pp);
 
             // 4) Revalidate cached emitters and rebuild the snapshot. A cached block that is no
             //    longer a target id was DESTROYED → drop it; one whose area has UNLOADED → drop the
@@ -239,7 +245,21 @@ namespace CMM
         }
 
         // Scan a POI's bounding box (clamped to the world's Y range) for target blocks.
-        private static void ScanPoi(World world, PrefabInstance pi, List<Emitter> outList)
+        // ── Amortized POI scan (one in flight, budget-sliced across polls) ─────────────────────────
+        // A column cursor (x,z — full Y per column) resumes each poll and stops after ScanBudgetMs;
+        // hits accumulate in _scanHits and commit to the cache only when the whole volume finished.
+        // A typical store (~75k cells) completes in a few polls (~1 s); the 400k cap worst case ~5 s —
+        // fine for the RescanInterval refresh, and discovery was already staggered one-POI-per-poll.
+        private const float ScanBudgetMs = 3f;
+        private static bool _scanActive;
+        private static int _scanPiId;
+        private static int _scanX0, _scanX1, _scanY0, _scanY1, _scanZ0, _scanZ1;   // [min, max) bounds
+        private static int _scanX, _scanZ;                                          // resume cursor
+        private static int _scanPolls;                                              // diagnostic
+        private static readonly List<Emitter> _scanHits = new List<Emitter>();
+
+        // Begin an amortized scan of `pi` (bounds + cursor). False = rejected (oversized/empty).
+        private static bool StartScan(PrefabInstance pi)
         {
             Vector3i b = pi.boundingBoxPosition, s = pi.boundingBoxSize;
             int x0 = b.x, z0 = b.z, y0 = Mathf.Max(0, b.y);
@@ -251,18 +271,52 @@ namespace CMM
                 // keeps flickering in/out of scan range spams the log every few seconds.
                 if (vol > MaxScanVolume && _oversizedIds.Add(pi.id))
                     CMMConfig.D($"[CMM] Emitter scan skipped oversized POI '{pi.name}' (vol {vol}).");
-                return;
+                return false;
             }
+            _scanPiId = pi.id;
+            _scanX0 = x0; _scanX1 = x1; _scanY0 = y0; _scanY1 = y1; _scanZ0 = z0; _scanZ1 = z1;
+            _scanX = x0; _scanZ = z0;
+            _scanPolls = 0;
+            _scanHits.Clear();
+            _scanActive = true;
+            return true;
+        }
 
-            for (int x = x0; x < x1; x++)
-                for (int z = z0; z < z1; z++)
-                    for (int y = y0; y < y1; y++)
+        // Advance the in-flight scan until the time budget elapses; commit on completion.
+        private static void ContinueScan(World world)
+        {
+            if (!_scanActive) return;
+            _scanPolls++;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            int colH = _scanY1 - _scanY0, sinceCheck = 0;
+            while (_scanX < _scanX1)
+            {
+                while (_scanZ < _scanZ1)
+                {
+                    for (int y = _scanY0; y < _scanY1; y++)
                     {
-                        BlockValue bv = world.GetBlock(x, y, z);   // null-safe → Air on unloaded
+                        BlockValue bv = world.GetBlock(_scanX, y, _scanZ);   // null-safe → Air on unloaded
                         if (bv.isair) continue;
                         if (_targetIds.TryGetValue(bv.type, out string name))
-                            outList.Add(new Emitter { Pos = new Vector3i(x, y, z), Name = name });
+                            _scanHits.Add(new Emitter { Pos = new Vector3i(_scanX, y, _scanZ), Name = name });
                     }
+                    _scanZ++;
+                    if ((sinceCheck += colH) >= 2048)
+                    {
+                        sinceCheck = 0;
+                        if ((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs >= ScanBudgetMs)
+                            return;   // budget spent — resume at this cursor next poll
+                    }
+                }
+                _scanZ = _scanZ0;
+                _scanX++;
+            }
+            // Complete → commit (replaces the old list ⇒ respawned blocks appear, removed ones drop).
+            _poiCache[_scanPiId] = new List<Emitter>(_scanHits);
+            _poiScanTime[_scanPiId] = Time.realtimeSinceStartup;
+            _scanHits.Clear();
+            _scanActive = false;
         }
 
         // Resolve target names → ids once the block table exists. Returns false until it's built.

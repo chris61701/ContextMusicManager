@@ -108,6 +108,18 @@ struct cmm_out {
     float emLpf;
     float emLpfCoef;
 
+    /* Radio coloration ("through a speaker", v26) — applied to the emitter mono BEFORE the distance
+     * LPF and the reverb feed, so muffle/occlusion/pan/reflections all act on the colored signal.
+     * Params are relayed live from config (lock-free volatiles); the filter/noise state below them
+     * is callback-thread only. */
+    volatile float emColDrive;    /* soft-clip amount 0..1 (0 = clean) */
+    volatile float emColStatic;   /* static-hiss bed level 0..1 (0 = none) */
+    volatile float emColVoice;    /* band-pass voicing blend 0..1 (0 = full-range, 1 = small speaker) */
+    float emColLo;                /* one-pole low tracker (~250 Hz) — subtracted for the voicing HPF */
+    float emColHi;                /* one-pole low-pass (~4.2 kHz) — the voicing's top cap */
+    float emColLoCoef, emColHiCoef;  /* fixed cutoffs, computed from the device rate at open */
+    unsigned int emColRng;        /* LCG state for the static hiss */
+
     /* Reverb (room reflections) for the emitter. Params relayed live from the managed room probe;
      * the reverb itself is callback-thread-only. The WET path is attenuated by REAL distance only, NOT
      * by occlusion — so behind a wall the dry sound drops away but the reflections persist, which is
@@ -122,6 +134,14 @@ struct cmm_out {
                                  * bearing. 0 = fully diffuse (surrounds you); 1 = fully located. Lets the
                                  * reflections still point the way at distance, where the wet dominates. */
     float emRevPanSmooth;       /* slewed applied wet pan (callback-thread; frozen during the out-of-range tail) */
+    /* DEPTH GRADING (v27): the listener's acoustic depth from the station (air-route blocks, relayed
+     * from the managed flood) grades the wet — deeper ⇒ quieter, DARKER (output low-pass) and more
+     * damped, the way a reverberant field decays down a real tunnel. amt 0 = flat (pre-v27). */
+    volatile float emRevDepth;    /* air-route blocks to the station */
+    volatile float emRevDepthAmt; /* 0..1 grading strength */
+    float emRevDepthSm;           /* slewed depth (callback-thread; pushes land at 4Hz, this glides them) */
+    float emRevLpL, emRevLpR;     /* one-pole LPF state on the wet L/R output (the depth darkening) */
+    float emRevLpCoef;            /* slewed LPF coefficient (1 = transparent at zero depth) */
     cmm_reverb reverb;
     /* Reverb tail keepalive (callback-thread only). When the wet FEED stops (walked out of range at
      * mx), we keep ticking the reverb with ZERO input for this many more frames so (a) the reflections
@@ -132,6 +152,18 @@ struct cmm_out {
     float emRevHold;   /* frames of tail keepalive remaining (0 = reverb fully idle) */
     float emRevLast;   /* last in-range wet mix gain, held to voice the decaying tail */
     float emRevMix;    /* SLEWED applied wet gain — chases the target so re-entry glides, never steps */
+
+    /* ── LOCAL reverb bus (v28) ─────────────────────────────────────────────
+     * The two-bus split: the reverb above ("CARRY") is the deliberate next-room/down-the-tunnel cue —
+     * fed the UN-occluded source, seal-gated + depth-graded + route-panned by the managed side. This
+     * SECOND bus is YOUR OWN SPACE ringing off the sound that actually ARRIVES: its input is the
+     * post-attenuation, post-occlusion, muffled dry (y × arriving level), so walls, distance, water and
+     * the hard-stop shape it exactly as they shape the dry — silence in ⇒ silence out, no seal knob.
+     * Diffuse on purpose (no pan): your room surrounds you. */
+    volatile float emRevLocWet;  /* local output level = ear-room wetness × master (managed; no seal/range terms) */
+    float emRevLocMix;           /* slewed applied local gain (callback-thread) */
+    float emRevLocHold;          /* local tail keepalive frames (rings out after the dry goes silent) */
+    cmm_reverb reverbLocal;
 };
 
 /* Compute the summed L/R spatial gain for the emitter from the live listener + speaker state,
@@ -144,6 +176,10 @@ struct cmm_out {
 /* Effective distance (blocks) at which the tone is fully muffled (per the Muffle strength), independent
  * of the volume Range. ~24 ≈ "clearly across a room / behind a wall". */
 #define CMM_EMIT_MUFFLE_REF 24.0f
+/* Air-route depth (blocks) at which the depth-graded reverb reaches its full grading (per depthAmt) —
+ * the wet keeps sinking gently past it (level curve caps at 2× this). ~48 ≈ "well down the tunnel";
+ * a reverberant field carries much farther than the dry, hence 2× the muffle reference. */
+#define CMM_EMIT_REV_DEPTH_REF 48.0f
 static void cmm_emitter_gains(cmm_out* o, float* gL, float* gR, float* bright, float* wet, float* wetPan)
 {
     float totalL = 0.0f, totalR = 0.0f;
@@ -239,14 +275,14 @@ static void cmm_emitter_gains(cmm_out* o, float* gL, float* gR, float* bright, f
          * the dry drops but the wet carries — the "it bounced" cue). Its range is emMaxDist × emRevRangeMult,
          * so the reverb reaches FARTHER than the dry: a brief step past the dry range in a connected cave keeps
          * the tail alive. Open ground stays dry regardless — emRevWet≈0 with no enclosure, so a bigger reach
-         * multiplies nothing. Flat across the range, fading only over the last 15% (no snap at the edge). */
+         * multiplies nothing. v29: power decay over the WHOLE reach at HALF the dry falloff exponent (the
+         * reverberant field decays slower than the direct, but it DECAYS — the old flat-until-85% curve left
+         * a constant-loudness wash for ~10 blocks after the dry died: "music gone, ghost hum follows you"). */
         {
             float rmx = mx * o->emRevRangeMult;
-            float flatTo = rmx * 0.85f;
             float attWet;
-            if (d >= rmx) attWet = 0.0f;
-            else if (d <= flatTo) attWet = 1.0f;
-            else { float u = (rmx - d) / (rmx - flatTo); attWet = u * u * (3.0f - 2.0f * u); }
+            if (d >= rmx || rmx <= 0.0f) attWet = 0.0f;
+            else attWet = powf((rmx - d) / rmx, fexp * 0.5f);
             /* Track the NEAREST reverberant speaker's bearing too, so the mix can PAN the (otherwise diffuse)
              * reverb toward it — the traced air-route direction, so at distance the reflections still point
              * the way to the source (down the tunnel) instead of washing out non-directionally. */
@@ -330,7 +366,39 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         float gL, gR, bright, wet, wetPan;
         cmm_emitter_gains(o, &gL, &gR, &bright, &wet, &wetPan);
         int audible = (o->emPtCount > 0) && (gL != 0.0f || gR != 0.0f);
-        int wetFeed = wet > 1e-4f;   /* in range → still feeding the reverb new energy */
+
+        /* DEPTH GRADING (v27): sink the wet with the listener's acoustic depth from the station (air-route
+         * blocks from the managed flood — walks around bends, ignores walls). LEVEL decays exponentially
+         * (much slower than the dry — a reverberant field carries far), normalized to a fixed reference
+         * like the muffle so it's Range-independent; the range-edge taper in cmm_emitter_gains still
+         * bounds the reach. Depth is slewed (~0.5s) so 4Hz pushes glide. amt 0 ⇒ everything here is a
+         * no-op and the wet is exactly the pre-v27 flat behaviour. */
+        o->emRevDepthSm += (o->emRevDepth - o->emRevDepthSm) * 0.02f;
+        float ndep = (o->emRevDepthSm - o->emMinDist) * (1.0f / CMM_EMIT_REV_DEPTH_REF);
+        if (ndep < 0.0f) ndep = 0.0f; else if (ndep > 2.0f) ndep = 2.0f;
+        float damt = o->emRevDepthAmt;
+        if (damt > 0.0f) wet *= expf(-1.2f * damt * ndep);
+        float ndep1 = ndep > 1.0f ? 1.0f : ndep;
+        /* BRIGHTNESS: coefficient for a one-pole LPF on the wet OUTPUT — near = bright splash (coef 1 =
+         * transparent), deep = dark rumble. Slewed per callback (±0.05) like the dry muffle so it never
+         * zipper-clicks. Runs on the tail too (out of range the darkness holds — correct: the field you
+         * left doesn't re-brighten). */
+        float rb = 1.0f - damt * ndep1;
+        float rcoefT = 0.05f + 0.95f * rb * rb;
+        float rcoef = o->emRevLpCoef;
+        float rdc = rcoefT - rcoef;
+        if (rdc > 0.05f) rdc = 0.05f; else if (rdc < -0.05f) rdc = -0.05f;
+        rcoef += rdc;
+        o->emRevLpCoef = rcoef;
+
+        int wetFeed = wet > 1e-4f;   /* in range → still feeding the CARRY reverb new energy */
+
+        /* LOCAL bus (v28): total ARRIVING level = magnitude of the summed spatial gains (equal-power pan
+         * preserves per-speaker energy, so this ≈ the distance+occlusion attenuation actually applied).
+         * The local reverb's input is y (the muffled arriving mono) × this — walls/water/hard-stop shape
+         * it exactly as they shape the dry. */
+        float aLvl = sqrtf(gL * gL + gR * gR); if (aLvl > 1.0f) aLvl = 1.0f;
+        float locWet = o->emRevLocWet;
         /* Tail keepalive: while feeding, recharge the hold timer and remember the live wet gain.
          * Once the feed stops (out of range), count the timer down and keep the reverb running so
          * the tail rings out and the buffers drain. ~2s covers the longest room decay. */
@@ -341,6 +409,17 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             if (o->emRevHold < 0.0f) o->emRevHold = 0.0f;
         }
         int wetOn = wetFeed || o->emRevHold > 0.0f;
+
+        /* Local keepalive mirrors the carry's: once the dry goes silent, tick with zero input so the
+         * local tail rings out and the buffers drain (no click on the next arrival). */
+        int locFeed = audible && locWet > 1e-4f;
+        if (locFeed) o->emRevLocHold = revTailFrames;
+        else if (o->emRevLocHold > 0.0f) {
+            o->emRevLocHold -= (float)frameCount;
+            if (o->emRevLocHold < 0.0f) o->emRevLocHold = 0.0f;
+        }
+        int locOn = locFeed || o->emRevLocHold > 0.0f;
+        float locTarget = locFeed ? locWet : 0.0f;   /* slewed below; the tail also decays on its own */
         /* Held tail gain: last in-range wet, linearly faded to 0 across the keepalive window so the
          * decaying reflections glide to silence (on top of the reverb's own decay) instead of snapping. */
         float tailGain = (revTailFrames > 0.0f) ? o->emRevLast * (o->emRevHold / revTailFrames) : 0.0f;
@@ -363,8 +442,15 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         float wgL = 1.0f - o->emRevPan * wp;   /* source-left (wp<0) ⇒ >1 on L */
         float wgR = 1.0f + o->emRevPan * wp;
 
-        /* Refresh reverb decay/damping from the live room probe (cheap coefficient update). */
-        if (wetOn) cmm_reverb_set(&o->reverb, o->emRevRoom, o->emRevDamp);
+        /* Refresh reverb decay/damping from the live room probe (cheap coefficient update). Depth biases
+         * the CARRY's damping up (each extra bounce down the tunnel sheds highs), on top of the output
+         * LPF; the LOCAL bus is your own room — its input is already muffled, so no depth bias. */
+        if (wetOn) {
+            float dampEff = o->emRevDamp + 0.35f * damt * ndep1;
+            if (dampEff > 1.0f) dampEff = 1.0f;
+            cmm_reverb_set(&o->reverb, o->emRevRoom, dampEff);
+        }
+        if (locOn) cmm_reverb_set(&o->reverbLocal, o->emRevRoom, o->emRevDamp);
 
         /* Map brightness → one-pole LPF coefficient (1 = open/bypass, small = muffled), then SLEW
          * the live coefficient toward it so a distance/occlusion step doesn't click. bright*bright
@@ -377,6 +463,16 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         if (dc > 0.05f) dc = 0.05f; else if (dc < -0.05f) dc = -0.05f;  /* max step per callback */
         coef += dc;
 
+        /* Radio coloration per-block constants. The soft-clip is level-compensated at a 0.25
+         * reference (typical music peak after loudness normalization): quiet material passes
+         * near-unity, peaks get crushed — grit without a volume jump. Params can change between
+         * callbacks (live tuning); a one-block step is inaudible. */
+        float colDrive = o->emColDrive, colStatic = o->emColStatic, colVoice = o->emColVoice;
+        int colOn = (colDrive > 0.001f) || (colStatic > 0.001f) || (colVoice > 0.001f);
+        float colPre = 1.0f + colDrive * 5.0f;
+        float colMk = 0.25f / tanhf(colPre * 0.25f);
+        float colNoiseAmp = colStatic * 0.08f;
+
         ma_uint32 got = 0;
         while (got < frameCount) {
             ma_uint32 n = frameCount - got;
@@ -388,38 +484,84 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
              * occluded dry gain) silently skipped the reverb in any occluded space (e.g. a tight corridor
              * where the radio is around a bend) — the bug that made reverb inaudible until FloodRadius was
              * cranked up to un-occlude the dry. */
-            if (audible || wetOn) {
+            if (audible || wetOn || locOn) {
                 const float* m = (const float*)rp;
                 float* op = (float*)output + (size_t)got * o->channels;
                 float y = o->emLpf;
+                float cLo = o->emColLo, cHi = o->emColHi;
+                unsigned int cRng = o->emColRng;
                 ma_uint32 f;
                 for (f = 0; f < n; f++) {
+                    /* Radio coloration — runs BEFORE the distance LPF and the reverb feed, so the
+                     * muffle, pan, occlusion and reflections all act on the colored ("through a
+                     * speaker") signal. All params 0 ⇒ x is the raw mono, exact bypass. */
+                    float x = m[f];
+                    if (colOn) {
+                        /* Static bed first, so the hiss shares the voicing + drive (it comes out of
+                         * the same speaker — and downstream it's distance-faded/panned like the music). */
+                        if (colNoiseAmp > 0.0f) {
+                            cRng = cRng * 1664525u + 1013904223u;
+                            x += (float)(int)cRng * (1.0f / 2147483648.0f) * colNoiseAmp;
+                        }
+                        /* Band-pass voicing: strip lows (~250 Hz) and highs (~4.2 kHz) — the "small
+                         * speaker" body — blended in by `voice` so 0 keeps the full-range signal. */
+                        if (colVoice > 0.0f) {
+                            cLo += o->emColLoCoef * (x - cLo);
+                            float bp = x - cLo;                 /* highs + mids (lows removed) */
+                            cHi += o->emColHiCoef * (bp - cHi); /* cap the top */
+                            x += (cHi - x) * colVoice;
+                        }
+                        /* Soft-clip drive (Padé tanh, exact ±1 at the ±3 clamp): crushes peaks into
+                         * speaker breakup; colMk keeps the loudness at the reference level flat. */
+                        if (colDrive > 0.001f) {
+                            float t = x * colPre;
+                            if (t > 3.0f) t = 3.0f; else if (t < -3.0f) t = -3.0f;
+                            float t2 = t * t;
+                            x = t * (27.0f + t2) / (27.0f + 9.0f * t2) * colMk;
+                        }
+                    }
                     if (audible) {
-                        y += coef * (m[f] - y);            /* one-pole distance/occlusion low-pass (mono) */
+                        y += coef * (x - y);               /* one-pole distance/occlusion low-pass (mono) */
                         op[f * o->channels]     += y * gL;
                         op[f * o->channels + 1] += y * gR;
                     }
                     if (wetOn) {
-                        /* Reverb feeds off the DRY mono (pre-occlusion-LPF) and mixes in at the wet
+                        /* Reverb feeds off the COLORED mono (pre-occlusion-LPF) and mixes in at the wet
                          * gain, which is NOT occluded — so reflections carry around/through walls.
                          * Past range (feed stopped) we tick with ZERO input so the tail decays out and
                          * the buffers drain, voicing it at the fading held gain rather than the live wet. */
-                        float rin = wetFeed ? m[f] : 0.0f;
+                        float rin = wetFeed ? x : 0.0f;
                         o->emRevMix += (mixTarget - o->emRevMix) * mixCoef;   /* glide, never step */
                         float wl, wr;
                         cmm_reverb_tick(&o->reverb, rin, &wl, &wr);
+                        /* Depth darkening: one-pole on the wet output (coef 1 at zero depth = transparent). */
+                        o->emRevLpL += rcoef * (wl - o->emRevLpL); wl = o->emRevLpL;
+                        o->emRevLpR += rcoef * (wr - o->emRevLpR); wr = o->emRevLpR;
                         op[f * o->channels]     += wl * o->emRevMix * wgL;
                         op[f * o->channels + 1] += wr * o->emRevMix * wgR;
                     }
+                    if (locOn) {
+                        /* LOCAL bus: your space ringing off what ARRIVES. Input = the muffled dry (y)
+                         * × the applied spatial attenuation — so occlusion/distance/water/hard-stop
+                         * govern it exactly as the dry (fully occluded ⇒ nothing to ring). Un-panned
+                         * (diffuse: your room surrounds you); no depth LPF (the input is already dull). */
+                        float lin = audible ? y * aLvl : 0.0f;
+                        o->emRevLocMix += (locTarget - o->emRevLocMix) * mixCoef;
+                        float ll, lr;
+                        cmm_reverb_tick(&o->reverbLocal, lin, &ll, &lr);
+                        op[f * o->channels]     += ll * o->emRevLocMix;
+                        op[f * o->channels + 1] += lr * o->emRevLocMix;
+                    }
                 }
                 if (audible) o->emLpf = y;
+                o->emColLo = cLo; o->emColHi = cHi; o->emColRng = cRng;
             }
             ma_pcm_rb_commit_read(&o->emrb, n);   /* commit even when inaudible → discard residual */
             got += n;
         }
         o->emLpfCoef = coef;
         /* Clip-guard the summed output (music + emitter can exceed unity). */
-        if (audible || wetOn) {
+        if (audible || wetOn || locOn) {
             float* p = (float*)output;
             ma_uint32 total = frameCount * (ma_uint32)o->channels, i;
             for (i = 0; i < total; i++) {
@@ -490,7 +632,16 @@ static cmm_out* cmm_out_alloc_ring(int sampleRate, int channels, int ringFrames,
     o->emRevRangeMult = 1.0f;   /* reverb range == dry range until config relays */
     o->emRevPan = 0.0f; o->emRevPanSmooth = 0.0f;   /* diffuse reverb until config relays */
     o->emRevHold = 0.0f; o->emRevLast = 0.0f; o->emRevMix = 0.0f;   /* tail keepalive idle */
+    o->emRevDepth = 0.0f; o->emRevDepthAmt = 0.0f; o->emRevDepthSm = 0.0f;   /* depth grading off until relayed */
+    o->emRevLpL = 0.0f; o->emRevLpR = 0.0f; o->emRevLpCoef = 1.0f;           /* wet LPF starts transparent */
+    /* Coloration off (clean bypass) until config relays; fixed voicing cutoffs from the device rate. */
+    o->emColDrive = 0.0f; o->emColStatic = 0.0f; o->emColVoice = 0.0f;
+    o->emColLoCoef = 1.0f - expf(-6.2831853f * 250.0f  / (float)sampleRate);
+    o->emColHiCoef = 1.0f - expf(-6.2831853f * 4200.0f / (float)sampleRate);
+    o->emColRng = 0x2545F491u;
+    o->emRevLocWet = 0.0f; o->emRevLocMix = 0.0f; o->emRevLocHold = 0.0f;    /* local bus idle until relayed */
     cmm_reverb_init(&o->reverb, sampleRate);
+    cmm_reverb_init(&o->reverbLocal, sampleRate);
     if (ma_pcm_rb_init(ma_format_f32, 1, (ma_uint32)ringFrames, NULL, NULL, &o->emrb) == MA_SUCCESS)
         o->hasEmRing = 1;
     return o;
@@ -648,8 +799,11 @@ void cmm_out_set_emitter_spatial(cmm_out* o, const float* lisPos3, const float* 
 
 /* v23 — relay the live reverb (room reflection) parameters from the managed room probe. wet 0 = off.
  * rangeMult (≥1) extends the wet's audible distance past the dry range so the tail survives a brief step
- * out of range in a connected cave. */
-void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, float rangeMult, float pan)
+ * out of range in a connected cave. v27 adds depth (air-route blocks) + depthAmt (grading strength).
+ * v28 splits the buses: `wet` is the CARRY level (seal-gated, depth-graded, route-panned next-room cue);
+ * `localWet` is the LOCAL level (your room ringing off the arriving occluded signal; no seal/range). */
+void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, float rangeMult, float pan,
+                                float depth, float depthAmt, float localWet)
 {
     if (!o) return;
     if (wet  < 0.0f) wet  = 0.0f; else if (wet  > 1.0f) wet  = 1.0f;
@@ -657,7 +811,23 @@ void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, f
     if (damp < 0.0f) damp = 0.0f; else if (damp > 1.0f) damp = 1.0f;
     if (rangeMult < 1.0f) rangeMult = 1.0f; else if (rangeMult > 8.0f) rangeMult = 8.0f;
     if (pan  < 0.0f) pan  = 0.0f; else if (pan  > 1.0f) pan  = 1.0f;
+    if (depth < 0.0f) depth = 0.0f; else if (depth > 512.0f) depth = 512.0f;
+    if (depthAmt < 0.0f) depthAmt = 0.0f; else if (depthAmt > 1.0f) depthAmt = 1.0f;
+    if (localWet < 0.0f) localWet = 0.0f; else if (localWet > 1.0f) localWet = 1.0f;
     o->emRevWet = wet; o->emRevRoom = room; o->emRevDamp = damp; o->emRevRangeMult = rangeMult; o->emRevPan = pan;
+    o->emRevDepth = depth; o->emRevDepthAmt = depthAmt;
+    o->emRevLocWet = localWet;
+}
+
+/* v26 — relay the live radio-coloration params from config. All 0..1; all 0 = clean bypass. Lock-free
+ * volatile writes like the rest of the emitter state (a torn read colors one ~10ms callback oddly). */
+void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice)
+{
+    if (!o) return;
+    if (drive     < 0.0f) drive     = 0.0f; else if (drive     > 1.0f) drive     = 1.0f;
+    if (staticLvl < 0.0f) staticLvl = 0.0f; else if (staticLvl > 1.0f) staticLvl = 1.0f;
+    if (voice     < 0.0f) voice     = 0.0f; else if (voice     > 1.0f) voice     = 1.0f;
+    o->emColDrive = drive; o->emColStatic = staticLvl; o->emColVoice = voice;
 }
 
 /* Frames of free space available to write right now (for the producer to pace

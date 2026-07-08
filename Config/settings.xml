@@ -40,6 +40,30 @@
   <WorldEmitterOcclusionWallDistance>35</WorldEmitterOcclusionWallDistance>
   <WorldEmitterOcclusionMaxDistance>30</WorldEmitterOcclusionMaxDistance>
   <WorldEmitterOcclusionHardStop>68</WorldEmitterOcclusionHardStop>
+  <!-- Mid-swing door acoustics follow the physical GAP IN METRES (swing fraction × the door's largest
+       dimension), so the same two knobs are right for every door size: a 3 m garage door with a metre
+       still to go is a huge aperture (full sound); a vault leaf the same fraction open is a hand-width
+       crack (nearly shut). DoorGapFull = opening (m) at/above which sound is fully open — big doors come
+       alive almost immediately on open. DoorGapClosed = opening (m) at/below which it's acoustically
+       shut — the final sliver of crack is ignored, so heavy doors read as a slam. Hot-reloads. -->
+  <WorldEmitterDoorGapFull>1.25</WorldEmitterDoorGapFull>
+  <!-- GapFullOpen: the OPENING direction's full-sound threshold (metres of gap). Kept separate from
+       GapFull because the two directions want different feels: closing is tuned for when the shut lands
+       (fade begins early), but sound should FLOOD IN the moment an opening door has a real gap — sharing
+       one threshold made a close-tuned door slow to come alive on open. Hot-reloads. -->
+  <WorldEmitterDoorGapFullOpen>0.7</WorldEmitterDoorGapFullOpen>
+  <WorldEmitterDoorGapClosed>0.15</WorldEmitterDoorGapClosed>
+  <!-- DoorGapOverrides: per-door-type overrides of the three gap thresholds, without touching the rest.
+       Format: "match=full/fullOpen/closed;match=..." — match is a case-insensitive SUBSTRING of the
+       block name ("garageDoor" catches wooden/steel/iron variants), "-" inherits the global, first match
+       wins. Default slows the garage/roll-up OPEN ramp to suit their long lift. Hot-reloads. -->
+  <WorldEmitterDoorGapOverrides>garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1</WorldEmitterDoorGapOverrides>
+  <!-- DoorSealTypes: comma-separated block-name prefixes of doors that are AIRTIGHT when fully shut and
+       undamaged. A closed vault door is a pressure seal — TRUE SILENCE via the hard-stop, landing while
+       the leaf is still visibly closing (the slam) — not just a metal panel's worth of muffle. No volume
+       knob can reach silence for ordinary doors; this list is what does it, per door type. Any visible
+       damage state breaches the seal (back to normal material acoustics). Hot-reloads. -->
+  <WorldEmitterDoorSealTypes>vaultDoor,vaultHatch</WorldEmitterDoorSealTypes>
   <!-- PathRouting: when the direct line to a speaker is blocked, flood-fill through open air to find
        whether sound can reach you another way (around a wall, up a stairwell) and how far it travels,
        so it routes through openings instead of going near-silent. Deterministic (no ray noise).
@@ -51,7 +75,7 @@
        masks the reverb; a small one lets the dry fade so reverb blooms. Default 8 is a middle ground —
        dial toward 1 for reverb-forward, toward 24 for routing-forward. Hot-reloads live. -->
   <WorldEmitterPathRouting>true</WorldEmitterPathRouting>
-  <WorldEmitterFloodRadius>12</WorldEmitterFloodRadius>
+  <WorldEmitterFloodRadius>32</WorldEmitterFloodRadius>
   <!-- Directional occlusion: when the straight line to a speaker runs through solid rock, the sound is
        re-aimed to arrive from the OPEN ROUTE (down the corridor) instead of straight through the wall.
        Only the direction changes; loudness/muffle are unchanged. Needs PathRouting on. Hot-reloads. -->
@@ -72,12 +96,14 @@
        (why a large cave lost its reverb). Raise it for big caverns; cost is longer ray marches per reverb
        tick (cheap at the few-Hz rate). Hot-reloads. -->
   <WorldEmitterReverbRange>64</WorldEmitterReverbRange>
-  <!-- ReverbOcclusion 0..1: how much a SOLID wall between you and the speakers mutes the reverb. 0 = wet
-       carries through anything (a radio outside a sealed room bleeds in); 1 = a fully walled-off speaker's
-       reverb is silenced. Keyed to the flood's SOLID cost, so reflections still carry around an open-air
-       corner (no material crossed). Winding corridors the flood can't route read as sealed, so keep it
-       moderate. Hot-reloads. -->
-  <WorldEmitterReverbOcclusion>0.5</WorldEmitterReverbOcclusion>
+  <!-- ReverbCarry 0..1: level of the CARRY reverb — the deliberate "muffled music from the next room /
+       down the tunnel" cue that survives occlusion of the direct sound. Taste knob: your own room's
+       reverb (the LOCAL bus) is fed the arriving occluded signal so it follows walls/water/hard-stop
+       automatically, while the carry responds to real material on its own (fixed physics, not a dial):
+       it halves per half wall-equivalent crossed — a shut wooden door ≈ −3 dB, metal ≈ −6 dB — and is
+       hard-blocked entirely at vault thickness; open-air corners carry at full level. 0 = only your own
+       space reverberates. Replaces the old ReverbOcclusion compromise dial. Hot-reloads. -->
+  <WorldEmitterReverbCarry>0.8</WorldEmitterReverbCarry>
   <!-- ReverbRangeMult (≥1): the reverb reaches this many times FARTHER than the dry Range, so a brief step
        past the dry range in a connected cave doesn't drop the tail. Safe outdoors (no enclosure = no wet, so
        a bigger reach carries nothing). 1 = reverb stops at the dry range; 1.5–2 bridges cave dips. Hot-reloads. -->
@@ -87,6 +113,23 @@
        the source, so at distance — where the wet dominates the faded dry — you can still tell which way the
        sound comes from (in a cave, down the tunnel toward the radio). Hot-reloads. -->
   <WorldEmitterReverbPan>0.5</WorldEmitterReverbPan>
+  <!-- ReverbDepth 0..1: how much the reverb EVOLVES with your acoustic depth from the station — the
+       air-route distance (real distance + the open-air detour around bends; walls don't count, the seal
+       gate covers those). Deeper = the wet gets quieter, DARKER and more damped, the way reflections
+       really decay down a tunnel: a bright splash near the radio, a sinking dark rumble deep in the
+       cave, no cliff anywhere. 0 = flat wet at any depth (old behaviour). Hot-reloads. -->
+  <WorldEmitterReverbDepth>0.7</WorldEmitterReverbDepth>
+  <!-- Radio coloration: the "through a speaker" voice, applied before the distance muffle / occlusion /
+       reverb (the reflections carry the colored sound). Three independent 0..1 levers; all 0 = clean:
+       ColorDrive  = soft-clip amount — crushes peaks into speaker breakup/grit (level-compensated, so
+                     it adds distortion, not volume).
+       ColorStatic = constant static-hiss bed from the radio (panned + muffled like the music).
+       ColorVoice  = band-pass voicing — strips lows (<~250 Hz) and highs (>~4 kHz), the "small cheap
+                     speaker" body. 0 = full-range hi-fi, 1 = fully boxed-in. All hot-reload.
+       Disabled (all 0) by default — the coloration pass is parked until the acoustics work settles. -->
+  <WorldEmitterColorDrive>0</WorldEmitterColorDrive>
+  <WorldEmitterColorStatic>0</WorldEmitterColorStatic>
+  <WorldEmitterColorVoice>0</WorldEmitterColorVoice>
 
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back

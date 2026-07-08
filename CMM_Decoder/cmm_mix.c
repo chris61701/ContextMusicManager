@@ -161,6 +161,16 @@ static volatile float g_emRevRoom = 0.5f;
 static volatile float g_emRevDamp = 0.5f;
 static volatile float g_emRevRangeMult = 1.0f;   /* wet range = dry range × this (≥1) */
 static volatile float g_emRevPan = 0.0f;         /* 0 = diffuse reverb, 1 = panned to source bearing */
+static volatile float g_emRevDepth = 0.0f;       /* air-route blocks to the station (v27 depth grading) */
+static volatile float g_emRevDepthAmt = 0.0f;    /* 0..1: how strongly depth grades the wet (0 = flat) */
+static volatile float g_emRevLocWet = 0.0f;      /* LOCAL bus level (v28): ear-room wetness × master */
+
+/* Live radio-coloration ("through a speaker") params, from config (v26). All 0 = clean bypass.
+ * Defaults match the shipped settings (coloration parked/disabled) so the first blocks before
+ * managed pushes are sane. */
+static volatile float g_emColDrive  = 0.0f;   /* soft-clip amount */
+static volatile float g_emColStatic = 0.0f;   /* static-hiss bed level */
+static volatile float g_emColVoice  = 0.0f;   /* band-pass "small speaker" voicing blend */
 
 /* adaptive ring state (see cmm_out.c / ComputeFillTargetLocked) */
 static int g_tightFill, g_maxFill, g_lowWater, g_targetFill;
@@ -456,10 +466,13 @@ static void pump_body(void) {
                     cmm_out_set_emitter_spatial(dev, lp, lr, em->emitPts, em->emitPtGain,
                                                 em->emitPtCount, g_emMinDist, g_emMaxDist,
                                                 g_emFalloffExp, g_emMuffle, g_emStereoWidth);
-                    cmm_out_set_emitter_reverb(dev, g_emRevWet, g_emRevRoom, g_emRevDamp, g_emRevRangeMult, g_emRevPan);
+                    cmm_out_set_emitter_reverb(dev, g_emRevWet, g_emRevRoom, g_emRevDamp, g_emRevRangeMult, g_emRevPan,
+                                               g_emRevDepth, g_emRevDepthAmt, g_emRevLocWet);
+                    cmm_out_set_emitter_color(dev, g_emColDrive, g_emColStatic, g_emColVoice);
                 } else {
                     cmm_out_set_emitter_spatial(dev, NULL, NULL, NULL, NULL, 0, 1.0f, 2.0f, 1.5f, 0.7f, 0.85f);
-                    cmm_out_set_emitter_reverb(dev, 0.0f, 0.5f, 0.5f, 1.0f, 0.0f);
+                    cmm_out_set_emitter_reverb(dev, 0.0f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                    cmm_out_set_emitter_color(dev, 0.0f, 0.0f, 0.0f);
                 }
             }
         }
@@ -771,14 +784,31 @@ CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float fall
 }
 
 /* Live emitter reverb params from the managed room probe (see EmitterAcoustics.ProbeRoom).
- * wet = master wet level (0 = off), room = size→decay, damp = HF damping. All 0..1. */
-CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan) {
+ * wet = CARRY bus level (0 = off), room = size→decay, damp = HF damping. All 0..1.
+ * v27: depth = air-route blocks to the station (grades the carry's level/brightness/damping),
+ * depthAmt = 0..1 grading strength (0 = flat wet at any depth).
+ * v28: localWet = LOCAL bus level (your room ringing off the arriving occluded signal). */
+CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan,
+                                        float depth, float depthAmt, float localWet) {
     if (wet  < 0.0f) wet  = 0.0f; else if (wet  > 1.0f) wet  = 1.0f;
     if (room < 0.0f) room = 0.0f; else if (room > 1.0f) room = 1.0f;
     if (damp < 0.0f) damp = 0.0f; else if (damp > 1.0f) damp = 1.0f;
     if (rangeMult < 1.0f) rangeMult = 1.0f; else if (rangeMult > 8.0f) rangeMult = 8.0f;
     if (pan  < 0.0f) pan  = 0.0f; else if (pan  > 1.0f) pan  = 1.0f;
+    if (depth < 0.0f) depth = 0.0f; else if (depth > 512.0f) depth = 512.0f;
+    if (depthAmt < 0.0f) depthAmt = 0.0f; else if (depthAmt > 1.0f) depthAmt = 1.0f;
+    if (localWet < 0.0f) localWet = 0.0f; else if (localWet > 1.0f) localWet = 1.0f;
     g_emRevWet = wet; g_emRevRoom = room; g_emRevDamp = damp; g_emRevRangeMult = rangeMult; g_emRevPan = pan;
+    g_emRevDepth = depth; g_emRevDepthAmt = depthAmt;
+    g_emRevLocWet = localWet;
+}
+
+/* v26 — live radio-coloration params from config (see header). All 0..1, all 0 = clean bypass. */
+CMM_API void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice) {
+    if (drive     < 0.0f) drive     = 0.0f; else if (drive     > 1.0f) drive     = 1.0f;
+    if (staticLvl < 0.0f) staticLvl = 0.0f; else if (staticLvl > 1.0f) staticLvl = 1.0f;
+    if (voice     < 0.0f) voice     = 0.0f; else if (voice     > 1.0f) voice     = 1.0f;
+    g_emColDrive = drive; g_emColStatic = staticLvl; g_emColVoice = voice;
 }
 
 /* v17 — set a live emitter voice to a SINGLE world position. Missing/non-emitter id = no-op. */

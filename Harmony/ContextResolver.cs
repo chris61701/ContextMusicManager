@@ -53,6 +53,16 @@ namespace CMM
         // interrupted by an unload can't emit a phantom impact in the next world.
         static float _fallPeak;
 
+        // Change-gate for the per-tick [CMM POI] state log. The snapshot runs every scan
+        // tick (~10×/s), so re-logging identical state floods the log while standing in a
+        // POI. Log only when a reported value changes; cleared on leaving the POI so
+        // re-entry logs again. Shared by the SP and MP-client branches (only one runs per
+        // tick): "remaining" is enemiesRemainingInPoi (SP) / spawnedEnemies (MP),
+        // "cleared" is clearedVolumes (SP) / questCleared 0-1 (MP).
+        static string _poiLogName;
+        static int _poiLogRemaining = -1;
+        static int _poiLogCleared = -1;
+
         // Subscribe (once) to the quest system's sleepers-cleared event. Idempotent and
         // cheap to call every tick — guarded by _poiClearHooked.
         static void EnsurePoiClearHook()
@@ -676,9 +686,17 @@ namespace CMM
 
                 // Guard the interpolation: D() re-checks the flag, but the string is built at the
                 // call site BEFORE D() runs — and this fires every scan tick while inside a POI.
-                if (CMMConfig.DebugLogging)
+                // Change-gated: tier/volumes/excluded are fixed per POI, so name+cleared+remaining
+                // covers everything the line reports.
+                if (CMMConfig.DebugLogging &&
+                    (currentPoI != _poiLogName || enemiesRemainingInPoi != _poiLogRemaining || clearedVolumes != _poiLogCleared))
+                {
+                    _poiLogName = currentPoI;
+                    _poiLogRemaining = enemiesRemainingInPoi;
+                    _poiLogCleared = clearedVolumes;
                     CMMConfig.D($"[CMM POI] name='{currentPoI}' tier={tier} tierSuffix='{tierSuffix}' " +
                                 $"volumes={totalVolumes} cleared={clearedVolumes} excluded={excludedVolumes} remaining={enemiesRemainingInPoi}");
+                }
 
                 gameState.InPoi = true;
                 gameState.PoiName = currentPoI;
@@ -723,9 +741,15 @@ namespace CMM
                 // Consume the one-shot quest-clear marker for this POI (if any).
                 bool questCleared = _poiClearedPending.Remove(prefab.boundingBoxPosition);
 
-                if (CMMConfig.DebugLogging)
+                if (CMMConfig.DebugLogging &&
+                    (currentPoI != _poiLogName || spawnedEnemies != _poiLogRemaining || (questCleared ? 1 : 0) != _poiLogCleared))
+                {
+                    _poiLogName = currentPoI;
+                    _poiLogRemaining = spawnedEnemies;
+                    _poiLogCleared = questCleared ? 1 : 0;
                     CMMConfig.D($"[CMM POI] (MP client) name='{currentPoI}' tier={tier} " +
                                 $"spawnedEnemies={spawnedEnemies} questCleared={questCleared} (client heuristic)");
+                }
 
                 gameState.InPoi = true;
                 gameState.PoiName = currentPoI;
@@ -734,6 +758,15 @@ namespace CMM
                 gameState.PoiEnemiesRemaining = spawnedEnemies;
                 gameState.PoiQuestCleared = questCleared;
                 gameState.PoiClearFromQuestOnly = true;
+            }
+
+            // Outside any POI: drop the change-gate memory so walking back into the same
+            // POI (or the same state in another POI) logs a fresh [CMM POI] line.
+            if (!gameState.InPoi)
+            {
+                _poiLogName = null;
+                _poiLogRemaining = -1;
+                _poiLogCleared = -1;
             }
 
             return gameState;

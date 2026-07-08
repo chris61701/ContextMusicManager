@@ -36,6 +36,9 @@ namespace CMM
         // block-before-play path can't double-decode the same file (observed in the perf
         // logs: one track measured twice 0.5s apart). A second request for an in-flight
         // path joins the existing MeasureHandle instead of spawning a new thread.
+        // Serializes IN-GAME loudness decodes (see StartMeasure) so concurrent prewarms can't
+        // saturate several cores at once and starve the main thread.
+        private static readonly object _measureGate = new object();
         private static readonly Dictionary<string, MeasureHandle> _loudnessInFlight =
             new Dictionary<string, MeasureHandle>(StringComparer.OrdinalIgnoreCase);
         // One-shot: on the menu most context snapshots aren't built yet (ContextScanLoop
@@ -552,9 +555,22 @@ namespace CMM
 
             var h = new MeasureHandle();
             _loudnessInFlight[path] = h;
+            // IN-GAME, measures are SERIALIZED through _measureGate: the N-ahead prewarm can queue
+            // several files at once, and each one runs a full-rate native decode on its own thread —
+            // 3-4 saturated cores visibly starve the main thread even at BelowNormal priority (78 of
+            // 274 logged stutters sat on loudness bursts, 2026-07-07). One decode at a time keeps the
+            // burst to a single core; the others just wait their turn on their own (background)
+            // threads. The MENU prescan stays parallel — decided on the main thread NOW, not inside
+            // the worker, so a world loading mid-measure can't flip the mode.
+            bool serialize = GameManager.Instance?.World != null;
             var t = new Thread(() =>
             {
-                try { h.Result = AudioDecoder.MeasureLoudness(path); } catch { }
+                try
+                {
+                    if (serialize) lock (_measureGate) { h.Result = AudioDecoder.MeasureLoudness(path); }
+                    else h.Result = AudioDecoder.MeasureLoudness(path);
+                }
+                catch { }
                 h.Done = true;
             })
             {

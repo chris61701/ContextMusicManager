@@ -97,8 +97,25 @@ typedef struct cmm_decoder cmm_decoder;
  *        current music context's volume.
  *   v25:+ EMITTER CONTINUITY — cmm_mix_add_emitter gains a `startFrame` so a station rejoined mid-song
  *        seeks to its virtual playhead (the station keeps "broadcasting" on a wall-clock while idle;
- *        managed computes the offset). Mirrors cmm_mix_add's resume seek. */
-#define CMM_DECODER_ABI 25
+ *        managed computes the offset). Mirrors cmm_mix_add's resume seek.
+ *   v26:+ RADIO COLORATION — cmm_mix_set_emitter_color(drive, staticLvl, voice) drives the "through a
+ *        speaker" DSP on the emitter mono: band-pass voicing (small-speaker body), soft-clip drive
+ *        (level-compensated), and a static-hiss bed, all applied BEFORE the distance low-pass and the
+ *        reverb feed so the room hears the colored speaker output. All three 0..1, live-tunable.
+ *   v27:+ DEPTH-GRADED REVERB — cmm_mix_set_emitter_reverb gains `depth` (air-route blocks from the
+ *        listener to the station, walls excluded) + `depthAmt` (0..1 strength): the wet gets QUIETER,
+ *        DARKER (a low-pass on the reverb output) and MORE DAMPED with depth, the way a reverberant
+ *        field really decays down a tunnel — near the radio a bright splash, deep in the cave a dark
+ *        sinking rumble, continuous everywhere (replaces "flat wet until the range edge").
+ *   v28:+ TWO-BUS REVERB — cmm_mix_set_emitter_reverb gains `localWet`: a SECOND Freeverb (the LOCAL
+ *        bus) is fed the ARRIVING dry (post-attenuation/occlusion/muffle), so your own space's reverb
+ *        follows every dry rule for free — walls, water, distance and the hard-stop silence it with the
+ *        dry (no seal knob). The original bus becomes the CARRY (next-room cue): un-occluded feed,
+ *        seal-gated + depth-graded + route-panned by the managed side.
+ *   v29:  CARRY range curve reshaped (no interface change): the wet's distance attenuation is now a
+ *        power decay over the whole reach (exponent = dry falloff × 0.5) instead of flat-until-85% —
+ *        kills the constant-loudness reverb plateau that trailed the player after the dry died. */
+#define CMM_DECODER_ABI 29
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -358,8 +375,14 @@ void cmm_out_set_emitter_spatial(cmm_out* o, const float* lisPos3, const float* 
                                  float minDist, float maxDist, float falloffExp, float muffle,
                                  float stereoWidth);
 
-/* Relay the live emitter reverb params (from the managed room probe). wet 0 = off. Lock-free. */
-void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, float rangeMult, float pan);
+/* Relay the live emitter reverb params (from the managed room probe). Lock-free.
+ * wet = CARRY bus level (0 = off), localWet = LOCAL bus level (v28),
+ * depth = air-route blocks to the station, depthAmt = 0..1 depth-grading strength (v27). */
+void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, float rangeMult, float pan,
+                                float depth, float depthAmt, float localWet);
+
+/* Relay the live radio-coloration params (v26). All 0..1; all 0 = clean bypass. Lock-free. */
+void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice);
 
 /* ── Format converter (resample + channel map) ────────────────────────────
  * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
@@ -472,8 +495,27 @@ CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float fall
  * (0 = off), room = size→decay/tail, damp = HF damping (dead room = darker/shorter). All 0..1.
  * rangeMult (≥1) = wet audible range as a multiple of the dry range (reverb reaches farther than the dry).
  * pan (0..1) = how much the diffuse reverb is panned toward the source's traced bearing (0 = diffuse).
+ * v27: depth = the listener's ACOUSTIC DEPTH from the station (air-route blocks — real distance plus the
+ * open-air detour around bends; walls excluded, the managed seal gate covers those); depthAmt = 0..1 how
+ * strongly depth grades the wet (0 = flat wet at any depth, the pre-v27 behaviour). With grading on, the
+ * wet's level, brightness (output low-pass) and damping all sink smoothly with depth.
+ * v28: two buses. `wet` = the CARRY bus (the deliberate next-room / down-the-tunnel cue: un-occluded
+ * feed; managed applies the solid-seal gate + carry level; native applies range + depth grading + route
+ * pan). `localWet` = the LOCAL bus: a second reverb fed the ARRIVING dry (post-attenuation/occlusion),
+ * so your own room's reverb inherits every dry rule — walls, water, hard-stop — with no seal knob;
+ * pass the ear-room wetness × master only.
  * Lock-free; call every probe tick. Applies to the single shared station. */
-CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan);
+CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan,
+                                        float depth, float depthAmt, float localWet);
+
+/* v26 — set the LIVE radio-coloration ("through a speaker") params. drive = soft-clip amount (0 = clean,
+ * 1 = crunchy; level-compensated so it adds grit, not volume); staticLvl = static-hiss bed level
+ * (0 = none); voice = band-pass voicing blend (0 = full-range, 1 = fully "small speaker": no lows below
+ * ~250 Hz, no highs above ~4 kHz). Applied to the emitter mono BEFORE the distance low-pass and the
+ * reverb feed, so distance muffle, occlusion, pan and reflections all act on the colored signal — the
+ * static hisses from the radio's position like everything else. All 0 = exact bypass. Lock-free;
+ * call every tick. Applies to the single shared station. */
+CMM_API void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice);
 
 /* v24 — set the EMITTER (world-radio) master volume, separate from the music master. Feed the game's
  * music slider × the Radio context's own volume. Clamped to >= 0. Lock-free; call every tick. */

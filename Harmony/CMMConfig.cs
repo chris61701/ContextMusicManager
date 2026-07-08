@@ -150,12 +150,39 @@ namespace CMM
         // the reverb fades out (why a large cave went dry). Raise it so big caverns register as enclosed;
         // the cost is longer ray marches per reverb tick (14 rays), which is cheap at the few-Hz reverb rate.
         public static float  WorldEmitterReverbRange   = 64f;
-        // ReverbOcclusion 0..1: how much a SOLID seal between you and the speakers mutes the reverb. 0 = wet
-        // ignores occlusion (reflections carry through anything — a radio outside a sealed vault bleeds in);
-        // 1 = a fully walled-off speaker's reverb is silenced. Because it keys off the flood's SOLID cost,
-        // reflections still carry around an open-air corner/corridor (no solid crossed) — only real material
-        // blocks them. Winding corridors the flood can't route read as sealed, so keep this moderate.
-        public static float  WorldEmitterReverbOcclusion = 0.5f;
+        // ReverbCarry 0..1: level of the CARRY reverb bus — the deliberate "muffled music from the next
+        // room / down the tunnel" cue that survives occlusion of the direct sound. This is a TASTE knob,
+        // not a physics patch: your own room's reverb (the LOCAL bus) is fed the arriving occluded signal,
+        // so it follows walls/water/hard-stop automatically, and the carry is hard-blocked by real
+        // material (solid seal, not adjustable — bleed through solids shouldn't exist at any setting;
+        // open-air corners still carry because air has no solid cost). 0 = only your own space ever
+        // reverberates. Replaces the old ReverbOcclusion compromise dial.
+        public static float  WorldEmitterReverbCarry = 0.8f;
+        // Mid-swing door acoustics are driven by the physical GAP IN METRES (swing fraction × the door's
+        // largest dimension), so one pair of knobs is right for every door size: a 3 m garage door with a
+        // metre still to go is a huge aperture (full sound), a vault leaf the same fraction open is a
+        // hand-width crack. DoorGapFull = opening (m) at/above which sound is acoustically fully open;
+        // DoorGapClosed = opening (m) at/below which it's fully shut (a sliver of crack is ignored —
+        // heavy doors read as a slam). Both hot-reload.
+        public static float  WorldEmitterDoorGapFull     = 1.25f;  // CLOSING: fade spans GapClosed→GapFull metres of opening
+        public static float  WorldEmitterDoorGapFullOpen = 0.7f;   // OPENING: full sound this early (sound floods a real gap)
+        public static float  WorldEmitterDoorGapClosed   = 0.15f;
+        // Per-door-type overrides of the three gap thresholds: "match=full/fullOpen/closed;match=…" —
+        // match is a case-insensitive SUBSTRING of the block name ("garageDoor" catches wooden/steel/
+        // iron variants), "-" inherits the global, first match wins. Lets one door type be retuned
+        // (e.g. a garage's open ramp slowed to its long lift) without touching every other door.
+        // NOTE the big POI roll-up is named rollUpDoor5x4*, NOT *garageDoor* — both entries are needed.
+        // Defaults are the hand-tuned in-game values (2026-07-08): heavy hatches fade through the whole
+        // close but snap alive on open; the vault hatch swings light because its slam is the seal below.
+        public static string WorldEmitterDoorGapOverrides = "garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1";
+        // DoorSealTypes: comma-separated block-name PREFIXES of doors that are AIRTIGHT when fully shut
+        // and undamaged — a closed vault door is a pressure seal, not a metal panel's worth of muffle.
+        // Sealed doors read as gate-class solid (true silence via the hard-stop), and because the seal
+        // density ramps in as the leaf closes, the silence lands while the door is still visibly closing
+        // (the "slam") instead of only after — no gap/fraction knob could ever get there, since the dry
+        // fade bottoms out at "muffled", never "dead". Damage breaks the seal: any visible damage state
+        // drops the door back to ordinary material acoustics. Hot-reloads.
+        public static string WorldEmitterDoorSealTypes = "vaultDoor,vaultHatch";
         // ReverbRangeMult (≥1): the reverb's audible reach as a multiple of the dry Range. The reflections
         // carry FARTHER than the direct sound, so a brief step past the dry range in a connected cave doesn't
         // drop the tail (it fades continuously past the dry edge instead of cutting at it). Safe in the open:
@@ -167,6 +194,26 @@ namespace CMM
         // spacious reverb but leans it toward the source, so at distance — where the wet dominates the faded
         // dry — you can still tell which way the sound is coming from (in a cave, down the tunnel). Hot-reloads.
         public static float  WorldEmitterReverbPan = 0.5f;
+        // ReverbDepth 0..1: how much the reverb EVOLVES with acoustic depth — the air-route distance from
+        // you to the station (real distance + the open-air detour around bends; walls don't count, the
+        // seal gate covers those). Deeper = the wet gets quieter, DARKER (low-passed) and more damped, the
+        // way a reverberant field really decays down a tunnel: near the radio it's a bright splash, deep
+        // in the cave a sinking dark rumble, with no cliff anywhere. 0 = flat wet at any depth (the old
+        // behaviour); 1 = full grading. Hot-reloads.
+        public static float  WorldEmitterReverbDepth = 0.7f;
+        // Radio coloration — the "through a speaker" voice, applied to the station's signal before the
+        // distance muffle / occlusion / reverb (so the reflections carry the colored sound too). Three
+        // independent 0..1 levers, all hot-reloadable; all 0 = the clean, uncolored signal:
+        //   ColorDrive  = soft-clip amount. Crushes peaks into speaker breakup/grit. Level-compensated so
+        //                 it adds distortion, not volume.
+        //   ColorStatic = constant static-hiss bed from the radio (spatialized + muffled like the music,
+        //                 so it hisses FROM the speaker). Subtle even at moderate values.
+        //   ColorVoice  = band-pass voicing blend: strips lows (<~250 Hz) and highs (>~4 kHz) — the
+        //                 "small cheap speaker" body. 0 = full-range hi-fi, 1 = fully boxed-in.
+        // Disabled (all 0) by default — parked until the acoustics work settles.
+        public static float  WorldEmitterColorDrive  = 0f;
+        public static float  WorldEmitterColorStatic = 0f;
+        public static float  WorldEmitterColorVoice  = 0f;
 
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track

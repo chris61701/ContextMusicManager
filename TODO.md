@@ -9,8 +9,8 @@ Backlog of planned and in-development features. Status tags: **(done)**, **(in p
   can use to tune stations. *(conceptualizing; will be disabled in multiplayer)*
 - [ ] **Multiple radio stations from `/Music/radio` subfolders** — each subfolder under
   `/Music/radio` defines a separate station, and the folder's name is the station name.
-- [ ] **Radio distortion / coloration DSP** — "through a speaker" bandpass + soft-clip +
-  low static (audio stage 3c). *(in progress)*
+- [x] **Radio distortion / coloration DSP** — "through a speaker" bandpass + soft-clip +
+  low static (audio stage 3c). Built (ABI 26, `WorldEmitterColor*` knobs); in-game test pending.
 - [ ] **DJ system** — Fallout 3/4-style station DJ/announcer. *(idea, maybe 1.0.6)*
 
 ## UI / overlays

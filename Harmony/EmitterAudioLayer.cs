@@ -68,6 +68,25 @@ namespace CMM
         private const float TickInterval = 0.25f;
         private const float DoorTickInterval = 0.05f;   // ~20 Hz while a door is mid-swing (tight fade/mute timing)
         private static float _nextTick;
+
+        // ── Amortized occlusion flood ─────────────────────────────────────────────────────────────
+        // The occlusion Dijkstra used to settle its full 8000-cell budget synchronously inside the 4 Hz
+        // tick — ~10 ms average, 135 ms worst, ON THE MAIN THREAD: a metronomic frame spike (the felt
+        // stutter of 2026-07-07, 90% of measured ticks over 8 ms). Now the tick only BEGINS the flood;
+        // every frame advances it by a small time slice (FloodBudgetMs), and when it completes the
+        // finish lands the per-speaker gains + reverb push. Total CPU is unchanged; no frame pays more
+        // than the slice. Occlusion results land ~2-6 frames after the tick — invisible behind the
+        // native gain slew (~0.5-1 s). While a door is swinging the budget is raised so door acoustics
+        // keep their ~50 ms responsiveness.
+        private const float FloodBudgetMs = 2.5f;
+        private const float DoorFloodBudgetMs = 16f;   // per-frame slice while a door is mid-swing
+        private const float DoorRushBudgetMs = 32f;    // one-shot inline budget at tick start during a swing —
+                                                       // most floods complete in it, restoring the pre-amortization
+                                                       // same-frame door response (a single ~16 ms frame at the
+                                                       // moment of a swing is invisible; 100 ms of audio lag isn't)
+        private static bool _occlPending;      // a begun flood is being stepped; finish not yet landed
+        private static int _occlCount;         // point count culled at begin (positions already in _pts)
+        private static Vector3 _occlEar;       // the ear the flood was anchored at (finish must use the same)
         private static bool  _forceRefresh;    // an acoustic change (door toggle) fired → run the next refresh a frame early instead of waiting up to 250 ms (main-thread only)
         private static float _nextReverbLog;   // throttle for the reverb diagnostic (DebugLogging only)
 
@@ -79,7 +98,9 @@ namespace CMM
         // out the interval — so the occlusion re-floods with the door's new state immediately and the ~1 s
         // native gain glide starts WITH the swing instead of finishing after it.
         internal static void NotifyAcousticChange() => _forceRefresh = true;
-        private static float _revWetSmooth, _revRoomSmooth;   // reverb inertia (EMA of the pushed wet/room)
+        private static float _revWetSmooth, _revRoomSmooth;   // reverb inertia (EMA of the pushed carry/room)
+        private static float _revLocSmooth;                   // LOCAL bus level EMA (same inertia as the carry)
+        private static float _lastRevPush;                    // realtime of the previous push (dt for the EMAs)
 
         internal static void Tick()
         {
@@ -114,12 +135,20 @@ namespace CMM
                 {
                     EmitterRegistry.RefreshSnapshot(w, player.position);
                     if (EmitterRegistry.Count == 0) { Stop(); return; }
+
+                    // Advance the amortized occlusion flood by one time slice per FRAME; when it
+                    // completes, land the whole tick's output (per-speaker gains + directional points +
+                    // reverb) from the finished field. This is the anti-stutter split: no frame ever
+                    // pays the full Dijkstra, only a slice.
+                    if (_occlPending && EmitterAcoustics.OcclusionStep(w, EmitterAcoustics.AnyDoorAnimating ? DoorFloodBudgetMs : FloodBudgetMs))
+                        FinishOcclusion(player, w);
                 }
             }
 
             // A door toggled since the last tick (hook set the flag) → collapse the up-to-250 ms wait so the
-            // occlusion re-floods with the door's new open/closed state this frame.
-            if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; }
+            // occlusion re-floods with the door's new open/closed state this frame. An in-flight flood was
+            // built from the PRE-toggle door state — abandon it so the restart samples the swing fresh.
+            if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; }
             if (Time.realtimeSinceStartup < _nextTick) return;
             // While a door is mid-swing, refresh fast (~20 Hz) so its openness is sampled tightly — the fade
             // starts promptly on open and the mute is precise on close — instead of in 250 ms steps. Back to
@@ -173,13 +202,65 @@ namespace CMM
             }
             else if (audible)
             {
-                int count = BuildPointBuffer(player);   // all in-range speakers + their occlusion
-                CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, count);
-                PushReverb(player);                     // probe the room + drive the reverb
+                World world = GameManager.Instance?.World;
+                if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && world != null)
+                {
+                    // Routed occlusion = the expensive flood → AMORTIZE. Cull the point set and seed the
+                    // flood now; the per-frame stepper above settles it a slice at a time and lands the
+                    // gains/points/reverb push on completion. If the previous tick's flood is still in
+                    // flight (a heavy spot), let it land first — the next tick starts a fresh one.
+                    if (!_occlPending)
+                    {
+                        _occlCount = CullPoints(player, out _occlEar);
+                        if (_occlCount > 0)
+                        {
+                            EmitterAcoustics.OcclusionBegin(_occlEar, world);
+                            _occlPending = true;
+                            // DOOR RUSH: while a door is mid-swing, try to complete the flood in ONE big
+                            // inline slice so the openness change lands THIS frame, like the old
+                            // synchronous path — amortizing it added 2-6 frames of latency, which reads
+                            // as the door acoustics lagging the swing. Swings are brief; the one-frame
+                            // cost is the pre-amortization behaviour the door tuning was built on.
+                            if (EmitterAcoustics.AnyDoorAnimating && EmitterAcoustics.OcclusionStep(world, DoorRushBudgetMs))
+                                FinishOcclusion(player, world);
+                        }
+                        else
+                        {
+                            CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, 0);
+                            PushReverb(player);
+                        }
+                    }
+                }
+                else
+                {
+                    // Occlusion off / direct-line only: cheap, stays synchronous.
+                    int count = BuildPointBuffer(player);   // all in-range speakers + their occlusion
+                    CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, count);
+                    PushReverb(player);                     // probe the room + drive the reverb
+                }
             }
-            // else: voice live but out of the whole audible radius — keep it warm and in sync, but skip the
-            // occlusion flood + room probe. Distance falloff (updated by the per-frame PushListener) holds
-            // it silent; re-entry resumes the heavy update with no re-open/re-seek.
+            else
+            {
+                // Voice live but out of the whole audible radius — keep it warm and in sync, skipping the
+                // flood + room probe. BUT the point set can still change out here: if the nearby radio you
+                // just SMASHED was the last audible one, the native voice would otherwise keep playing
+                // from its STALE position forever (the "destroyed radio doesn't stop" report). Everything
+                // is beyond the cull range now, so publish the EMPTY set — native gains go to 0 and the
+                // reverb tail rings out — and drop any in-flight flood (it was built for the dead set).
+                _occlPending = false;
+                CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, 0);
+            }
+        }
+
+        // Land a completed occlusion flood: per-speaker gains + directional points from the finished
+        // field, push them to the native voice, then the room probe + reverb. Called from the per-frame
+        // stepper on completion, or inline at tick start during a door rush.
+        private static void FinishOcclusion(EntityPlayerLocal player, World w)
+        {
+            EmitterAcoustics.OcclusionFinish(_occlEar, _pts, _occlCount, _ptGain, w);
+            CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, _occlCount);
+            PushReverb(player);
+            _occlPending = false;
         }
 
         // Fill _pts/_ptGain with the world-centre and occlusion gain of every detected speaker within
@@ -190,11 +271,26 @@ namespace CMM
         // reflection fan is bounded to at most MaxPoints speakers.
         private static int BuildPointBuffer(EntityPlayerLocal player)
         {
-            float range = CMMConfig.WorldEmitterRange;
-            var snap = EmitterRegistry.Snapshot;
+            int count = CullPoints(player, out Vector3 ear);
             World world = GameManager.Instance?.World;
             bool occlude = CMMConfig.WorldEmitterOcclusion && world != null;
-            Vector3 ear = ListenerWorldPos(player);   // camera ear, same world-space point as the listener
+
+            if (occlude)
+                EmitterAcoustics.ComputeOcclusion(ear, _pts, count, _ptGain, world);
+            else
+                for (int i = 0; i < count; i++) _ptGain[i] = 1f;
+
+            return count;
+        }
+
+        // The cull half of the point buffer: fill _pts/_ptDist with the nearest in-range speakers and
+        // report the ear they'll be measured from. No occlusion — the amortized path runs that across
+        // frames (OcclusionBegin/Step/Finish); the sync path adds it in BuildPointBuffer above.
+        private static int CullPoints(EntityPlayerLocal player, out Vector3 ear)
+        {
+            float range = CMMConfig.WorldEmitterRange;
+            var snap = EmitterRegistry.Snapshot;
+            ear = ListenerWorldPos(player);   // camera ear, same world-space point as the listener
 
             int count = 0;
             for (int i = 0; i < snap.Count; i++)
@@ -213,12 +309,6 @@ namespace CMM
                     if (e.Dist < _ptDist[far]) { WritePoint(far, e.Pos); _ptDist[far] = e.Dist; }
                 }
             }
-
-            if (occlude)
-                EmitterAcoustics.ComputeOcclusion(ear, _pts, count, _ptGain, world);
-            else
-                for (int i = 0; i < count; i++) _ptGain[i] = 1f;
-
             return count;
         }
 
@@ -253,6 +343,9 @@ namespace CMM
                                                 CMMConfig.WorldEmitterFalloff,
                                                 CMMConfig.WorldEmitterMuffle,
                                                 CMMConfig.WorldEmitterStereoWidth);
+            CmmMixer.Instance?.SetEmitterColor(CMMConfig.WorldEmitterColorDrive,
+                                               CMMConfig.WorldEmitterColorStatic,
+                                               CMMConfig.WorldEmitterColorVoice);
         }
 
         // Probe the room around the listener and push the resulting reverb params to the native mixer.
@@ -263,35 +356,76 @@ namespace CMM
             World world = GameManager.Instance?.World;
             if (!CMMConfig.WorldEmitterReverbEnabled || world == null)
             {
-                CmmMixer.Instance?.SetEmitterReverb(0f, 0.5f, 0.5f, 1f, 0f);
+                CmmMixer.Instance?.SetEmitterReverb(0f, 0.5f, 0.5f, 1f, 0f, 0f, 0f, 0f);
                 return;
             }
             Vector3 ear = ListenerWorldPos(player);
+            long probeT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             EmitterAcoustics.ProbeRoom(ear, world, out float avgDist, out float roomSize, out float reflect, out float openFrac, out bool roofed);
+            float probeMs = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - probeT0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
             // Prefer the FLOOD's connected-air extent for room SIZE: it walks around corners/tunnels, so a
             // winding corridor reads its real length instead of the ray probe's short sightline. Take whichever
             // sees the larger space (rays can reach farther than the flood box in a straight open shot).
             // Enclosure & reflectivity stay from the ray probe — those it measures fine. Only when the flood ran.
             if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && EmitterAcoustics.AirCellCount > 0)
                 roomSize = Mathf.Max(roomSize, EmitterAcoustics.AirRoomSize);
-            EmitterAcoustics.ComputeReverb(roomSize, reflect, openFrac, roofed, out float wet, out float room, out float damp);
-            wet  *= CMMConfig.WorldEmitterReverbWet;     // LEVEL lever
-            // Fade the wet when the speakers are SOLID-sealed off (no air path) so reflections don't leak
-            // through a wall; ReverbSeal=0 (an open corridor/corner) leaves it untouched so the wet still
-            // carries around bends. WorldEmitterReverbOcclusion scales how hard the seal bites.
-            wet  *= 1f - CMMConfig.WorldEmitterReverbOcclusion * EmitterAcoustics.ReverbSeal;
+            EmitterAcoustics.ComputeReverb(roomSize, reflect, openFrac, roofed, out float roomWet, out float room, out float damp);
+            float master = CMMConfig.WorldEmitterReverbWet;   // LEVEL lever (both buses)
+            // TWO BUSES (the v28 split):
+            //   LOCAL — your own space ringing off the sound that actually ARRIVES. Native feeds it the
+            //   post-attenuation/occlusion dry, so walls, water, distance and the hard-stop already shaped
+            //   the input — the level here is purely "how reverberant is the room I'm standing in".
+            //   CARRY — the deliberate "next room / down the tunnel" cue: un-occluded feed, so it must be
+            //   HARD-blocked by real material (full seal, not a dial — bleed through solids shouldn't
+            //   exist at any setting; open-air corners still carry since air has no solid cost), scaled
+            //   by the ReverbCarry taste knob, depth-graded + route-panned natively.
+            float local = roomWet * master;
+            float carry = roomWet * master * CMMConfig.WorldEmitterReverbCarry * (1f - EmitterAcoustics.ReverbSeal);
+            // PROPORTIONAL material damping on the carry (the closed-door case): transmission loss applies
+            // to next-room reverb like it does to the dry, so the carry halves per HALF wall-equivalent of
+            // SOLID on the least-blocked route — a shut wooden door ≈ −3 dB, a metal door ≈ −6 dB, a full
+            // stone wall ≈ −11 dB — long before the all-or-nothing seal window (0.55·HardStop → HardStop)
+            // finishes it at vault thickness. Open-air detours add no solid, so corners still carry at
+            // full level. Fixed physical curve, no knob: ReverbCarry stays the taste lever. Door swings
+            // fade this smoothly for free (openness already scales the door cell's cost).
+            if (CMMConfig.WorldEmitterOcclusion)
+            {
+                float halfWall = 0.5f * Mathf.Max(1f, CMMConfig.WorldEmitterOcclusionWallDistance);
+                carry *= Mathf.Pow(0.5f, EmitterAcoustics.ReverbSolid / halfWall);
+            }
             room *= CMMConfig.WorldEmitterReverbDecay;   // TAIL-length lever (independent of level)
-            // Reverb has inertia — a box you step behind for a moment shouldn't snap the room off. EMA the
-            // pushed wet/room (~1.5 s glide at the 4 Hz tick) so the reverb eases as the space changes.
-            _revWetSmooth  += (wet  - _revWetSmooth)  * 0.18f;
-            _revRoomSmooth += (room - _revRoomSmooth) * 0.18f;
+            // Reverb has inertia, and it's ASYMMETRIC: room character is EARNED by staying somewhere, not
+            // granted by walking past something. The ear probe legitimately spikes to "enclosed" for a
+            // second when the player passes an overhang/doorway/canopy, and with a symmetric EMA that
+            // bloomed the far-carrying wet with no dry under it — the "burst of reverb from nowhere at a
+            // fair distance while moving" report (log-confirmed: enc 0.72→1.00 + roofed flip in one 4 Hz
+            // tick, carry +0.10 in a second). Slow RISE (~4 s) crushes those transients to sub-audible;
+            // the FALL keeps the old ~1.3 s glide, so stepping out still dries promptly and a slammed
+            // seal door still cuts the carry fast (drops are releases). dt-based so a stalled push
+            // cadence (flood in flight, out-of-range gaps) can't turn one tick into a jump.
+            float nowRev = Time.realtimeSinceStartup;
+            float dtRev = Mathf.Clamp(nowRev - _lastRevPush, 0.05f, 1f);
+            _lastRevPush = nowRev;
+            float aUp = 1f - Mathf.Exp(-dtRev / 4f);
+            float aDn = 1f - Mathf.Exp(-dtRev / 1.3f);
+            _revWetSmooth  += (carry - _revWetSmooth)  * (carry > _revWetSmooth ? aUp : aDn);
+            _revLocSmooth  += (local - _revLocSmooth)  * (local > _revLocSmooth ? aUp : aDn);
+            _revRoomSmooth += (room  - _revRoomSmooth) * aDn;   // tail length: symmetric, size isn't a level blip
+            // ACOUSTIC DEPTH: the air-route distance to the closest-by-air speaker (real + open-air detour;
+            // walls excluded — the seal gate covers those). The occlusion pass just computed it (BuildPoint-
+            // Buffer runs immediately before us); with occlusion off there's no route data, so the straight
+            // nearest distance stands in. Native grades the wet's level/brightness/damping by it.
+            float depth = (CMMConfig.WorldEmitterOcclusion && world != null)
+                ? EmitterAcoustics.ReverbDepth
+                : EmitterRegistry.NearestDist;
             if (Time.realtimeSinceStartup >= _nextReverbLog)
             {
                 _nextReverbLog = Time.realtimeSinceStartup + 1.5f;
                 CMMConfig.D($"[CMM] Reverb: enc={1f - openFrac:0.00} rayS={avgDist:0.0} airSize={EmitterAcoustics.AirRoomSize:0.0} airCells={EmitterAcoustics.AirCellCount} size={roomSize:0.0} reflect={reflect:0.00} " +
-                            $"roofed={roofed} seal={EmitterAcoustics.ReverbSeal:0.00} nearest={EmitterRegistry.NearestDist:0.0}m → wet={_revWetSmooth:0.00} room={_revRoomSmooth:0.00} damp={damp:0.00}");
+                            $"roofed={roofed} seal={EmitterAcoustics.ReverbSeal:0.00} solid={EmitterAcoustics.ReverbSolid:0.0} depth={depth:0.0} nearest={EmitterRegistry.NearestDist:0.0}m probeMs={probeMs:0.0} → carry={_revWetSmooth:0.00} loc={_revLocSmooth:0.00} room={_revRoomSmooth:0.00} damp={damp:0.00}");
             }
-            CmmMixer.Instance?.SetEmitterReverb(_revWetSmooth, _revRoomSmooth, damp, CMMConfig.WorldEmitterReverbRangeMult, CMMConfig.WorldEmitterReverbPan);
+            CmmMixer.Instance?.SetEmitterReverb(_revWetSmooth, _revRoomSmooth, damp, CMMConfig.WorldEmitterReverbRangeMult, CMMConfig.WorldEmitterReverbPan,
+                                                depth, CMMConfig.WorldEmitterReverbDepth, _revLocSmooth);
         }
 
         // The listener's world-space position (camera ear), matching block coords. Used for occlusion
@@ -554,6 +688,7 @@ namespace CMM
             CMMConfig.D("[CMM] World emitter station stopped.");
             _voiceId = 0;
             _voiceTrack = null;
+            _occlPending = false;   // abandon any in-flight amortized flood (its finish targets this voice)
         }
 
         // A measurement for `file` just landed — if the live station voice is airing that exact track,
