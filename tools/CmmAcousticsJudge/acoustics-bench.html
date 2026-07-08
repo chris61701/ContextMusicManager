@@ -1,0 +1,578 @@
+<title>CMM Acoustics Bench</title>
+<style>
+  :root {
+    --bg: #14181d; --panel: #1b2128; --panel2: #222a33; --line: #2e3844;
+    --ink: #dfe6ec; --ink-dim: #8b98a5; --ink-faint: #5c6873;
+    --amber: #e8a33d; --cyan: #4dc3d8; --good: #6fbf73; --bad: #d96a5f;
+    --mono: "Cascadia Mono", Consolas, "SF Mono", monospace;
+    --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #eef0f2; --panel: #ffffff; --panel2: #f2f4f6; --line: #d5dbe1;
+      --ink: #22292f; --ink-dim: #5a6670; --ink-faint: #97a2ac;
+      --amber: #c07f14; --cyan: #14818f;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #eef0f2; --panel: #ffffff; --panel2: #f2f4f6; --line: #d5dbe1;
+    --ink: #22292f; --ink-dim: #5a6670; --ink-faint: #97a2ac;
+    --amber: #c07f14; --cyan: #14818f;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: var(--ui); font-size: 14px; }
+  * { box-sizing: border-box; }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 12px 18px 6px; }
+  header h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: .01em; }
+  header .sub { color: var(--ink-dim); font-size: 12.5px; }
+  .wrap { display: flex; gap: 12px; padding: 8px 14px 18px; align-items: flex-start; flex-wrap: wrap; }
+  .rail { width: 235px; flex: none; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-dim); margin: 0 0 8px; font-weight: 600; }
+  .scen button, .modes button, .toolbtn {
+    background: var(--panel2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px;
+    padding: 4px 9px; font-size: 12.5px; cursor: pointer; font-family: var(--ui);
+  }
+  .scen button { display: block; width: 100%; text-align: left; margin: 3px 0; }
+  .scen button.on, .modes button.on, .toolbtn.on { border-color: var(--amber); color: var(--amber); }
+  .scen .tag { color: var(--ink-faint); font-size: 11px; float: right; }
+  .knob { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .knob label { flex: 1; font-size: 12px; color: var(--ink-dim); }
+  .knob input { width: 86px; accent-color: var(--amber); }
+  .knob .v { font-family: var(--mono); font-size: 11.5px; width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+  .center { flex: 1 1 640px; min-width: 560px; }
+  .modes { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 8px; }
+  canvas { border: 1px solid var(--line); border-radius: 4px; background: #000; display: block; max-width: 100%; image-rendering: pixelated; cursor: crosshair; }
+  .tools { display: flex; gap: 5px; flex-wrap: wrap; margin: 8px 0; align-items: center; }
+  .pal { display: flex; gap: 3px; flex-wrap: wrap; }
+  .pal button { width: 26px; height: 22px; border: 1px solid var(--line); border-radius: 3px; cursor: pointer; font-size: 10px; font-family: var(--mono); color: #fff; text-shadow: 0 1px 2px #000a; }
+  .pal button.on { outline: 2px solid var(--amber); }
+  .side { width: 320px; flex: none; display: flex; flex-direction: column; gap: 10px; }
+  table.probe { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  table.probe td { padding: 2px 4px; border-bottom: 1px solid var(--line); }
+  table.probe td:first-child { color: var(--ink-dim); font-family: var(--ui); font-size: 11.5px; }
+  table.probe td:nth-child(2), table.probe td:nth-child(3) { text-align: right; }
+  table.probe tr.hd td { color: var(--ink-dim); border-bottom: 1px solid var(--ink-faint); font-weight: 600; }
+  .verdict { font-size: 12px; margin-top: 8px; line-height: 1.45; color: var(--ink-dim); }
+  .verdict b { color: var(--ink); }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; font-size: 11.5px; color: var(--ink-dim); }
+  .legend span i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .note { font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; }
+  .bar { height: 8px; border-radius: 4px; background: var(--panel2); overflow: hidden; margin: 2px 0 6px; }
+  .bar i { display: block; height: 100%; }
+  .kv { font-size: 11.5px; color: var(--ink-dim); display: flex; justify-content: space-between; }
+</style>
+
+<header>
+  <h1>CMM Acoustics Bench</h1>
+  <span class="sub">real POI geometry · shipped voxel model vs idealized physics · click = listener, E+click = emitter, paint to experiment</span>
+</header>
+
+<div class="wrap">
+  <div class="rail">
+    <div class="card scen"><h2>Scenario</h2><div id="scenBtns"></div></div>
+    <div class="card"><h2>Tuning (live defaults)</h2><div id="knobs"></div></div>
+    <div class="card"><h2>Block legend</h2><div class="legend" id="legend"></div>
+      <div class="note" style="margin-top:8px">Paint with the palette above the map, then watch every view recompute. <b>L</b>adders &amp; <b>F</b>rames are free after the 2026-07-08 fix — repaint them as concrete to hear the old bug.</div>
+    </div>
+  </div>
+
+  <div class="center">
+    <div class="modes" id="modes"></div>
+    <canvas id="cv" width="720" height="720"></canvas>
+    <div class="tools">
+      <button class="toolbtn" id="btnEmit">Place emitter (E)</button>
+      <button class="toolbtn" id="btnRand">Random emitter</button>
+      <span style="color:var(--ink-faint);font-size:12px">paint:</span>
+      <div class="pal" id="pal"></div>
+      <button class="toolbtn" id="btnReset">Reset scenario</button>
+    </div>
+    <div class="note" id="modeNote"></div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Probe — listener readout</h2>
+      <div class="kv"><span>CMM total</span><span id="cmmDb" style="font-family:var(--mono)"></span></div>
+      <div class="bar"><i id="cmmBar" style="background:var(--amber)"></i></div>
+      <div class="kv"><span>Reference (ideal)</span><span id="refDb" style="font-family:var(--mono)"></span></div>
+      <div class="bar"><i id="refBar" style="background:var(--cyan)"></i></div>
+      <table class="probe" id="probeTbl"></table>
+      <div class="verdict" id="verdict"></div>
+    </div>
+    <div class="card">
+      <h2>Model notes</h2>
+      <div class="note">
+        <b>CMM</b> is the shipped code, ported: material-weighted flood (Dijkstra) with boundary blend, tanh soft-knee + hard-stop gate, occlusion-as-virtual-distance falloff, air-route depth grading, and the two-bus reverb (local = fed the arriving occluded signal; carry = seal-gated + material-damped next-room cue).<br><br>
+        <b>Reference</b> is idealized physics: spherical spreading over the geodesic path + per-material transmission loss in dB, reverb from enclosure/absorption. It ignores engine constraints — the point is the <b>Δ view</b>: red = CMM louder than physics, blue = quieter.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ═════════ scenario data — real POI slices (parsed from Data/Prefabs/POIs *.tts) ═════════
+const REAL = {"house_floor": {"kind": "top", "cell": 1, "rows": ["TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "F         TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT             F", "            SSSSSSSSSSSSSSSSSSSSS                           ", "           GWW.WF  .WwDWWwDww. .W                           ", "           GG.      Ww wWw ww   WG                          ", "           WG.      WwwwWwwww   WG                          ", "           GWW  .  WWwwwWwwwww WW                           ", "            WWWWWWWWWWWWWWWWWWWWW                           ", "            Wm     m..  m   m . W                           ", "           wWwwwwwwwwwwwwwwwwwwwWw                          ", "           wwwwwwwwwwwwwwwwwwwwwww                          ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "F         TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT             F", "            SSSSSSSSSSSSSSSSSSSSS                           ", "            W.D. ...W...W. .   .WG                          ", "           GWW    . WW  W      .GG                          ", "           GWW     .W   W.     .GW                          ", "            WW     WWW.WWW .   WWG                          ", "            WWWWWWWWWWWWWWWWWWWWW                           ", "            Wmmmmmmmmmmmmmmmm  .W                           ", "           wwwwwwwwwwwwwwwwwwwwwww                          ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", " F        TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT             F", "            SSSSSSSSSSSSSSSSSSSSS                           ", "            WW.WM . W.. WM     .W                           ", "            W...    W . W       WG                          ", "            W.WW    W . W       WG                          ", "            WWWWWWWWWWWWWW    WWW                           ", "            WWWWWWWWWWWWWWWWWWWWW                           ", "           wWWWWWWWWWWWWWWWWWWWWWw                          ", "           wwwwwwwwwwwwwwwwwwwwwww                          ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            "]}, "house_section": {"kind": "side", "cell": 1, "rows": ["                                                            ", "                                                            ", "                                                            ", "                                                            ", "F         TTSSSSSSSSSSSSSSSSSSSSSSSTTTTTTTTTTT             F", "            WWWWW WWWWGWWW... WWW                           ", "            WWWWWWWWWWWWWWWWWWWWW                           ", "           GW  . WWWWWWWW . .   WG                          ", "                                                            ", "                                                            ", "                                                            ", "F         TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT            F ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "F                                                          F", "                                                            ", "                                                            "]}, "cave_section": {"kind": "side", "cell": 1, "rows": ["                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT T      TTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT  TTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTT TTT    TTTT      TTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", " TTTTTTTTTTT  TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT    ", "        TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT            ", "               TTTTTTTTTTTTTTTTTTTTTTTTTTTTT                ", "                       TTTTTTTTT                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTT            TTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTT    TTTTTTT               TTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT    TTTTTTTTTT . T         TTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTT       TTTTTTTTTTTTTTTTTTTTTTTTT     TTTTTTTTTTTTTTTTTT", "TT TTT      TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TT TT   w   TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT  T  TTTTTTTT.TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "  TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT   ", "           TTTTTTTTTTTTTTTTTT   TTTTTTTTTTTTTTTTTT          ", "                    TTTTTTTTTTTTTTTTTTT                     ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTT .TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT .   TTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT TTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"]}, "cave_floor": {"kind": "top", "cell": 1, "rows": ["TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTT  TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTT     TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT      TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT      T   TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT      T   TTTTTTTTTTT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT     TTT  TTTTTTTTTT   TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT      TTTTTTTTTTTTT      TTTTTTT TTTTTTTTTTTTTTTTTTTTT", "TTTTT       TTTTTTTTTTTTT      TTTTTT   TTTTTTTTTTTTTTTTTTTT", "TTTTTT      TTTTTTTTTTTTT      TTTTTT    TTTTTTTTTTTTTTTTTTT", "TTTTTT     TTTTTTTTTTTTTTT     TTTTTT   TTTTTTTTTTTTTTTTTTTT", "TTTTTTTT  TTTTTTTTTTTTTTTTT   TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTT   TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT     TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT     TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTT     TTTTTTTTTTTTTTTTTTTTTTTT    TTTTTTTTTTTTTTTTTTTTT", "T..TT    TTTTTTTTTTTTTTTTTTTTTTTT      TTTTTTTTTTTTTTTTTTTTT", "T   T   w TTTTTTTTTTTTTTTTTTTTTTT       TTTTTTTTTTTTTTTTTTTT", "TT  TT  G  TTTTTTTTTTTTTTTTTTTTTTT      TTTTTTTTTTTTTTTTTTTT", "TTTTTTT     TTTTTTT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTT    TTTTTTT   TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTT  TTTTTTTTTT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "  TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT   ", "     TTTTTTTTTTTTTTTTTTTTTTTT   TTTTTTTTTTTTTTTTTTTTTT      ", "       TTTTTTTTTTTTTTTTTTTTTT    TTTTTTTTTTTTTTTTTTT        ", "         TTTTTTTTTTTTTTTTTTTT    TTTTTTTTTTTTTTTTT          ", "            TTTTTTTTTTTTTTTTT   TTTTTTTTTTTTTTTTT           ", "              TTTTTTTTTTTTTTTT TTTTTTTTTTTTTTTT             ", "                 TTTTTTTTTTTTTTTTTTTTTTTTTTTT               ", "                   TTTTTTTTTTTTTTTTTTTT  T                  ", "                    TTTTTTTTTTTTTTTTTT                      ", "                      TTTTTTTTTTTTTT                        ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            "]}, "store_floor": {"kind": "top", "cell": 1, "rows": ["                  sGsGGGsGs                                 ", "                 sssssssssss                                ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTsSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSsTTTTTTTTTTTTTTTTTTTTT", "             ...                            ssSSSSS         ", "                                                            ", "                                                            ", "      mmmmmmmmmmm . .  . .  mmmmmmmmmmm                     ", "                 sSSSSSSSSSs                                ", "                 SSSSSSSSSSS                                ", "                 Ss s.. s sS                                ", "                 ssms..msmss                                ", "                 ssGsGGGsGss                                ", "                 sMMMMMMMMMs                                ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTsSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSsTTTTTTTTTTTTTTTTTTTTT", "           GGG.   GG GDG GG GGGGGG          ss              ", "         . G    G GG.G G.GG GGGGGG.                         ", "           GGGGGG GG GGG GG GGGGGG                          ", "      mmmmmmmmmmm           mmmmmmmmmmm                     ", "      mmmmmmmmmmmsSSSSSSSSSsmmmmmmmmmmm                     ", "                 SSSSSSSSSSS                                ", "                 S .. .. . S                                ", "                 s .     . s                                ", "                 s        .s                                ", "                 sMmmmmmmmMs                                ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "                                                            ", "TTsSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSsTTTTTTTTTTTTTTTTTTTTT", "         SS  GGG S  s . s  s D  D sS        ss.             ", "         SS      S .S   S .S      SS                        ", "         SS      S  S   S  S      SS                        ", "      mmmSSSSSSSSSSSSSSSSSSSSSSSSSSSmmm                     ", "      mmmSSSSSSSSSSSSSSSSSSSSSSSSSSSmmm                     "]}};
+
+// ═════════ block taxonomy ═════════
+// loss = CMM CellLoss fraction (of WallDistance); refDb = idealized transmission loss per cell crossed
+const BLOCKS = {
+  " ": { name: "air",            loss: 0,    refDb: 0,  col: null,      reflect: 0    },
+  "~": { name: "water",          loss: 0.2,  refDb: 15, col: "#2f6db8", reflect: 0.85 },
+  "L": { name: "ladder",         loss: 0,    refDb: 0,  col: "#b08a3e", reflect: 0    },
+  "F": { name: "frame/bars",     loss: 0,    refDb: 1,  col: "#7d8a96", reflect: 0    },
+  "G": { name: "glass pane",     loss: 0.15, refDb: 22, col: "#7fd4e8", reflect: 0.85 },
+  ".": { name: "deco/trim",      loss: 0.06, refDb: 3,  col: "#4a5560", reflect: 0.3  },
+  "D": { name: "door (shut)",    loss: 0.25, refDb: 27, col: "#8a5a2b", reflect: 0.45 },
+  "S": { name: "stone/concrete", loss: 0.9,  refDb: 45, col: "#707a84", reflect: 0.9  },
+  "M": { name: "metal",          loss: 1.0,  refDb: 55, col: "#5b7f9e", reflect: 0.95 },
+  "W": { name: "wood",           loss: 0.5,  refDb: 27, col: "#8f6b40", reflect: 0.45 },
+  "T": { name: "terrain",        loss: 0.7,  refDb: 35, col: "#54483a", reflect: 0.3  },
+  "s": { name: "stone partial",  loss: 0.45, refDb: 22, col: "#5a636c", reflect: 0.9  },
+  "m": { name: "metal partial",  loss: 0.5,  refDb: 27, col: "#4a6confuse", reflect: 0.95 },
+  "w": { name: "wood partial",   loss: 0.25, refDb: 14, col: "#75593a", reflect: 0.45 },
+};
+BLOCKS["m"].col = "#4a6a85";
+const SOLID = ch => "SMWTGD".includes(ch) || "smw".includes(ch);   // reflective surface for the room probe
+
+// ═════════ synthetic scenarios ═════════
+function synth(name) {
+  const W = 60, H = 60, g = Array.from({ length: H }, () => Array(W).fill(" "));
+  const fill = (x0, y0, x1, y1, c) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (x>=0&&y>=0&&x<W&&y<H) g[y][x] = c; };
+  if (name === "tunnel_twist") {           // side view: winding tunnel into rock, radio deep inside
+    fill(0, 20, 59, 59, "T");
+    let x = 2, y = 24; const carve = (dx, dy, n) => { for (let i = 0; i < n; i++) { fill(x-1, y-1, x+1, y+1, " "); x += dx; y += dy; } };
+    carve(1,0,14); carve(0,1,8); carve(1,0,12); carve(0,1,10); carve(1,0,14); carve(0,1,8); carve(1,0,12);
+    fill(0,0,59,19," ");
+    return { kind: "side", rows: g.map(r => r.join("")), emit: [x-2, y], listen: [3, 18] };
+  }
+  if (name === "ladder_shaft") {           // side view: 1-wide shaft with ladders, radio at bottom
+    fill(0, 12, 59, 59, "T");
+    fill(28, 12, 30, 52, " ");             // the shaft
+    for (let y = 12; y <= 52; y++) g[y][29] = "L";
+    fill(20, 50, 40, 56, " ");             // bottom chamber
+    fill(20, 49, 40, 49, "S"); fill(20, 57, 40, 57, "S"); fill(19, 49, 19, 57, "S"); fill(41, 49, 41, 57, "S");
+    fill(28, 49, 30, 49, " ");             // shaft opens into chamber roof
+    return { kind: "side", rows: g.map(r => r.join("")), emit: [30, 54], listen: [29, 10] };
+  }
+  if (name === "vault") {                  // top view: nested rooms, increasing wall thickness
+    fill(4, 4, 55, 55, " ");
+    const box = (x0,y0,x1,y1,c,t) => { for (let i=0;i<t;i++){ fill(x0+i,y0+i,x1-i,y0+i,c); fill(x0+i,y1-i,x1-i,y1-i,c); fill(x0+i,y0+i,x0+i,y1-i,c); fill(x1-i,y0+i,x1-i,y1-i,c);} };
+    box(8, 8, 51, 51, "W", 1);  g[30][8] = "D";
+    box(16, 16, 43, 43, "S", 1); g[16][30] = "D";
+    box(24, 24, 35, 35, "M", 2);            // sealed steel vault, no door
+    return { kind: "top", rows: g.map(r => r.join("")), emit: [29, 29], listen: [5, 30] };
+  }
+  if (name === "pond") {                   // top view: radio across (and under) a water body
+    fill(0, 0, 59, 59, " ");
+    for (let y = 14; y <= 45; y++) for (let x = 18; x <= 42; x++) {
+      const dx = (x-30)/13, dy = (y-30)/17; if (dx*dx + dy*dy < 1) g[y][x] = "~";
+    }
+    return { kind: "top", rows: g.map(r => r.join("")), emit: [30, 30], listen: [50, 30] };
+  }
+}
+
+// ═════════ state ═════════
+const SCENARIOS = [
+  { id: "house_floor",  label: "House — floor plan",   tag: "real POI" },
+  { id: "house_section",label: "House — cross-section",tag: "real POI" },
+  { id: "store_floor",  label: "Bookstore — floor",    tag: "real POI" },
+  { id: "cave_floor",   label: "Cave — tunnel level",  tag: "real POI" },
+  { id: "cave_section", label: "Cave — deep section",  tag: "real POI" },
+  { id: "tunnel_twist", label: "Twisting tunnel",      tag: "synthetic" },
+  { id: "ladder_shaft", label: "Ladder shaft",         tag: "synthetic" },
+  { id: "vault",        label: "Nested vault",         tag: "synthetic" },
+  { id: "pond",         label: "Water pond",           tag: "synthetic" },
+];
+const K = {   // knobs — defaults = the live settings.xml
+  Range:      { v: 30, min: 10, max: 120, step: 1,   label: "Range" },
+  MinDist:    { v: 1,  min: 0,  max: 10,  step: 0.5, label: "MinDistance" },
+  Falloff:    { v: 2.5,min: 0.5,max: 8,   step: 0.1, label: "Falloff" },
+  Muffle:     { v: 0.9,min: 0,  max: 1,   step: 0.05,label: "Muffle" },
+  WallDist:   { v: 35, min: 4,  max: 64,  step: 1,   label: "WallDistance" },
+  MaxDist:    { v: 30, min: 8,  max: 64,  step: 1,   label: "Occl MaxDist" },
+  HardStop:   { v: 68, min: 16, max: 128, step: 2,   label: "HardStop" },
+  FloodR:     { v: 32, min: 4,  max: 32,  step: 1,   label: "FloodRadius" },
+  Wet:        { v: 0.6,min: 0,  max: 1,   step: 0.05,label: "ReverbWet" },
+  Carry:      { v: 0.8,min: 0,  max: 1,   step: 0.05,label: "ReverbCarry" },
+  RangeMult:  { v: 1.5,min: 1,  max: 4,   step: 0.1, label: "RangeMult" },
+  DepthAmt:   { v: 0.7,min: 0,  max: 1,   step: 0.05,label: "ReverbDepth" },
+};
+let grid = [], GW = 0, GH = 0, emit = [30, 30], listen = [10, 10], scenId = "house_floor";
+let mode = "total", placing = false, paint = null;
+let fld = null, probeCache = null;
+
+function loadScenario(id) {
+  scenId = id;
+  const s = REAL[id] || synth(id);
+  grid = s.rows.map(r => r.split(""));
+  GH = grid.length; GW = grid[0].length;
+  emit = s.emit ? s.emit.slice() : findOpen(0.5, 0.5);
+  listen = s.listen ? s.listen.slice() : findOpen(0.2, 0.2);
+  if (!s.emit) randomEmitter();
+  recompute();
+}
+const at = (x, y) => (x >= 0 && y >= 0 && x < GW && y < GH) ? grid[y][x] : "T";
+const loss = (x, y) => BLOCKS[at(x, y)].loss;
+function findOpen(fx, fy) {
+  let bx = Math.floor(GW * fx), by = Math.floor(GH * fy), best = null, bd = 1e9;
+  for (let y = 1; y < GH - 1; y++) for (let x = 1; x < GW - 1; x++) if (at(x, y) === " ") {
+    const d = (x-bx)*(x-bx) + (y-by)*(y-by); if (d < bd) { bd = d; best = [x, y]; }
+  }
+  return best || [1, 1];
+}
+function randomEmitter() {
+  const open = [];
+  for (let y = 1; y < GH - 1; y++) for (let x = 1; x < GW - 1; x++)
+    if (at(x, y) === " ") {
+      let solidN = 0; for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) if (SOLID(at(x+dx, y+dy)) || at(x+dx,y+dy) === "T") solidN++;
+      if (solidN >= 1) open.push([x, y]);   // indoor-ish: touching structure
+    }
+  if (open.length) emit = open[Math.floor(Math.random() * open.length)];
+  recompute();
+}
+
+// ═════════ CMM model — faithful 2D port of the shipped code ═════════
+const CS = 4, MAXB = 2048;   // CostScale, MaxBucket (shipped values)
+function flood(sx, sy) {     // Dial's algorithm from the emitter (reciprocal of the ear flood)
+  const n = GW * GH, cost = new Int32Array(n).fill(-1), wall = new Int32Array(n);
+  const wcs = Math.round(K.WallDist.v * CS);
+  const bh = new Int32Array(MAXB + 1).fill(-1), nxt = new Int32Array(n);
+  const si = sx + sy * GW; cost[si] = 0; bh[0] = si; nxt[si] = -1;
+  for (let c = 0; c <= MAXB; c++) {
+    let i = bh[c];
+    while (i !== -1) {
+      const ni = nxt[i];
+      if (cost[i] === c) {
+        const x = i % GW, y = (i / GW) | 0, pw = wall[i];
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || ny2 < 0 || nx2 >= GW || ny2 >= GH) continue;
+          const j = nx2 + ny2 * GW;
+          const we = Math.round(wcs * loss(nx2, ny2));
+          const nc = c + CS + we;
+          if (nc > MAXB) continue;
+          if (cost[j] !== -1 && nc >= cost[j]) continue;
+          cost[j] = nc; wall[j] = pw + we; nxt[j] = bh[nc]; bh[nc] = j;
+        }
+      }
+      i = ni;
+    }
+  }
+  return { cost, wall };
+}
+function segLoss(x0, y0, x1, y1) {   // straight-line material sum (SegmentLoss, 2D DDA)
+  let sum = 0; const dx = x1 - x0, dy = y1 - y0, steps = Math.max(Math.abs(dx), Math.abs(dy)) * 2;
+  for (let i = 1; i <= steps; i++) {
+    const x = Math.round(x0 + dx * i / steps), y = Math.round(y0 + dy * i / steps);
+    if (x === x0 && y === y0) continue;
+    sum += loss(x, y) / 2;           // sampled 2× per cell
+  }
+  return sum;
+}
+const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+function shape(raw, solid, solidGate) {  // ShapeOcclusion — v29.1: wall term scales with range (fixed dB, not fixed meters)
+  const k = Math.max(0.05, K.Range.v / 30), hs = K.HardStop.v;
+  const detour = Math.max(0, raw - solid);
+  const md = Math.max(0.001, K.MaxDist.v * k);
+  const audible = md * Math.tanh((detour + solid * k) / md);
+  const gate = smooth(0.55 * hs, hs, solidGate);
+  return { extra: audible + gate * K.Range.v, gate };
+}
+// v29 gate-flap fix (mirrors SampleArrival.wallMin): the hard-stop gates on the LEAST wall over any
+// reached route into the 3×3 neighbourhood, not the wall that rode the single min-cost path — two
+// near-equal-cost routes with different material no longer flip the gate between adjacent cells.
+function wallMinAt(x, y) {
+  let mn = Infinity;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
+    const j = nx + ny * GW;
+    if (fld.cost[j] !== -1 && fld.wall[j] < mn) mn = fld.wall[j];
+  }
+  return mn === Infinity ? 0 : mn;
+}
+function cmmAt(x, y) {               // everything CMM computes for a listener at (x,y)
+  const i = x + y * GW;
+  const d = Math.hypot(x - emit[0], y - emit[1]);
+  const man = Math.abs(x - emit[0]) + Math.abs(y - emit[1]);
+  const cheb = Math.max(Math.abs(x - emit[0]), Math.abs(y - emit[1]));
+  let raw, solid, solidGate, branch;
+  if (fld.cost[i] !== -1 && cheb <= K.FloodR.v) {                       // R: routed
+    raw = Math.max(0, fld.cost[i] / CS - man); solid = fld.wall[i] / CS; solidGate = wallMinAt(x, y) / CS; branch = "R";
+  } else {
+    // B: boundary blend — walk from listener toward emitter to the flood-box edge, routed there + straight rest
+    let bx = x, by = y, ok = false;
+    const steps = Math.max(1, Math.max(Math.abs(x - emit[0]), Math.abs(y - emit[1])));
+    for (let t = 0; t <= steps; t++) {
+      const px = Math.round(x + (emit[0] - x) * t / steps), py = Math.round(y + (emit[1] - y) * t / steps);
+      const pc = Math.max(Math.abs(px - emit[0]), Math.abs(py - emit[1]));
+      if (pc <= K.FloodR.v && fld.cost[px + py * GW] !== -1) { bx = px; by = py; ok = true; break; }
+    }
+    if (ok) {
+      const bi = bx + by * GW;
+      const remW = segLoss(x, y, bx, by) * K.WallDist.v;
+      const remM = Math.abs(x - bx) + Math.abs(y - by);
+      raw = Math.max(0, fld.cost[bi] / CS + remM + remW - man);
+      solid = fld.wall[bi] / CS + remW; solidGate = wallMinAt(bx, by) / CS; branch = "B";
+    } else {
+      raw = segLoss(x, y, emit[0], emit[1]) * K.WallDist.v; solid = raw; solidGate = raw; branch = "F";
+    }
+  }
+  const { extra, gate } = shape(raw, solid, solidGate);
+  const dEff = d + extra;
+  const mn = K.MinDist.v, mx = K.Range.v, span = Math.max(0.0001, mx - mn);
+  const att = dEff <= mn ? 1 : dEff >= mx ? 0 : Math.pow((mx - dEff) / span, K.Falloff.v);
+  const bright = 1 - K.Muffle.v * Math.max(0, Math.min(1, (dEff - mn) / 24));
+  const depth = d + Math.max(0, raw - solid);
+  // room probe (listener-side)
+  const pr = probeAt(x, y);
+  const roomWet = pr.enc * pr.reflect * (pr.roofed ? 1 : 0.5);
+  // two buses
+  const rmx = mx * K.RangeMult.v;
+  // v29: power decay over the whole reverb reach at half the dry falloff exponent (was flat until 85%)
+  const attWet = d >= rmx ? 0 : Math.pow((rmx - d) / rmx, K.Falloff.v * 0.5);
+  const depthFac = Math.exp(-1.2 * K.DepthAmt.v * Math.min(2, Math.max(0, (depth - mn) / 48)));
+  const matDamp = Math.pow(0.5, solidGate / (0.5 * K.WallDist.v));
+  const carry = roomWet * K.Wet.v * K.Carry.v * (1 - gate) * matDamp * depthFac * attWet;
+  const local = roomWet * K.Wet.v * att;      // output level × arriving input level
+  const total = Math.sqrt(att * att + carry * carry + local * local);
+  return { d, raw, solid, solidGate, gate, extra, dEff, att, bright, depth, carry, local, total, branch, pr };
+}
+// 16-ray room probe (2D)
+const DIRS = Array.from({ length: 16 }, (_, i) => [Math.cos(i * Math.PI / 8), Math.sin(i * Math.PI / 8)]);
+function probeAt(x, y) {
+  if (probeCache[x + y * GW]) return probeCache[x + y * GW];
+  let hits = 0, sumR = 0, dists = [];
+  for (const [dx, dy] of DIRS) {
+    let hit = false, dist = 24;
+    for (let t = 1; t <= 24; t++) {
+      const px = Math.round(x + dx * t), py = Math.round(y + dy * t);
+      const ch = at(px, py);
+      if (SOLID(ch) || ch === "~") { hit = true; dist = t; sumR += BLOCKS[ch].reflect; break; }
+    }
+    if (hit) hits++; dists.push(dist);
+  }
+  dists.sort((a, b) => a - b);
+  const top = dists.slice(-4).reduce((a, b) => a + b, 0) / 4;
+  const r = { enc: hits / 16, reflect: hits ? sumR / hits : 0, size: top, roofed: hits > 10 };
+  probeCache[x + y * GW] = r;
+  return r;
+}
+// ═════════ reference model — idealized physics ═════════
+let refFld = null;
+function refFlood(sx, sy) {          // bucket-queue Dijkstra minimizing (length + weighted dB)
+  const n = GW * GH, CAP = 4096, Q = 4;   // cost quantized to 0.25 units
+  const best = new Int32Array(n).fill(-1), len = new Float32Array(n), db = new Float32Array(n);
+  const bh = new Int32Array(CAP + 1).fill(-1), nxt = new Int32Array(n);
+  const si = sx + sy * GW; best[si] = 0; bh[0] = si; nxt[si] = -1;
+  for (let c = 0; c <= CAP; c++) {
+    let i = bh[c];
+    while (i !== -1) {
+      const ni = nxt[i];
+      if (best[i] === c) {
+        const x = i % GW, y = (i / GW) | 0;
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || ny2 < 0 || nx2 >= GW || ny2 >= GH) continue;
+          const j = nx2 + ny2 * GW;
+          const stepDb = BLOCKS[at(nx2, ny2)].refDb;
+          const nc = c + Q + Math.round(stepDb * 0.8 * Q);   // path length + weighted transmission
+          if (nc > CAP) continue;
+          if (best[j] !== -1 && nc >= best[j]) continue;
+          best[j] = nc; len[j] = len[i] + 1; db[j] = db[i] + stepDb;
+          nxt[j] = bh[nc]; bh[nc] = j;
+        }
+      }
+      i = ni;
+    }
+  }
+  return { len, db, best };
+}
+function refAt(x, y) {
+  const i = x + y * GW;
+  if (refFld.best[i] === -1) return { dryDb: -80, amp: 0, wet: 0 };   // unreached = sealed beyond the cap
+  const L = Math.max(1, refFld.len[i]);
+  const spreadDb = 20 * Math.log10(L);              // spherical spreading over the geodesic
+  const dryDb = -(spreadDb + refFld.db[i]);
+  const dryAmp = Math.pow(10, Math.max(-60, dryDb) / 20);
+  const pr = probeAt(x, y);
+  const wet = pr.enc * pr.reflect * Math.sqrt(dryAmp);   // reverberant field: decays ~half as fast
+  return { dryDb, amp: Math.min(1, Math.hypot(dryAmp, wet)), wet };
+}
+
+// ═════════ rendering ═════════
+const cv = document.getElementById("cv"), cx = cv.getContext("2d");
+function magma(t) {  // compact perceptual ramp
+  t = Math.max(0, Math.min(1, t));
+  const s = [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,255,164]];
+  const f = t * (s.length - 1), k = Math.min(s.length - 2, Math.floor(f)), u = f - k;
+  return s[k].map((v, j) => Math.round(v + (s[k + 1][j] - v) * u));
+}
+function diverge(t) { // −1..1 blue↔grey↔red
+  t = Math.max(-1, Math.min(1, t));
+  const m = t < 0 ? [[43,111,180],[60,66,72]] : [[60,66,72],[214,88,66]];
+  const u = Math.abs(t);
+  return m[0].map((v, j) => Math.round(v + (m[1][j] - v) * u));
+}
+const db = a => a <= 1e-4 ? -80 : 20 * Math.log10(a);
+function render() {
+  const cell = Math.floor(Math.min(720 / GW, 720 / GH));
+  cv.width = GW * cell; cv.height = GH * cell;
+  const img = cx.createImageData(cv.width, cv.height);
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) {
+    let rgb;
+    const ch = at(x, y);
+    if (mode === "blocks") {
+      rgb = ch === " " ? [18, 21, 26] : hex(BLOCKS[ch].col);
+    } else if (SOLID(ch)) {
+      rgb = hex(BLOCKS[ch].col).map(v => Math.round(v * 0.42));     // dim structure under heatmaps
+    } else {
+      const c = cmmAt(x, y);
+      if (mode === "dry")        rgb = magma(Math.pow(c.att, 0.5));
+      else if (mode === "reverb")rgb = magma(Math.pow(Math.hypot(c.carry, c.local), 0.5));
+      else if (mode === "total") rgb = magma(Math.pow(c.total, 0.5));
+      else if (mode === "ref")   rgb = magma(Math.pow(refAt(x, y).amp, 0.5));
+      else if (mode === "delta") rgb = diverge((db(c.total) - db(refAt(x, y).amp)) / 24);
+    }
+    for (let py = 0; py < cell; py++) for (let px = 0; px < cell; px++) {
+      const o = ((y * cell + py) * cv.width + x * cell + px) * 4;
+      img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  // grid overlay for structure in heatmap modes: outline solids lightly
+  cx.lineWidth = 1;
+  if (mode !== "blocks") {
+    cx.strokeStyle = "rgba(255,255,255,.10)";
+    for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++)
+      if (at(x, y) !== " ") cx.strokeRect(x * cell + .5, y * cell + .5, cell - 1, cell - 1);
+  }
+  // markers
+  const mark = (p, color, r) => { cx.beginPath(); cx.arc((p[0] + .5) * cell, (p[1] + .5) * cell, r, 0, 7); cx.fillStyle = color; cx.fill(); cx.lineWidth = 2; cx.strokeStyle = "#000"; cx.stroke(); };
+  mark(emit, "#e8a33d", cell * 0.55);
+  mark(listen, "#4dc3d8", cell * 0.42);
+  updateProbe();
+}
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+
+function updateProbe() {
+  const c = cmmAt(listen[0], listen[1]);
+  const r = refAt(listen[0], listen[1]);
+  const cd = db(c.total), rd = r.amp <= 1e-4 ? -80 : db(r.amp);
+  document.getElementById("cmmDb").textContent = cd <= -79 ? "silent" : cd.toFixed(1) + " dB";
+  document.getElementById("refDb").textContent = rd <= -79 ? "silent" : rd.toFixed(1) + " dB";
+  document.getElementById("cmmBar").style.width = Math.max(0, (cd + 60) / 60 * 100) + "%";
+  document.getElementById("refBar").style.width = Math.max(0, (rd + 60) / 60 * 100) + "%";
+  const rows = [
+    ["", "CMM", ""],
+    ["distance / route", c.d.toFixed(1), "blk"],
+    ["occlusion extra", c.extra.toFixed(1), "blk"],
+    ["solid on route", c.solidGate.toFixed(1), "blk"],
+    ["hard-stop gate", c.gate.toFixed(2), c.branch],
+    ["effective dist", c.dEff.toFixed(1), "/" + K.Range.v],
+    ["dry level", pct(c.att), db1(c.att)],
+    ["tone brightness", pct(c.bright), ""],
+    ["acoustic depth", c.depth.toFixed(1), "blk"],
+    ["carry reverb", pct(c.carry), db1(c.carry)],
+    ["local reverb", pct(c.local), db1(c.local)],
+    ["room: enclosure", pct(c.pr.enc), "refl " + c.pr.reflect.toFixed(2)],
+  ];
+  document.getElementById("probeTbl").innerHTML = rows.map((r2, i) =>
+    `<tr${i === 0 ? ' class="hd"' : ''}><td>${r2[0]}</td><td>${r2[1]}</td><td>${r2[2]}</td></tr>`).join("");
+  const dd = cd - rd;
+  let v;
+  if (cd <= -79 && rd <= -79) v = "Both models call this <b>silent</b> — agreement.";
+  else if (Math.abs(dd) < 6) v = `CMM within <b>${Math.abs(dd).toFixed(0)} dB</b> of the physical reference — good agreement.`;
+  else if (dd > 0) v = `CMM is <b>${dd.toFixed(0)} dB louder</b> than physics here — check the Δ view: is material being under-charged on this route (branch ${c.branch})?`;
+  else v = `CMM is <b>${(-dd).toFixed(0)} dB quieter</b> than physics — occlusion may be over-charging this route (extra ${c.extra.toFixed(0)} blk on branch ${c.branch}).`;
+  document.getElementById("verdict").innerHTML = v;
+}
+const pct = v => (v * 100).toFixed(0) + "%";
+const db1 = v => v <= 1e-4 ? "−∞" : db(v).toFixed(0) + "dB";
+
+// ═════════ recompute + UI ═════════
+function recompute(knobsOnly) {
+  if (!knobsOnly) {                        // grid or emitter changed
+    probeCache = new Array(GW * GH);
+    refFld = refFlood(emit[0], emit[1]);   // reference has no knobs
+  }
+  fld = flood(emit[0], emit[1]);           // WallDistance affects the CMM flood
+  render();
+}
+const MODES = [
+  ["blocks", "Blocks", "The scenario geometry and its acoustic classes. Paint to experiment."],
+  ["dry", "CMM dry", "Direct-path level after distance falloff + occlusion-as-virtual-distance."],
+  ["reverb", "CMM reverb", "Both reverb buses summed: local (your room, fed the arriving signal) + carry (seal-gated next-room cue)."],
+  ["total", "CMM total", "What you'd hear: dry + both reverb buses, power-summed."],
+  ["ref", "Reference", "Idealized physics: spreading over the geodesic + per-material dB."],
+  ["delta", "Δ CMM−Ref", "Red = CMM louder than physics, blue = quieter. Grey = agreement."],
+];
+document.getElementById("modes").innerHTML = MODES.map(m =>
+  `<button data-m="${m[0]}"${m[0] === mode ? ' class="on"' : ''}>${m[1]}</button>`).join("");
+document.getElementById("modes").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  mode = b.dataset.m;
+  document.querySelectorAll("#modes button").forEach(x => x.classList.toggle("on", x === b));
+  document.getElementById("modeNote").textContent = MODES.find(m => m[0] === mode)[2];
+  render();
+};
+document.getElementById("modeNote").textContent = MODES.find(m => m[0] === mode)[2];
+
+document.getElementById("scenBtns").innerHTML = SCENARIOS.map(s =>
+  `<button data-s="${s.id}"${s.id === scenId ? ' class="on"' : ''}>${s.label}<span class="tag">${s.tag}</span></button>`).join("");
+document.getElementById("scenBtns").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  document.querySelectorAll("#scenBtns button").forEach(x => x.classList.toggle("on", x === b));
+  loadScenario(b.dataset.s);
+};
+
+document.getElementById("knobs").innerHTML = Object.entries(K).map(([k, o]) =>
+  `<div class="knob"><label>${o.label}</label><input type="range" data-k="${k}" min="${o.min}" max="${o.max}" step="${o.step}" value="${o.v}"><span class="v" id="v_${k}">${o.v}</span></div>`).join("");
+document.getElementById("knobs").oninput = e => {
+  const k = e.target.dataset.k; if (!k) return;
+  K[k].v = parseFloat(e.target.value);
+  document.getElementById("v_" + k).textContent = K[k].v;
+  recompute(true);
+};
+
+const PAINTS = [" ", "S", "M", "W", "T", "G", "D", "L", "F", "~", "s", "w", "."];
+document.getElementById("pal").innerHTML = PAINTS.map(p =>
+  `<button data-p="${p}" style="background:${p === " " ? "#111" : BLOCKS[p].col}" title="${BLOCKS[p].name}">${p === " " ? "␣" : p}</button>`).join("");
+document.getElementById("pal").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  paint = paint === b.dataset.p ? null : b.dataset.p;
+  document.querySelectorAll("#pal button").forEach(x => x.classList.toggle("on", x.dataset.p === paint && paint !== null));
+  document.getElementById("btnEmit").classList.remove("on"); placing = false;
+};
+document.getElementById("legend").innerHTML = Object.entries(BLOCKS).filter(([c]) => c !== " ").map(([c, b]) =>
+  `<span><i style="background:${b.col}"></i>${b.name}</span>`).join("");
+
+document.getElementById("btnEmit").onclick = () => { placing = !placing; paint = null; document.querySelectorAll("#pal button").forEach(x => x.classList.remove("on")); document.getElementById("btnEmit").classList.toggle("on", placing); };
+document.getElementById("btnRand").onclick = randomEmitter;
+document.getElementById("btnReset").onclick = () => loadScenario(scenId);
+addEventListener("keydown", e => { if (e.key === "e" || e.key === "E") document.getElementById("btnEmit").click(); });
+
+let dragging = false;
+function cellOf(e) {
+  const r = cv.getBoundingClientRect();
+  const cell = cv.width / GW;
+  const scale = r.width / cv.width;
+  return [Math.floor((e.clientX - r.left) / (cell * scale)), Math.floor((e.clientY - r.top) / (cell * scale))];
+}
+cv.addEventListener("mousedown", e => {
+  const [x, y] = cellOf(e);
+  if (x < 0 || y < 0 || x >= GW || y >= GH) return;
+  if (placing) { emit = [x, y]; placing = false; document.getElementById("btnEmit").classList.remove("on"); recompute(); return; }
+  if (paint !== null) { dragging = true; grid[y][x] = paint; recompute(); return; }
+  listen = [x, y]; render();
+});
+cv.addEventListener("mousemove", e => {
+  if (!dragging || paint === null) return;
+  const [x, y] = cellOf(e);
+  if (x >= 0 && y >= 0 && x < GW && y < GH && grid[y][x] !== paint) { grid[y][x] = paint; recompute(); }
+});
+addEventListener("mouseup", () => dragging = false);
+
+loadScenario(scenId);
+</script>
