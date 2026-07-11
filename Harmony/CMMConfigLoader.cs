@@ -76,7 +76,21 @@ namespace CMM
                 CMMConfig.KeyPrevTrack  = ReadEnum<UnityEngine.KeyCode>(root, "KeyPrevTrack",  CMMConfig.KeyPrevTrack);
                 CMMConfig.KeyVolumeUp   = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeUp",   CMMConfig.KeyVolumeUp);
                 CMMConfig.KeyVolumeDown = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeDown", CMMConfig.KeyVolumeDown);
+                CMMConfig.KeyBanTrack          = ReadEnum<UnityEngine.KeyCode>(root, "KeyBanTrack",          CMMConfig.KeyBanTrack);
+                CMMConfig.KeyUndoBan           = ReadEnum<UnityEngine.KeyCode>(root, "KeyUndoBan",           CMMConfig.KeyUndoBan);
+                CMMConfig.KeyFavouriteTrack   = ReadEnum<UnityEngine.KeyCode>(root, "KeyFavouriteTrack",   CMMConfig.KeyFavouriteTrack);
+                CMMConfig.KeyToggleCombatMusic = ReadEnum<UnityEngine.KeyCode>(root, "KeyToggleCombatMusic", CMMConfig.KeyToggleCombatMusic);
+                CMMConfig.KeyNowPlaying        = ReadEnum<UnityEngine.KeyCode>(root, "KeyNowPlaying",        CMMConfig.KeyNowPlaying);
+                CMMConfig.KeyRadioNext         = ReadEnum<UnityEngine.KeyCode>(root, "KeyRadioNext",         CMMConfig.KeyRadioNext);
+                CMMConfig.KeyRadioPrev         = ReadEnum<UnityEngine.KeyCode>(root, "KeyRadioPrev",         CMMConfig.KeyRadioPrev);
+                CMMConfig.NowPlayingEnabled    = ReadBool(root, "NowPlayingEnabled", CMMConfig.NowPlayingEnabled);
                 CMMConfig.UserTrimStep  = ReadFloat(root, "UserTrimStep", CMMConfig.UserTrimStep);
+                CMMConfig.FavouriteWeight = ReadFloat(root, "FavouriteWeight", CMMConfig.FavouriteWeight);
+                CMMConfig.ManualSkipFadeDuration = ReadFloat(root, "ManualSkipFadeDuration", CMMConfig.ManualSkipFadeDuration);
+
+                // MusicPath may have just changed (settings hot-reload): the ban /
+                // favourite mirrors hold absolute paths derived from it, so re-derive.
+                LoudnessStore.RebuildDerivedPathSets();
 
                 CMMConfig.NativeOutputRingMs = ReadInt (root, "NativeOutputRingMs", CMMConfig.NativeOutputRingMs);
                 CMMConfig.NativeOutputMaxRingMs = ReadInt (root, "NativeOutputMaxRingMs", CMMConfig.NativeOutputMaxRingMs);
@@ -87,6 +101,9 @@ namespace CMM
                 CMMConfig.WorldEmitterSource  = ReadString(root, "WorldEmitterSource",  CMMConfig.WorldEmitterSource);
                 CMMConfig.WorldEmitterRange   = ReadFloat (root, "WorldEmitterRange",   CMMConfig.WorldEmitterRange);
                 CMMConfig.WorldEmitterFade    = ReadFloat (root, "WorldEmitterFade",    CMMConfig.WorldEmitterFade);
+                CMMConfig.RadioAnchorSeconds  = ReadFloat (root, "RadioAnchorSeconds",  CMMConfig.RadioAnchorSeconds);
+                CMMConfig.WorldEmitterBirthFade = ReadFloat(root, "WorldEmitterBirthFade", CMMConfig.WorldEmitterBirthFade);
+                if (CMMConfig.RadioAnchorSeconds < 300f) CMMConfig.RadioAnchorSeconds = 300f;   // tiny windows = constant re-anchoring
                 CMMConfig.WorldEmitterMinDistance = ReadFloat(root, "WorldEmitterMinDistance", CMMConfig.WorldEmitterMinDistance);
                 CMMConfig.WorldEmitterFalloff     = ReadFloat(root, "WorldEmitterFalloff",     CMMConfig.WorldEmitterFalloff);
                 CMMConfig.WorldEmitterMuffle      = ReadFloat(root, "WorldEmitterMuffle",      CMMConfig.WorldEmitterMuffle);
@@ -192,8 +209,10 @@ namespace CMM
                     ContextMusicManager.contexts[kv.Key] = kv.Value;
 
                 // Rebuild the vanilla section→context reverse map from the freshly loaded
-                // Link attributes (covers both first load and the hot-reload path).
+                // Link attributes, and the combat-context set the mute keybind covers
+                // (covers both first load and the hot-reload path).
                 ContextMusicManager.RebuildVanillaLinkMap();
+                ContextMusicManager.RebuildCombatContextSet();
 
                 if (sawDeprecatedPath)
                     Log.Warning("[CMM] contexts.xml uses the deprecated 'path' attribute on one or " +

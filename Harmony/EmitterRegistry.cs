@@ -30,10 +30,10 @@ namespace CMM
     internal static class EmitterRegistry
     {
         // Target block names (resolved to ids once the block table exists). Excludes the
-        // player-craftable `speaker` per the feature scope.
+        // player-craftable `speaker` per the feature scope, and the trader `loudspeaker`
+        // (it already voices trader PA announcements — may reactivate later).
         private static readonly string[] TargetNames =
         {
-            "loudspeaker",
             "radioHam",
             "cntStoreShelfElectronicsSingleBottomSpeaker",
             "cntStoreElectronicsBookShelfSpeaker",
@@ -41,7 +41,17 @@ namespace CMM
         private static Dictionary<int, string> _targetIds;   // blockID → display name
 
         // A detected emitter block. Pos is the world block position; Dist is refreshed each poll.
-        internal struct Emitter { public Vector3i Pos; public string Name; public float Dist; }
+        // StationHash is a stable positive hash the audio layer maps onto a station (hash % count):
+        // POI emitters hash their PrefabInstance.id — so EVERY speaker in one POI shares a station,
+        // stable across reload and MP-consistent for free (each client computes the same); player-
+        // placed emitters (no POI) hash their block position — stable per placement, move to retune.
+        internal struct Emitter { public Vector3i Pos; public string Name; public float Dist; public int StationHash; }
+
+        // Knuth multiplicative hashes, masked positive. Derive, don't store: no replication, no
+        // persistence, stable across sessions as long as the id/position is.
+        private static int StationHashFromId(int id) => (int)(((uint)id * 2654435761u) & 0x7fffffff);
+        private static int StationHashFromPos(Vector3i p) =>
+            (int)(((uint)(p.x * 73856093 ^ p.y * 19349663 ^ p.z * 83492791) * 2654435761u) & 0x7fffffff);
 
         // Scan + cache a POI once we come within this many blocks of its bounding box; drop it from
         // the cache once we're farther than this. MUST cover the station's whole audible reach: this
@@ -96,7 +106,12 @@ namespace CMM
         private static readonly List<int> _dropIds = new List<int>();
         private static readonly Dictionary<Vector3i, string> _placedCache = new Dictionary<Vector3i, string>();  // discovered player-placed emitters (pos→name), kept beyond the discovery box
         private static readonly List<Vector3i> _placedDrop = new List<Vector3i>();     // scratch: placed entries to forget this rebuild
-        private static readonly HashSet<Vector3i> _snapPos = new HashSet<Vector3i>();  // positions already in the snapshot (dedup POI vs placed)
+        // Positions already in the snapshot → their snapshot index. Dedups BOTH placed-vs-POI AND
+        // POI-vs-POI: prefab volumes OVERLAP (a house POI + a part_ sub-prefab + tile pieces), so
+        // one radio inside two boxes was scanned by both and entered the snapshot TWICE with two
+        // different per-POI StationHashes — one physical radio audibly playing TWO stations at once
+        // (log 2026-07-09 13:43: Enclave + Maz, identical nearest 78.3m tracking in lockstep).
+        private static readonly Dictionary<Vector3i, int> _snapPos = new Dictionary<Vector3i, int>();
 
         // ── Public snapshot (rebuilt each poll; main-thread only) ──────────────
         // The live set of detected emitters and the nearest one, for the HUD now and audio later.
@@ -210,8 +225,21 @@ namespace CMM
                     }
                     float dist = Vector3.Distance(pp, new Vector3(p.x + 0.5f, p.y + 0.5f, p.z + 0.5f));
                     var e = list[i]; e.Dist = dist; list[i] = e;
+                    if (_snapPos.TryGetValue(p, out int dupIdx))
+                    {
+                        // Same block already claimed by an overlapping POI: keep ONE entry, and
+                        // break the tie by the SMALLER StationHash — arbitrary but deterministic
+                        // (stable across rebuilds, sessions and MP clients), so the radio's station
+                        // never flips with dictionary iteration order.
+                        if (e.StationHash < Snapshot[dupIdx].StationHash)
+                        {
+                            var keep = Snapshot[dupIdx]; keep.StationHash = e.StationHash;
+                            Snapshot[dupIdx] = keep;
+                        }
+                        continue;
+                    }
                     Snapshot.Add(e);
-                    _snapPos.Add(p);
+                    _snapPos[p] = Snapshot.Count - 1;
                     if (dist < NearestDist) { NearestDist = dist; NearestName = e.Name; NearestPos = p; }
                 }
             }
@@ -227,8 +255,8 @@ namespace CMM
                 if (dist > PlacedDiscardDist) { _placedDrop.Add(p); continue; }        // long gone — forget (re-discover on return)
                 if (!world.IsChunkAreaLoaded(p.ToVector3())) continue;                 // unloaded → keep cached, just not audible now
                 if (world.GetBlock(p.x, p.y, p.z).type != BlockIdFor(kv.Value)) { _placedDrop.Add(p); continue; }  // destroyed/picked up
-                if (_snapPos.Contains(p)) continue;                                    // already counted via a POI
-                Snapshot.Add(new Emitter { Pos = p, Name = kv.Value, Dist = dist });
+                if (_snapPos.ContainsKey(p)) continue;                                 // already counted via a POI
+                Snapshot.Add(new Emitter { Pos = p, Name = kv.Value, Dist = dist, StationHash = StationHashFromPos(p) });
                 if (dist < NearestDist) { NearestDist = dist; NearestName = kv.Value; NearestPos = p; }
             }
             foreach (Vector3i p in _placedDrop) _placedCache.Remove(p);
@@ -251,9 +279,54 @@ namespace CMM
                         if (_targetIds.TryGetValue(bv.type, out string name))
                         {
                             var pos = new Vector3i(x, y, z);
-                            if (!_placedCache.ContainsKey(pos)) _placedCache[pos] = name;   // discover (kept until destroyed / far)
+                            if (_placedCache.ContainsKey(pos)) continue;   // already discovered
+                            // Inside a scannable POI's bounds, the POI scan owns the block (and its
+                            // per-POI station identity). Pre-claiming it here gave a radio placed
+                            // INSIDE a POI a position-hash station for its first ~8 s, then an
+                            // audible station FLIP when the POI rescan took it over.
+                            if (InsideScannablePoi(pos, out int poiId))
+                            {
+                                // A target block HERE that the POI's cache doesn't know about was
+                                // JUST PLACED (or chunk-regenerated). Cache it PROVISIONALLY right
+                                // now — with the POI's own station identity, so nothing flips when
+                                // the scan takes over — and make the authoritative rescan due. Only
+                                // forcing the rescan wasn't enough: the amortized walk of a big POI
+                                // takes seconds to commit (3 ms/poll), which kept placement at a
+                                // base inside POI bounds a ~5 s wait (log 2026-07-10 19:33).
+                                if (!_poiCache.TryGetValue(poiId, out List<Emitter> known))
+                                    _poiCache[poiId] = known = new List<Emitter>();
+                                bool knownHere = false;
+                                for (int k = 0; k < known.Count; k++)
+                                    if (known[k].Pos.Equals(pos)) { knownHere = true; break; }
+                                if (!knownHere)
+                                {
+                                    known.Add(new Emitter { Pos = pos, Name = name,
+                                                            StationHash = StationHashFromId(poiId) });
+                                    _poiScanTime[poiId] = float.MinValue;
+                                }
+                                continue;
+                            }
+                            _placedCache[pos] = name;   // discover (kept until destroyed / far)
                         }
                     }
+        }
+
+        // True when `p` lies inside a nearby, SCANNABLE POI's bounding box — that POI's scan/rescan
+        // will claim the block, so the proximity sweep must not. Oversized (never-scanned) POIs and
+        // POIs beyond keep range don't count: blocks in those are only ever found by the sweep.
+        // _prefabScratch/_nearIds are refreshed by Poll step 1 right before the sweep runs.
+        private static bool InsideScannablePoi(Vector3i p, out int poiId)
+        {
+            foreach (PrefabInstance pi in _prefabScratch)
+            {
+                if (!_nearIds.Contains(pi.id) || _oversizedIds.Contains(pi.id)) continue;
+                Vector3i b = pi.boundingBoxPosition, s = pi.boundingBoxSize;
+                if (p.x >= b.x && p.x < b.x + s.x &&
+                    p.y >= b.y && p.y < b.y + s.y &&
+                    p.z >= b.z && p.z < b.z + s.z) { poiId = pi.id; return true; }
+            }
+            poiId = 0;
+            return false;
         }
 
         // Scan a POI's bounding box (clamped to the world's Y range) for target blocks.
@@ -311,7 +384,8 @@ namespace CMM
                         BlockValue bv = world.GetBlock(_scanX, y, _scanZ);   // null-safe → Air on unloaded
                         if (bv.isair) continue;
                         if (_targetIds.TryGetValue(bv.type, out string name))
-                            _scanHits.Add(new Emitter { Pos = new Vector3i(_scanX, y, _scanZ), Name = name });
+                            _scanHits.Add(new Emitter { Pos = new Vector3i(_scanX, y, _scanZ), Name = name,
+                                                        StationHash = StationHashFromId(_scanPiId) });
                     }
                     _scanZ++;
                     if ((sinceCheck += colH) >= 2048)
@@ -325,6 +399,22 @@ namespace CMM
                 _scanX++;
             }
             // Complete → commit (replaces the old list ⇒ respawned blocks appear, removed ones drop).
+            // Carry over cached entries the walk didn't see whose block is still live: a radio placed
+            // BEHIND this scan's cursor (provisionally cached by the sweep) must survive the commit,
+            // or it blinks out of the snapshot until the sweep re-adds it. Truly-removed blocks fail
+            // the GetBlock check and drop as before.
+            if (_poiCache.TryGetValue(_scanPiId, out List<Emitter> prior))
+            {
+                for (int i = 0; i < prior.Count; i++)
+                {
+                    bool seen = false;
+                    for (int j = 0; j < _scanHits.Count; j++)
+                        if (_scanHits[j].Pos.Equals(prior[i].Pos)) { seen = true; break; }
+                    Vector3i p = prior[i].Pos;
+                    if (!seen && world.GetBlock(p.x, p.y, p.z).type == BlockIdFor(prior[i].Name))
+                        _scanHits.Add(prior[i]);
+                }
+            }
             _poiCache[_scanPiId] = new List<Emitter>(_scanHits);
             _poiScanTime[_scanPiId] = Time.realtimeSinceStartup;
             _scanHits.Clear();

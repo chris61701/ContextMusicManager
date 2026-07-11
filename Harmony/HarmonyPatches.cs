@@ -310,6 +310,14 @@ namespace CMM
             // mixer would bank a deep cushion behind the stinger and then flush it on the falling
             // edge once the poll caught up — clipping the stinger's start ("Spawn plays offset").
             CmmMixer.DeepBuffer = false;
+            // The menu→game handoff (MenuToGameFade) parks the CONSUMER-side output gain at 0 and
+            // relies on the next music-bus Play (normally the Spawn stinger, dispatched below) to
+            // revive it — but emitter voices (cmm_mix_add_emitter) never revive it, so when Spawn
+            // has no playable file and the personal radio is off, world-emitter stations restarted
+            // on re-entry rendered into a parked 0 gain: silent until the next music add ("after
+            // quit+continue the emitters don't work until I dial the radio", log 2026-07-10 20-07).
+            // Restore it unconditionally, at the same moment the stinger would have.
+            CmmMixer.Instance?.SetOutputGain(1f, 0f);
             CMMConfig.D("[CMM] Player respawned");
             ContextMusicManager._contextStack.Clear();
 

@@ -52,11 +52,13 @@ namespace CMM
 
         // v16 — emitter voices: an independent positional layer that plays alongside the music
         // voices (exempt from the music crossfade + eviction). Same decoder handoff as cmm_mix_add;
-        // takes ownership of dec. Returns an emitter voice id (0 on failure).
+        // takes ownership of dec. v31: `slot` (0..MaxEmitterSlots-1) pins the voice to a station
+        // render slot — voices sharing a slot sum (a track-advance crossfade). Returns an emitter
+        // voice id (0 on failure).
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern long cmm_mix_add_emitter(IntPtr dec, int kind, int srcRate, int srcChannels,
             long totalFrames, float fadeIn, int loop, float trackGain,
-            float posX, float posY, float posZ, float minDist, float maxDist, long startFrame);
+            float posX, float posY, float posZ, float minDist, float maxDist, long startFrame, int slot);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_remove_emitter(long id, float fade);
@@ -65,6 +67,11 @@ namespace CMM
         // before a FRESH station voice starts, so the previous voice's leftovers never bleed under it.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_emitter_reset_acoustics();
+
+        // v32 — flush one render slot (queued dry ring + per-slot render state) before a DIFFERENT
+        // station acquires it, so the old station's buffered audio never plays under the new voice.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_emitter_flush_slot(int slot);
 
         // v17 — listener basis (pos + forward + right, from the camera) + live emitter reposition.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -88,11 +95,14 @@ namespace CMM
         // v23 — live emitter reverb (room reflections) from the managed room probe.
         // v27 adds depth (air-route blocks to the station) + depthAmt (0..1 grading strength): the wet
         // gets quieter/darker/more damped the deeper you are from the source.
-        // v28 splits the buses: wet = CARRY (seal-gated next-room cue), localWet = LOCAL (your room
+        // v28 splits the buses: CARRY (seal-gated next-room cue) vs localWet = LOCAL (your room
         // ringing off the arriving occluded signal — inherits every dry occlusion rule natively).
+        // v31: wets/depths are PER-SLOT arrays (MaxEmitterSlots floats) — each voiced station's own
+        // carry send + air-route depth; the room-shape params stay shared (the listener's room).
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan,
-                                                               float depth, float depthAmt, float localWet);
+        internal static extern void cmm_mix_set_emitter_reverb(float[] wets, float[] depths,
+                                                               float room, float damp, float rangeMult, float pan,
+                                                               float depthAmt, float localWet);
 
         // v26 — live radio coloration ("through a speaker"): soft-clip drive, static-hiss bed,
         // band-pass voicing blend. All 0..1; all 0 = clean bypass.
@@ -237,20 +247,26 @@ namespace CMM
 
         // Playhead + length of a voice, in seconds. active=false (and false return) when the id
         // is unknown — i.e. it finished and was retired, or never existed.
+        // Max simultaneously-voiced stations (native render slots). MUST match the native
+        // CMM_MAX_EMIT_VOICES — the per-slot reverb arrays are exactly this long.
+        internal const int MaxEmitterSlots = 3;
+
         // Install an EMITTER voice: an independent positional layer that plays ALONGSIDE the music
         // voices instead of crossfading them (a diegetic world speaker keeps playing while the
         // soundtrack changes underneath). `dec`+`kind` name a decoder the caller opened via
         // AudioDecoder.OpenNativeHandle; the mixer TAKES OWNERSHIP (closes it on retire or failure).
-        // loop restarts at EOF; trackGain is the per-track loudness gain. Returns an emitter voice
-        // id (0 on failure) to stop via RemoveEmitter. v16 renders it centered; spatialization later.
+        // loop restarts at EOF; trackGain is the per-track loudness gain; slot pins the voice to a
+        // station render slot (0..MaxEmitterSlots-1 — the emitter layer keeps one station per slot).
+        // Returns an emitter voice id (0 on failure) to stop via RemoveEmitter.
         public long PlayEmitter(IntPtr dec, int kind, int srcRate, int srcChannels, long totalFrames,
                                 float fadeInSeconds, bool loop, float posX, float posY, float posZ,
-                                float minDist, float maxDist, float trackGain = 1f, long startFrame = 0)
+                                float minDist, float maxDist, float trackGain = 1f, long startFrame = 0,
+                                int slot = 0)
         {
             if (dec == IntPtr.Zero) return 0;
             return NativeMix.cmm_mix_add_emitter(dec, kind, srcRate, srcChannels, totalFrames,
                                                  fadeInSeconds, loop ? 1 : 0, trackGain,
-                                                 posX, posY, posZ, minDist, maxDist, startFrame);
+                                                 posX, posY, posZ, minDist, maxDist, startFrame, slot);
         }
 
         // Fade an emitter voice out (over fadeSeconds; 0 snaps) and retire it. No-op if it's gone.
@@ -265,6 +281,14 @@ namespace CMM
         public void ResetEmitterAcoustics()
         {
             NativeMix.cmm_mix_emitter_reset_acoustics();
+        }
+
+        // Flush one station render slot (queued dry + LPF/color/send state). Call before starting a
+        // voice on a slot whose previous occupant was a DIFFERENT station; never on a same-station
+        // track advance (the ring residual there is the outgoing track's tail — wanted continuity).
+        public void FlushEmitterSlot(int slot)
+        {
+            NativeMix.cmm_mix_emitter_flush_slot(slot);
         }
 
         // Push the listener basis (world position + forward + right unit vectors, straight from the
@@ -299,11 +323,12 @@ namespace CMM
         }
 
         // Push the live emitter reverb (room reflections) from the room probe. Every tick.
-        // wet = CARRY bus level; localWet = LOCAL bus level (see the v28 split);
-        // depth = air-route blocks to the station; depthAmt = how much depth grades the carry (0 = flat).
-        public void SetEmitterReverb(float wet, float room, float damp, float rangeMult, float pan, float depth, float depthAmt, float localWet)
+        // wets/depths = per-SLOT arrays (MaxEmitterSlots long; caller reuses the buffers): each voiced
+        // station's own seal-gated CARRY send level + air-route depth. room/damp/pan/localWet = the
+        // listener's room (shared); depthAmt = how much depth grades the carry (0 = flat).
+        public void SetEmitterReverb(float[] wets, float[] depths, float room, float damp, float rangeMult, float pan, float depthAmt, float localWet)
         {
-            NativeMix.cmm_mix_set_emitter_reverb(wet, room, damp, rangeMult, pan, depth, depthAmt, localWet);
+            NativeMix.cmm_mix_set_emitter_reverb(wets, depths, room, damp, rangeMult, pan, depthAmt, localWet);
         }
 
         // Push the live radio coloration (soft-clip drive, static bed, band-pass voicing). Every tick.

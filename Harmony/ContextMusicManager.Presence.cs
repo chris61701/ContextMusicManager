@@ -191,7 +191,39 @@ namespace CMM
         // behaviour. For a music mod that staleness window is harmless.
         public static bool ContextHasFiles(string contextName)
         {
-            return _contextsWithFiles.Contains(contextName);
+            if (!_contextsWithFiles.Contains(contextName)) return false;
+            // Files exist, but if the user banned every one of them the context is
+            // treated as EMPTY: it resolves through its fallback chain (like the
+            // disable-context keybind) instead of playing tracks the user rejected.
+            return !AllTracksBanned(contextName);
+        }
+
+        // Memoized "every track in this context's snapshot is banned" check. The full
+        // sweep is O(files) but re-runs only when a ban toggles (BanRevision) or the
+        // snapshot array is replaced; every other call is two field compares, cheap
+        // enough for the resolver's every-tick use. A context whose snapshot hasn't
+        // been built yet reads as "not all banned" — the first pick populates the
+        // snapshot and the next tick corrects it.
+        private static bool AllTracksBanned(string contextName)
+        {
+            if (LoudnessStore.BannedCount == 0) return false;
+            if (!cacheMap.TryGetValue(contextName, out ContextCache cache)) return false;
+            string[] snap = cache.directorySnapshot;
+            if (snap == null || snap.Length == 0) return false;
+
+            if (cache.banEvalRevision != LoudnessStore.BanRevision
+                || !ReferenceEquals(cache.banEvalSnapshot, snap))
+            {
+                bool all = true;
+                for (int i = 0; i < snap.Length; i++)
+                {
+                    if (!LoudnessStore.IsBannedPath(snap[i])) { all = false; break; }
+                }
+                cache.allTracksBanned = all;
+                cache.banEvalRevision = LoudnessStore.BanRevision;
+                cache.banEvalSnapshot = snap;
+            }
+            return cache.allTracksBanned;
         }
 
         // Recomputes presence for one context from its in-memory directory snapshot

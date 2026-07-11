@@ -13,8 +13,8 @@ namespace CMM
         public float lastLeftTime = -1f;
         // The file most recently SELECTED for this context. Advances to the next track as
         // soon as the auto-advance picks it (≈end of the current track, or immediately on a
-        // skip) — so it is NOT necessarily the audible file. Used for next-track avoidance,
-        // loudness measurement, and previous-track memory.
+        // skip) — so it is NOT necessarily the audible file. Used for next-track avoidance
+        // and loudness measurement.
         public string lastPlayedFile;
         // The file the native mixer is actually VOICING right now (set when StartNativeContext
         // dispatches it). Volume/normalization keys off this, not lastPlayedFile, so the
@@ -27,10 +27,67 @@ namespace CMM
         // so the HUD reflects how the track BEGAN, not whether it has since been measured.
         public bool playingFilePreMeasured;
 #endif
-        // The track that played immediately before lastPlayedFile in this context.
-        // One-deep (no full history) — drives the "previous track" keybind, which
-        // toggles between the two. Captured in StartNativeContext on every advance.
-        public string previousPlayedFile;
+        // ── Per-context play history ───────────────────────────────────────────
+        // The tracks that actually played in this context, in order, with a cursor at
+        // the playing one — drives the Prev/Next keybinds like a music player's
+        // back/forward. Session-only, capped at MaxPlayHistory (oldest dropped).
+        // Every track start commits here (CommitToHistory); the commit itself
+        // recognizes replays by comparing against the cursor's neighbours, so the
+        // navigation code never has to move the cursor.
+        public const int MaxPlayHistory = 25;
+        public readonly List<string> playHistory = new List<string>();
+        public int historyIndex = -1;   // cursor: index of the playing track, -1 = empty
+
+        // Record `file` as the track now playing. A forward/backward REPLAY (the file
+        // is the cursor's neighbour — a Prev/Next keypress or a mid-history
+        // auto-advance) just moves the cursor; landing on the cursor itself (context
+        // resume / convergence re-assert) is a no-op. A genuinely new track drops any
+        // forward (rewound-past) entries and appends, like a browser history.
+        public void CommitToHistory(string file)
+        {
+            if (string.IsNullOrEmpty(file)) return;
+            if (HistoryAt(historyIndex, file)) return;
+            if (HistoryAt(historyIndex + 1, file)) { historyIndex++; return; }
+            if (HistoryAt(historyIndex - 1, file)) { historyIndex--; return; }
+            if (historyIndex >= 0 && historyIndex < playHistory.Count - 1)
+                playHistory.RemoveRange(historyIndex + 1, playHistory.Count - historyIndex - 1);
+            playHistory.Add(file);
+            if (playHistory.Count > MaxPlayHistory) playHistory.RemoveAt(0);
+            historyIndex = playHistory.Count - 1;
+        }
+
+        // The nearest entry BEHIND the cursor that still exists on disk, or null at the
+        // start of history. Dead entries are pruned as they're found so the cursor's
+        // path stays contiguous (CommitToHistory recognizes only direct neighbours).
+        // Peek-only: the cursor moves when the replayed track actually commits.
+        public string HistoryBack()
+        {
+            while (historyIndex > 0)
+            {
+                string f = playHistory[historyIndex - 1];
+                if (System.IO.File.Exists(f)) return f;
+                playHistory.RemoveAt(historyIndex - 1);
+                historyIndex--;
+            }
+            return null;
+        }
+
+        // Forward twin of HistoryBack: the nearest surviving entry AHEAD of the cursor
+        // (non-null only after rewinding), pruning dead ones. Peek-only.
+        public string HistoryForward()
+        {
+            while (historyIndex >= 0 && historyIndex < playHistory.Count - 1)
+            {
+                string f = playHistory[historyIndex + 1];
+                if (System.IO.File.Exists(f)) return f;
+                playHistory.RemoveAt(historyIndex + 1);
+            }
+            return null;
+        }
+
+        private bool HistoryAt(int i, string file) =>
+            i >= 0 && i < playHistory.Count
+            && string.Equals(playHistory[i], file, StringComparison.OrdinalIgnoreCase);
         // The single track pinned to play the next time this context starts FRESH (a
         // switch-in, not a resume). It is the ONLY track pre-measured for an inactive
         // context, and StartNativeContext consumes it so the track we start is exactly
@@ -39,6 +96,13 @@ namespace CMM
         public string stagedFile;
         public int sequentialIndex;
         public string[] directorySnapshot;
+        // Memoized "is every track in the snapshot banned?" evaluation, re-run only
+        // when a ban toggles (LoudnessStore.BanRevision) or the snapshot is replaced
+        // — ContextHasFiles runs every scan tick, so the O(files) sweep can't live
+        // there unmemoized. See ContextMusicManager.AllTracksBanned.
+        public int banEvalRevision = -1;
+        public string[] banEvalSnapshot;
+        public bool allTracksBanned;
         // For a FLAT FOLDER source: the top-level .m3u/.m3u8 files discovered in the folder
         // at the last scan. The file-watch change signature folds these files' own mtimes in
         // (a folder's mtime doesn't change when a contained .m3u is edited in place), so

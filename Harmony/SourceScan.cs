@@ -170,6 +170,37 @@ namespace CMM
             return false;
         }
 
+        // The LISTING-based change signature for sloppy-mtime filesystems: an FNV-1a hash over
+        // every file's full path + mtime under `dir` (top-level or the whole tree). On exFAT/FAT/
+        // removable/network volumes a folder's mtime does NOT move when a child is added, removed
+        // or renamed, so the max-of-mtimes signatures are blind there — this catches all three
+        // (path set changes on add/remove/rename; mtime covers in-place edits). Callers gate on
+        // IsSloppyMtimeFilesystem (NTFS/ReFS keep their pure-stat fast path) and treat a THROW as
+        // "no change" (transient IO mid-walk must not flap the caller). Never returns 0 — callers
+        // use 0 as "not computed".
+        internal static long FileSetContentHash(string dir, bool includeSubfolders)
+        {
+            if (!Directory.Exists(dir)) return 1;
+            ulong h = 14695981039346656037UL;
+            foreach (string f in Directory.EnumerateFiles(dir, "*",
+                         includeSubfolders ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
+            {
+                for (int i = 0; i < f.Length; i++)
+                {
+                    h ^= char.ToLowerInvariant(f[i]);
+                    h *= 1099511628211UL;
+                }
+                ulong t = (ulong)File.GetLastWriteTimeUtc(f).Ticks;
+                for (int b = 0; b < 8; b++)
+                {
+                    h ^= (byte)(t >> (b * 8));
+                    h *= 1099511628211UL;
+                }
+            }
+            long res = (long)h;
+            return res == 0 ? 1 : res;
+        }
+
         // Cache of drive-root → whether its filesystem is "sloppy" about folder mtimes: FAT/exFAT,
         // removable media, and network/undeterminable volumes may not bump a directory's write-time
         // when a file is added or removed, so the mtime fast-path can silently miss a playlist

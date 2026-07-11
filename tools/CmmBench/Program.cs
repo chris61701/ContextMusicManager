@@ -35,7 +35,7 @@ internal static class Program
         AppDomain.MonitoringIsEnabled = true;
 
         int repeats = 5;
-        bool verbose = false, benchOpen = false, verifyFileOpen = false, cold = false, probe = false, seektest = false;
+        bool verbose = false, benchOpen = false, verifyFileOpen = false, cold = false, probe = false, seektest = false, probeAll = false;
         var inputs = new List<string>();
 
         for (int i = 0; i < args.Length; i++)
@@ -48,6 +48,7 @@ internal static class Program
                 case "--verify-fileopen": verifyFileOpen = true; break;
                 case "--cold": cold = true; break;
                 case "--probe": probe = true; break;
+                case "--probeall": probeAll = true; break;
                 case "--seektest": seektest = true; break;
                 case "-h": case "--help": Usage(); return 0;
                 default: inputs.Add(args[i]); break;
@@ -71,6 +72,7 @@ internal static class Program
         }
 
         var files = CollectFiles(inputs);
+        if (probeAll) return ProbeAll(files);
         if (seektest) return SeekTest(files);
         if (verifyFileOpen) return VerifyFileOpen(files);
         if (cold) return RunCold(files, repeats);
@@ -186,7 +188,24 @@ internal static class Program
                 files.AddRange(Directory.EnumerateFiles(p, "*", SearchOption.AllDirectories)
                     .Where(f => Exts.Contains(Path.GetExtension(f).ToLowerInvariant())));
             else if (File.Exists(p))
-                files.Add(p);
+            {
+                string ext = Path.GetExtension(p).ToLowerInvariant();
+                if (ext == ".m3u" || ext == ".m3u8")
+                {
+                    // Expand playlist entries (relative paths resolve against the playlist's folder),
+                    // matching how a station's PlaylistSource sees them.
+                    string baseDir = Path.GetDirectoryName(Path.GetFullPath(p));
+                    foreach (string raw in File.ReadAllLines(p))
+                    {
+                        string line = raw.Trim();
+                        if (line.Length == 0 || line.StartsWith("#")) continue;
+                        string full = Path.IsPathRooted(line) ? line : Path.Combine(baseDir, line);
+                        if (File.Exists(full) && Exts.Contains(Path.GetExtension(full).ToLowerInvariant()))
+                            files.Add(full);
+                    }
+                }
+                else files.Add(p);
+            }
             else
                 Console.WriteLine($"WARN: not found: {p}");
         }
@@ -258,6 +277,52 @@ internal static class Program
         }
         c.Close(dec);
         return (frames, peak);
+    }
+
+    // ── Batch length-probe throughput ─────────────────────────────────────────
+    // Times the EXACT per-track cost of RadioStationCatalog.ProbeLength — one
+    // AudioDecoder.OpenNativeHandle (header parse yields total frames) + close per
+    // file, no PCM read — over the whole input set, back to back with no budget
+    // throttle. Answers "how long does it take to make a station of N tracks
+    // schedule-Ready?" Run it twice: pass 1 ≈ cold-ish OS cache, pass 2 = warm.
+    static int ProbeAll(List<string> files)
+    {
+        if (files.Count == 0) { Console.WriteLine("No supported audio files found."); return 1; }
+        Console.WriteLine($"CmmBench --probeall — {files.Count} file(s)\n");
+
+        var perExtMs = new Dictionary<string, List<double>>();
+        int ok = 0, fail = 0;
+        double worstMs = 0; string worstFile = null;
+        long swAll = Stopwatch.GetTimestamp();
+
+        foreach (string f in files)
+        {
+            string ext = Path.GetExtension(f).ToLowerInvariant();
+            long t = Stopwatch.GetTimestamp();
+            IntPtr dec = AudioDecoder.OpenNativeHandle(f, out int kind, out _, out int rate, out long total);
+            if (dec != IntPtr.Zero) AudioDecoder.CloseNativeHandle(dec, kind);
+            double ms = Ms(t);
+
+            bool good = dec != IntPtr.Zero && total > 0 && rate > 0;
+            if (good) ok++; else { fail++; Console.WriteLine($"  FAIL {Path.GetFileName(f)} ({ext})"); }
+            if (!perExtMs.TryGetValue(ext, out var list)) perExtMs[ext] = list = new List<double>();
+            list.Add(ms);
+            if (ms > worstMs) { worstMs = ms; worstFile = f; }
+        }
+
+        double totalS = Ms(swAll) / 1000.0;
+        Console.WriteLine("\n── Probe throughput by format ─────────────────────────────────────────");
+        foreach (var kv in perExtMs.OrderBy(k => k.Key))
+        {
+            var sorted = kv.Value.OrderBy(x => x).ToArray();
+            Console.WriteLine($"  {kv.Key,-6} n={sorted.Length,-4} avg {sorted.Average(),7:F2}ms  " +
+                              $"p50 {Pct(sorted, 50),7:F2}ms  p95 {Pct(sorted, 95),7:F2}ms  max {sorted.Last(),8:F2}ms");
+        }
+        Console.WriteLine($"\n  TOTAL {files.Count} probes in {totalS:F2}s  =  {files.Count / totalS:F1} probes/s  " +
+                          $"(ok {ok}, fail {fail})");
+        if (worstFile != null)
+            Console.WriteLine($"  slowest: {worstMs:F1}ms  {worstFile}");
+        return fail == 0 ? 0 : 2;
     }
 
     // ── Single-file probe ─────────────────────────────────────────────────────

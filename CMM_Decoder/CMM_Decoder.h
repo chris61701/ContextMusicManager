@@ -119,12 +119,30 @@ typedef struct cmm_decoder cmm_decoder;
  *        + LPF/pan/mix slews + per-slot smooth state before a FRESH station voice starts, so a
  *        destroyed radio's still-ringing reverb never re-voices under its replacement. Also (no
  *        interface change) a freshly-activated point slot now initializes its smoothed occlusion/
- *        position from the target instead of gliding from the previous occupant's stale state. */
-#define CMM_DECODER_ABI 30
+ *        position from the target instead of gliding from the previous occupant's stale state.
+ *   v31:+ MULTI-STATION emitters — up to CMM_MAX_EMIT_VOICES stations render SIMULTANEOUSLY, each on
+ *        its own SLOT (own dry-mono ring, point set, position/occlusion slews, distance LPF and
+ *        coloration filter state). cmm_mix_add_emitter gains a `slot` (0..CMM_MAX_EMIT_VOICES-1) the
+ *        managed layer assigns per station; voices sharing a slot sum (a track-advance crossfade).
+ *        REVERB stays ONE shared pair of room buses (reverb is a property of the listener's room,
+ *        not the station): cmm_mix_set_emitter_reverb now takes PER-SLOT carry-send + depth arrays —
+ *        each slot feeds the CARRY bus input scaled by its own (seal-gated, wet-attenuated,
+ *        depth-graded) send, and the LOCAL bus off its arriving dry; output darkening/damping/pan
+ *        follow the DOMINANT slot. Input-side send scaling replaces the old output wet gain
+ *        (linear-equivalent for one station; the out-of-range tail now decays naturally).
+ *   v32:+ SLOT FLUSH (cmm_mix_emitter_flush_slot → per-slot flag serviced by the callback): discard
+ *        a slot's queued dry ring + reset its render state (LPF/color/slews) when a DIFFERENT
+ *        station acquires the slot — without it, up to a cushion's worth of the previous station's
+ *        audio played through the new station's speaker positions on a steal/identity change. */
+#define CMM_DECODER_ABI 32
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
 #define CMM_MAX_EMIT_PTS 8
+
+/* Max SIMULTANEOUSLY-VOICED stations (native slots). The station catalog can be any size; the
+ * managed layer voices only the K nearest audible stations, each pinned to one slot here. */
+#define CMM_MAX_EMIT_VOICES 3
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
@@ -368,23 +386,25 @@ CMM_API int cmm_out_drain(cmm_out* o, int frames);
  * it to the output, so head-turn panning is heard at output latency, not behind the ring cushion.
  * These are not part of the managed ABI (same-DLL cross-TU calls), so they are plain (unexported). */
 
-/* Enqueue up to `frames` mono f32 frames of the emitter's dry signal. Non-blocking; returns frames
- * accepted (SPSC — the producer is the sole writer, exactly like cmm_out_write). */
-int cmm_out_write_emitter(cmm_out* o, const float* mono, int frames);
+/* Enqueue up to `frames` mono f32 frames of one SLOT's dry signal (v31: one ring per station slot).
+ * Non-blocking; returns frames accepted (SPSC — the producer is the sole writer per ring). */
+int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames);
 
-/* Relay the live spatial state the callback spatializes with: listener world position + right unit
- * vector, `count` speaker positions (interleaved xyz) with per-speaker gains, and min/max distance.
- * count 0 = no emitter audible this block (the callback discards any residual mono). Lock-free. */
-void cmm_out_set_emitter_spatial(cmm_out* o, const float* lisPos3, const float* lisRight3,
+/* Relay one SLOT's live spatial state: `count` speaker positions (interleaved xyz) with per-speaker
+ * occlusion virtual distances. count 0 = this slot inaudible this block (residual mono discarded).
+ * The listener basis + curve tuning are GLOBAL (shared by every slot). Lock-free. */
+void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, const float* lisRight3,
                                  const float* pts, const float* gains, int count,
                                  float minDist, float maxDist, float falloffExp, float muffle,
                                  float stereoWidth);
 
 /* Relay the live emitter reverb params (from the managed room probe). Lock-free.
- * wet = CARRY bus level (0 = off), localWet = LOCAL bus level (v28),
- * depth = air-route blocks to the station, depthAmt = 0..1 depth-grading strength (v27). */
-void cmm_out_set_emitter_reverb(cmm_out* o, float wet, float room, float damp, float rangeMult, float pan,
-                                float depth, float depthAmt, float localWet);
+ * v31: wets/depths are PER-SLOT arrays (CMM_MAX_EMIT_VOICES long): each slot's CARRY send level
+ * (seal-gated next-room cue; 0 = none) and its air-route depth. room/damp/pan/localWet describe the
+ * LISTENER's room and stay shared. */
+void cmm_out_set_emitter_reverb(cmm_out* o, const float* wets, const float* depths,
+                                float room, float damp, float rangeMult, float pan,
+                                float depthAmt, float localWet);
 
 /* Relay the live radio-coloration params (v26). All 0..1; all 0 = clean bypass. Lock-free. */
 void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice);
@@ -393,6 +413,11 @@ void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float v
  * smooth state — serviced by the audio callback before its next block. Called when a NEW station
  * voice starts fresh so nothing from the previous voice bleeds under it. Lock-free flag. */
 void cmm_out_emitter_reset(cmm_out* o);
+
+/* Request ONE slot's flush (v32): the callback discards the slot's queued dry mono and resets its
+ * per-slot render state (LPF, coloration filters, send slew, point-smooth init) before its next
+ * drain. Raised when a DIFFERENT station acquires the slot. Lock-free flag. */
+void cmm_out_emitter_flush_slot(cmm_out* o, int slot);
 
 /* ── Format converter (resample + channel map) ────────────────────────────
  * Streaming f32→f32 sample-rate + channel converter (miniaudio's data
@@ -465,11 +490,13 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
  * Same decoder handoff as cmm_mix_add: the caller opens `dec` (+ `kind`) off the audio thread and
  * the mixer TAKES OWNERSHIP (frees it on retire or on failure). fadeIn = ramp-up seconds; loop
  * restarts at EOF; trackGain = per-track loudness gain. Returns an emitter voice id (0 on failure)
- * to remove via cmm_mix_remove_emitter. v16 renders emitters CENTERED (no spatialization yet). */
+ * to remove via cmm_mix_remove_emitter. v31: `slot` (0..CMM_MAX_EMIT_VOICES-1) pins the voice to a
+ * station render slot — voices sharing a slot sum into its ring (a track-advance crossfade); the
+ * managed layer keeps one station per slot. Out-of-range slot fails the add. */
 CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
                                       long long totalFrames, float fadeIn, int loop, float trackGain,
                                       float posX, float posY, float posZ, float minDist, float maxDist,
-                                      long long startFrame);
+                                      long long startFrame, int slot);
 
 /* Fade an emitter voice out over `fade` (<=0 snaps) and retire it. Unknown id is a no-op. */
 CMM_API void cmm_mix_remove_emitter(long long id, float fade);
@@ -478,6 +505,12 @@ CMM_API void cmm_mix_remove_emitter(long long id, float fade);
  * smooth state). Call BEFORE adding a station voice that starts FRESH (not a track advance) so the
  * previous voice's leftover reverb energy / stale slews never bleed under the new one. */
 CMM_API void cmm_mix_emitter_reset_acoustics(void);
+
+/* v32 — flush ONE render slot: discard its queued dry ring + reset its per-slot render state. Call
+ * BEFORE adding a voice when the slot's previous occupant was a DIFFERENT station, so the old
+ * station's buffered audio never plays through the new station's speakers. NOT called on a track
+ * advance (same station keeps its ring/tail continuity). */
+CMM_API void cmm_mix_emitter_flush_slot(int slot);
 
 /* Set the LISTENER basis for emitter spatialization: world position + forward + right unit
  * vectors (pass them straight from the camera transform — the mixer uses them as-is, so there is
@@ -514,14 +547,18 @@ CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float fall
  * open-air detour around bends; walls excluded, the managed seal gate covers those); depthAmt = 0..1 how
  * strongly depth grades the wet (0 = flat wet at any depth, the pre-v27 behaviour). With grading on, the
  * wet's level, brightness (output low-pass) and damping all sink smoothly with depth.
- * v28: two buses. `wet` = the CARRY bus (the deliberate next-room / down-the-tunnel cue: un-occluded
- * feed; managed applies the solid-seal gate + carry level; native applies range + depth grading + route
- * pan). `localWet` = the LOCAL bus: a second reverb fed the ARRIVING dry (post-attenuation/occlusion),
+ * v28: two buses. CARRY = the deliberate next-room / down-the-tunnel cue: un-occluded feed; managed
+ * applies the solid-seal gate + carry level; native applies range + depth grading + route pan.
+ * `localWet` = the LOCAL bus: a second reverb fed the ARRIVING dry (post-attenuation/occlusion),
  * so your own room's reverb inherits every dry rule — walls, water, hard-stop — with no seal knob;
  * pass the ear-room wetness × master only.
- * Lock-free; call every probe tick. Applies to the single shared station. */
-CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan,
-                                        float depth, float depthAmt, float localWet);
+ * v31: `wets`/`depths` are PER-SLOT arrays (CMM_MAX_EMIT_VOICES floats): each voiced station's own
+ * carry-send level + air-route depth (its seal/solid gating differs per station); the room-shape
+ * params (room/damp/pan/localWet) describe the LISTENER's room and stay shared.
+ * Lock-free; call every probe tick. */
+CMM_API void cmm_mix_set_emitter_reverb(const float* wets, const float* depths,
+                                        float room, float damp, float rangeMult, float pan,
+                                        float depthAmt, float localWet);
 
 /* v26 — set the LIVE radio-coloration ("through a speaker") params. drive = soft-clip amount (0 = clean,
  * 1 = crunchy; level-compensated so it adds grit, not volume); staticLvl = static-hiss bed level

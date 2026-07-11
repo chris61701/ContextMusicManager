@@ -1,5 +1,6 @@
 // Gated to 3.0 (GV_V3): TEFeatureDoor (composite tile-entity door) + the world-emitter layer are 3.0-only.
 #if GV_V3
+using System.Reflection;
 using HarmonyLib;
 
 namespace CMM
@@ -23,19 +24,36 @@ namespace CMM
     // client aren't registered and fall back to the binary at-rest path (still correct, just not swing-tracked).
     // Doors YOU operate run SetOpen locally and get the full treatment.
     //
+    // CROSS-VERSION SHAPE: the shipped DLL is compiled once with GV_V3 and runs on A20/A21/2.6 too, where
+    // TEFeatureDoor does not exist (composite tile entities are 1.0+). Nothing PatchAll scans — the class
+    // attribute, the method signatures — may carry a TEFeatureDoor token, or attribute/parameter resolution
+    // throws TypeLoadException there and aborts EVERY patch in the mod. So: bare [HarmonyPatch] + the target
+    // resolved by NAME in TargetMethod, Prepare() skipping the patch cleanly off 3.0, and __instance typed as
+    // object. The cast inside Postfix is safe because method BODIES only resolve their tokens at JIT time,
+    // and Postfix is only ever invoked where the patch was applied (i.e. on 3.0, where the type exists).
+    //
     // Read-only, exception-guarded: it never touches the door's state or return, and a throw here must never
     // break the game's door logic.
-    [HarmonyPatch(typeof(TEFeatureDoor), nameof(TEFeatureDoor.SetOpen))]
+    [HarmonyPatch]
     internal static class Patch_DoorAcousticChange
     {
-        static void Postfix(TEFeatureDoor __instance, bool _open)
+        // Both checks by name: RuntimeSupported covers the game-version gate, the Method probe covers a
+        // future 3.x renaming SetOpen (a null TargetMethod would abort PatchAll; skipping is graceful).
+        static bool Prepare() => EmitterCompat.RuntimeSupported
+            && AccessTools.Method(AccessTools.TypeByName("TEFeatureDoor"), "SetOpen") != null;
+
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(AccessTools.TypeByName("TEFeatureDoor"), "SetOpen");
+
+        static void Postfix(object __instance, bool _open)
         {
             try
             {
                 if (!EmitterAudioLayer.HasActiveVoice) return;
+                var door = (TEFeatureDoor)__instance;
                 // Flag this door as mid-swing (with its direction) so the flood samples its Animator openness
                 // (Tier 2) and the occlusion tracks the physical swing, then poke the emitter to refresh now.
-                EmitterAcoustics.RegisterAnimatingDoor(__instance.blockValue.type, __instance.ToWorldPos(), _open);
+                EmitterAcoustics.RegisterAnimatingDoor(door.blockValue.type, door.ToWorldPos(), _open);
                 EmitterAudioLayer.NotifyAcousticChange();
             }
             catch { /* a door must never break because of us */ }

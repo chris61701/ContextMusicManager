@@ -18,8 +18,9 @@ namespace CMM
     {
         // ── PickNextFile ──────────────────────────────────────────────────────
         // UNIFORM random selection over the whole eligible folder (RandomNoRepeat also
-        // excludes avoidFile). There is deliberately NO bias toward already-measured
-        // tracks: under on-demand scanning only a tiny handful of a context's files are
+        // excludes avoidFile), except for the user's keybind flags: banned tracks are
+        // excluded and favourites are weighted up (see PickRandomHonouringFlags).
+        // There is deliberately NO bias toward already-measured tracks: under on-demand scanning only a tiny handful of a context's files are
         // ever measured (the menu prewarm measures one per context), so biasing toward
         // them collapsed every pick onto that one track — the "same track out of 3000"
         // bug. Normalization is handled independently of selection: StartNativeContext reads
@@ -230,10 +231,58 @@ namespace CMM
         // _transitionId bumps + StopNativeIfActive.
         internal static void StartContextCoroutine(string contextName, bool isSameContextSwitchingToNextTrack, int newId)
         {
+            // The personal radio owns the music layer while on (in-game): resolution keeps
+            // tracking contexts, but none of them may START audio — the radio's voice is the
+            // music. EXCEPTION: PlayOnce stingers (Death / Spawn / POI_Cleared) interrupt the
+            // radio — their add crossfades (Death/Spawn) or ducks (POI_Cleared) the radio's
+            // voice, and PersonalRadio holds its broadcast rejoin until the stinger finishes.
+            // Dialing the radio off calls ReResolveNow, which lands back here ungated.
+            if (PersonalRadio.SuppressesMusic)
+            {
+                Contexts gateCtx = GetContext(contextName);
+                if (gateCtx == null || !gateCtx.PlayOnce)
+                {
+                    // Tear the context voice's bookkeeping down WITHOUT the bus-wide stop —
+                    // the radio's own voice shares the bus and must survive. (This releases a
+                    // just-finished stinger; it's a no-op when no context voice exists.)
+                    ReleaseNativeVoiceForRadio(CrossFadeDuration);
+                    return;
+                }
+            }
             if (ContextHasFiles(contextName))
                 Instance.StartNativeContext(contextName, isSameContextSwitchingToNextTrack, newId, null);
             else
                 StopNativeIfActive(CrossFadeDuration);          // a silent / vanilla context is taking over
+        }
+
+        // Clear the native context-voice bookkeeping and fade THAT VOICE only, per-voice. Used
+        // by the radio-suppression gate: the bus-wide StopNativeIfActive would take the personal
+        // radio's voice (same bus) down with it.
+        private static void ReleaseNativeVoiceForRadio(float fade)
+        {
+            lock (_natCommitLock)
+            {
+                if (_nativeActiveContext != null)
+                    CMMConfig.D($"[CMM] native: releasing context voice to the radio (was {_nativeActiveContext}).");
+                _nativeActiveContext = null;
+                long vid = Interlocked.Exchange(ref _nativeVoiceId, 0);
+                if (vid != 0) CmmMixer.Instance?.SetVoiceTrackGain(vid, 0f, fade);
+            }
+        }
+
+        // True while a PlayOnce stinger (Death / Spawn / POI_Cleared) is AUDIBLY playing on the
+        // context voice. The personal radio holds its broadcast rejoin under it; VolumeSyncLoop
+        // lets the stinger's own context volume govern the bus master for its duration.
+        internal static bool PlayOnceStingerActive
+        {
+            get
+            {
+                Contexts c = currentContext;
+                if (c == null || !c.PlayOnce) return false;
+                long vid = Interlocked.Read(ref _nativeVoiceId);
+                return vid != 0 && CmmMixer.Instance != null
+                    && CmmMixer.Instance.TryGetState(vid, out _, out _, out _);
+            }
         }
 
         // Fade the mixer out and forget it's active. No-op (so safe to call anywhere)
@@ -302,8 +351,11 @@ namespace CMM
         // read the stored gain now (real for staged / menu-prewarmed tracks, which is the
         // common case; 1.0 if a straggler isn't measured yet) and fire a non-blocking measure
         // so it's correct next time.
+        // fadeOverride ≥ 0 replaces the fade the context/transition settings would give
+        // (the manual-skip keybinds pass CMMConfig.ManualSkipFadeDuration so a keypress
+        // switches quickly regardless of the context's fadeintime); -1 = no override.
         internal void StartNativeContext(string contextName, bool isSameContextSwitchingToNextTrack,
-                                         int transitionId, string forcedFile)
+                                         int transitionId, string forcedFile, float fadeOverride = -1f)
         {
             if (transitionId != _transitionId) return;
             Contexts ctx = GetContext(contextName);
@@ -407,9 +459,10 @@ namespace CMM
             if (ctx.PlayOnce) fade = ctx.FadeInDuration;
             else if (isSameContextSwitchingToNextTrack) fade = Mathf.Max(0.25f, TrackTransitionFadeDuration);
             else fade = ctx.FadeInDuration > 0f ? ctx.FadeInDuration : CrossFadeDuration;
+            if (fadeOverride >= 0f) fade = fadeOverride;   // manual skip: keypress-fast, not context-slow
 
             // ── Cache bookkeeping (main thread, before dispatch) ──
-            cache.previousPlayedFile = cache.lastPlayedFile;
+            cache.CommitToHistory(file);
             cache.playingFile        = file;
             cache.lastPlayedFile     = file;
 #if CMM_DEBUG_HUD
@@ -518,7 +571,6 @@ namespace CMM
             public string Context;
             public int    TransitionId;
             public string NextFile;
-            public string PrevFile;   // the file being replaced → cache.previousPlayedFile
         }
         private static PreStagedAdvance _preStaged;   // accessed only via Interlocked
 
@@ -542,7 +594,14 @@ namespace CMM
                 return;
             }
 
-            string nextFile = PickNextFile(contextName, avoidFile: currentFile);
+            // A rewound history (the user pressed Prev) replays forward through what
+            // they rewound before anything new is picked — so the pre-staged advance
+            // must be that forward entry, or the auto-advance would desert the replay.
+            // (Same eligibility guard as PreferPreStagedNext: a since-banned or
+            // invalidated forward entry is not replayed.)
+            string nextFile = cache.HistoryForward();
+            if (nextFile == null || _invalidFiles.Contains(nextFile) || LoudnessStore.IsBannedPath(nextFile))
+                nextFile = PickNextFile(contextName, avoidFile: currentFile);
             if (nextFile == null) { Interlocked.Exchange(ref _preStaged, null); return; }
 
             float gain = CMMConfig.LoudnessNormalizationEnabled ? LoudnessStore.GetTrackGain(nextFile) : 1f;
@@ -567,7 +626,6 @@ namespace CMM
                 Context = contextName,
                 TransitionId = transitionId,
                 NextFile = nextFile,
-                PrevFile = currentFile,
                 Req = new NativeStartReq
                 {
                     Context = contextName, File = nextFile, TransitionId = transitionId,
@@ -589,7 +647,7 @@ namespace CMM
                 && string.Equals(_nativeActiveContext, ps.Context, StringComparison.OrdinalIgnoreCase)
                 && cacheMap.TryGetValue(ps.Context, out ContextCache cache))
             {
-                cache.previousPlayedFile = ps.PrevFile;
+                cache.CommitToHistory(ps.NextFile);
                 cache.playingFile        = ps.NextFile;
                 cache.lastPlayedFile     = ps.NextFile;
 #if CMM_DEBUG_HUD
@@ -773,11 +831,18 @@ namespace CMM
         // caller re-reads its loudness gain + re-arms a fresh pre-stage afterward).
         private static string PreferPreStagedNext(string contextName, ContextCache cache)
         {
+            // A rewound history replays forward before anything fresh (usually the
+            // pre-stage below already holds this exact file — see PreStageNextAdvance).
+            string fwd = cache.HistoryForward();
+            if (fwd != null && !_invalidFiles.Contains(fwd) && !LoudnessStore.IsBannedPath(fwd))
+                return fwd;
+
             PreStagedAdvance ps = Interlocked.CompareExchange(ref _preStaged, null, null);   // atomic read
             if (ps != null
                 && string.Equals(ps.Context, contextName, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(ps.NextFile)
                 && !_invalidFiles.Contains(ps.NextFile)
+                && !LoudnessStore.IsBannedPath(ps.NextFile)   // staged before the ban keypress
                 && !string.Equals(ps.NextFile, cache.lastPlayedFile, StringComparison.OrdinalIgnoreCase)
                 && File.Exists(ps.NextFile))
                 return ps.NextFile;
@@ -845,22 +910,79 @@ namespace CMM
                         if (cache.sequentialIndex >= files.Length) cache.sequentialIndex = 0;
                         string pick = files[cache.sequentialIndex];
                         cache.sequentialIndex = (cache.sequentialIndex + 1) % files.Length;
+                        // Banned tracks are skipped in place (the ordering is otherwise
+                        // preserved; favourites don't apply to an explicit order). If the
+                        // bounded walk finds nothing unbanned the whole folder is banned —
+                        // null, so the context resolves through its fallback chain (the
+                        // resolver normally catches this first via ContextHasFiles).
+                        if (LoudnessStore.BannedCount > 0)
+                        {
+                            for (int n = 1; n < files.Length && LoudnessStore.IsBannedPath(pick); n++)
+                            {
+                                pick = files[cache.sequentialIndex];
+                                cache.sequentialIndex = (cache.sequentialIndex + 1) % files.Length;
+                            }
+                            if (LoudnessStore.IsBannedPath(pick)) return null;
+                        }
                         return pick;
                     }
                 case TrackOrderMode.RandomNoRepeat:
                     {
-                        if (files.Length == 1) return files[0];
+                        if (files.Length == 1)
+                            return LoudnessStore.IsBannedPath(files[0]) ? null : files[0];
                         string[] candidates = avoidFile != null
                             ? files.Where(f => f != avoidFile).ToArray()
                             : files;
                         if (candidates.Length == 0) candidates = files;
-                        return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+                        string pick = PickRandomHonouringFlags(candidates);
+                        // Everything except the avoided (current) track is banned: retry
+                        // with the full pool so the sole unbanned track — the current one —
+                        // replays rather than a banned pick or silence.
+                        if (pick == null && candidates != files)
+                            pick = PickRandomHonouringFlags(files);
+                        return pick;
                     }
                 default:
                     {
-                        return files[UnityEngine.Random.Range(0, files.Length)];
+                        return PickRandomHonouringFlags(files);
                     }
             }
+        }
+
+        // Random pick honouring the keybind-set track flags: banned tracks are excluded
+        // and each favourite counts FavouriteWeight× in the roll. Returns null when
+        // every candidate is banned — the caller (and the resolver, via the ban-aware
+        // ContextHasFiles) treats that like an empty folder and falls back. When no
+        // flags exist anywhere (the common case) this is the same single uniform roll
+        // as before; with flags it's one O(n) pass of zero-alloc HashSet checks.
+        private static string PickRandomHonouringFlags(string[] candidates)
+        {
+            bool anyBan = LoudnessStore.BannedCount > 0;
+            bool anyFav = LoudnessStore.FavouriteCount > 0;
+            if (!anyBan && !anyFav)
+                return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+
+            float favWeight = CMMConfig.FavouriteWeight < 1f ? 1f : CMMConfig.FavouriteWeight;
+            int eligible = 0, favs = 0;
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                if (anyBan && LoudnessStore.IsBannedPath(candidates[i])) continue;
+                eligible++;
+                if (anyFav && LoudnessStore.IsFavouritePath(candidates[i])) favs++;
+            }
+            if (eligible == 0) return null;   // all banned → resolve like an empty folder
+
+            double roll = UnityEngine.Random.Range(0f, 1f)
+                          * ((eligible - favs) + favs * (double)favWeight);
+            string last = null;
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                if (anyBan && LoudnessStore.IsBannedPath(candidates[i])) continue;
+                last = candidates[i];
+                roll -= (anyFav && LoudnessStore.IsFavouritePath(candidates[i])) ? favWeight : 1.0;
+                if (roll < 0.0) return candidates[i];
+            }
+            return last;   // fp edge (roll landed exactly on the total)
         }
 
         // ── Memory summary ────────────────────────────────────────────────────

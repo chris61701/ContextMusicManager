@@ -117,6 +117,7 @@ namespace CMM
             CMMConfigLoader.LoadSettings(modPath);
             CMMConfigLoader.LoadContexts(modPath);
             LoudnessStore.Load(modPath);
+            PersonalRadio.Load(modPath);   // persisted dial state (Cache/radio.xml)
             ScriptHost.Load(modPath);   // external Lua decision script (Config/context.lua)
 
             foreach (var ctx in contexts.Values)
@@ -433,6 +434,12 @@ namespace CMM
                     && currentContext.Context != "Silence"
                     && currentContext.Context != "Vanilla"
                     && !vanillaIsActive
+                    // The personal radio owns the music layer: the context being silent is
+                    // INTENTIONAL, not a strand. Without this the convergence branch re-asserts
+                    // the context every scan tick, the radio gate swallows it, and the loop
+                    // storms TriggerMusic ~10×/s for as long as the radio plays (the
+                    // Ambient_Desert→Ambient_Desert TX-INTERRUPT storm, log 16-23-19).
+                    && !PersonalRadio.SuppressesMusic
                     && _crossFadeCoroutine == null
                     && _trackEndCoroutine == null
                     && !_advancePending          // an off-frame-loop advance is in flight (NativeScheduler)

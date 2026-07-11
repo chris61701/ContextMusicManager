@@ -15,7 +15,7 @@ namespace CMM
     // the derived volume gain. Two levels:
     //
     //   contentHash → Measurement        (source of truth: lufs, peak, metric
-    //                                      version, userTrim)
+    //                                      version, userTrim, banned/favourite)
     //   relPath     → PathRecord          (fast play-time resolution: which hash,
     //                                      plus size + mtime for change detection)
     //
@@ -23,14 +23,20 @@ namespace CMM
     // measurement (and its manual userTrim) for free; only a genuine content change
     // (size or mtime differs → recompute hash) forces a re-measure.
     //
-    // PERSISTENCE POLICY: the in-memory dictionaries hold every measurement seen this
-    // session, but loudness.xml is written ONLY for tracks carrying a manual volume
-    // override (UserTrim != 1.0 — see IsPersistWorthy). Pure auto-normalization values
-    // are no longer persisted: with native decoding the measure-on-demand path is cheap
-    // and only a couple of tracks per context are ever loaded at once, so recomputing on
-    // the fly each launch costs less than maintaining a large cache file. The manual
-    // trims, which the user can't reproduce by remeasuring, are the only thing worth
-    // keeping on disk.
+    // The per-track BAN and FAVOURITE flags (keybind-toggled) ride the same records:
+    // they get the rename/move/duplicate survival for free and share the debounced
+    // save. Like the trim, they can only attach once a track is measured.
+    //
+    // PERSISTENCE POLICY: EVERY measurement in the store persists to loudness.xml
+    // (debounced, off-thread). The store itself stays bounded — RetainOnly keeps only
+    // the live working set (playing/staged/history per context, plus each radio
+    // station's on-air + deterministic up-next) — so the file stays small while
+    // anything measured recently starts at its normalized level next launch instead
+    // of hot-then-settling. Radio broadcasts made that audible (2026-07-10): the world
+    // clock freezes offline, so a relaunch rejoins the SAME track that was playing at
+    // quit — under the old trim-only policy it re-measured (started hot) every time.
+    // Manually-trimmed/flagged tracks are additionally EXEMPT FROM EVICTION
+    // (IsPersistWorthy): user data is never dropped, measured or not.
     //
     // THREADING: this store is MAIN-THREAD ONLY. Background measurement threads
     // compute (hash, lufs, peak) and hand the result back to the main thread, which
@@ -57,6 +63,8 @@ namespace CMM
             public double Peak;
             public int MetricVersion = LoudnessStore.MetricVersion;
             public float UserTrim = 1f;   // manual trim (±UserTrimStep, default 0.1); survives re-measure
+            public bool Banned;           // keybind: never pick this track again
+            public bool Favourite;        // keybind: pick this track FavouriteWeight× more often
         }
 
         private struct PathRecord
@@ -106,11 +114,13 @@ namespace CMM
             return m.MetricVersion == MetricVersion;
         }
 
-        // A measurement is persisted to loudness.xml ONLY when it carries a manual
-        // volume override (UserTrim differs from the 1.0 neutral ceiling). Auto-only
-        // measurements live in memory for the session and are recomputed next launch.
+        // A measurement carrying USER DATA — a manual volume override (UserTrim differs
+        // from the 1.0 neutral ceiling) or a ban/favourite flag. These are exempt from
+        // RetainOnly eviction (the user can't reproduce them by re-measuring); plain
+        // auto measurements are evicted normally but, while live, persist like any other
+        // (see PERSISTENCE POLICY).
         private static bool IsPersistWorthy(Measurement m)
-            => m != null && Math.Abs(m.UserTrim - 1f) > 1e-4f;
+            => m != null && (Math.Abs(m.UserTrim - 1f) > 1e-4f || m.Banned || m.Favourite);
 
         private static float ComputeGain(Measurement m)
         {
@@ -171,10 +181,8 @@ namespace CMM
             }
 
             _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks };
-            // Only a trimmed track's measurement reaches disk, so only flag the save
-            // when we just refreshed one (e.g. re-measuring a manually-trimmed file).
-            // Fresh auto-only measurements stay in memory and never dirty the cache.
-            if (IsPersistWorthy(m)) _dirty = true;
+            MirrorFlagsForPath(absolutePath, m);
+            _dirty = true;   // every measurement persists (see PERSISTENCE POLICY)
         }
 
         // Bind a path to an already-known hash (the copy/rename dedup case) without
@@ -184,8 +192,8 @@ namespace CMM
             string key = ToRelKey(absolutePath);
             if (key == null || hash == null || !_byHash.TryGetValue(hash, out Measurement m)) return;
             _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks };
-            // Persisted only if this hash carries a manual trim (see Save).
-            if (IsPersistWorthy(m)) _dirty = true;
+            MirrorFlagsForPath(absolutePath, m);
+            _dirty = true;   // the rebound path must reach disk with its measurement
         }
 
         // Adjust the manual trim for the track currently at this path, in linear
@@ -217,6 +225,108 @@ namespace CMM
             if (key == null || !_byPath.TryGetValue(key, out PathRecord pr)) return 1f;
             if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return 1f;
             return m.UserTrim;
+        }
+
+        // ── Ban / favourite flags ──────────────────────────────────────────────
+        // The flags live on the hash-keyed Measurement (see IsPersistWorthy — a
+        // flagged track always persists and is never evicted), but the play-time
+        // checks run per CANDIDATE inside PickNextFile, which can walk a very large
+        // snapshot. So the flagged tracks are mirrored into absolute-path sets and
+        // the hot-path checks are plain zero-alloc HashSet hits — no ToRelKey
+        // (Path.GetFullPath + two string allocations) per file.
+        private static readonly HashSet<string> _bannedAbs =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _favouriteAbs =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        public static int BannedCount => _bannedAbs.Count;
+        public static int FavouriteCount => _favouriteAbs.Count;
+        public static bool IsBannedPath(string absolutePath) => _bannedAbs.Contains(absolutePath);
+        public static bool IsFavouritePath(string absolutePath) => _favouriteAbs.Contains(absolutePath);
+
+        // Bumped whenever the banned set may have changed (a ban toggle, a load, a
+        // derived-set rebuild). Lets per-context "is everything here banned?" checks
+        // memoize their O(files) sweep and re-run it only when a ban actually moved
+        // (see ContextMusicManager.AllTracksBanned).
+        public static int BanRevision { get; private set; } = 1;
+
+        // Flip the ban / favourite flag for the track at this path. Returns the new
+        // state, or null when the track is unmeasured (no hash to attach the flag to
+        // yet — same limitation as the volume trim; the sweep measures the playing
+        // track within seconds). Main thread, like every other mutator here.
+        public static bool? ToggleBanned(string absolutePath) => ToggleFlag(absolutePath, ban: true);
+        public static bool? ToggleFavourite(string absolutePath) => ToggleFlag(absolutePath, ban: false);
+
+        private static bool? ToggleFlag(string absolutePath, bool ban)
+        {
+            string key = ToRelKey(absolutePath);
+            if (key == null || !_byPath.TryGetValue(key, out PathRecord pr)) return null;
+            if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return null;
+
+            bool now;
+            if (ban) { m.Banned = !m.Banned; now = m.Banned; }
+            else     { m.Favourite = !m.Favourite; now = m.Favourite; }
+            _dirty = true;
+
+            // Mirror into the derived set for EVERY path bound to this hash — a track
+            // that exists in two contexts is banned/favourited in both. Toggles are
+            // rare (a keypress), so the O(paths) walk is fine.
+            HashSet<string> set = ban ? _bannedAbs : _favouriteAbs;
+            foreach (var kv in _byPath)
+            {
+                if (!string.Equals(kv.Value.Hash, pr.Hash, StringComparison.Ordinal)) continue;
+                string abs = KeyToAbsPath(kv.Key);
+                if (abs == null) continue;
+                if (now) set.Add(abs); else set.Remove(abs);
+            }
+            // Also the exact string the caller plays from, in case it isn't canonical.
+            if (now) set.Add(absolutePath); else set.Remove(absolutePath);
+            if (ban) BanRevision++;
+            return now;
+        }
+
+        // Rebuilds the absolute-path mirrors from the dictionaries. Called after Load
+        // and whenever MusicDirectory may have changed (settings reload) — the rel
+        // keys are root-relative, so the derived absolute paths move with the root.
+        public static void RebuildDerivedPathSets()
+        {
+            BanRevision++;
+            _bannedAbs.Clear();
+            _favouriteAbs.Clear();
+            foreach (var kv in _byPath)
+            {
+                if (!_byHash.TryGetValue(kv.Value.Hash, out Measurement m)) continue;
+                if (!m.Banned && !m.Favourite) continue;
+                string abs = KeyToAbsPath(kv.Key);
+                if (abs == null) continue;
+                if (m.Banned) _bannedAbs.Add(abs);
+                if (m.Favourite) _favouriteAbs.Add(abs);
+            }
+        }
+
+        // Keep the mirrors current when a NEW path binds to an already-flagged hash
+        // (Store on a re-measure, BindPath on the copy/rename dedup).
+        private static void MirrorFlagsForPath(string absolutePath, Measurement m)
+        {
+            if (m == null || (!m.Banned && !m.Favourite)) return;
+            if (m.Banned && _bannedAbs.Add(absolutePath)) BanRevision++;
+            if (m.Favourite) _favouriteAbs.Add(absolutePath);
+        }
+
+        // Inverse of ToRelKey. Rel keys are lowercased '/'-separated paths under
+        // MusicDirectory; absolute keys (external context folders) are stored whole.
+        // The derived sets compare OrdinalIgnoreCase, so the lowercasing is moot.
+        private static string KeyToAbsPath(string key)
+        {
+            try
+            {
+                if (key.Length > 1 && (key[1] == ':' || key[0] == '/' || key[0] == '\\'))
+                    return Path.GetFullPath(key);
+                string root = ContextMusicManager.MusicDirectory;
+                if (string.IsNullOrEmpty(root)) return null;
+                return Path.GetFullPath(Path.Combine(root, key));
+            }
+            catch { return null; }
         }
 
         // ── Eviction (keep the in-memory store bounded to the working set) ──────
@@ -409,13 +519,23 @@ namespace CMM
                         string hash = el.GetAttribute("hash");
                         if (string.IsNullOrEmpty(hash)) continue;
                         int ver = ReadInt(el, "metric", 0);
-                        if (ver != MetricVersion) continue; // stale algorithm → drop, re-measure
+                        float trim = (float)ReadDouble(el, "trim", 1.0);
+                        bool ban = el.GetAttribute("ban") == "1";
+                        bool fav = el.GetAttribute("fav") == "1";
+                        // Stale algorithm → drop and re-measure, UNLESS the entry carries
+                        // user data (trim / ban / favourite): those load with their stale
+                        // version intact — the sweep re-measures the loudness (Store keeps
+                        // the flags, same hash) instead of discarding the user's choices.
+                        if (ver != MetricVersion && !(Math.Abs(trim - 1f) > 1e-4f || ban || fav))
+                            continue;
                         _byHash[hash] = new Measurement
                         {
                             Lufs = ReadDouble(el, "lufs", -23.0),
                             Peak = ReadDouble(el, "peak", 0.0),
                             MetricVersion = ver,
-                            UserTrim = (float)ReadDouble(el, "trim", 1.0),
+                            UserTrim = trim,
+                            Banned = ban,
+                            Favourite = fav,
                         };
                     }
                     else if (el.Name == "Path")
@@ -438,23 +558,17 @@ namespace CMM
                     if (!_byHash.ContainsKey(kv.Value.Hash)) orphans.Add(kv.Key);
                 foreach (string k in orphans) _byPath.Remove(k);
 
-                // Migration: older builds persisted every measurement. If the file we
-                // just loaded carries any auto-only (untrimmed) entry, flag a rewrite so
-                // the next debounced save prunes it down to trim-only. The auto entries
-                // stay in memory for this session (they spare a re-measure); only the
-                // on-disk copy shrinks.
-                foreach (Measurement m in _byHash.Values)
-                {
-                    if (!IsPersistWorthy(m)) { _dirty = true; break; }
-                }
-
-                CMMConfig.D($"[CMM] Cache/loudness.xml loaded: {_byHash.Count} tracks, {_byPath.Count} paths.");
+                RebuildDerivedPathSets();
+                CMMConfig.D($"[CMM] Cache/loudness.xml loaded: {_byHash.Count} tracks, {_byPath.Count} paths, " +
+                            $"{_bannedAbs.Count} banned, {_favouriteAbs.Count} favourite(s).");
             }
             catch (Exception ex)
             {
                 Log.Error($"[CMM] Failed to parse Cache/loudness.xml: {ex.Message}");
                 _byHash.Clear();
                 _byPath.Clear();
+                _bannedAbs.Clear();
+                _favouriteAbs.Clear();
             }
         }
 
@@ -477,14 +591,14 @@ namespace CMM
             public readonly List<TrackLine> Tracks = new List<TrackLine>();
             public readonly List<PathLine> Paths = new List<PathLine>();
 
-            public struct TrackLine { public string Hash; public double Lufs, Peak; public int Metric; public float Trim; }
+            public struct TrackLine { public string Hash; public double Lufs, Peak; public int Metric; public float Trim; public bool Banned, Favourite; }
             public struct PathLine  { public string Rel, Hash; public long Size, Mtime; }
         }
 
         // MAIN THREAD: capture everything Save would persist into a detached snapshot and
-        // clear the dirty flag. Returns null only when there is no file target. Mirrors the
-        // old Save()'s selection exactly — persist-worthy (manually-trimmed) tracks, and the
-        // path records that point at them.
+        // clear the dirty flag. Returns null only when there is no file target. Selection =
+        // EVERY live measurement (the dictionaries are already bounded to the working set
+        // by RetainOnly) plus the path records that point at one.
         public static SaveSnapshot SnapshotForSave()
         {
             if (_filePath == null) return null;
@@ -493,19 +607,18 @@ namespace CMM
             foreach (var kv in _byHash)
             {
                 Measurement m = kv.Value;
-                if (!IsPersistWorthy(m)) continue;
                 snap.Tracks.Add(new SaveSnapshot.TrackLine
                 {
                     Hash = kv.Key, Lufs = m.Lufs, Peak = m.Peak,
                     Metric = m.MetricVersion, Trim = m.UserTrim,
+                    Banned = m.Banned, Favourite = m.Favourite,
                 });
             }
             foreach (var kv in _byPath)
             {
                 PathRecord pr = kv.Value;
-                // Drop path records for measurements we didn't persist, so the file never
-                // references a hash that isn't in it.
-                if (!_byHash.TryGetValue(pr.Hash, out Measurement pm) || !IsPersistWorthy(pm))
+                // The file must never reference a hash that isn't in it.
+                if (!_byHash.ContainsKey(pr.Hash))
                     continue;
                 snap.Paths.Add(new SaveSnapshot.PathLine
                 {
@@ -552,6 +665,8 @@ namespace CMM
                         w.WriteAttributeString("peak", t.Peak.ToString("F5", CultureInfo.InvariantCulture));
                         w.WriteAttributeString("metric", t.Metric.ToString(CultureInfo.InvariantCulture));
                         w.WriteAttributeString("trim", t.Trim.ToString("F3", CultureInfo.InvariantCulture));
+                        if (t.Banned)    w.WriteAttributeString("ban", "1");
+                        if (t.Favourite) w.WriteAttributeString("fav", "1");
                         w.WriteEndElement();
                     }
 
@@ -571,7 +686,7 @@ namespace CMM
 
                 if (File.Exists(snap.FilePath)) File.Delete(snap.FilePath);
                 File.Move(tmp, snap.FilePath);
-                CMMConfig.D($"[CMM] Cache/loudness.xml saved: {snap.Tracks.Count} trimmed track(s).");
+                CMMConfig.D($"[CMM] Cache/loudness.xml saved: {snap.Tracks.Count} trimmed/flagged track(s).");
                 return true;
             }
             catch (Exception ex)

@@ -23,6 +23,10 @@ namespace CMM
     // RecursiveCrawlLoop replaces both for these contexts. It walks the tree on a
     // background thread in small, throttled chunks, statting each directory and only
     // re-listing the ones whose mtime actually changed (per-directory mtime skip).
+    // On SLOPPY-mtime filesystems (exFAT/FAT/removable/network) the skip is disabled —
+    // a directory's mtime never moves there when a child file changes, so trusting it
+    // would hide every add/remove/rename forever; those sweeps re-list every directory
+    // (same chunk bounds) and rely on the listing-equality check at commit to stay quiet.
     // The flat directorySnapshot PickNextFile consumes is reassembled from the per-
     // directory cache only when something changed. Steady state is therefore mostly
     // cheap directory stats spread thinly over time — no per-tick full-tree walk and
@@ -149,6 +153,12 @@ namespace CMM
             public bool            MarkedHasFiles;
             public bool            Incremental;     // publish growing partial snapshots this sweep
             public float           LastPublish;
+            // Root lives on a sloppy-mtime filesystem (exFAT/FAT/removable/network): a directory's
+            // mtime does NOT move when a child file is added/removed/renamed there, so the
+            // per-directory mtime skip below would silently skip CHANGED directories forever.
+            // These sweeps re-list every directory instead — still bounded by the same per-turn
+            // chunking, just without the stat shortcut. NTFS keeps the skip.
+            public bool            SloppyFs;
 
             // Paged listing of one directory across turns. ScanDir != null ⇒ a directory is
             // mid-enumeration: ScanEnum is its open lazy file enumerator and ScanFiles the
@@ -162,6 +172,18 @@ namespace CMM
 
         // A sweep is done only when nothing is stacked AND no directory is still being paged.
         private static bool SweepFinished(SweepState s) => s.Stack.Count == 0 && s.ScanDir == null;
+
+        // Element-wise compare of two directory listings (both produced by the same filtered
+        // enumeration, so an unchanged directory yields the same sequence). Ordinal-ignore-case;
+        // a false negative just costs one benign republish.
+        private static bool SameFileList(string[] a, string[] b)
+        {
+            if (a == null || b == null) return a == b;
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+                if (!string.Equals(a[i], b[i], StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
 
         private static void DrainRescanRequests()
         {
@@ -223,6 +245,7 @@ namespace CMM
                 Stack       = new Stack<string>(),
                 Incremental = incremental,
                 LastPublish = Time.realtimeSinceStartup,
+                SloppyFs    = IsSloppyMtimeFilesystem(root),   // see the field — disables the mtime skip
             };
             s.Stack.Push(root);
             return s;
@@ -273,7 +296,9 @@ namespace CMM
                         for (int i = 0; i < subs.Length; i++) s.Stack.Push(subs[i]);
 
                         // mtime unchanged since last sweep → skip the (possibly huge) listing.
-                        if (state.Dirs.TryGetValue(d, out DirNode node) && node.Mtime == mtime)
+                        // Not on sloppy filesystems: there the mtime never moves on child
+                        // add/remove/rename, so the skip would hide changes forever (SloppyFs).
+                        if (!s.SloppyFs && state.Dirs.TryGetValue(d, out DirNode node) && node.Mtime == mtime)
                             continue;
 
                         s.ScanDir   = d;
@@ -316,12 +341,16 @@ namespace CMM
             while (!done) yield return null;
 
             // ── Apply on the main thread ────────────────────────────────────────
-            // Commit directories whose listing finished this turn.
+            // Commit directories whose listing finished this turn. A re-listing whose file set is
+            // IDENTICAL to the cached node doesn't mark the sweep changed — essential on sloppy
+            // filesystems, where every sweep re-lists every directory (no mtime skip) and would
+            // otherwise rebuild + republish the whole snapshot every pass for nothing.
             for (int i = 0; i < completed.Count; i++)
             {
                 CompletedDir cd = completed[i];
+                if (!(state.Dirs.TryGetValue(cd.Dir, out DirNode prev) && SameFileList(prev.Files, cd.Files)))
+                    s.Changed = true;
                 state.Dirs[cd.Dir] = new DirNode { Mtime = cd.Mtime, Files = cd.Files };
-                s.Changed = true;
                 // Flip presence on as soon as the first file is seen, so a huge context becomes
                 // playable mid-sweep instead of only at the end.
                 if (!s.MarkedHasFiles && cd.Files.Length > 0)

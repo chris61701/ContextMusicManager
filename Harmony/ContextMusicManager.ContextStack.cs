@@ -124,8 +124,10 @@ namespace CMM
             Add("Menu",     "menu", "Vanilla", resume:false, stale:0, cool:5, fadeintime:2, bypass:true, priority:0);
 
             // Build the vanilla section→context reverse map from the built-in Links (the
-            // external contexts.xml load, when present, rebuilds it again with its own).
+            // external contexts.xml load, when present, rebuilds it again with its own),
+            // and the combat-context set the mute keybind covers.
             RebuildVanillaLinkMap();
+            RebuildCombatContextSet();
         }
 
         public static Contexts GetContext(string contextIn) =>
@@ -209,6 +211,47 @@ namespace CMM
         private static readonly HashSet<string> _resolvingContexts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // ── Combat-music mute (keybind, session-only) ─────────────────────────
+        // One switch for ALL combat contexts (Alt+Home by default). While muted,
+        // every combat context resolves as if it had no files — the fallback chain
+        // and the stack decide what plays through fights instead — and the linked
+        // vanilla Combat/Bloodmoon sections are suppressed exactly like a
+        // DisabledVanillaSections entry (see VanillaSectionSuppressed), so the
+        // Combat_Low → VanillaIfPanicked handoff can't leak the game's own combat
+        // music back in. Deliberately NOT persisted: this is a mute-for-now control,
+        // not configuration — contexts.xml / DisabledVanillaSections are the durable
+        // knobs.
+        private static bool _combatMusicMuted;
+
+        // Every context the mute covers: any whose NAME contains "combat"
+        // (Combat_Low/High/Boss, the per-biome variants, Blood_Moon_Combat — and any
+        // user-defined context following the same naming). Precomputed on every
+        // contexts (re)load so the per-tick IsUserDisabled stays a set lookup.
+        private static readonly HashSet<string> _combatContexts =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        internal static bool CombatMusicMuted => _combatMusicMuted;
+        internal static int CombatContextCount => _combatContexts.Count;
+
+        // Returns true when combat music is muted AFTER the toggle.
+        internal static bool ToggleCombatMusicMuted() => _combatMusicMuted = !_combatMusicMuted;
+
+        internal static bool IsUserDisabled(string contextName) =>
+            _combatMusicMuted && _combatContexts.Contains(contextName);
+
+        // (Re)derives _combatContexts from the loaded context table. Called wherever
+        // RebuildVanillaLinkMap is (InitContexts + CMMConfigLoader.LoadContexts).
+        public static void RebuildCombatContextSet()
+        {
+            _combatContexts.Clear();
+            foreach (Contexts ctx in contexts.Values)
+            {
+                if (ctx.Context != null &&
+                    ctx.Context.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0)
+                    _combatContexts.Add(ctx.Context);
+            }
+        }
+
         // Walks the fallback chain to find the nearest playable context.
         // Returns "Vanilla" when the chain terminates at a Vanilla fallback.
         // Returns null when the chain terminates at Silence (explicit silence).
@@ -233,7 +276,11 @@ namespace CMM
             string current = contextName;
             for (int i = 0; i < 5; i++)
             {
-                if (ContextHasFiles(current)) return current;
+                // A combat context muted by the keybind never plays its own files; it
+                // falls through its fallback chain like an empty folder, and any
+                // Vanilla handoff it reaches is separately gated by governance
+                // (VanillaSectionSuppressed), so its linked section stays quiet too.
+                if (!IsUserDisabled(current) && ContextHasFiles(current)) return current;
                 Contexts ctx = GetContext(current);
                 string fallback = ctx?.Fallback ?? "Silence";
                 if (fallback == "Vanilla") return "Vanilla";
@@ -247,7 +294,7 @@ namespace CMM
                 // Otherwise falls through to Stack so no music change occurs.
                 if (fallback == "VanillaIfPanicked")
                 {
-                    bool dmsEnabled = GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled);
+                    bool dmsEnabled = GamePrefsCompat.DynamicMusicEnabled();
                     var localPlayer = GameManager.Instance?.World?.GetPrimaryPlayer();
                     bool panicked = dmsEnabled && localPlayer?.ThreatLevel?.Category == ThreatLevelType.Panicked;
                     if (panicked && !PanicHandoffSectionDisabled())
@@ -267,7 +314,7 @@ namespace CMM
                 // the stack so ambient/home/etc. keeps playing instead of vanilla.
                 if (fallback == "VanillaIfDMS")
                 {
-                    bool dmsEnabled = GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled);
+                    bool dmsEnabled = GamePrefsCompat.DynamicMusicEnabled();
                     // Every VanillaIfDMS context — including the five traders — hands off to the
                     // warm, muted Conductor via the generic "Vanilla" path: we unmute the DMS
                     // (edge-triggered) and let the game play its own clip.
@@ -308,7 +355,7 @@ namespace CMM
             }
             // Null signals "nothing playable and DMS is off" — caller should fade to
             // silence rather than activating vanilla and releasing the Conductor.
-            return GamePrefs.GetBool(EnumGamePrefs.OptionsDynamicMusicEnabled) ? "Vanilla" : null;
+            return GamePrefsCompat.DynamicMusicEnabled() ? "Vanilla" : null;
         }
 
         // ── Vanilla handoff ───────────────────────────────────────────────────
@@ -429,11 +476,21 @@ namespace CMM
         // read; the fast-changing combat handoff uses PanicHandoffSectionDisabled instead.
         private static SectionType _gameProposedSection = SectionType.None;
 
-        // True when the vanilla section the game currently wants to play is in the user's disable
-        // list — used by the VanillaIfDMS fallback (its exposed section is location-based).
+        // A vanilla section is suppressed when the user disabled it in settings.xml
+        // (DisabledVanillaSections), OR its governing CMM context is covered by the
+        // live combat-music mute, OR the personal radio owns the music layer (every
+        // vanilla section stays quiet while the radio plays) — all paths behave
+        // identically downstream.
+        private static bool VanillaSectionSuppressed(SectionType section) =>
+            PersonalRadio.SuppressesMusic
+            || CMMConfig.DisabledVanillaSections.Contains(section)
+            || (_sectionToContext.TryGetValue(section, out string governing) && IsUserDisabled(governing));
+
+        // True when the vanilla section the game currently wants to play is disabled —
+        // used by the VanillaIfDMS fallback (its exposed section is location-based).
         private static bool ProposedVanillaSectionDisabled() =>
             _gameProposedSection != SectionType.None
-            && CMMConfig.DisabledVanillaSections.Contains(_gameProposedSection);
+            && VanillaSectionSuppressed(_gameProposedSection);
 
         // True when the vanilla section a PANIC (combat) handoff would expose is disabled. The
         // game plays Bloodmoon on a blood moon, otherwise Combat. Reads the game's authoritative
@@ -442,11 +499,12 @@ namespace CMM
         // catches up.
         private static bool PanicHandoffSectionDisabled()
         {
-            if (CMMConfig.DisabledVanillaSections.Count == 0) return false;
+            if (CMMConfig.DisabledVanillaSections.Count == 0 && !_combatMusicMuted
+                && !PersonalRadio.SuppressesMusic)
+                return false;
             World world = GameManager.Instance?.World;
             bool bloodMoon = world != null && world.IsWorldEvent(World.WorldEvent.BloodMoon);
-            return CMMConfig.DisabledVanillaSections.Contains(
-                bloodMoon ? SectionType.Bloodmoon : SectionType.Combat);
+            return VanillaSectionSuppressed(bloodMoon ? SectionType.Bloodmoon : SectionType.Combat);
         }
 
         // The vanilla section to play in place of a disabled one the game proposed. The game
@@ -466,14 +524,14 @@ namespace CMM
                 World world = GameManager.Instance?.World;
                 bool bloodMoon = world != null && world.IsWorldEvent(World.WorldEvent.BloodMoon);
                 SectionType panic = bloodMoon ? SectionType.Bloodmoon : SectionType.Combat;
-                if (!CMMConfig.DisabledVanillaSections.Contains(panic)) return panic;
+                if (!VanillaSectionSuppressed(panic)) return panic;
             }
             else if (threat == ThreatLevelType.Spooked)
             {
-                if (!CMMConfig.DisabledVanillaSections.Contains(SectionType.Suspense))
+                if (!VanillaSectionSuppressed(SectionType.Suspense))
                     return SectionType.Suspense;
             }
-            return CMMConfig.DisabledVanillaSections.Contains(SectionType.Exploration)
+            return VanillaSectionSuppressed(SectionType.Exploration)
                 ? SectionType.None
                 : SectionType.Exploration;
         }
@@ -504,7 +562,7 @@ namespace CMM
             // THREAT choice (combat/bloodmoon/suspense), so disabling e.g. a trader you're fighting
             // next to still yields combat music instead of dropping to Exploration. Checked ahead
             // of the link map so it applies whether or not the section has a linked CMM context.
-            if (proposed != SectionType.None && CMMConfig.DisabledVanillaSections.Contains(proposed))
+            if (proposed != SectionType.None && VanillaSectionSuppressed(proposed))
             {
                 SectionType fallback = SituationalVanillaFallback();
                 if (_lastLoggedHold != proposed)

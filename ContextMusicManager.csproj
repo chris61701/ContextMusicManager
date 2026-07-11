@@ -181,6 +181,10 @@
     <Compile Include="Harmony\ContextMusicManager.Crawler.cs" />
     <Compile Include="Harmony\CmmConsoleCmd.cs" />
     <Compile Include="Harmony\ContextMusicManager.DebugHud.cs" />
+    <Compile Include="Harmony\GamePrefsCompat.cs" />
+    <Compile Include="Harmony\RadioStationCatalog.cs" />
+    <Compile Include="Harmony\PersonalRadio.cs" />
+    <Compile Include="Harmony\EmitterCompat.cs" />
     <Compile Include="Harmony\EmitterRegistry.cs" />
     <Compile Include="Harmony\EmitterAudioLayer.cs" />
     <Compile Include="Harmony\EmitterAcoustics.cs" />
@@ -397,8 +401,6 @@
          testing. The committed settings.xml keeps the release values (Ctrl off / Alt on). -->
     <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
              Query="/CMMSettings/KeybindRequireCtrl" Value="false" />
-    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
-             Query="/CMMSettings/KeybindRequireAlt" Value="false" />
     <Message Importance="high"
              Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true, keybind modifiers off" />
   </Target>
@@ -454,9 +456,13 @@
        with no explicit target) deploy to EVERY install, not just the selected GameVersion.
        The in-process build already compiled+deployed its own version; here we fan out to
        the OTHER versions by COPYING that finished payload into each install's Mods folder.
-       This is valid because the source no longer has any #if GV_* forks — every game-API
-       member that differs across A20/A21/2.6/3.0 is bound by name via reflection (see
-       ContextResolver's version bridges), so one compiled DLL runs on all four. Copying
+       This is valid because divergent game-API members are bound by name via reflection
+       (see ContextResolver's version bridges), so one compiled DLL runs on all four. The
+       ONE #if GV_V3 fork (the world-emitter radio, 3.0-only) IS included in this payload —
+       it's built against the default GameVersion (3.0) — and self-disables at runtime on
+       older games via EmitterCompat.RuntimeSupported (with the TEFeatureDoor Harmony hook
+       resolved by NAME, since that type doesn't exist pre-1.0 and a hard token would abort
+       PatchAll on A20/A21). Copying
        instead of recompiling makes a full four-install deploy near-instant for testing.
        The payload is now fully uniform across installs — ModInfo.xml is a single
        dual-format file that A20 and A21/2.x/3.x both accept (see its header), so there
@@ -500,9 +506,11 @@
        currently-active Configuration:
          dotnet msbuild ContextMusicManager.csproj -t:Package
        One compiled DLL runs on every supported game version, so this produces exactly
-       ONE artifact: dist\ContextMusicManager V<ver> for A20-A21-2.6-3.0.zip. It builds Release
-       against the default GameVersion (any supported version's assemblies work, since
-       the divergent APIs are reflection-bound); override with -p:GameVersion=... . -->
+       ONE artifact: dist\ContextMusicManager V<ver> for A20-A21-2.6-3.0.zip. It MUST build
+       against the default GameVersion (3.0): the world-emitter radio is #if GV_V3, so a
+       DLL built against any other version would silently ship WITHOUT that feature.
+       (Including it is always safe — it runtime-disables itself on pre-3.0 games via
+       EmitterCompat.RuntimeSupported.) -->
   <Target Name="Package">
     <Message Importance="high" Text="[CMM] Package — building the single cross-version Release zip." />
     <MSBuild Projects="$(MSBuildProjectFullPath)"

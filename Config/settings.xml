@@ -9,10 +9,42 @@
        Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
   <MusicPath>Music</MusicPath>
 
+  <!-- The world EMITTERS (speaker/radio blocks playing spatially in the world) require game
+       version 3.0+ — on older versions they are inert and this setting (plus the acoustic
+       WorldEmitter* settings below) is ignored. The RADIO STATIONS themselves and the
+       personal radio dial (KeyRadioNext/KeyRadioPrev) work on EVERY supported version. -->
   <WorldEmitterEnabled>true</WorldEmitterEnabled>
+  <!-- The Radio source. Names a context (its Source/fadeintime/volume then apply), or is a raw
+       folder / .m3u / absolute path.
+       STATIONS: every SUBFOLDER of that folder is one radio station — the folder name is the
+       station name. A station folder can hold audio files, .m3u/.m3u8 playlists (expanded; their
+       entries may point anywhere), or both. Each POI's radios all tune to ONE station (picked
+       stably per POI); a radio
+       you place yourself gets a station from its position (move it to retune). Stations broadcast
+       on the WORLD CLOCK: everyone in the same world hears the same song at the same point, and
+       rejoining a station resumes wherever its broadcast is now. Songs play whole, back-to-back;
+       stations are ready INSTANTLY at any library size (no scanning — a join reads only a handful
+       of file headers). Up to 3 nearest stations are audible at once. Loose tracks directly in
+       the folder are a FALLBACK single station, used only when no subfolder has playable audio
+       (a flat folder behaves as before).
+       REMOVING a station folder mid-game: radios tuned to it go SILENT (no retune — dead air
+       until the folder returns or you re-enter the world; other stations are unaffected). -->
   <WorldEmitterSource>Radio</WorldEmitterSource>   <!-- J:\7D2D Custom Music\Radio, or an .m3u, or an absolute path -->
   <WorldEmitterRange>100</WorldEmitterRange>
   <WorldEmitterFade>1.0</WorldEmitterFade>
+  <!-- Placement ("birth") fade, seconds: how long a just-placed speaker takes to fade in — both
+       when it joins a station that's already playing (per-speaker ramp) and when placing it is
+       what STARTS the station's voice (the placed radio is its first audible speaker nearby).
+       -1 = inherit the station start fade (the Radio context's fadeintime, else WorldEmitterFade).
+       0 = pop in at full volume instantly. Tune this to make placing radios feel snappier without
+       changing station-approach fade-ins or the personal radio's world-entry join. -->
+  <WorldEmitterBirthFade>0</WorldEmitterBirthFade>
+  <!-- Broadcast anchor window, seconds (min 300; default 3600 = 1 h). Station schedules re-anchor
+       at every multiple of this: the song lineup jumps to a fresh deterministic point once per
+       window (a playing song still finishes first — nothing is ever cut). Longer = rarer jumps
+       but slightly more file headers read when joining a station. Everyone in an MP world should
+       use the same value — it shapes the shared broadcast, like the station folders do. -->
+  <RadioAnchorSeconds>3600</RadioAnchorSeconds>
   <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
        MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;
                     beyond it the volume fades to silence at Range.
@@ -231,16 +263,52 @@
 
   <!-- ── Playback keybinds ───────────────────────────────────────────────
        Live controls for whatever music is playing (menu or in-game):
-         Next / Prev track  – skip within the current context's folder. "Prev"
-                              steps back to the one track it remembers (one-deep),
-                              if that file still exists; otherwise it picks a new one.
+         Next / Prev track  – skip within the current context's folder, music-player
+                              style: each context keeps a play history (25 deep, this
+                              session). Prev steps back through what actually played
+                              (nothing happens at the very start of the history); Next
+                              replays forward through anything you rewound, then picks
+                              fresh. Manual skips crossfade at ManualSkipFadeDuration,
+                              not the context's own fade times.
          Volume up / down   – nudges the CURRENT track's per-track volume trim
                               (saved in Cache/loudness.xml, persists across sessions).
                               Only audible while LoudnessNormalizationEnabled is true.
-       Keys use Unity KeyCode names (RightArrow, LeftArrow, F7, Keypad6, ...).
-       By default all four require Alt held so they don't collide with game or chat
-       input. Ctrl is NOT used because it's the game's crouch toggle; Alt is unbound
-       in 7D2D. Set the Require flags as you like for other bindings. -->
+         Ban track          – the current track is skipped and never picked again
+                              (saved in Cache/loudness.xml; press again while it
+                              plays — e.g. after a manual Prev — to unban). Banning
+                              EVERY track in a folder mutes that context: it falls
+                              through its fallback chain as if the folder were empty
+                              (only Prev can still replay a banned track, so you can
+                              reach one to unban it).
+         Undo ban           – unbans the most recently banned track; press again to
+                              walk further back (up to the last 25 bans from this
+                              session).
+         Favourite track    – the current track is picked FavouriteWeight× more
+                              often in the random orders (saved in Cache/loudness.xml;
+                              press again to remove). Sequential order ignores it.
+         Now Playing        – a TOGGLE that shows/hides a persistent top-left
+                              readout (independent of the debug HUD): the current
+                              track's title, its context, time remaining/total,
+                              and the track's volume trim %. While vanilla music
+                              or silence plays it stays up and says so. Keybind
+                              notices (ban, favourite, combat, ...) appear on its
+                              second line — with the readout hidden, the box pops
+                              up briefly just for them. NowPlayingEnabled below
+                              picks the state at launch.
+         Combat music       – a TOGGLE that mutes/unmutes ALL combat contexts at
+                              once (the Combat tiers, their biome variants, and
+                              Blood_Moon_Combat — any context whose name contains
+                              "combat"). While muted, fights keep whatever music
+                              was already playing: the combat contexts resolve
+                              through their fallback chains as if empty, and the
+                              game's own Combat/Bloodmoon sections are held back
+                              too. Not saved — a restart resets it to on.
+       Keys use Unity KeyCode names (RightArrow, Delete, Home, F7, Keypad6, ...).
+       By default all of these require Alt held so they don't collide with game or
+       chat input, and none sit on letters — the game binds letters (D = strafe,
+       F = flashlight) and they'd fire while playing. Ctrl is NOT used because
+       it's the game's crouch toggle. Set the Require flags as you like for other
+       bindings. -->
   <KeybindsEnabled>true</KeybindsEnabled>
   <KeybindRequireCtrl>false</KeybindRequireCtrl>
   <KeybindRequireAlt>true</KeybindRequireAlt>
@@ -248,8 +316,31 @@
   <KeyPrevTrack>LeftArrow</KeyPrevTrack>
   <KeyVolumeUp>UpArrow</KeyVolumeUp>
   <KeyVolumeDown>DownArrow</KeyVolumeDown>
+  <KeyBanTrack>Delete</KeyBanTrack>
+  <KeyUndoBan>End</KeyUndoBan>
+  <KeyFavouriteTrack>Insert</KeyFavouriteTrack>
+  <KeyToggleCombatMusic>Home</KeyToggleCombatMusic>
+  <KeyNowPlaying>Keypad7</KeyNowPlaying>
+  <!-- Personal radio dial (in-game only, works on EVERY game version): the two keys step
+       through Off → station → station → … → Off, wrapping both ways, so they give you
+       on, off, next and previous with just PgUp/PgDn. Stations are the subfolders of the
+       Radio source below (same stations the world radios broadcast); your radio plays the
+       same world-clock broadcast, non-spatial, replacing the normal music while on. The
+       tuned station and on/off state persist across sessions (Cache/radio.xml). A station
+       whose folder is removed goes silent ("off air") and resumes when it returns. -->
+  <KeyRadioNext>PageUp</KeyRadioNext>
+  <KeyRadioPrev>PageDown</KeyRadioPrev>
+  <!-- Whether the Now Playing overlay starts visible (the key toggles it live). -->
+  <NowPlayingEnabled>false</NowPlayingEnabled>
   <!-- Per-press change to the current track's volume trim (linear factor). -->
   <UserTrimStep>0.1</UserTrimStep>
+  <!-- How much more often a favourited track is picked (weight multiplier;
+       1 = no preference). -->
+  <FavouriteWeight>3.0</FavouriteWeight>
+  <!-- Crossfade for the MANUAL next/prev/ban skips, in seconds — a keypress switches
+       this fast regardless of the context's fadeintime. Automatic advances and
+       context changes keep using TrackTransitionFadeDuration / the context fades. -->
+  <ManualSkipFadeDuration>0.25</ManualSkipFadeDuration>
 
   <!-- ── Native audio output ring buffer ─────────────────────────────────
        Music plays through CMM's OWN audio output + mixer thread (miniaudio,

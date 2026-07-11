@@ -19,6 +19,9 @@ namespace CMM
         private IEnumerator FileWatchLoop()
         {
             var lastWriteTimes = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            // Sloppy-filesystem content hashes (see _fwLastContentHash on the scheduler path —
+            // this is the coroutine fallback's own copy of the same exFAT/FAT/network guard).
+            var lastContentHashes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             // Re-validate blacklisted files no more than this often (seconds). The
             // directory mtime does NOT change when a file finishes writing its contents,
             // so a file that failed validation while still being copied in (locked /
@@ -148,7 +151,7 @@ namespace CMM
                     // ── FAST PATH: single stat (+ one ping for the active context) ──────
                     DateTime currentWriteTime = DateTime.MinValue;
                     bool playingFileGone = false;
-                    bool folderPlaylistChanged = false;
+                    long contentHash = 0;
                     bool statDone = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
@@ -159,17 +162,23 @@ namespace CMM
                                 : ContextWriteSignatureUtc(dir, includeSub, folderPlaylistFiles);
                             if (!string.IsNullOrEmpty(playingFile))
                                 playingFileGone = !File.Exists(playingFile);
-                            // An in-folder .m3u appearing or vanishing that the max-of-mtimes
-                            // signature can't see (add/remove on exFAT/FAT/network — the folder
-                            // mtime doesn't bump). Only listed on those sloppy filesystems; NTFS
-                            // bumps the folder mtime for both, so it stays a pure O(1) stat there.
+                            // Files (audio OR .m3u) appearing/vanishing/renamed that the
+                            // max-of-mtimes signature can't see (the folder mtime doesn't bump on
+                            // exFAT/FAT/network): hash the folder's top-level path+mtime set. Only
+                            // on those sloppy filesystems — NTFS stays pure-stat. A throw lands in
+                            // the outer catch, leaving 0 = "no change" (transient IO must not
+                            // trigger a rescan). Subsumes the old top-level-.m3u set-diff.
                             if (!isPlaylist && IsSloppyMtimeFilesystem(dir))
-                                folderPlaylistChanged = FolderPlaylistSetChanged(dir, folderPlaylistFiles);
+                                contentHash = FileSetContentHash(dir, false);
                         }
                         catch { }
                         statDone = true;
                     });
                     while (!statDone) yield return null;
+
+                    bool contentChanged = contentHash != 0
+                        && lastContentHashes.TryGetValue(contextName, out long knownHash)
+                        && contentHash != knownHash;
 
                     lastWriteTimes.TryGetValue(contextName, out DateTime knownTime);
 
@@ -201,8 +210,9 @@ namespace CMM
                         && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(SignatureFreshnessWindow);
 
                     if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
-                        && !folderPlaylistChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;
+                        && !contentChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;
                     lastWriteTimes[contextName] = currentWriteTime;
+                    if (contentHash != 0) lastContentHashes[contextName] = contentHash;
 
                     // ── FAST REACTION: the ping found the playing file gone ──────────
                     // We already know exactly what changed, so react off the in-memory
@@ -583,12 +593,19 @@ namespace CMM
         // so they need no lock and stay independent of the coroutine fallback's own copies.
         private static readonly Dictionary<string, DateTime> _fwLastWriteTimes =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        // Listing-based content hash per flat context, ONLY populated on sloppy-mtime filesystems
+        // (exFAT/FAT/removable/network), where the directory write time never moves on child
+        // add/remove/rename and the mtime signature above is therefore blind (the radio catalog
+        // hit exactly this on the user's exFAT music drive). NTFS contexts never pay the listing.
+        private static readonly Dictionary<string, long> _fwLastContentHash =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private static readonly System.Diagnostics.Stopwatch _fwClock = System.Diagnostics.Stopwatch.StartNew();
         private static double _fwLastBlacklistRetry;
 
         internal static void FileWatchInit()
         {
             _fwLastWriteTimes.Clear();
+            _fwLastContentHash.Clear();
             _fwLastBlacklistRetry = -FwBlacklistRetryInterval;   // allow the first retry sweep immediately
         }
 
@@ -703,12 +720,18 @@ namespace CMM
                         ? PlaylistWriteSignatureUtc(d.PlaylistFile)
                         : ContextWriteSignatureUtc(d.Dir, false, d.FolderPlaylistFiles);
                     bool playingFileGone = !string.IsNullOrEmpty(pf) && PingGone(pf);
-                    // An in-folder .m3u appearing or vanishing the max-of-mtimes signature can't
-                    // see (add/remove on exFAT/FAT/network — the folder mtime doesn't bump). Only
-                    // lists the folder on those sloppy filesystems; NTFS bumps the folder mtime for
-                    // both directions, so this stays a pure O(1) stat there.
-                    bool folderPlaylistChanged = !d.IsPlaylist && IsSloppyMtimeFilesystem(d.Dir)
-                        && FolderPlaylistSetChanged(d.Dir, d.FolderPlaylistFiles);
+                    // Files (audio OR .m3u) appearing/vanishing/renamed that the max-of-mtimes
+                    // signature can't see (the folder mtime doesn't bump on exFAT/FAT/network):
+                    // hash the folder's top-level path+mtime set. Only on those sloppy
+                    // filesystems — NTFS bumps the folder mtime for all of it, staying pure-stat.
+                    // A throw mid-listing leaves the hash 0 = "no change" (transient IO must not
+                    // trigger a rescan). Subsumes the old top-level-.m3u set-diff.
+                    long contentHash = 0;
+                    if (!d.IsPlaylist && IsSloppyMtimeFilesystem(d.Dir))
+                        try { contentHash = FileSetContentHash(d.Dir, false); } catch { }
+                    bool contentChanged = contentHash != 0
+                        && _fwLastContentHash.TryGetValue(ctxName, out long knownHash)
+                        && contentHash != knownHash;
 
                     bool neverScanned = !_fwLastWriteTimes.TryGetValue(ctxName, out DateTime knownTime);
                     // Never trust the write-time shortcut for an empty dir (a refill can land on
@@ -720,8 +743,9 @@ namespace CMM
                         && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(FwSignatureFreshnessWindow);
 
                     if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
-                        && !folderPlaylistChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;   // no change — no main hop
+                        && !contentChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;   // no change — no main hop
                     _fwLastWriteTimes[ctxName] = currentWriteTime;
+                    if (contentHash != 0) _fwLastContentHash[ctxName] = contentHash;
 
                     if (d.IsActiveContext && playingFileGone)
                     {

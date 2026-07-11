@@ -30,6 +30,10 @@ namespace CMM
         // call (used by contexts that set their own volume, e.g. POI_Cleared).
         public static float GetVolume(bool inGame, float volumeOverride = -1f)
         {
+            // Direct enum use is safe HERE ONLY because these two members sit at ordinals 3/4 in
+            // every supported version. EnumGamePrefs ordinals drift deeper into the enum — any
+            // other member must go through GamePrefsCompat (compiled constants read the wrong
+            // pref cross-version otherwise).
             float inGameVolume = GamePrefs.GetFloat(
                     inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
 
@@ -84,6 +88,15 @@ namespace CMM
         public static float  WorldEmitterRange   = 100f;
         // Fade (seconds) when the station starts (a speaker comes in range) / stops (all leave range).
         public static float  WorldEmitterFade    = 1.0f;
+        // Placement ("birth") ramp for a speaker that APPEARS while its station is already
+        // playing (just placed, or streamed in with a chunk). < 0 ⇒ inherit the start fade
+        // (the Radio context's fadeintime, else WorldEmitterFade). 0 = pop in instantly.
+        public static float  WorldEmitterBirthFade = -1f;
+        // Broadcast anchor window (seconds). Station schedules re-anchor at every multiple of this:
+        // a join walks track lengths forward from the current window's anchor (~window/4min header
+        // opens, pool-size independent). Longer = rarer re-anchor jumps, slightly costlier joins.
+        // MP clients must share the value (it shapes the schedule, like the station folders do).
+        public static float  RadioAnchorSeconds  = 3600f;
         // ── Spatial curve (live-tunable; pushed to the native spatializer every tick) ──────────────
         // MinDistance = full-volume plateau radius (move freely inside it, level flat); past it the
         // level fades to silence at Range. Falloff = fade steepness (1 = straight amplitude ramp, >1
@@ -305,10 +318,36 @@ namespace CMM
         public static KeyCode KeyPrevTrack  = KeyCode.LeftArrow;
         public static KeyCode KeyVolumeUp   = KeyCode.UpArrow;
         public static KeyCode KeyVolumeDown = KeyCode.DownArrow;
+        // Track flags + the combat-music toggle (same modifier gate as the keys
+        // above). Ban/favourite persist per-track in Cache/loudness.xml alongside
+        // the trim; the combat toggle is session-only. Defaults sit on the
+        // Ins/Del/Home cluster — NEVER on letters: the game binds letters
+        // (D = strafe, F = light) and Alt is the free-look hold, so Alt+letter
+        // fires during normal play.
+        public static KeyCode KeyBanTrack         = KeyCode.Delete;
+        public static KeyCode KeyUndoBan          = KeyCode.End;   // unbans the last-banned track (25-deep, session)
+        public static KeyCode KeyFavouriteTrack   = KeyCode.Insert;
+        public static KeyCode KeyToggleCombatMusic = KeyCode.Home;
+        // Shows/hides the persistent Now Playing overlay (top-left track + context
+        // readout). NowPlayingEnabled below picks the state at launch.
+        public static KeyCode KeyNowPlaying       = KeyCode.Keypad7;
+        // Personal radio dial (PersonalRadio): steps through Off → station → station → Off,
+        // wrapping both ways — two keys give on/off/next/prev. On the same physical key
+        // cluster as Ins/Del/Home/End, same modifier gate. In-game only.
+        public static KeyCode KeyRadioNext        = KeyCode.PageUp;
+        public static KeyCode KeyRadioPrev        = KeyCode.PageDown;
+        public static bool NowPlayingEnabled = false;
         // Per-press change to the current track's manual volume trim (linear factor),
         // persisted per-track in Cache/loudness.xml. Folded into the loudness gain, so
         // it only takes audible effect when LoudnessNormalizationEnabled is true.
         public static float UserTrimStep = 0.1f;
+        // How much more often a favourited track is picked in the random track orders
+        // (weight multiplier; 1 = no preference). Sequential order ignores favourites.
+        public static float FavouriteWeight = 3f;
+        // Crossfade used by the MANUAL next/prev/ban skips (seconds). A keypress should
+        // switch fast regardless of the context's fadeintime / TrackTransitionFadeDuration,
+        // which still govern automatic advances and context changes.
+        public static float ManualSkipFadeDuration = 0.25f;
 
         // Set to false in Config/settings.xml to silence verbose console output.
         // Log.Warning and Log.Error always emit regardless of this flag.

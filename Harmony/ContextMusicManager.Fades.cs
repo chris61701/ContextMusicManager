@@ -66,17 +66,38 @@ namespace CMM
         // and so we never restore a gain we didn't lower. Pause is forced false in MP and on
         // the menu (GameManager.updatePauseState), so this only ever engages during SP play.
         private static volatile bool _pauseDucked;
+        private static float _pauseDuckedAt;   // realtime stamp of the duck edge (0 = no pause pending)
         internal static void OnGamePauseChanged(bool paused)
         {
             // Only ever engage in-game. When not in a world (menu / mid-quit teardown) there's no
             // pause to duck for, and — critically — this stops a stray unpause fired during the
             // quit-to-menu cleanup from RESTORING the output gain and swelling the just-faded music
             // back in over the exit fade. The quit path continues the fade to silence itself.
-            if (!inGame) return;
+            // (_pauseDuckedAt clears too, so a pause that ended in a quit can't trigger a stale
+            // radio resync on the next world's first unpause edge.)
+            if (!inGame) { _pauseDuckedAt = 0f; return; }
             if (paused == _pauseDucked) return;          // no edge — cheap per-frame guard
             _pauseDucked = paused;
             CmmMixer.Instance?.SetOutputGain(paused ? 0f : 1f, PauseFadeDuration);
             CMMConfig.D($"[CMM] native: pause {(paused ? "duck" : "restore")} ({PauseFadeDuration:F2}s)");
+            if (paused) { _pauseDuckedAt = Time.realtimeSinceStartup; return; }
+
+            // Unpause: the SP pause froze the broadcast clock (worldTime) while every live RADIO
+            // voice kept decoding in realtime under the duck — each is now AHEAD of the paper
+            // schedule by the pause length, a lead the EOF pause-drift guard then locks in
+            // (next-at-0) for the rest of the session. Fresh joins always resolve the paper, so
+            // without a re-glue the world emitters and the personal radio audibly drift apart with
+            // every pause. Rejoin the paper now: the song resumes where the listener stopped
+            // hearing it (a pause no longer skips content), and both radio layers stay aligned.
+            float pausedFor = _pauseDuckedAt > 0f ? Time.realtimeSinceStartup - _pauseDuckedAt : 0f;
+            _pauseDuckedAt = 0f;
+            if (pausedFor > 1f)
+            {
+                PersonalRadio.ResyncToClock();
+#if GV_V3
+                EmitterAudioLayer.ResyncToClock();
+#endif
+            }
         }
 
         // ── Vanilla fade-out ──────────────────────────────────────────────────

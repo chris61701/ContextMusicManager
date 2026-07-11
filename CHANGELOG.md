@@ -6,6 +6,66 @@ All notable changes to Context Music Manager are documented here.
 
 ### Added
 
+- **Personal radio.** Tune your own radio to any station with two keys (**Alt+PageUp** /
+  **Alt+PageDown**, rebindable): the dial steps `Off → station → station → Off`, wrapping both
+  ways, and shows the station in the game's own notification area above the toolbelt. Your
+  radio plays the station's live world-clock broadcast (the same song, at the same point, as
+  every world radio and every other player tuned to it), non-spatially, replacing the normal
+  context music while it's on — dial back to Off and the situational soundtrack returns. The
+  tuned station and on/off state persist across sessions. Works on EVERY supported game
+  version (A20/A21/2.6/3.0) — only the in-world emitters remain 3.0-only.
+- **Station folders can be removed live.** Deleting a station's folder mid-game no longer
+  silently retunes every radio in the world: radios tuned to it go quiet ("off air" — static
+  is planned), everything else keeps its station, and the moment the folder returns (~2 s
+  watch) its broadcast resumes. The personal radio survives the same way.
+- **Multi-station radio.** Every subfolder of the Radio source folder is now its own radio
+  STATION (the folder name is the station name); loose tracks directly in the folder remain a
+  single fallback station when no subfolders exist. Every POI's radios all tune to one station
+  — picked stably per building, so the diner plays one thing and the store across the street
+  another — and a radio you place yourself gets a station from its position (move it to
+  retune). Stations broadcast on the WORLD CLOCK: each runs a deterministic rotation seeded by
+  its name, so every session, every radio, and every player in the same world hears the same
+  song at the same point, and walking back to a station rejoins its broadcast mid-song. Up to
+  the 3 nearest stations are audible at once, each with its own position, occlusion, muffle
+  and radio-coloration path (native render slots), sharing one room reverb the way real
+  sources in one room do. The trader PA `loudspeaker` is no longer a music emitter (it keeps
+  its announcements); ham radios and store speakers remain.
+- **Ban / favourite / combat-music keybinds.** Four new live controls alongside the
+  existing skip and volume keys (all behind the same Alt gate, rebindable in
+  `settings.xml`; defaults sit on the Ins/Del/Home/End cluster, never on letters the game
+  binds under free-look): **Alt+Delete** bans the playing track — it skips immediately and
+  is never picked again (banning every track in a folder mutes that context, which then
+  resolves through its fallback chain like an empty folder). **Alt+End** undoes the last
+  ban — each press walks one step further back through this session's bans (25 deep); a
+  banned track can also be unbanned by replaying it via Prev and pressing Alt+Delete
+  again. **Alt+Insert** favourites it — favourites are
+  picked `FavouriteWeight`× (default 3×) more often in the random orders. Both flags
+  persist in `Cache/loudness.xml` next to the volume trim and follow a file through
+  renames/moves via its content hash. **Alt+Home** toggles ALL combat music off/on for
+  the session (the Combat tiers, their biome variants, Blood_Moon_Combat — any context
+  whose name contains "combat"): while muted, fights keep whatever music was already
+  playing, and the game's own Combat/Bloodmoon sections are held back exactly like a
+  `DisabledVanillaSections` entry. Each keypress confirms via a notice on the Now Playing
+  overlay (which pops up briefly for the notice even when toggled off).
+- **Now Playing overlay.** **Alt+Num7** (rebindable: `KeyNowPlaying`; `NowPlayingEnabled`
+  sets the launch state) toggles a persistent top-left readout: the playing track's title
+  (long names scroll like a music player's display) over a status line with the context,
+  the time remaining / total track time, and the track's volume trim percentage — which
+  updates live as the volume keys are pressed. While vanilla music or silence plays the
+  box stays up and says so ("Vanilla music" / "Nothing playing") instead of vanishing.
+  The same box is the notification surface for every keybind: ban/favourite/combat
+  notices swap onto the status line for a few seconds, then it reverts — and with the
+  readout toggled off, the box appears just for the notice and fades away. The debug HUD
+  steps below the box whenever it's visible, so nothing in the top-left corner ever
+  overlaps. (Num7's old debug role — the functionally-dormant GC A/B switch — is retired.)
+- **Per-context play history for Next/Prev (music-player back/forward).** Each context now
+  remembers the last 25 tracks that actually played (session-only). **Prev** steps back
+  through them one at a time (deleted files are skipped; at the very start of the history
+  the press does nothing — it no longer falls back to a random pick), and **Next** — or an
+  automatic track advance — replays forward through anything you rewound before picking
+  fresh. Manual skips (next/prev/ban) also crossfade at the new `ManualSkipFadeDuration`
+  (default 0.25 s) instead of the context's fade times, so a keypress switches immediately;
+  automatic advances keep using `TrackTransitionFadeDuration`.
 - **World-emitter "Radio" — music through in-world speakers.** Custom music can now play
   diegetically out of speaker blocks placed in the world, layered additively over the
   normal soundtrack and heard positionally: per-speaker panning and distance attenuation,
@@ -42,6 +102,15 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **Radio stations start instantly at any library size.** Station broadcasts no longer scan
+  every track's length up front (a large playlist station could sit silent for a minute after
+  a fresh launch). Schedules now re-anchor once per hour of world time (`RadioAnchorSeconds`)
+  and a join reads only the handful of file headers between the anchor and "now" — in the
+  background, independent of pool size, so tuning in or approaching a radio plays within about
+  a second even on a first launch. Songs still play whole and back-to-back on the shared world
+  clock; at the hourly re-anchor a playing song finishes first, then the station rejoins the
+  live broadcast (nothing is ever cut mid-song). Also covers live edits: adding or removing
+  tracks re-resolves instantly instead of re-scanning.
 - **Massive contexts now crawl incrementally.** A `subfolders=true` context pointed at a
   huge tree fills its snapshot over time instead of all at once: a growing partial snapshot
   is published during the sweep so the context becomes playable long before the full walk
@@ -52,9 +121,69 @@ All notable changes to Context Music Manager are documented here.
 - **Lower resolve-tick GC.** The per-tick snapshot marshal now caches each scalar field and
   re-sends only the ones that changed instead of boxing/allocating ~20 values every scan
   tick (steady roaming tick: ~20 allocations → ~1).
+- **Overlays hide while the game is paused.** The Now Playing box and the debug HUD sit in
+  the same top-left corner as the pause menu's options; both now hide during a single-player
+  pause and come back exactly as they were on unpause.
 
 ### Fixed
 
+- **World radios could be silent after quitting to the menu and continuing.** The menu↔game
+  handoff parks the audio output's gain at zero and relied on the next music start (normally
+  the spawn sting) to restore it — with the personal radio off and no spawn track, the world
+  emitters restarted into a muted output and stayed inaudible until any music event (e.g.
+  dialing the personal radio). The gain is now restored at every spawn.
+- **Pausing no longer knocks the radios off the broadcast clock.** The world clock freezes in
+  the single-player pause menu while radio audio keeps playing (muted), so every pause pushed
+  live stations ahead of the shared broadcast — world radios and the personal radio audibly
+  drifted apart over a session. On unpause they now rejoin the broadcast, which also means a
+  pause no longer skips music: the song resumes where you stopped hearing it.
+- **Hitches while the radio plays and when switching stations.** Three causes: with the radio
+  owning the music layer the context engine re-asserted its "music should be playing" recovery
+  ~9× a second for the whole radio session; every station switch opened and seeked minutes into
+  a file on the main thread (rapid dialing compounded it); and dialing onto a station whose
+  join track wasn't loudness-measured yet could leave the previous station playing until its
+  song ended. Radio starts now open/seek on a background worker and the suppression is
+  understood by the recovery watchdog.
+- **Death/spawn/POI-clear stings now interrupt the radio.** One-shot stingers crossfade (or
+  duck, for POI-clear) the personal radio instead of being swallowed by it, and the radio stays
+  silent from death until respawn — and never starts before you've spawned into the world.
+- **Approaching a radio no longer flips its station.** Overlapping POI prefabs are discovered
+  progressively on approach, which could reassign a radio's station seconds after it first
+  became audible; a radio's station is now pinned to its physical position for the session.
+- **Placing a radio inside a building took up to ~8 s to become audible.** Radios placed inside
+  a POI's bounds waited for that POI's periodic rescan (an 0–8 s lottery, ~5 s buildings). The
+  proximity sweep now registers a just-placed radio immediately with its proper station —
+  audible in about a second, with the new `WorldEmitterBirthFade` controlling its fade-in
+  (`-1` inherits the station start fade; the fade also covers a fresh station voice born from
+  the placement).
+- **Radio tracks no longer start loud and then settle.** Two causes: the personal radio's
+  upcoming tracks were never loudness-measured ahead of time (the world-emitter prewarm only
+  covers stations with a nearby speaker), so every track change started at full volume until
+  its measurement landed; and loudness measurements weren't saved between sessions, so even
+  the song that resumes at world entry re-measured (and started hot) every launch. The tuned
+  station's on-air and next tracks now prewarm continuously, measurements persist in
+  Cache/loudness.xml again (the file stays small — it only ever holds the recently-played
+  working set; manual volume trims are still never dropped), and a station switch onto a
+  never-measured track briefly holds in "tuning" until its measurement lands (bounded at
+  a few seconds) instead of starting loud — the broadcast keeps running, so you simply
+  join the song a moment later. On filesystems that don't
+  update a folder's timestamp when files inside it change (exFAT USB drives, SD cards, FAT,
+  many network shares), the mod's change detection never fired: adding, removing or renaming
+  tracks — or whole radio station folders — went unnoticed until a restart. All three watchers
+  (flat context folders, recursive contexts, and the radio station catalog) now use a
+  listing-based signature on those filesystems, so live edits hot-load there just like on NTFS.
+  NTFS users keep the cheaper timestamp fast path.
+- **Wrong game option read on A20/A21 (cross-version enum drift).** `EnumGamePrefs` member
+  ordinals differ between game versions, and the single cross-version DLL bakes the compile-time
+  values in — so on A20/A21 the mod's "is the vanilla Dynamic Music System enabled" checks read a
+  different, unrelated option, which could skew the vanilla-handoff decisions there. Affected
+  option lookups are now resolved by NAME at runtime against the running game (the new
+  world-clock day-length read uses the same path).
+- **Mod could fail to load entirely on A20/A21 (unified DLL).** The world-emitter door hook
+  referenced a 3.0-only game type in its Harmony attribute; on games without that type the
+  patch scan threw and aborted every patch in the mod. The hook now resolves its target by
+  name at runtime and skips itself cleanly on pre-3.0 versions, and the whole emitter layer
+  runtime-detects the game version instead of trusting the build flags.
 - **World-emitter radio transitions cleaned up (CMM_Decoder ABI 30).** Four related fixes to
   how the station starts, stops, and hands over between speakers:
   - *Ghost audio when replacing a destroyed radio.* Destroying a radio and placing another

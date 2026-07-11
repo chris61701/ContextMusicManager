@@ -150,8 +150,17 @@ namespace CMM
                 // music slider. Sampled here on the main thread (GamePrefs is not safe
                 // to read from the mixer thread) and stored in a volatile the mixer reads.
                 // Uses the active native context's volume override, mirroring GetContextVolume.
-                Contexts nctx = _nativeActiveContext != null ? GetContext(_nativeActiveContext) : null;
-                CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, nctx?.VolumeOverride ?? -1f);
+                // While the personal radio owns the bus there IS no active context — the Radio
+                // context's own volume governs instead (radio and contexts share the main bus) —
+                // EXCEPT while a PlayOnce stinger is airing over the radio: for its duration the
+                // stinger's own context volume governs, like any context playback.
+                if (PersonalRadio.SuppressesMusic && !PlayOnceStingerActive)
+                    CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, PersonalRadio.MasterVolumeOverride);
+                else
+                {
+                    Contexts nctx = _nativeActiveContext != null ? GetContext(_nativeActiveContext) : null;
+                    CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, nctx?.VolumeOverride ?? -1f);
+                }
                 // Hold a DEEP output cushion ONLY while actually loading a world (_gameIsLoading)
                 // — the window of heavy CPU contention (world-gen) where output latency doesn't
                 // matter — so the music can't hitch no matter how starved the producer gets.
@@ -216,7 +225,10 @@ namespace CMM
                 // If this is the track already playing (started un-normalized), settle the gain in —
                 // for the main context voice AND the world-emitter voice (whichever is airing it).
                 SettleTrackGainIntoLiveVoice(filePath);
+                PersonalRadio.SettleLoudness(filePath);   // all versions — the radio's main-bus voice
+#if GV_V3
                 EmitterAudioLayer.SettleLoudness(filePath);
+#endif
             }
         }
 
@@ -294,8 +306,13 @@ namespace CMM
             {
                 if (cache.playingFile != null)      _loudnessKeepScratch.Add(cache.playingFile);
                 if (cache.lastPlayedFile != null)   _loudnessKeepScratch.Add(cache.lastPlayedFile);
-                if (cache.previousPlayedFile != null) _loudnessKeepScratch.Add(cache.previousPlayedFile);
                 if (cache.stagedFile != null)       _loudnessKeepScratch.Add(cache.stagedFile);
+                // The play-history entries adjacent to the cursor: what one Prev / Next
+                // press would replay, kept measured so the replay starts normalized.
+                if (cache.historyIndex > 0)
+                    _loudnessKeepScratch.Add(cache.playHistory[cache.historyIndex - 1]);
+                if (cache.historyIndex >= 0 && cache.historyIndex < cache.playHistory.Count - 1)
+                    _loudnessKeepScratch.Add(cache.playHistory[cache.historyIndex + 1]);
             }
             // Protect tracks mid-measure (their path isn't in a cache field yet) so a sweep
             // can't evict a measurement the instant before its track is loaded.
@@ -303,7 +320,10 @@ namespace CMM
             // The world-emitter station's voice + up-next queue aren't context cache entries, so protect
             // them too — otherwise the sweep evicts what the station's look-ahead just measured, and the
             // per-tick prewarm re-decodes it forever.
+#if GV_V3
             EmitterAudioLayer.AppendLoudnessKeep(_loudnessKeepScratch);
+#endif
+            PersonalRadio.AppendLoudnessKeep(_loudnessKeepScratch);   // all versions
 
             LoudnessStore.RetainOnly(_loudnessKeepScratch);
         }

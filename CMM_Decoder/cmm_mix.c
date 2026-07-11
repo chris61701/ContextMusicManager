@@ -78,7 +78,8 @@ static const mix_close_fn CLOSE_FN[KIND_COUNT] = {
 #define BUS_MAXFRAMES        2048   /* largest block produced per device write */
 #define REFILL_FRAMES        2048   /* per-iteration input top-up for a converted voice */
 #define MAX_VOICES              4   /* out+in crossfade needs 2; a few overlaps need 3 */
-#define MAX_VOICES_HARD         8   /* array headroom (add appends before eviction trims) */
+#define MAX_VOICES_HARD        12   /* array headroom: 4 music (+ pre-evict append) + up to
+                                     * CMM_MAX_EMIT_VOICES stations × 2 (advance crossfade overlap) */
 #define CALM_MS              3000
 #define FLUSH_GRACE_MS        750
 #define STINGER_RESTORE_SEC  0.6f
@@ -104,6 +105,7 @@ typedef struct mix_voice {
     int    isStinger;           /* PlayOnce overlay: restore ducked beds when it retires */
     int    ducked;              /* this voice was DUCKED (not killed) under a stinger */
     int    isEmitter;           /* independent positional layer: exempt from the music crossfade + eviction */
+    int    emitSlot;            /* station render slot (0..CMM_MAX_EMIT_VOICES-1); voices sharing a slot sum */
     float  emitPts[MAX_EMIT_PTS * 3]; /* emitter: world positions of every speaker playing this station */
     float  emitPtGain[MAX_EMIT_PTS];  /* emitter: per-speaker gain multiplier (occlusion: 1=clear, <1=muffled) */
     int    emitPtCount;         /* number of active positions in emitPts */
@@ -155,13 +157,14 @@ static volatile float g_emFalloffExp  = 1.5f;
 static volatile float g_emMuffle      = 0.7f;
 static volatile float g_emStereoWidth = 0.85f;
 
-/* Live emitter reverb (room reflection) params, from the managed room probe. wet 0 = off. */
-static volatile float g_emRevWet  = 0.0f;
+/* Live emitter reverb (room reflection) params, from the managed room probe. v31: the CARRY send
+ * level + air-route depth are PER-SLOT (each station's seal/route differs); the room shape is shared. */
+static volatile float g_emRevWet[CMM_MAX_EMIT_VOICES];    /* per-slot carry-send level (0 = off) */
+static volatile float g_emRevDepth[CMM_MAX_EMIT_VOICES];  /* per-slot air-route blocks (v27 depth grading) */
 static volatile float g_emRevRoom = 0.5f;
 static volatile float g_emRevDamp = 0.5f;
 static volatile float g_emRevRangeMult = 1.0f;   /* wet range = dry range × this (≥1) */
 static volatile float g_emRevPan = 0.0f;         /* 0 = diffuse reverb, 1 = panned to source bearing */
-static volatile float g_emRevDepth = 0.0f;       /* air-route blocks to the station (v27 depth grading) */
 static volatile float g_emRevDepthAmt = 0.0f;    /* 0..1: how strongly depth grades the wet (0 = flat) */
 static volatile float g_emRevLocWet = 0.0f;      /* LOCAL bus level (v28): ear-room wetness × master */
 
@@ -189,7 +192,8 @@ static int g_wasEmpty;
 static float* g_bus;
 static float* g_voiceStereo;
 static float* g_convTmp;
-static float* g_emitterMono;   /* emitter voices' dry mono for the consumer-side spatializer */
+static float* g_emitterMono;   /* per-SLOT dry mono for the consumer-side spatializer:
+                                * CMM_MAX_EMIT_VOICES contiguous BUS_MAXFRAMES-float lanes */
 
 /* ── helpers ──────────────────────────────────────────────────────────────*/
 static float compute_step(float from, float to, float seconds) {
@@ -304,8 +308,10 @@ static int render_voice_add(mix_voice* v, int n) {
         int o = f * g_busChannels;
         float g = v->gain * v->trackGain;
         if (emit) {
-            /* Dry mono (accumulated: a brief 2-voice overlap during a start/stop crossfade sums). */
-            g_emitterMono[f] += 0.5f * (g_voiceStereo[o] + g_voiceStereo[o + 1]) * g;
+            /* Dry mono into this voice's SLOT lane (accumulated: two voices sharing a slot during
+             * a track-advance crossfade sum; different stations land in different lanes). */
+            g_emitterMono[(size_t)v->emitSlot * BUS_MAXFRAMES + f] +=
+                0.5f * (g_voiceStereo[o] + g_voiceStereo[o + 1]) * g;
         } else {
             g_bus[o]     += g_voiceStereo[o]     * g;
             g_bus[o + 1] += g_voiceStereo[o + 1] * g;
@@ -435,13 +441,19 @@ static void pump_body(void) {
         if (n < 1) { mix_sleep_ms(2); continue; }
 
         memset(g_bus, 0, (size_t)n * g_busChannels * sizeof(float));
-        memset(g_emitterMono, 0, (size_t)n * sizeof(float));
+        memset(g_emitterMono, 0, (size_t)CMM_MAX_EMIT_VOICES * BUS_MAXFRAMES * sizeof(float));
 
-        int emActive = 0;   /* an emitter voice produced this block (write its mono; retiring voice's last frames count) */
+        int emActive[CMM_MAX_EMIT_VOICES];   /* per slot: an emitter voice produced this block (write its
+                                              * mono; a retiring voice's last frames count) */
+        {
+            int s;
+            for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) emActive[s] = 0;
+        }
         mix_lock(&g_lock);
         {
             int i;
-            for (i = 0; i < g_voiceCount; i++) if (g_voices[i]->isEmitter) { emActive = 1; break; }
+            for (i = 0; i < g_voiceCount; i++)
+                if (g_voices[i]->isEmitter) emActive[g_voices[i]->emitSlot] = 1;
             for (i = g_voiceCount - 1; i >= 0; i--) {
                 if (!render_voice_add(g_voices[i], n)) {
                     int wasStinger = g_voices[i]->isStinger;
@@ -452,26 +464,42 @@ static void pump_body(void) {
                 }
             }
 
-            /* Relay the emitter's live spatial state to the output for consumer-side spatialization.
-             * Pick the newest emitter voice (normally one; a brief two during a start/stop overlap).
-             * dev is valid here (we hold the lock and any closeWhenIdle teardown runs below). */
+            /* Relay each slot's live spatial state to the output for consumer-side spatialization.
+             * Per slot, pick its newest emitter voice (normally one; briefly two during a track-
+             * advance overlap — the newer voice carries the fresher point set). A slot with no
+             * voice relays count 0 (silent). dev is valid here (we hold the lock and any
+             * closeWhenIdle teardown runs below). */
             if (dev) {
-                mix_voice* em = NULL;
-                for (i = 0; i < g_voiceCount; i++) if (g_voices[i]->isEmitter) em = g_voices[i];
-                if (em) {
-                    float lp[3] = { g_lisPos[0], g_lisPos[1], g_lisPos[2] };
-                    float lr[3] = { g_lisRight[0], g_lisRight[1], g_lisRight[2] };
-                    /* min/max come from the LIVE tuning globals (not the voice's baked-in values) so
-                     * range + plateau are hot-tunable; falloff + muffle likewise. */
-                    cmm_out_set_emitter_spatial(dev, lp, lr, em->emitPts, em->emitPtGain,
-                                                em->emitPtCount, g_emMinDist, g_emMaxDist,
-                                                g_emFalloffExp, g_emMuffle, g_emStereoWidth);
-                    cmm_out_set_emitter_reverb(dev, g_emRevWet, g_emRevRoom, g_emRevDamp, g_emRevRangeMult, g_emRevPan,
-                                               g_emRevDepth, g_emRevDepthAmt, g_emRevLocWet);
+                int s;
+                float lp[3] = { g_lisPos[0], g_lisPos[1], g_lisPos[2] };
+                float lr[3] = { g_lisRight[0], g_lisRight[1], g_lisRight[2] };
+                float wets[CMM_MAX_EMIT_VOICES], depths[CMM_MAX_EMIT_VOICES];
+                int any = 0;
+                for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
+                    mix_voice* em = NULL;
+                    for (i = 0; i < g_voiceCount; i++)
+                        if (g_voices[i]->isEmitter && g_voices[i]->emitSlot == s) em = g_voices[i];
+                    if (em) {
+                        any = 1;
+                        /* min/max come from the LIVE tuning globals (not the voice's baked-in values)
+                         * so range + plateau are hot-tunable; falloff + muffle likewise. */
+                        cmm_out_set_emitter_spatial(dev, s, lp, lr, em->emitPts, em->emitPtGain,
+                                                    em->emitPtCount, g_emMinDist, g_emMaxDist,
+                                                    g_emFalloffExp, g_emMuffle, g_emStereoWidth);
+                        wets[s] = g_emRevWet[s]; depths[s] = g_emRevDepth[s];
+                    } else {
+                        cmm_out_set_emitter_spatial(dev, s, NULL, NULL, NULL, NULL, 0,
+                                                    g_emMinDist, g_emMaxDist,
+                                                    g_emFalloffExp, g_emMuffle, g_emStereoWidth);
+                        wets[s] = 0.0f; depths[s] = 0.0f;
+                    }
+                }
+                if (any) {
+                    cmm_out_set_emitter_reverb(dev, wets, depths, g_emRevRoom, g_emRevDamp,
+                                               g_emRevRangeMult, g_emRevPan, g_emRevDepthAmt, g_emRevLocWet);
                     cmm_out_set_emitter_color(dev, g_emColDrive, g_emColStatic, g_emColVoice);
                 } else {
-                    cmm_out_set_emitter_spatial(dev, NULL, NULL, NULL, NULL, 0, 1.0f, 2.0f, 1.5f, 0.7f, 0.85f);
-                    cmm_out_set_emitter_reverb(dev, 0.0f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                    cmm_out_set_emitter_reverb(dev, NULL, NULL, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 0.0f);
                     cmm_out_set_emitter_color(dev, 0.0f, 0.0f, 0.0f);
                 }
             }
@@ -501,13 +529,18 @@ static void pump_body(void) {
         }
 
         /* Emitter DRY mono: apply master (spatialization + clip happen in the output callback) and
-         * enqueue to the emitter ring — ONLY when an emitter voice produced this block, so an idle
-         * emitter ring stays empty and the radio's audio onset isn't delayed behind a cushion of
-         * zeros. No clip here (the callback clips the summed output). */
-        if (emActive) {
-            float emMaster = g_emMasterVol;   /* the radio's OWN master, not the music master */
-            for (i = 0; i < n; i++) g_emitterMono[i] *= emMaster;
-            cmm_out_write_emitter(dev, g_emitterMono, n);
+         * enqueue each SLOT's lane to its ring — ONLY slots whose station produced this block, so an
+         * idle slot's ring stays empty and that station's audio onset isn't delayed behind a cushion
+         * of zeros. No clip here (the callback clips the summed output). */
+        {
+            float emMaster = g_emMasterVol;   /* the radios' OWN master, not the music master */
+            int s;
+            for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
+                if (!emActive[s]) continue;
+                float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
+                for (i = 0; i < n; i++) lane[i] *= emMaster;
+                cmm_out_write_emitter(dev, s, lane, n);
+            }
         }
     }
 }
@@ -554,7 +587,7 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_bus         = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_voiceStereo = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_convTmp     = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
-    g_emitterMono = (float*)malloc((size_t)BUS_MAXFRAMES * sizeof(float));
+    g_emitterMono = (float*)malloc((size_t)CMM_MAX_EMIT_VOICES * BUS_MAXFRAMES * sizeof(float));
     if (!g_bus || !g_voiceStereo || !g_convTmp || !g_emitterMono) { if (err) *err = -2; return -2; }
 
     mix_mutex_init(&g_lock);
@@ -684,13 +717,15 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
 /* v16 — add an EMITTER voice: an independent positional layer that plays ALONGSIDE the music.
  * Unlike cmm_mix_add it does NOT fade the other voices out and is exempt from the voice-count
  * eviction — it just appends a voice the emitter layer owns. Takes ownership of `dec` (frees it
- * on retire or on any failure here). Returns an emitter voice id (0 on failure). */
+ * on retire or on any failure here). v31: `slot` (0..CMM_MAX_EMIT_VOICES-1) pins the voice to a
+ * station render slot; out-of-range fails. Returns an emitter voice id (0 on failure). */
 CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
                                       long long totalFrames, float fadeIn, int loop, float trackGain,
                                       float posX, float posY, float posZ, float minDist, float maxDist,
-                                      long long startFrame) {
+                                      long long startFrame, int slot) {
     if (!dec) return 0;
     if (kind < 0 || kind >= KIND_COUNT) return 0;   /* leak-safe: unknown kind, caller keeps dec */
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) { CLOSE_FN[kind](dec); return 0; }
 
     mix_voice* v = (mix_voice*)calloc(1, sizeof(mix_voice));
     if (!v) { CLOSE_FN[kind](dec); return 0; }
@@ -708,6 +743,7 @@ CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, i
     v->trackGain = trackGain > 0.0f ? trackGain : 1.0f;
     v->trackGainTarget = v->trackGain;
     v->isEmitter = 1;
+    v->emitSlot = slot;
     v->emitPts[0] = posX; v->emitPts[1] = posY; v->emitPts[2] = posZ;
     v->emitPtGain[0] = 1.0f;                   /* unoccluded until the layer sends real per-speaker gains */
     v->emitPtCount = 1;                        /* start with the one speaker; the layer adds the rest */
@@ -770,6 +806,14 @@ CMM_API void cmm_mix_emitter_reset_acoustics(void) {
     mix_unlock(&g_lock);
 }
 
+/* v32 — flush one render slot's queued dry + render state (a DIFFERENT station acquired it). See
+ * cmm_out_emitter_flush_slot; not used on a same-station track advance (the tail is continuity). */
+CMM_API void cmm_mix_emitter_flush_slot(int slot) {
+    mix_lock(&g_lock);
+    if (g_out) cmm_out_emitter_flush_slot(g_out, slot);
+    mix_unlock(&g_lock);
+}
+
 /* v17 — push the listener basis for emitter spatialization. Lock-free (see g_lisPos): the
  * producer reads these per render block. forward/right come straight from the camera transform. */
 CMM_API void cmm_mix_set_listener(float px, float py, float pz,
@@ -795,22 +839,29 @@ CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float fall
 }
 
 /* Live emitter reverb params from the managed room probe (see EmitterAcoustics.ProbeRoom).
- * wet = CARRY bus level (0 = off), room = size→decay, damp = HF damping. All 0..1.
- * v27: depth = air-route blocks to the station (grades the carry's level/brightness/damping),
- * depthAmt = 0..1 grading strength (0 = flat wet at any depth).
- * v28: localWet = LOCAL bus level (your room ringing off the arriving occluded signal). */
-CMM_API void cmm_mix_set_emitter_reverb(float wet, float room, float damp, float rangeMult, float pan,
-                                        float depth, float depthAmt, float localWet) {
-    if (wet  < 0.0f) wet  = 0.0f; else if (wet  > 1.0f) wet  = 1.0f;
+ * v31: wets/depths are PER-SLOT arrays (CMM_MAX_EMIT_VOICES floats; NULL = all 0) — each voiced
+ * station's own seal-gated CARRY send level + air-route depth. room = size→decay, damp = HF damping,
+ * pan, depthAmt, localWet (LOCAL bus level) describe the LISTENER's room and stay shared. */
+CMM_API void cmm_mix_set_emitter_reverb(const float* wets, const float* depths,
+                                        float room, float damp, float rangeMult, float pan,
+                                        float depthAmt, float localWet) {
+    int s;
     if (room < 0.0f) room = 0.0f; else if (room > 1.0f) room = 1.0f;
     if (damp < 0.0f) damp = 0.0f; else if (damp > 1.0f) damp = 1.0f;
     if (rangeMult < 1.0f) rangeMult = 1.0f; else if (rangeMult > 8.0f) rangeMult = 8.0f;
     if (pan  < 0.0f) pan  = 0.0f; else if (pan  > 1.0f) pan  = 1.0f;
-    if (depth < 0.0f) depth = 0.0f; else if (depth > 512.0f) depth = 512.0f;
     if (depthAmt < 0.0f) depthAmt = 0.0f; else if (depthAmt > 1.0f) depthAmt = 1.0f;
     if (localWet < 0.0f) localWet = 0.0f; else if (localWet > 1.0f) localWet = 1.0f;
-    g_emRevWet = wet; g_emRevRoom = room; g_emRevDamp = damp; g_emRevRangeMult = rangeMult; g_emRevPan = pan;
-    g_emRevDepth = depth; g_emRevDepthAmt = depthAmt;
+    for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
+        float w = wets   ? wets[s]   : 0.0f;
+        float d = depths ? depths[s] : 0.0f;
+        if (w < 0.0f) w = 0.0f; else if (w > 1.0f) w = 1.0f;
+        if (d < 0.0f) d = 0.0f; else if (d > 512.0f) d = 512.0f;
+        g_emRevWet[s] = w;
+        g_emRevDepth[s] = d;
+    }
+    g_emRevRoom = room; g_emRevDamp = damp; g_emRevRangeMult = rangeMult; g_emRevPan = pan;
+    g_emRevDepthAmt = depthAmt;
     g_emRevLocWet = localWet;
 }
 

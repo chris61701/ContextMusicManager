@@ -4,92 +4,87 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
+using Station = CMM.RadioStation;   // catalog/schedule model is version-neutral (RadioStationCatalog)
 
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
-    // WORLD-EMITTER AUDIO LAYER  (Phase 3a — routing/decision, non-spatial)
+    // WORLD-EMITTER AUDIO LAYER  (multi-station: the player's diegetic radio net)
     // ─────────────────────────────────────────────────────────────────────────
-    // Turns detected in-world speakers (EmitterRegistry) into audible playback: when the nearest
-    // detected speaker is within WorldEmitterRange, plays the shared "station" as an INDEPENDENT
-    // emitter voice (CmmMixer.PlayEmitter) that sums ALONGSIDE the normal soundtrack instead of
-    // crossfading it; stops it when every speaker leaves range. This is the BRAIN half of the
-    // feature — it decides when the station plays; the native mixer's emitter voice is the hands.
+    // Turns detected in-world speakers (EmitterRegistry) into audible RADIO STATIONS. The station
+    // MODEL — catalog (subfolders/playlists/root fallback), deterministic schedules, world-time
+    // broadcast clock — lives in the version-neutral RadioStationCatalog (shared with the
+    // personal radio, which runs on every game version); THIS layer is the 3.0-only spatial
+    // consumer:
     //
-    // Phase 3a scope: NON-spatial (the voice renders centered) and it loops a single picked track.
-    // Spatialization (pan + distance falloff), radio coloration, per-emitter mixing and station
-    // advance come in later phases. Behavior model (settled): ONE shared station, always on while
-    // a speaker is in range. Main-thread only (world reads + the registry poll + decoder open).
+    //   ASSIGNMENT — each detected emitter carries a stable StationHash (per-POI: every speaker
+    //   in one POI shares it; player-placed radios hash their block position). The hash is PINNED
+    //   to a station NAME on first sight (sorted list, hash % count) — a station folder removed
+    //   mid-session leaves its radios SILENT (dead station) rather than retuning the world.
+    //
+    //   VOICING — up to CmmMixer.MaxEmitterSlots (native CMM_MAX_EMIT_VOICES) nearest audible
+    //   stations play SIMULTANEOUSLY, each on its own native render slot (own ring/points/muffle/
+    //   coloration state); an incumbent keeps its slot unless a challenger is decisively nearer
+    //   (hysteresis). Reverb stays ONE shared room pair, fed per-slot carry sends.
+    //
+    // Each voice is an INDEPENDENT emitter layer that sums ALONGSIDE the normal soundtrack
+    // instead of crossfading it. Main-thread only (world reads + registry poll + decoder opens).
     internal static class EmitterAudioLayer
     {
-        private static long _voiceId;        // active emitter voice id, 0 = none playing
-        private static string[] _pool;       // cached track pool for the configured source
-        private static string _poolSource;   // the source string _pool was built from (rebuild on change)
-        private static DateTime _poolSig;    // folder/playlist change signature the pool was built at
-        private static float _nextPoolCheck; // throttles the change-signature stat (recursive folders are pricey)
-        private const float PoolCheckInterval = 2f;   // matches the context file-watch cadence
-        private static readonly System.Random _rng = new System.Random();
-        // Loudness normalization for the diegetic station. _voiceTrack is the file the live voice is
-        // playing (so a measurement that lands after Start can settle its gain in); _voiceGainApplied is
-        // the gain currently on the voice. _stationUpNext is the pre-picked, pre-MEASURED queue of the next
-        // few tracks (LoudnessMeasureAhead deep) so an advance plays an already-normalized track — no
-        // on-demand decode while airing.
-        private static string _voiceTrack;
-        private static float  _voiceGainApplied = 1f;
-        private static readonly List<string> _stationUpNext = new List<string>();
+        // Max speaker positions fed to one emitter voice (matches native CMM_MAX_EMIT_PTS) and
+        // max simultaneously-voiced stations (matches native CMM_MAX_EMIT_VOICES).
+        private const int MaxPoints = RadioStation.MaxPoints;
+        private const int MaxSlots  = CmmMixer.MaxEmitterSlots;
 
-        // ── Station clock (continuity) ──────────────────────────────────────────────────────────────
-        // The station "keeps broadcasting" on a wall-clock playhead even while out of range, so rejoining
-        // resumes MID-SONG where the station actually is — not from the top of a fresh random track. It
-        // doesn't decode/buffer while idle; it just tracks which track is airing and how far in.
-        //   _stationAiredAt = realtimeSinceStartup at which the CURRENT track's position 0 aired; the
-        //   offset into it is (now - _stationAiredAt). While playing, the decoder's EOF is authoritative
-        //   (advance then); while idle, the clock advances virtually across probed track lengths.
-        private static string _stationTrack;    // the track currently "on air" (null = none picked yet)
-        private static long   _stationFrames;   // its total frames (0 = unknown length)
-        private static int    _stationRate;     // its sample rate
-        private static float  _stationAiredAt;  // realtimeSinceStartup of the current track's position 0
-        // Probed track lengths, so the idle clock doesn't re-open a file it already measured.
-        private static readonly Dictionary<string, long> _lenFrames = new Dictionary<string, long>();
-        private static readonly Dictionary<string, int>  _lenRate   = new Dictionary<string, int>();
+        // A challenger must be this many blocks nearer than the farthest incumbent to steal its
+        // slot — otherwise two stations straddling a boundary would flap (every flap is a decoder
+        // open + a possibly-far seek).
+        private const float StealMargin = 5f;
 
-        // The full-volume plateau radius + falloff shape are live config (WorldEmitterMinDistance /
-        // Falloff / Muffle), pushed to the native spatializer every tick so they can be dialled in-game.
+        // How long a voiced station survives having NO tracked speaker before its voice is released.
+        // Chunk-load flicker at the tracked fringe drops a POI from the registry for a few seconds
+        // until its rescan; stopping instantly churned open+seek every ~10 s. The voice is silent
+        // throughout (empty point set ⇒ native gains 0), so the grace costs one idle decode stream.
+        private const float UnseenGrace = 12f;
 
-        // Max speaker positions fed to one emitter voice (matches native MAX_EMIT_PTS). Reused buffers
-        // (+ per-slot distances for the nearest-N cull) so the per-tick point push allocates nothing.
-        private const int MaxPoints = 8;
-        private static readonly float[] _pts = new float[MaxPoints * 3];
-        private static readonly float[] _ptGain = new float[MaxPoints];   // per-speaker occlusion gain
-        private static readonly float[] _ptDist = new float[MaxPoints];
+        // The station list lives on the shared catalog (RadioStation class, version-neutral); this
+        // layer owns the emitter-side fields on it (VoiceId/Slot/points/acoustics).
+        private static List<Station> _stations => RadioStationCatalog.Stations;
 
-        // The most recent point-set push (count + when). A track ADVANCE retires and re-adds the native
-        // voice; seeding the new voice from this (same speakers, same ear, ≤ a tick old) keeps its
-        // occlusion continuous instead of starting unoccluded until the next flood lands — which burst
-        // a fully-walled speaker into the open for ~a quarter second on every advance.
-        private static int   _lastPtPushCount;
-        private static float _lastPtPushAt = -999f;
+        private static readonly Station[] _slotOwner = new Station[MaxSlots];
+        // Which station NAME last played on each native slot: a slot acquired by a DIFFERENT station
+        // is flushed native-side first (its ring still holds up to a cushion of the previous
+        // station's audio, which otherwise plays through the new station's speakers — the
+        // "two stations through one radio" report). A same-name reacquire (track advance, airing-
+        // file hot-swap) keeps the ring: that residual is the outgoing track's tail, wanted.
+        private static readonly string[] _slotLastStation = new string[MaxSlots];
 
-        // ── Placement fade-in ("birth" ramp) ────────────────────────────────────────────────────────
-        // First-seen time per tracked speaker position. A speaker that APPEARS while the station voice
-        // is already live (a radio the player just placed next to an already-playing set) used to pop
-        // into the point set at full spatial gain. Instead its published occlusion gain carries a
-        // decaying extra virtual distance — born fully out of range, reaching its true value over the
-        // start fade — so a placed radio fades in like a fresh station start does. Keyed by block pos,
-        // pruned when the speaker leaves the snapshot (destroyed/unloaded), so re-placing re-births.
+        // ── Name-pinned station assignment ──────────────────────────────────────────────────────
+        // Speaker POSITION → station NAME, pinned the first time a position is seen (from the
+        // sorted list, its entry's StationHash % count at that moment). Keyed by POSITION, not by
+        // StationHash: overlapping POI prefabs (house + part_ sub-prefab + tiles) are scanned
+        // progressively as the player approaches, and the position-dedup tiebreak can hand the
+        // SAME radio a different hash seconds after it first voiced — a hash-keyed pin then
+        // audibly retuned it mid-listen ("station comes in, immediately flips to another"). The
+        // physical radio is what the listener perceives, so the pin sticks to it. Later ticks
+        // resolve the pinned name through the catalog: a station folder REMOVED mid-session
+        // leaves its radios silent (dead station) instead of retuning the world; a folder ADDED
+        // doesn't reshuffle existing pins either. Cleared on world exit (the player == null
+        // bail), so a re-entry recomputes from the then-current folder set — deterministic for
+        // identical folders (the MP stance) — reviving/retuning dead stations.
+        private static readonly Dictionary<Vector3i, string> _posPins = new Dictionary<Vector3i, string>();
+
+        // ── Placement fade-in ("birth" ramp) ────────────────────────────────────────────────────
+        // First-seen time per tracked speaker position (station-agnostic — keyed by block pos). A
+        // speaker that APPEARS while a station voice is already live fades in over the start fade
+        // instead of popping (its published occlusion gain carries a decaying extra virtual distance).
         private static readonly Dictionary<Vector3i, float> _speakerFirstSeen = new Dictionary<Vector3i, float>();
         private static readonly List<Vector3i> _birthScratch = new List<Vector3i>();
 
-        // ── Movement fade-out (occlusion rise limiter) ─────────────────────────────────────────────
+        // ── Movement fade-out (occlusion rise limiter) ─────────────────────────────────────────
         // Last PUBLISHED occlusion extra per speaker, so a movement-driven RISE can be rate-limited
-        // (WorldEmitterOcclusionFadeRate, virtual blocks/s). Walking out a doorway flips the routed
-        // cost from near-clear to fully-blocked in ONE 4 Hz tick, and the native glide is deliberately
-        // fast for big jumps (door tuning) — so the dry HARD-CUT instead of fading (log 2026-07-08
-        // 08:28:51: extra 6.8→98.4 in one tick leaving a store; the lingering reverb was all that
-        // remained, which is why it read as "the reverb cut out"). Door events bypass the cap (their
-        // fast, tuned response must land with the swing); occlusion DROPS are never capped — sound
-        // ARRIVING should track the event, and the fade-in paths (fresh-start muted seed, birth ramp)
-        // are all falls. Keyed by block pos like the birth map; pruned with it.
+        // (WorldEmitterOcclusionFadeRate, virtual blocks/s). Door events bypass the cap; drops are
+        // never capped. Keyed by block pos like the birth map; pruned with it.
         private struct PublishedExtra { public float Value; public float At; }
         private static readonly Dictionary<Vector3i, PublishedExtra> _publishedExtra = new Dictionary<Vector3i, PublishedExtra>();
         private static float _doorEventAt = -999f;   // last door toggle (see NotifyAcousticChange)
@@ -99,228 +94,254 @@ namespace CMM
         private const float TickInterval = 0.25f;
         private const float DoorTickInterval = 0.05f;   // ~20 Hz while a door is mid-swing (tight fade/mute timing)
         private static float _nextTick;
+        private static bool _unsupportedLogged;         // one-shot "needs 3.0+" notice when configured on an older game
 
-        // ── Amortized occlusion flood ─────────────────────────────────────────────────────────────
-        // The occlusion Dijkstra used to settle its full 8000-cell budget synchronously inside the 4 Hz
-        // tick — ~10 ms average, 135 ms worst, ON THE MAIN THREAD: a metronomic frame spike (the felt
-        // stutter of 2026-07-07, 90% of measured ticks over 8 ms). Now the tick only BEGINS the flood;
-        // every frame advances it by a small time slice (FloodBudgetMs), and when it completes the
-        // finish lands the per-speaker gains + reverb push. Total CPU is unchanged; no frame pays more
-        // than the slice. Occlusion results land ~2-6 frames after the tick — invisible behind the
-        // native gain slew (~0.5-1 s). While a door is swinging the budget is raised so door acoustics
-        // keep their ~50 ms responsiveness.
+        // ── Amortized occlusion flood ─────────────────────────────────────────────────────────
+        // The tick only BEGINS the flood; every frame advances it by a small time slice
+        // (FloodBudgetMs), and when it completes the finish lands EVERY culled station's gains +
+        // points + the reverb push from the one finished field. No frame pays the full Dijkstra.
         private const float FloodBudgetMs = 2.5f;
         private const float DoorFloodBudgetMs = 16f;   // per-frame slice while a door is mid-swing
-        private const float DoorRushBudgetMs = 32f;    // one-shot inline budget at tick start during a swing —
-                                                       // most floods complete in it, restoring the pre-amortization
-                                                       // same-frame door response (a single ~16 ms frame at the
-                                                       // moment of a swing is invisible; 100 ms of audio lag isn't)
-        private static bool _occlPending;      // a begun flood is being stepped; finish not yet landed
-        private static int _occlCount;         // point count culled at begin (positions already in _pts)
-        private static Vector3 _occlEar;       // the ear the flood was anchored at (finish must use the same)
-        private static bool  _forceRefresh;    // an acoustic change (door toggle) fired → run the next refresh a frame early instead of waiting up to 250 ms (main-thread only)
-        private static float _nextReverbLog;   // throttle for the reverb diagnostic (DebugLogging only)
+        private const float DoorRushBudgetMs = 32f;    // one-shot inline budget at tick start during a swing
+        private static bool _occlPending;              // a begun flood is being stepped; finish not yet landed
+        private static Vector3 _occlEar;               // the ear the flood was anchored at
+        private static readonly List<Station> _occlStations = new List<Station>();   // stations culled for this flood
+        private static bool  _forceRefresh;            // door toggled → run the next tick a frame early
+        private static float _nextReverbLog;           // throttle for the reverb diagnostic (DebugLogging only)
 
-        // True while the station voice is live. Read by the door hook so it only pokes when there's something to update.
-        internal static bool HasActiveVoice => _voiceId != 0;
+        // Reverb inertia: per-SLOT carry-send EMA (asymmetric — room character is EARNED by staying,
+        // not granted by walking past a doorway), plus the shared local/room EMAs.
+        private static readonly float[] _revWetSmooth = new float[MaxSlots];
+        private static readonly float[] _revWets   = new float[MaxSlots];   // reused push buffers
+        private static readonly float[] _revDepths = new float[MaxSlots];
+        private static float _revLocSmooth;
+        private static float _revRoomSmooth;
+        private static float _lastRevPush;
 
-        // Called from the door Harmony hook (Patch_DoorAcousticChange) the instant a door's open/closed state
-        // flips. Just requests that the 4 Hz decision/occlusion tick run on the next frame rather than waiting
-        // out the interval — so the occlusion re-floods with the door's new state immediately and the ~1 s
-        // native gain glide starts WITH the swing instead of finishing after it.
+        // True while any station voice is live. Read by the door hook so it only pokes when there's
+        // something to update.
+        internal static bool HasActiveVoice
+        {
+            get
+            {
+                for (int i = 0; i < _stations.Count; i++) if (_stations[i].VoiceId != 0) return true;
+                return false;
+            }
+        }
+
+        // Called from the door Harmony hook (Patch_DoorAcousticChange) the instant a door's open/closed
+        // state flips: collapse the up-to-250 ms tick wait so the occlusion re-floods with the door's
+        // new state immediately.
         internal static void NotifyAcousticChange()
         {
             _forceRefresh = true;
-            // Stamp the toggle so the occlusion fade-rate limiter stands aside: a door slam's settled
-            // (post-animation) flood lands within this window and must keep its tuned instant mute.
             _doorEventAt = Time.realtimeSinceStartup;
         }
-        private static float _revWetSmooth, _revRoomSmooth;   // reverb inertia (EMA of the pushed carry/room)
-        private static float _revLocSmooth;                   // LOCAL bus level EMA (same inertia as the carry)
-        private static float _lastRevPush;                    // realtime of the previous push (dt for the EMAs)
+
+        // ── Shared catalog forwarders ───────────────────────────────────────────────────────────
+        // The catalog/schedule/broadcast model moved to the version-neutral RadioStationCatalog
+        // (shared with PersonalRadio). Thin forwarders keep this file's call sites unchanged.
+        private static double BroadcastSeconds() => RadioStationCatalog.BroadcastSeconds();
+        private static void EnsureCatalog() => RadioStationCatalog.EnsureCatalog();
+        private static void ResolveOnAir(Station st, double B) => RadioStationCatalog.ResolveOnAir(st, B);
+        private static void AdvanceStation(Station st, string endedTrack) => RadioStationCatalog.AdvanceStation(st, endedTrack);
+        private static bool SafeExists(string file) => RadioStationCatalog.SafeExists(file);
+        private static Contexts RadioContext() => RadioStationCatalog.RadioContext();
+        private static float StartFade() => RadioStationCatalog.StartFade();
 
         internal static void Tick()
         {
+            // Runtime version gate FIRST: the cross-version DLL carries this code onto A20/A21/2.6,
+            // where the registry/acoustics paths below would bind 3.0-shaped game APIs. Bail before
+            // touching anything (lazy JIT keeps the deeper methods from ever resolving there).
+            if (!EmitterCompat.RuntimeSupported)
+            {
+                if (!_unsupportedLogged && CMMConfig.WorldEmitterEnabled && !string.IsNullOrWhiteSpace(CMMConfig.WorldEmitterSource))
+                {
+                    _unsupportedLogged = true;
+                    Log.Out("[CMM] World-emitter radio requires 7 Days to Die 3.0+ — feature disabled on this game version.");
+                }
+                return;
+            }
+
             if (!CMMConfig.WorldEmitterEnabled || string.IsNullOrWhiteSpace(CMMConfig.WorldEmitterSource))
             {
-                Stop();
+                StopAll();
                 return;
             }
 
             // No local player (menu / loading / world teardown): stop and bail, so a stale registry
-            // snapshot can't restart the station off the world.
+            // snapshot can't restart a station off the world. Station pins reset with the world —
+            // re-entry recomputes them from the then-current catalog (see _posPins).
             EntityPlayerLocal player = GameManager.Instance?.World?.GetPrimaryPlayer();
-            if (player == null) { Stop(); return; }
+            if (player == null) { _posPins.Clear(); StopAll(); return; }
 
-            // Per-frame (unthrottled) while a voice is live: keep the listener basis fresh so the pan
-            // tracks head/body movement smoothly, not in 0.5 s steps.
-            if (_voiceId != 0)
+            // Per-frame (unthrottled) while any voice is live: keep the listener basis fresh so the
+            // pan tracks head/body movement smoothly, and re-check the tracked speakers so smashing
+            // the last radio cuts promptly. Voices are released ONLY when speakers are truly GONE —
+            // walking out of range keeps them WARM (native distance falloff clamps them silent), so
+            // re-entering range is seamless (no re-open + mid-song re-seek hitch).
+            if (HasActiveVoice)
             {
                 PushListener(player);
-
-                // Per-frame destruction re-check so smashing a speaker cuts the station promptly instead of
-                // waiting for the 4 Hz decision tick below. Only revalidates the already-tracked speakers
-                // (cheap); the POI enumeration/scan stays throttled in Poll().
-                // We release the voice ONLY when the speakers are truly GONE (destroyed / chunk unloaded,
-                // Count == 0) — NOT merely because we walked out of range. Walking out of range keeps the
-                // voice WARM: the native distance falloff clamps it to silence past WorldEmitterRange
-                // (cmm_out att = 0 for dEff ≥ max), and the per-frame PushListener above keeps that current
-                // as we move. That way re-entering range is seamless — no re-open + mid-song re-seek, which
-                // was a main-thread hitch (a far dr_mp3 seek scans from 0; ~133 ms at 105 s in).
                 World w = GameManager.Instance?.World;
                 if (w != null)
                 {
+                    // Keeps destroyed blocks dropping out promptly; the audible cut lands via the
+                    // next tick's point publish (empty set ⇒ native gains 0), and an ALL-speakers
+                    // dropout goes through the per-station UnseenGrace instead of an instant StopAll
+                    // (chunk flicker was churning voices).
                     EmitterRegistry.RefreshSnapshot(w, player.position);
-                    if (EmitterRegistry.Count == 0) { Stop(); return; }
 
                     // Advance the amortized occlusion flood by one time slice per FRAME; when it
-                    // completes, land the whole tick's output (per-speaker gains + directional points +
-                    // reverb) from the finished field. This is the anti-stutter split: no frame ever
-                    // pays the full Dijkstra, only a slice.
+                    // completes, land every culled station's output from the finished field.
                     if (_occlPending && EmitterAcoustics.OcclusionStep(w, EmitterAcoustics.AnyDoorAnimating ? DoorFloodBudgetMs : FloodBudgetMs))
                         FinishOcclusion(player, w);
                 }
             }
 
-            // A door toggled since the last tick (hook set the flag) → collapse the up-to-250 ms wait so the
-            // occlusion re-floods with the door's new open/closed state this frame. An in-flight flood was
-            // built from the PRE-toggle door state — abandon it so the restart samples the swing fresh.
+            // A door toggled since the last tick → collapse the wait; an in-flight flood was built
+            // from the PRE-toggle door state — abandon it so the restart samples the swing fresh.
             if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; }
             if (Time.realtimeSinceStartup < _nextTick) return;
-            // While a door is mid-swing, refresh fast (~20 Hz) so its openness is sampled tightly — the fade
-            // starts promptly on open and the mute is precise on close — instead of in 250 ms steps. Back to
-            // 4 Hz once all doors settle (rooms/speaker-set change slowly; the flood cost stays bounded).
             _nextTick = Time.realtimeSinceStartup + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
 
-            // Push the live spatial-curve tuning from config (hot-reloaded), so edits to plateau /
-            // range / falloff / muffle in settings.xml apply in-game without a restart.
+            // Push the live spatial-curve tuning + radio master from config (hot-reloaded).
             PushTuning();
-            PushEmitterMaster();   // radio level = music slider × Radio context volume (live)
+            PushEmitterMaster();
 
-            // Keep the station "broadcasting" on its wall-clock while nothing is playing (so the next time
-            // a speaker comes in range we rejoin mid-song), and — while a voice IS playing — reconcile the
-            // pool with disk and hot-swap the airing track the moment its file vanishes (like a context).
-            if (_voiceId == 0) StationSyncIdle();
-            else MaintainPlayingStation(player);
-
-            MaintainUpNext();   // keep the next few tracks pre-picked + measured so an advance is normalized
+            EnsureCatalog();        // stations from the Radio source's subfolders (throttled disk stat)
+            if (_stations.Count == 0) { StopAll(); return; }
 
             EmitterRegistry.Poll();
-            MaintainBirths();   // stamp newly-appeared speakers / prune gone ones (placement fade-in)
-            bool hasEmitter = EmitterRegistry.Count > 0;
-            float nearest = EmitterRegistry.NearestDist;
-            bool inRange = hasEmitter && nearest <= CMMConfig.WorldEmitterRange;
-            // The wet reverb reaches farther than the dry (out to range × ReverbRangeMult), so the voice is
-            // still "doing something audible" in that outer ring even when the dry has faded to 0. Run the
-            // room probe + occlusion out to whichever is larger; past THAT everything is truly silent and we
-            // let the warm voice keep decoding untouched (cheap — no flood, no probe).
+            MaintainBirths();       // stamp newly-appeared speakers / prune gone ones (placement fade-in)
+            GroupSnapshot();        // per-station nearest + culled point sets from the registry snapshot
+            MaintainOnAir();        // keep idle nearby stations' on-air pointers current + prewarm loudness
+            if (_clockResyncPending) { _clockResyncPending = false; ResyncVoicesToClock(player); }
+            MaintainPlayingStations(player);   // airing-file-vanished interrupt + EOF advance
+            SelectAndVoice(player); // K-nearest start/steal/stop
+
+            // The wet reverb reaches farther than the dry (range × ReverbRangeMult), so occlusion +
+            // the room probe run out to whichever is larger; past that a warm voice keeps decoding
+            // untouched (cheap — no flood, no probe).
             float audibleR = CMMConfig.WorldEmitterRange;
             if (CMMConfig.WorldEmitterReverbEnabled)
                 audibleR *= Mathf.Max(1f, CMMConfig.WorldEmitterReverbRangeMult);
-            bool audible = hasEmitter && nearest <= audibleR;
 
-            if (_voiceId == 0)
+            // Split the voiced stations into the audible set (occlusion + points land) and the warm
+            // set (publish the EMPTY point set: native gains go to 0 and the tail rings out — also
+            // covers "the nearby radio you just smashed was this station's last audible one").
+            bool anyAudible = false;
+            for (int i = 0; i < _stations.Count; i++)
             {
-                if (inRange) Start(player, StartFade(), fresh: true);
+                Station st = _stations[i];
+                if (st.VoiceId == 0) continue;
+                if (st.NearestDist <= audibleR) { anyAudible = true; continue; }
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, 0);
+                RecordPtPush(st, 0);
             }
-            else if (!hasEmitter)
+            if (!anyAudible) { _occlPending = false; return; }
+
+            World world = GameManager.Instance?.World;
+            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && world != null)
             {
-                Stop();   // speakers gone (destroyed / chunk unloaded) → release the warm voice
-            }
-            else if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(_voiceId, out _, out _, out _))
-            {
-                // The voice retired = the current track finished (decoder EOF is authoritative). Advance the
-                // station clock and start the next track. We do this even while out of range so the warm
-                // voice stays on the SAME timeline as reality — the next re-entry rejoins seamlessly instead
-                // of having to seek far into a mid-song offset. The fresh track opens at ~frame 0 (cheap).
-                CMMConfig.D("[CMM] World emitter: track ended → next track.");
-                _voiceId = 0;
-                ForceAdvanceStation();
-                Start(player, AdvanceFade, fresh: false);
-            }
-            else if (audible)
-            {
-                World world = GameManager.Instance?.World;
-                if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && world != null)
+                // Routed occlusion = the expensive flood → AMORTIZE. ONE flood serves every audible
+                // station (the field is per-ear; each station's speakers sample it independently in
+                // the finish). If the previous tick's flood is still in flight, let it land first.
+                if (!_occlPending)
                 {
-                    // Routed occlusion = the expensive flood → AMORTIZE. Cull the point set and seed the
-                    // flood now; the per-frame stepper above settles it a slice at a time and lands the
-                    // gains/points/reverb push on completion. If the previous tick's flood is still in
-                    // flight (a heavy spot), let it land first — the next tick starts a fresh one.
-                    if (!_occlPending)
+                    _occlEar = ListenerWorldPos(player);
+                    _occlStations.Clear();
+                    int totalPts = 0;
+                    for (int i = 0; i < _stations.Count; i++)
                     {
-                        _occlCount = CullPoints(player, out _occlEar);
-                        if (_occlCount > 0)
-                        {
-                            EmitterAcoustics.OcclusionBegin(_occlEar, world);
-                            _occlPending = true;
-                            // DOOR RUSH: while a door is mid-swing, try to complete the flood in ONE big
-                            // inline slice so the openness change lands THIS frame, like the old
-                            // synchronous path — amortizing it added 2-6 frames of latency, which reads
-                            // as the door acoustics lagging the swing. Swings are brief; the one-frame
-                            // cost is the pre-amortization behaviour the door tuning was built on.
-                            if (EmitterAcoustics.AnyDoorAnimating && EmitterAcoustics.OcclusionStep(world, DoorRushBudgetMs))
-                                FinishOcclusion(player, world);
-                        }
-                        else
-                        {
-                            CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, 0);
-                            RecordPtPush(0);
-                            PushReverb(player);
-                        }
+                        Station st = _stations[i];
+                        if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                        _occlStations.Add(st);
+                        totalPts += st.PtCount;
                     }
-                }
-                else
-                {
-                    // Occlusion off / direct-line only: cheap, stays synchronous.
-                    int count = BuildPointBuffer(player);   // all in-range speakers + their occlusion
-                    PostProcessGains(count);                // birth fade-in + movement rise limiter
-                    CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, count);
-                    RecordPtPush(count);
-                    PushReverb(player);                     // probe the room + drive the reverb
+                    if (totalPts > 0)
+                    {
+                        EmitterAcoustics.OcclusionBegin(_occlEar, world);
+                        _occlPending = true;
+                        // DOOR RUSH: while a door is mid-swing, try to complete the flood in ONE big
+                        // inline slice so the openness change lands THIS frame (door acoustics were
+                        // tuned on the synchronous path).
+                        if (EmitterAcoustics.AnyDoorAnimating && EmitterAcoustics.OcclusionStep(world, DoorRushBudgetMs))
+                            FinishOcclusion(player, world);
+                    }
+                    else
+                    {
+                        for (int i = 0; i < _occlStations.Count; i++)
+                        {
+                            Station st = _occlStations[i];
+                            CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, 0);
+                            RecordPtPush(st, 0);
+                        }
+                        PushReverb(player);
+                    }
                 }
             }
             else
             {
-                // Voice live but out of the whole audible radius — keep it warm and in sync, skipping the
-                // flood + room probe. BUT the point set can still change out here: if the nearby radio you
-                // just SMASHED was the last audible one, the native voice would otherwise keep playing
-                // from its STALE position forever (the "destroyed radio doesn't stop" report). Everything
-                // is beyond the cull range now, so publish the EMPTY set — native gains go to 0 and the
-                // reverb tail rings out — and drop any in-flight flood (it was built for the dead set).
-                _occlPending = false;
-                CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, 0);
-                RecordPtPush(0);
+                // Occlusion off / direct-line only: cheap, stays synchronous. Per station: occlusion
+                // (or all-clear), birth fade + rise limiter, publish; capture its seal/solid/depth.
+                Vector3 ear = ListenerWorldPos(player);
+                bool occlude = CMMConfig.WorldEmitterOcclusion && world != null;
+                for (int i = 0; i < _stations.Count; i++)
+                {
+                    Station st = _stations[i];
+                    if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                    if (occlude)
+                    {
+                        EmitterAcoustics.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world);
+                        st.Seal = EmitterAcoustics.ReverbSeal;
+                        st.Solid = EmitterAcoustics.ReverbSolid;
+                        st.Depth = EmitterAcoustics.ReverbDepth;
+                    }
+                    else
+                        for (int k = 0; k < st.PtCount; k++) st.PtGain[k] = 0f;   // clear line (virtual distance 0)
+                    PostProcessGains(st);
+                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtCount);
+                    RecordPtPush(st, st.PtCount);
+                }
+                PushReverb(player);
             }
         }
 
-        // Land a completed occlusion flood: per-speaker gains + directional points from the finished
-        // field, push them to the native voice, then the room probe + reverb. Called from the per-frame
-        // stepper on completion, or inline at tick start during a door rush.
+        // Land a completed occlusion flood: for EVERY station culled at begin, per-speaker gains +
+        // directional points from the finished field (and its seal/solid/depth for the reverb),
+        // then the room probe + reverb push. Called from the per-frame stepper on completion, or
+        // inline at tick start during a door rush.
         private static void FinishOcclusion(EntityPlayerLocal player, World w)
         {
-            EmitterAcoustics.OcclusionFinish(_occlEar, _pts, _occlCount, _ptGain, w);
-            PostProcessGains(_occlCount);   // birth fade-in + movement rise limiter
-            CmmMixer.Instance?.SetEmitterPoints(_voiceId, _pts, _ptGain, _occlCount);
-            RecordPtPush(_occlCount);
+            for (int i = 0; i < _occlStations.Count; i++)
+            {
+                Station st = _occlStations[i];
+                if (st.VoiceId == 0 || st.PtCount == 0) continue;   // stopped/emptied while the flood ran
+                EmitterAcoustics.OcclusionFinish(_occlEar, st.Pts, st.PtCount, st.PtGain, w);
+                st.Seal  = EmitterAcoustics.ReverbSeal;    // the statics are per-Finish-call — capture now
+                st.Solid = EmitterAcoustics.ReverbSolid;
+                st.Depth = EmitterAcoustics.ReverbDepth;
+                PostProcessGains(st);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtCount);
+                RecordPtPush(st, st.PtCount);
+            }
             PushReverb(player);
             _occlPending = false;
         }
 
-        // Shape the freshly-computed per-speaker gains before they're published: the placement
-        // fade-in first (it inflates a new speaker's extra), then the movement rise limiter (it
-        // caps how fast any published extra may climb tick-to-tick).
-        private static void PostProcessGains(int count)
+        // Shape a station's freshly-computed per-speaker gains before publishing: the placement
+        // fade-in first (it inflates a new speaker's extra), then the movement rise limiter.
+        private static void PostProcessGains(Station st)
         {
-            ApplyBirthFades(count);
-            LimitOcclusionRise(count);
+            ApplyBirthFades(st.Pts, st.PtGain, st.PtCount);
+            LimitOcclusionRise(st.Pts, st.PtGain, st.PtCount);
         }
 
         // Rate-limit occlusion RISES (see _publishedExtra). Falls pass through untouched; door
-        // events bypass entirely (mid-swing or within 1 s of a toggle — the settled post-slam
-        // flood lands in that window); a speaker not published for >2 s republishes as-is (it was
-        // beyond the audible fringe, where everything is silent anyway).
-        private static void LimitOcclusionRise(int count)
+        // events bypass entirely; a speaker not published for >2 s republishes as-is.
+        private static void LimitOcclusionRise(float[] pts, float[] gains, int count)
         {
             if (count <= 0) return;
             float rate = CMMConfig.WorldEmitterOcclusionFadeRate;
@@ -328,33 +349,32 @@ namespace CMM
             bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f;
             for (int i = 0; i < count; i++)
             {
-                Vector3i key = SlotKey(i);
+                Vector3i key = SlotKey(pts, i);
                 if (rate > 0f && !doorWindow
                     && _publishedExtra.TryGetValue(key, out PublishedExtra prev)
-                    && now - prev.At < 2f && _ptGain[i] > prev.Value)
+                    && now - prev.At < 2f && gains[i] > prev.Value)
                 {
                     float cap = prev.Value + rate * Mathf.Clamp(now - prev.At, 0.02f, 1f);
-                    if (_ptGain[i] > cap) _ptGain[i] = cap;
+                    if (gains[i] > cap) gains[i] = cap;
                 }
-                _publishedExtra[key] = new PublishedExtra { Value = _ptGain[i], At = now };
+                _publishedExtra[key] = new PublishedExtra { Value = gains[i], At = now };
             }
         }
 
         // Block position of point slot i (inverse of WritePoint's +0.5 centring).
-        private static Vector3i SlotKey(int i) =>
-            new Vector3i(Mathf.FloorToInt(_pts[i * 3]), Mathf.FloorToInt(_pts[i * 3 + 1]), Mathf.FloorToInt(_pts[i * 3 + 2]));
+        private static Vector3i SlotKey(float[] pts, int i) =>
+            new Vector3i(Mathf.FloorToInt(pts[i * 3]), Mathf.FloorToInt(pts[i * 3 + 1]), Mathf.FloorToInt(pts[i * 3 + 2]));
 
-        // Remember the latest point-set push so a track advance can seed the replacement voice from it
-        // (occlusion continuity across the retire/re-add) instead of starting unoccluded.
-        private static void RecordPtPush(int count)
+        // Remember a station's latest point-set push so a track advance can seed the replacement
+        // voice from it (occlusion continuity across the retire/re-add).
+        private static void RecordPtPush(Station st, int count)
         {
-            _lastPtPushCount = count;
-            _lastPtPushAt = Time.realtimeSinceStartup;
+            st.LastPtPushCount = count;
+            st.LastPtPushAt = Time.realtimeSinceStartup;
         }
 
-        // Stamp speakers newly appeared in the registry snapshot and prune ones that left (destroyed /
-        // unloaded), so ApplyBirthFades can grade a just-placed radio in instead of popping it. Tiny sets;
-        // runs on the 4 Hz decision tick.
+        // Stamp speakers newly appeared in the registry snapshot and prune ones that left, so
+        // ApplyBirthFades can grade a just-placed radio in instead of popping it.
         private static void MaintainBirths()
         {
             float now = Time.realtimeSinceStartup;
@@ -377,30 +397,30 @@ namespace CMM
             }
         }
 
-        // A speaker that appeared while the station voice is live fades in rather than popping: its
-        // published occlusion gain (virtual distance, blocks) carries a decaying extra that starts at
-        // the full audible range (silent) and reaches 0 over the start fade. The native adaptive glide
-        // smooths the 4 Hz steps. In-place on _ptGain, which every caller recomputes per push.
-        private static void ApplyBirthFades(int count)
+        // A speaker that appeared while a station voice is live fades in rather than popping: its
+        // published occlusion gain (virtual distance, blocks) carries a decaying extra that starts
+        // silent and reaches 0 over WorldEmitterBirthFade (< 0 ⇒ inherit the start fade, so the
+        // placement ramp can be tuned without dragging station-approach / radio-join fades along).
+        private static void ApplyBirthFades(float[] pts, float[] gains, int count)
         {
             if (count <= 0 || _speakerFirstSeen.Count == 0) return;
-            float dur = StartFade();
+            float dur = CMMConfig.WorldEmitterBirthFade >= 0f ? CMMConfig.WorldEmitterBirthFade : StartFade();
             if (dur <= 0f) return;
             float now = Time.realtimeSinceStartup;
             float range = CMMConfig.WorldEmitterRange;
             for (int i = 0; i < count; i++)
             {
-                Vector3i key = SlotKey(i);
+                Vector3i key = SlotKey(pts, i);
                 if (!_speakerFirstSeen.TryGetValue(key, out float t0)) continue;
                 float age = now - t0;
                 if (age >= dur) continue;
-                _ptGain[i] += (1f - age / dur) * range;
+                gains[i] += (1f - age / dur) * range;
             }
         }
 
-        // Mark every currently-tracked speaker's birth as already elapsed. Used when the station voice
-        // itself starts FRESH — its own fade-in covers the entrance, and stacking the birth ramp on top
-        // would double-fade the radio that triggered the start.
+        // Mark every currently-tracked speaker's birth as already elapsed. Used when the FIRST
+        // station voice starts fresh — its own fade-in covers the entrance, and stacking the birth
+        // ramp on top would double-fade the radio that triggered the start.
         private static void ExpireBirths()
         {
             if (_speakerFirstSeen.Count == 0) return;
@@ -410,69 +430,370 @@ namespace CMM
             for (int i = 0; i < _birthScratch.Count; i++) _speakerFirstSeen[_birthScratch[i]] = expired;
         }
 
-        // Fill _pts/_ptGain with the world-centre and occlusion gain of every detected speaker within
-        // WorldEmitterRange (nearest MaxPoints when there are more), returning the count. Allocation-
-        // free (reused buffers). The native voice sums all of these, so they're heard together.
-        // Two phases: first CULL to the nearest speakers (writing positions), then run the ray-traced
-        // occlusion probe ONCE over that set (EmitterAcoustics) to fill the gains — so the expensive
-        // reflection fan is bounded to at most MaxPoints speakers.
-        private static int BuildPointBuffer(EntityPlayerLocal player)
+        // ── Registry grouping ───────────────────────────────────────────────────────────────────
+        // Partition the registry snapshot by station: each speaker POSITION is PINNED to a station
+        // NAME on first sight (sorted list, its StationHash % count at that moment) and resolves
+        // through the catalog thereafter — see _posPins for the identity-churn and removal
+        // semantics. Per station: the nearest speaker
+        // over ALL tracked distances (start/stop/steal ranking) plus the culled point set of its
+        // nearest in-Range speakers (what the native voice sums). Allocation-free steady-state
+        // (a pin allocates once per new hash).
+        private static void GroupSnapshot()
         {
-            int count = CullPoints(player, out Vector3 ear);
-            World world = GameManager.Instance?.World;
-            bool occlude = CMMConfig.WorldEmitterOcclusion && world != null;
-
-            if (occlude)
-                EmitterAcoustics.ComputeOcclusion(ear, _pts, count, _ptGain, world);
-            else
-                for (int i = 0; i < count; i++) _ptGain[i] = 1f;
-
-            return count;
-        }
-
-        // The cull half of the point buffer: fill _pts/_ptDist with the nearest in-range speakers and
-        // report the ear they'll be measured from. No occlusion — the amortized path runs that across
-        // frames (OcclusionBegin/Step/Finish); the sync path adds it in BuildPointBuffer above.
-        private static int CullPoints(EntityPlayerLocal player, out Vector3 ear)
-        {
+            int n = _stations.Count;
+            for (int i = 0; i < n; i++)
+            {
+                Station st = _stations[i];
+                st.NearestDist = float.MaxValue;
+                st.PtCount = 0;
+            }
             float range = CMMConfig.WorldEmitterRange;
+            float now = Time.realtimeSinceStartup;
             var snap = EmitterRegistry.Snapshot;
-            ear = ListenerWorldPos(player);   // camera ear, same world-space point as the listener
-
-            int count = 0;
             for (int i = 0; i < snap.Count; i++)
             {
                 EmitterRegistry.Emitter e = snap[i];
-                if (e.Dist > range) continue;
-                if (count < MaxPoints)
+                if (!_posPins.TryGetValue(e.Pos, out string pinned))
                 {
-                    WritePoint(count, e.Pos); _ptDist[count] = e.Dist; count++;
+                    pinned = _stations[e.StationHash % n].Name;
+                    _posPins[e.Pos] = pinned;
+                }
+                // Pinned to a REMOVED station ⇒ dead air: the radio contributes to no live station
+                // (silent) until the folder returns or the next world entry recomputes the pins.
+                if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st)) continue;
+                st.LastSeenAt = now;
+                if (e.Dist < st.NearestDist) { st.NearestDist = e.Dist; st.NearestPos = e.Pos; }
+                if (e.Dist > range) continue;
+                if (st.PtCount < MaxPoints)
+                {
+                    WritePoint(st, st.PtCount, e.Pos); st.PtDist[st.PtCount] = e.Dist; st.PtCount++;
                 }
                 else
                 {
                     // Buffer full: replace the current farthest slot if this speaker is nearer.
                     int far = 0;
-                    for (int k = 1; k < MaxPoints; k++) if (_ptDist[k] > _ptDist[far]) far = k;
-                    if (e.Dist < _ptDist[far]) { WritePoint(far, e.Pos); _ptDist[far] = e.Dist; }
+                    for (int k = 1; k < MaxPoints; k++) if (st.PtDist[k] > st.PtDist[far]) far = k;
+                    if (e.Dist < st.PtDist[far]) { WritePoint(st, far, e.Pos); st.PtDist[far] = e.Dist; }
                 }
             }
-            return count;
         }
 
-        private static void WritePoint(int slot, Vector3i p)
+        private static void WritePoint(Station st, int slot, Vector3i p)
         {
             int o = slot * 3;
-            _pts[o] = p.x + 0.5f; _pts[o + 1] = p.y + 0.5f; _pts[o + 2] = p.z + 0.5f;
+            st.Pts[o] = p.x + 0.5f; st.Pts[o + 1] = p.y + 0.5f; st.Pts[o + 2] = p.z + 0.5f;
         }
 
+        // ── Voice lifecycle ─────────────────────────────────────────────────────────────────────
+        // Per decision tick: interrupt a voiced station whose airing file vanished (hot-swap parity
+        // with contexts — the user is fine with a cut) and advance stations whose track ENDED (the
+        // decoder EOF is authoritative; runs even out of range so a warm voice stays on the
+        // schedule's timeline and re-entry rejoins seamlessly).
+        private static void MaintainPlayingStations(EntityPlayerLocal player)
+        {
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0) continue;
+
+                if (st.NearestDist == float.MaxValue)
+                {
+                    // No tracked speaker this tick. That can be a MOMENTARY registry dropout — chunk
+                    // load flicker at the tracked fringe dropped the POI cache until its rescan (log
+                    // 2026-07-09: GNR stop/start every ~10 s at ~82 m, each a decoder open + seek) —
+                    // so hold the WARM voice through a grace window instead of stopping instantly.
+                    // It is already inaudible: the warm/audible split publishes its EMPTY point set,
+                    // which zeroes the native gains (a destroyed radio still cuts within a tick).
+                    // Truly gone (grace expired) → release. A track that ENDS while unseen just
+                    // releases quietly — the schedule rejoins mid-song when the speakers return.
+                    if (Time.realtimeSinceStartup - st.LastSeenAt > UnseenGrace)
+                        StopStation(st);
+                    else if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(st.VoiceId, out _, out _, out _))
+                    {
+                        st.VoiceId = 0; st.VoiceTrack = null;
+                        StopStation(st);   // frees the slot; no restart while unseen
+                    }
+                    continue;
+                }
+
+                if (st.VoiceTrack != null && !SafeExists(st.VoiceTrack))
+                {
+                    CMMConfig.D($"[CMM] Station '{st.Name}': airing track gone ({Path.GetFileName(st.VoiceTrack)}) — hot-swapping (interrupt).");
+                    string ended = st.VoiceTrack;
+                    StopVoice(st);
+                    AdvanceStation(st, ended);
+                    StartStation(st, player, AdvanceFade, fresh: false);
+                    continue;
+                }
+
+                if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(st.VoiceId, out _, out _, out _))
+                {
+                    CMMConfig.D($"[CMM] Station '{st.Name}': track ended → next track.");
+                    string ended = st.VoiceTrack;
+                    st.VoiceId = 0; st.VoiceTrack = null;
+                    AdvanceStation(st, ended);
+                    StartStation(st, player, AdvanceFade, fresh: false);
+                }
+            }
+        }
+
+        // K-nearest voicing: start the nearest schedule-ready stations that have a speaker within
+        // dry Range, up to the slot count; a challenger may STEAL the farthest incumbent's slot only
+        // when decisively nearer (StealMargin) — the old voice fades on the shared bus while the new
+        // station starts on the freed slot (an ordinary station-change crossfade).
+        private static void SelectAndVoice(EntityPlayerLocal player)
+        {
+            float range = CMMConfig.WorldEmitterRange;
+            for (;;)
+            {
+                // Nearest unvoiced candidate.
+                Station cand = null;
+                for (int i = 0; i < _stations.Count; i++)
+                {
+                    Station st = _stations[i];
+                    if (st.VoiceId != 0 || !st.Ready) continue;
+                    if (st.NearestDist > range) continue;
+                    if (cand == null || st.NearestDist < cand.NearestDist) cand = st;
+                }
+                if (cand == null) return;
+
+                int free = FreeSlot();
+                if (free < 0)
+                {
+                    // All slots held: steal from the FARTHEST incumbent, with hysteresis.
+                    Station far = null;
+                    for (int s = 0; s < MaxSlots; s++)
+                    {
+                        Station own = _slotOwner[s];
+                        if (own == null) continue;
+                        if (far == null || own.NearestDist > far.NearestDist) far = own;
+                    }
+                    if (far == null || cand.NearestDist + StealMargin >= far.NearestDist) return;
+                    CMMConfig.D($"[CMM] Station '{cand.Name}' ({cand.NearestDist:0.0}m) steals the slot of '{far.Name}' ({far.NearestDist:0.0}m).");
+                    StopStation(far);
+                }
+                StartStation(cand, player, StartFade(), fresh: !HasActiveVoice);
+                if (cand.VoiceId == 0) return;   // start failed (no playable track) — don't spin
+            }
+        }
+
+        private static int FreeSlot()
+        {
+            for (int s = 0; s < MaxSlots; s++) if (_slotOwner[s] == null) return s;
+            return -1;
+        }
+
+        // ── Pause resync ────────────────────────────────────────────────────────────────────────
+        // Set from the unpause edge (OnGamePauseChanged, pauses > 1 s); consumed by the next tick.
+        private static bool _clockResyncPending;
+        internal static void ResyncToClock() { _clockResyncPending = true; }
+
+        // After an SP pause: the broadcast clock (worldTime) froze while every live voice kept
+        // decoding in realtime under the pause duck, so each playing station is now AHEAD of the
+        // paper schedule by the pause length — and the EOF pause-drift guard locks that lead in
+        // (next-at-0) for the rest of the session. Fresh joins (a personal-radio dial, a station
+        // coming into range) always resolve the paper, so without this re-glue the world emitters
+        // and the personal radio audibly drift apart with every pause. WARM out-of-range voices
+        // are simply released — inaudible now, and re-voicing on approach joins the paper for
+        // free; audible ones restart at the paper position (the song resumes where the listener
+        // stopped hearing it — a pause no longer skips content).
+        private static void ResyncVoicesToClock(EntityPlayerLocal player)
+        {
+            float audibleR = CMMConfig.WorldEmitterRange;
+            if (CMMConfig.WorldEmitterReverbEnabled)
+                audibleR *= Mathf.Max(1f, CMMConfig.WorldEmitterReverbRangeMult);
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0) continue;
+                if (st.NearestDist > audibleR) { StopStation(st); continue; }
+                StopVoice(st);
+                st.OnAir = null;   // force a fresh paper resolve in StartStation
+                StartStation(st, player, AdvanceFade, fresh: false);
+            }
+        }
+
+        // ── Start / stop ────────────────────────────────────────────────────────────────────────
+
+        // Fade-in for advancing to the NEXT track (station continuing) — short so it's near-seamless,
+        // unlike the gentle start fade used when a station first comes into range.
+        private const float AdvanceFade = 0.2f;
+
+        // Quick fade-out on stop (destroyed speaker / slot steal / disabled). Short so destroying a
+        // speaker cuts crisply; just long enough to avoid a click.
+        private const float StopFade = 0.12f;
+
+        // fresh = the FIRST station voice coming into existence (no other station live): clear the
+        // shared native acoustic state — a destroyed radio's still-ringing reverb tail must not be
+        // re-voiced under the new voice's fade-in — and skip the birth ramp (the voice fade covers
+        // it). With another station already playing, the shared reverb legitimately carries on.
+        private static void StartStation(Station st, EntityPlayerLocal player, float fadeIn, bool fresh)
+        {
+            if (st.VoiceId != 0) return;
+            if (st.OnAir == null) ResolveOnAir(st, BroadcastSeconds());
+            if (st.OnAir == null)
+            {
+                CMMConfig.D($"[CMM] Station '{st.Name}': no playable tracks.");
+                return;
+            }
+
+            // A start TRIGGERED BY a just-appeared speaker should feel like placement, not like a
+            // station drifting into range — use the birth fade for the voice too. (The birth RAMP
+            // only covers speakers joining an already-live station; when the placed radio is the
+            // station's first audible speaker, THIS voice fade is what the player hears.) Gate =
+            // the nearest speaker's birth stamp only: a chunk-streamed speaker starting a station
+            // at the range fringe also matches, but out there distance falloff hides the fade.
+            if (CMMConfig.WorldEmitterBirthFade >= 0f
+                && _speakerFirstSeen.TryGetValue(st.NearestPos, out float bornAt)
+                && Time.realtimeSinceStartup - bornAt < 2f)
+            {
+                CMMConfig.D($"[CMM] Station '{st.Name}': just-born nearest speaker — birth fade {CMMConfig.WorldEmitterBirthFade:0.##}s.");
+                fadeIn = CMMConfig.WorldEmitterBirthFade;
+            }
+
+            // Open the on-air track. If it fails — the file was moved/deleted since the catalog
+            // scan — drop it from the schedule and re-resolve, bounded so a folder wipe can't spin.
+            // (Dropping shortens the cycle; the next catalog rebuild restores determinism.)
+            IntPtr dec = IntPtr.Zero;
+            int kind = 0, srcCh = 0, srcRate = 0; long total = 0;
+            string file = null;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                file = st.OnAir;
+                if (file == null) return;
+                dec = AudioDecoder.OpenNativeHandle(file, out kind, out srcCh, out srcRate, out total);
+                if (dec != IntPtr.Zero) break;
+                CMMConfig.D($"[CMM] Station '{st.Name}': on-air track failed to open ({Path.GetFileName(file)}) — poisoning in schedule.");
+                RadioStationCatalog.PoisonTrack(file);
+                ResolveOnAir(st, BroadcastSeconds());
+            }
+            if (dec == IntPtr.Zero) return;
+
+            // Continuity: seek to the schedule's offset so we rejoin the broadcast mid-song.
+            long startFrame = 0;
+            double offset = st.OnAirOffset;
+            if (offset < 0) offset = 0;
+            if (srcRate > 0) startFrame = (long)(offset * srcRate);
+            if (total > 0 && startFrame >= total) startFrame = 0;   // clock/length mismatch safety
+
+            int slot = st.Slot >= 0 ? st.Slot : FreeSlot();
+            if (slot < 0) return;   // shouldn't happen (SelectAndVoice frees one first)
+
+            float trackGain = LoudnessStore.GetTrackGain(file);
+            if (fresh)
+            {
+                CmmMixer.GetOrCreate().ResetEmitterAcoustics();
+                ExpireBirths();
+            }
+            // A slot last used by a DIFFERENT station still holds its queued dry audio — flush it
+            // (and the slot's render state) so nothing of the old station plays under this voice.
+            if (!string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase))
+                CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
+            _slotLastStation[slot] = st.Name;
+            // PlayEmitter → cmm_mix_add_emitter takes ownership of dec and frees it on every failure
+            // path (returns 0), so a 0 id must NOT be closed again here. loop:false so the track ENDS
+            // (retiring the voice) and the station advances along its schedule.
+            Vector3 pos = new Vector3(st.NearestPos.x + 0.5f, st.NearestPos.y + 0.5f, st.NearestPos.z + 0.5f);
+            long id = CmmMixer.GetOrCreate().PlayEmitter(dec, kind, srcRate, srcCh, total,
+                                                         fadeIn, loop: false,
+                                                         pos.x, pos.y, pos.z,
+                                                         CMMConfig.WorldEmitterMinDistance, CMMConfig.WorldEmitterRange,
+                                                         trackGain: trackGain, startFrame: startFrame, slot: slot);
+            if (id == 0) return;
+            st.VoiceId = id;
+            st.VoiceTrack = file; st.VoiceGainApplied = trackGain;
+            st.Slot = slot;
+            _slotOwner[slot] = st;
+
+            // Seed the voice's occlusion before its first audible block. Advance/hot-swap: carry the
+            // last landed point set (same speakers, same ear, ≤ a tick old) straight onto the new
+            // voice. Fresh start (no landed field yet): seed MUTED — virtual distance ≥ range ⇒
+            // silent — and let the first flood glide the true value in (the start fade masks it).
+            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting)
+            {
+                if (!fresh && st.LastPtPushCount > 0 && Time.realtimeSinceStartup - st.LastPtPushAt < 1f)
+                {
+                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.LastPtPushCount);
+                }
+                else
+                {
+                    WritePoint(st, 0, st.NearestPos);
+                    st.PtGain[0] = CMMConfig.WorldEmitterRange;   // muted until the first flood lands
+                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, 1);
+                }
+                _forceRefresh = true;
+            }
+            ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if it wasn't measured yet
+            PushTuning();           // apply the curve before the first render block
+            PushEmitterMaster();    // set the radio level before the first block
+            PushListener(player);   // prime the listener so the very first render block is positioned
+            CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {slot}): {Path.GetFileName(file)} @ {offset:0}s " +
+                        $"(nearest speaker {st.NearestDist:0.0}m; B={BroadcastSeconds():0}s).");
+        }
+
+        // Release a station's voice AND its slot.
+        private static void StopStation(Station st)
+        {
+            StopVoice(st);
+            if (st.Slot >= 0)
+            {
+                if (_slotOwner[st.Slot] == st) _slotOwner[st.Slot] = null;
+                st.Slot = -1;
+            }
+        }
+
+        // Release just the native voice (keep the slot — used by the interrupt+restart path).
+        private static void StopVoice(Station st)
+        {
+            if (st.VoiceId == 0) return;
+            CmmMixer.Instance?.RemoveEmitter(st.VoiceId, StopFade);
+            CMMConfig.D($"[CMM] Station '{st.Name}' stopped.");
+            st.VoiceId = 0;
+            st.VoiceTrack = null;
+        }
+
+        private static void StopAll()
+        {
+            for (int i = 0; i < _stations.Count; i++) StopStation(_stations[i]);
+            _occlPending = false;   // abandon any in-flight flood (its finish targets dead voices)
+        }
+
+        // ── Catalog rebuild hook (called by RadioStationCatalog.RebuildCatalog) ─────────────────
+        // Migrate live emitter voices onto the NEW station objects by name: a same-name station
+        // keeps its voice/slot (its airing track must still be in the new schedule or the interrupt
+        // path swaps it next tick); anything not migrated is released. `old` = the pre-rebuild
+        // name → station map.
+        internal static void OnCatalogRebuilt(Dictionary<string, Station> old)
+        {
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (!old.TryGetValue(st.Name, out Station prev)) continue;
+                st.VoiceId = prev.VoiceId; st.VoiceTrack = prev.VoiceTrack;
+                st.VoiceGainApplied = prev.VoiceGainApplied;
+                st.Slot = prev.Slot;
+                if (st.Slot >= 0) _slotOwner[st.Slot] = st;
+                st.LastPtPushCount = prev.LastPtPushCount; st.LastPtPushAt = prev.LastPtPushAt;
+                st.Seal = prev.Seal; st.Solid = prev.Solid; st.Depth = prev.Depth;
+                prev.VoiceId = 0; prev.Slot = -1;
+                // An airing track that left the new schedule is interrupted by MaintainPlayingStations
+                // only if the FILE vanished; a pool re-shuffle alone keeps it playing to its end.
+            }
+            foreach (var kv in old)
+            {
+                Station prev = kv.Value;
+                if (prev.VoiceId == 0) continue;
+                if (prev.Slot >= 0 && _slotOwner[prev.Slot] == prev) _slotOwner[prev.Slot] = null;
+                CmmMixer.Instance?.RemoveEmitter(prev.VoiceId, StopFade);
+                CMMConfig.D($"[CMM] Station '{prev.Name}' removed by catalog rebuild — voice released.");
+            }
+        }
+
+        // ── Listener / tuning / reverb pushes ───────────────────────────────────────────────────
+
         // Push the listener basis (position + forward + right) to the mixer, ALL from the camera
-        // transform so position is as smooth/fresh as orientation — the camera updates every render
-        // frame, whereas player.position (the entity) steps on the physics tick, which made distance/
-        // volume lag while turn-panning stayed instant.
-        //   Position: cameraTransform.position is RENDER space (7D2D floating origin), so + Origin.
-        //   position converts it back to TRUE WORLD space, matching block coords (using the render
-        //   position directly would put every emitter ±260m off → wrong distance).
-        //   Direction: forward/right are rotations, unaffected by the origin shift.
+        // transform (position is RENDER space under 7D2D's floating origin, so + Origin.position
+        // converts back to TRUE WORLD space; directions are origin-invariant).
         private static void PushListener(EntityPlayerLocal player)
         {
             Transform t = player.cameraTransform;
@@ -480,9 +801,8 @@ namespace CMM
             CmmMixer.Instance?.SetListener(t.position + Origin.position, t.forward, t.right);
         }
 
-        // Relay the live spatial-curve tuning (plateau radius, audible range, falloff steepness,
-        // distance-muffle strength) from config to the native spatializer. Cheap (4 lock-free writes);
-        // config is hot-reloaded, so this is how in-game settings.xml edits take effect live.
+        // Relay the live spatial-curve tuning + coloration from config (hot-reloaded) to the native
+        // spatializer — how in-game settings.xml edits take effect live.
         private static void PushTuning()
         {
             CmmMixer.Instance?.SetEmitterTuning(CMMConfig.WorldEmitterMinDistance,
@@ -495,474 +815,160 @@ namespace CMM
                                                CMMConfig.WorldEmitterColorVoice);
         }
 
-        // Probe the room around the listener and push the resulting reverb params to the native mixer.
-        // When reverb is disabled (or no world), push wet 0 so the reverb is bypassed. Throttled (called
-        // from the 4 Hz decision tick) — rooms change slowly, and the native side slews internally.
+        // Probe the room around the listener once and push the reverb params: the ROOM (size, damp,
+        // local level) is the listener's and is shared; the CARRY send + depth are PER-SLOT — each
+        // voiced station's own seal/solid gating from ITS occlusion pass, so a sealed-off station's
+        // reverb doesn't leak just because another station is in the open.
         private static void PushReverb(EntityPlayerLocal player)
         {
             World world = GameManager.Instance?.World;
             if (!CMMConfig.WorldEmitterReverbEnabled || world == null)
             {
-                CmmMixer.Instance?.SetEmitterReverb(0f, 0.5f, 0.5f, 1f, 0f, 0f, 0f, 0f);
+                for (int s = 0; s < MaxSlots; s++) { _revWets[s] = 0f; _revDepths[s] = 0f; _revWetSmooth[s] = 0f; }
+                CmmMixer.Instance?.SetEmitterReverb(_revWets, _revDepths, 0.5f, 0.5f, 1f, 0f, 0f, 0f);
                 return;
             }
             Vector3 ear = ListenerWorldPos(player);
             long probeT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             EmitterAcoustics.ProbeRoom(ear, world, out float avgDist, out float roomSize, out float reflect, out float openFrac, out bool roofed);
             float probeMs = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - probeT0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
-            // Prefer the FLOOD's connected-air extent for room SIZE: it walks around corners/tunnels, so a
-            // winding corridor reads its real length instead of the ray probe's short sightline. Take whichever
-            // sees the larger space (rays can reach farther than the flood box in a straight open shot).
-            // Enclosure & reflectivity stay from the ray probe — those it measures fine. Only when the flood ran.
+            // Prefer the FLOOD's connected-air extent for room SIZE (walks around corners/tunnels).
             if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && EmitterAcoustics.AirCellCount > 0)
                 roomSize = Mathf.Max(roomSize, EmitterAcoustics.AirRoomSize);
             EmitterAcoustics.ComputeReverb(roomSize, reflect, openFrac, roofed, out float roomWet, out float room, out float damp);
             float master = CMMConfig.WorldEmitterReverbWet;   // LEVEL lever (both buses)
-            // TWO BUSES (the v28 split):
-            //   LOCAL — your own space ringing off the sound that actually ARRIVES. Native feeds it the
-            //   post-attenuation/occlusion dry, so walls, water, distance and the hard-stop already shaped
-            //   the input — the level here is purely "how reverberant is the room I'm standing in".
-            //   CARRY — the deliberate "next room / down the tunnel" cue: un-occluded feed, so it must be
-            //   HARD-blocked by real material (full seal, not a dial — bleed through solids shouldn't
-            //   exist at any setting; open-air corners still carry since air has no solid cost), scaled
-            //   by the ReverbCarry taste knob, depth-graded + route-panned natively.
             float local = roomWet * master;
-            float carry = roomWet * master * CMMConfig.WorldEmitterReverbCarry * (1f - EmitterAcoustics.ReverbSeal);
-            // PROPORTIONAL material damping on the carry (the closed-door case): transmission loss applies
-            // to next-room reverb like it does to the dry, so the carry halves per HALF wall-equivalent of
-            // SOLID on the least-blocked route — a shut wooden door ≈ −3 dB, a metal door ≈ −6 dB, a full
-            // stone wall ≈ −11 dB — long before the all-or-nothing seal window (0.55·HardStop → HardStop)
-            // finishes it at vault thickness. Open-air detours add no solid, so corners still carry at
-            // full level. Fixed physical curve, no knob: ReverbCarry stays the taste lever. Door swings
-            // fade this smoothly for free (openness already scales the door cell's cost).
-            if (CMMConfig.WorldEmitterOcclusion)
-            {
-                float halfWall = 0.5f * Mathf.Max(1f, CMMConfig.WorldEmitterOcclusionWallDistance);
-                carry *= Mathf.Pow(0.5f, EmitterAcoustics.ReverbSolid / halfWall);
-            }
+            float halfWall = 0.5f * Mathf.Max(1f, CMMConfig.WorldEmitterOcclusionWallDistance);
+
             room *= CMMConfig.WorldEmitterReverbDecay;   // TAIL-length lever (independent of level)
-            // Reverb has inertia, and it's ASYMMETRIC: room character is EARNED by staying somewhere, not
-            // granted by walking past something. The ear probe legitimately spikes to "enclosed" for a
-            // second when the player passes an overhang/doorway/canopy, and with a symmetric EMA that
-            // bloomed the far-carrying wet with no dry under it — the "burst of reverb from nowhere at a
-            // fair distance while moving" report (log-confirmed: enc 0.72→1.00 + roofed flip in one 4 Hz
-            // tick, carry +0.10 in a second). Slow RISE (~4 s) crushes those transients to sub-audible;
-            // the FALL keeps the old ~1.3 s glide, so stepping out still dries promptly and a slammed
-            // seal door still cuts the carry fast (drops are releases). dt-based so a stalled push
-            // cadence (flood in flight, out-of-range gaps) can't turn one tick into a jump.
+
+            // Asymmetric inertia (the 2026-07-08 blip fix): slow RISE (~4 s) crushes the enclosure
+            // transients of walking under an overhang; the FALL keeps the ~1.3 s glide so stepping
+            // out dries promptly. dt-based so a stalled push cadence can't turn one tick into a jump.
             float nowRev = Time.realtimeSinceStartup;
             float dtRev = Mathf.Clamp(nowRev - _lastRevPush, 0.05f, 1f);
             _lastRevPush = nowRev;
             float aUp = 1f - Mathf.Exp(-dtRev / 4f);
             float aDn = 1f - Mathf.Exp(-dtRev / 1.3f);
-            _revWetSmooth  += (carry - _revWetSmooth)  * (carry > _revWetSmooth ? aUp : aDn);
-            _revLocSmooth  += (local - _revLocSmooth)  * (local > _revLocSmooth ? aUp : aDn);
-            _revRoomSmooth += (room  - _revRoomSmooth) * aDn;   // tail length: symmetric, size isn't a level blip
-            // ACOUSTIC DEPTH: the air-route distance to the closest-by-air speaker (real + open-air detour;
-            // walls excluded — the seal gate covers those). The occlusion pass just computed it (BuildPoint-
-            // Buffer runs immediately before us); with occlusion off there's no route data, so the straight
-            // nearest distance stands in. Native grades the wet's level/brightness/damping by it.
-            float depth = (CMMConfig.WorldEmitterOcclusion && world != null)
-                ? EmitterAcoustics.ReverbDepth
-                : EmitterRegistry.NearestDist;
+
+            for (int s = 0; s < MaxSlots; s++)
+            {
+                Station st = _slotOwner[s];
+                float carry = 0f, depth = 0f;
+                // Carry only for stations with a speaker inside the DRY range: the wet's larger
+                // native reach (range × ReverbRangeMult) exists so a station you're LEAVING rings
+                // out gracefully (the 2 s tail + this EMA's fall cover that) — it must not keep a
+                // beyond-range station's music continuously washing into your room's reverb (the
+                // "hearing another station's reverb" report with two radios ~100-150 m apart).
+                if (st != null && st.VoiceId != 0 && st.NearestDist <= CMMConfig.WorldEmitterRange)
+                {
+                    // CARRY: the next-room cue — HARD-gated by this station's solid seal (bleed
+                    // through solids shouldn't exist at any setting; open-air corners still carry),
+                    // scaled by the ReverbCarry taste knob, then PROPORTIONALLY damped by the solid
+                    // on its least-blocked route (a shut wooden door ≈ −3 dB long before the seal).
+                    carry = roomWet * master * CMMConfig.WorldEmitterReverbCarry * (1f - st.Seal);
+                    if (CMMConfig.WorldEmitterOcclusion)
+                        carry *= Mathf.Pow(0.5f, st.Solid / halfWall);
+                    depth = (CMMConfig.WorldEmitterOcclusion && st.Depth < 511f)
+                        ? st.Depth
+                        : (st.NearestDist < float.MaxValue ? st.NearestDist : 0f);
+                }
+                _revWetSmooth[s] += (carry - _revWetSmooth[s]) * (carry > _revWetSmooth[s] ? aUp : aDn);
+                _revWets[s] = _revWetSmooth[s];
+                _revDepths[s] = depth;   // native slews depth itself (~0.5 s)
+            }
+            _revLocSmooth  += (local - _revLocSmooth) * (local > _revLocSmooth ? aUp : aDn);
+            _revRoomSmooth += (room - _revRoomSmooth) * aDn;   // tail length: symmetric, size isn't a level blip
+
             if (Time.realtimeSinceStartup >= _nextReverbLog)
             {
                 _nextReverbLog = Time.realtimeSinceStartup + 1.5f;
+                Station dom = null;
+                for (int s = 0; s < MaxSlots; s++)
+                    if (_slotOwner[s] != null && (dom == null || _revWetSmooth[s] > 0f)) dom = _slotOwner[s];
                 CMMConfig.D($"[CMM] Reverb: enc={1f - openFrac:0.00} rayS={avgDist:0.0} airSize={EmitterAcoustics.AirRoomSize:0.0} airCells={EmitterAcoustics.AirCellCount} size={roomSize:0.0} reflect={reflect:0.00} " +
-                            $"roofed={roofed} seal={EmitterAcoustics.ReverbSeal:0.00} solid={EmitterAcoustics.ReverbSolid:0.0} depth={depth:0.0} nearest={EmitterRegistry.NearestDist:0.0}m probeMs={probeMs:0.0} → carry={_revWetSmooth:0.00} loc={_revLocSmooth:0.00} room={_revRoomSmooth:0.00} damp={damp:0.00}");
+                            $"roofed={roofed} dom={(dom != null ? dom.Name : "-")} seal={(dom != null ? dom.Seal : 1f):0.00} solid={(dom != null ? dom.Solid : 0f):0.0} depth={(dom != null ? dom.Depth : 0f):0.0} probeMs={probeMs:0.0} " +
+                            $"→ carry={_revWets[0]:0.00}/{(MaxSlots > 1 ? _revWets[1] : 0f):0.00}/{(MaxSlots > 2 ? _revWets[2] : 0f):0.00} loc={_revLocSmooth:0.00} room={_revRoomSmooth:0.00} damp={damp:0.00}");
             }
-            CmmMixer.Instance?.SetEmitterReverb(_revWetSmooth, _revRoomSmooth, damp, CMMConfig.WorldEmitterReverbRangeMult, CMMConfig.WorldEmitterReverbPan,
-                                                depth, CMMConfig.WorldEmitterReverbDepth, _revLocSmooth);
+            CmmMixer.Instance?.SetEmitterReverb(_revWets, _revDepths, _revRoomSmooth, damp,
+                                                CMMConfig.WorldEmitterReverbRangeMult, CMMConfig.WorldEmitterReverbPan,
+                                                CMMConfig.WorldEmitterReverbDepth, _revLocSmooth);
         }
 
-        // The listener's world-space position (camera ear), matching block coords. Used for occlusion
-        // rays. Falls back to the entity position if the camera isn't up yet.
+        // The listener's world-space position (camera ear), matching block coords. Falls back to
+        // the entity position if the camera isn't up yet.
         private static Vector3 ListenerWorldPos(EntityPlayerLocal player)
         {
             Transform t = player.cameraTransform;
             return t != null ? t.position + Origin.position : player.position;
         }
 
-        // World-space centre of the nearest detected speaker block.
-        private static Vector3 NearestWorldPos()
-        {
-            Vector3i p = EmitterRegistry.NearestPos;
-            return new Vector3(p.x + 0.5f, p.y + 0.5f, p.z + 0.5f);
-        }
+        // ── Loudness integration ────────────────────────────────────────────────────────────────
 
-        // Fade-in for advancing to the NEXT track (station continuing) — short so it's near-seamless,
-        // unlike the gentle WorldEmitterFade used when the station first comes into range.
-        private const float AdvanceFade = 0.2f;
-
-        // fresh = the station is COMING INTO EXISTENCE (first radio in range, or a replacement after the
-        // voice was released) rather than continuing (track advance / airing-file hot-swap). Fresh starts
-        // clear the native acoustic state — a destroyed radio's still-ringing reverb tail must not be
-        // re-voiced under the new voice's fade-in — and skip the birth ramp (the voice fade covers it).
-        private static void Start(EntityPlayerLocal player, float fadeIn, bool fresh)
-        {
-            StationSyncIdle();                 // bring the station's on-air track up to the current moment
-            if (_stationTrack == null)
-            {
-                CMMConfig.D($"[CMM] World emitter: no playable tracks in source '{CMMConfig.WorldEmitterSource}'.");
-                return;
-            }
-
-            // Open the on-air track. If it fails to open — the file was moved/deleted out from under
-            // us since the pick (a hotswap the change-signature check hasn't reconciled yet) — drop it
-            // and re-pick a surviving track, rather than going SILENT until the virtual clock happens
-            // to roll past the dead track. Bounded so a wholesale folder wipe can't spin.
-            IntPtr dec = IntPtr.Zero;
-            int kind = 0, srcCh = 0, srcRate = 0; long total = 0;
-            string file = null;
-            for (int attempt = 0; attempt < 5; attempt++)
-            {
-                file = _stationTrack;
-                if (file == null) return;
-                dec = AudioDecoder.OpenNativeHandle(file, out kind, out srcCh, out srcRate, out total);
-                if (dec != IntPtr.Zero) break;
-                CMMConfig.D($"[CMM] World emitter: on-air track failed to open ({Path.GetFileName(file)}) — re-picking.");
-                DropFromPool(file);
-                if (_pool == null || _pool.Length == 0) { _stationTrack = null; return; }
-                PickStationTrack(Time.realtimeSinceStartup);
-            }
-            if (dec == IntPtr.Zero) return;
-
-            // Continuity: seek to the station's virtual playhead so we rejoin mid-song, not from 0.
-            long startFrame = 0;
-            float offset = Time.realtimeSinceStartup - _stationAiredAt;
-            if (offset < 0f) offset = 0f;
-            if (srcRate > 0) startFrame = (long)(offset * srcRate);
-            if (total > 0 && startFrame >= total) startFrame = 0;   // safety (clock/length mismatch)
-
-            // PlayEmitter → cmm_mix_add_emitter takes ownership of dec and frees it on every failure
-            // path (returns 0), so a 0 id must NOT be closed again here — that would double-free.
-            // loop:false so the track ENDS (retiring the voice) and the station advances to the next one.
-            Vector3 pos = NearestWorldPos();
-            // min/max here seed the voice; the live spatializer actually uses the tuning globals
-            // (PushTuning), so range/plateau stay hot-tunable while a voice is playing.
-            // Normalize the diegetic station too: apply the track's loudness gain (1.0 if off / not yet
-            // measured). If it isn't measured, play un-normalized now and request a measure — SettleLoudness
-            // eases the gain in the moment it lands. The N-ahead queue means this is usually already ready.
-            float trackGain = LoudnessStore.GetTrackGain(file);
-            // Fresh start: wipe the native acoustic render state BEFORE the new voice exists, so the
-            // previous station's reverb tail / stale slews can't bleed under it (the "I hear some audio
-            // before the new radio fades in" report — a destroy→place inside the ~2 s tail window
-            // re-voiced the old track's leftover reverb energy at full wet gain). The birth ramps are
-            // expired too: the voice's own fade-in covers the entrance.
-            if (fresh)
-            {
-                CmmMixer.GetOrCreate().ResetEmitterAcoustics();
-                ExpireBirths();
-            }
-            long id = CmmMixer.GetOrCreate().PlayEmitter(dec, kind, srcRate, srcCh, total,
-                                                         fadeIn, loop: false,
-                                                         pos.x, pos.y, pos.z,
-                                                         CMMConfig.WorldEmitterMinDistance, CMMConfig.WorldEmitterRange,
-                                                         trackGain: trackGain, startFrame: startFrame);
-            if (id == 0) return;
-            _voiceId = id;
-            _voiceTrack = file; _voiceGainApplied = trackGain;
-            // Seed the voice's occlusion before its first audible block. A new native voice defaults to
-            // ONE unoccluded point; until the first flood lands (~0.1-0.5 s) a walled-in speaker rendered
-            // as if in the open — the "quick burst of audio at distance" on every advance/appearance.
-            // Advance/hot-swap: carry the last landed point set (same speakers, same ear, ≤ a tick old)
-            // straight onto the new voice. Fresh start (no landed field yet): seed MUTED — virtual
-            // distance ≥ range ⇒ silent — and let the first flood glide the true value in (the start
-            // fade masks the beat of silence). Either way, force the decision tick + flood to run on the
-            // next frame instead of waiting out the 4 Hz interval.
-            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting)
-            {
-                if (!fresh && _lastPtPushCount > 0 && Time.realtimeSinceStartup - _lastPtPushAt < 1f)
-                {
-                    CmmMixer.Instance?.SetEmitterPoints(id, _pts, _ptGain, _lastPtPushCount);
-                }
-                else
-                {
-                    WritePoint(0, EmitterRegistry.NearestPos);
-                    _ptGain[0] = CMMConfig.WorldEmitterRange;   // muted until the first flood lands
-                    CmmMixer.Instance?.SetEmitterPoints(id, _pts, _ptGain, 1);
-                }
-                _forceRefresh = true;
-            }
-            ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if it wasn't measured yet
-            PushTuning();           // apply the curve before the first render block
-            PushEmitterMaster();    // set the radio level before the first block
-            PushListener(player);   // prime the listener so the very first render block is already positioned
-            // The listener→emitter world distance should match the registry's nearest distance; a big
-            // mismatch would mean a coordinate-space bug (e.g. render vs world space) and → silence.
-            CMMConfig.D($"[CMM] World emitter station started: {Path.GetFileName(file)} @ {offset:0}s " +
-                        $"(nearest {EmitterRegistry.NearestName} @ {EmitterRegistry.NearestDist:0.0}m; " +
-                        $"listener→emitter {Vector3.Distance(player.position, pos):0.0}m).");
-        }
-
-        // ── Station clock helpers ─────────────────────────────────────────────────────────────────────
-        // Advance the virtual playhead across any tracks that have "finished airing" since we last looked,
-        // so the current track + its offset are correct at `now`. Cheap while nothing elapses (a time
-        // compare); only opens a decoder when it rolls onto a new, not-yet-measured track.
-        private static void StationSyncIdle()
-        {
-            EnsurePool();
-            if (_pool == null || _pool.Length == 0) { _stationTrack = null; return; }
-            float now = Time.realtimeSinceStartup;
-            // No track on air yet, or the one that was airing dropped out of the pool (removed/moved on
-            // disk since we last looked) → re-pick from the current pool. No audible impact while idle.
-            if (_stationTrack == null || !PoolContains(_stationTrack)) { PickStationTrack(now); return; }
-            int guard = 0;
-            float len = StationLenSec();
-            while (len > 0f && now - _stationAiredAt >= len && guard++ < 64)
-            {
-                PickStationTrack(_stationAiredAt + len);   // next track went on air when this one ended
-                len = StationLenSec();
-            }
-            if (guard >= 64) _stationAiredAt = now;   // very long absence → stop simulating, snap to now
-        }
-
-        // The track's decoder ended (authoritative): put the next one on air, effective NOW.
-        private static void ForceAdvanceStation() => PickStationTrack(Time.realtimeSinceStartup);
-
-        // While a voice is playing: keep the pool reconciled with disk (adds/removes) and — matching how
-        // a normal context reacts to its playing file vanishing — INTERRUPT and hot-swap to a fresh track
-        // the moment the airing track is moved/deleted or drops out of the source. The user is fine with a
-        // cut, so we don't wait for the buffered voice to finish. Cheap: an O(1) File.Exists ping each tick
-        // (like the context watch's active-track ping) plus the throttled pool-signature stat in EnsurePool.
-        private static void MaintainPlayingStation(EntityPlayerLocal player)
-        {
-            EnsurePool();   // fold in folder adds/removes on the throttled cadence
-            string airing = _stationTrack;
-            bool gone = airing == null || !PoolContains(airing) || !SafeExists(airing);
-            if (!gone) return;
-            CMMConfig.D($"[CMM] World emitter: airing track gone ({(airing != null ? Path.GetFileName(airing) : "null")}) — hot-swapping (interrupt).");
-            Stop();                       // cut the voice on the vanished track (short StopFade, click-free)
-            ForceAdvanceStation();        // fresh track on air, effective now
-            Start(player, AdvanceFade, fresh: false);   // start it (short fade; station continues)
-        }
-
-        // File.Exists, treating a transient IO error (an external move/delete mid-stat) as "present" so a
-        // hiccup doesn't needlessly interrupt playback — same stance as the context watch's ping.
-        private static bool SafeExists(string file)
-        {
-            try { return File.Exists(file); } catch { return true; }
-        }
-
-        // Put the next track on air at wall-time `airedAt`, probing its length for the clock. Prefers the
-        // pre-picked (already-measured) up-next queue so an advance airs a normalized track; falls back to a
-        // fresh random pick when the queue is empty (e.g. drained by a long out-of-range catch-up) or the
-        // popped track has since left the pool.
-        private static void PickStationTrack(float airedAt)
-        {
-            EnsurePool();
-            _stationAiredAt = airedAt;
-            _stationTrack = null;
-            while (_stationUpNext.Count > 0 && _stationTrack == null)
-            {
-                string cand = _stationUpNext[0];
-                _stationUpNext.RemoveAt(0);
-                if (PoolContains(cand)) _stationTrack = cand;   // else it left the pool — skip it
-            }
-            if (_stationTrack == null && _pool != null && _pool.Length > 0)
-                _stationTrack = _pool[_rng.Next(_pool.Length)];
-            _stationFrames = 0; _stationRate = 0;
-            if (_stationTrack != null) ProbeLength(_stationTrack, out _stationFrames, out _stationRate);
-        }
-
-        private static float StationLenSec()
-        {
-            if (_stationRate > 0 && _stationFrames > 0) return (float)_stationFrames / _stationRate;
-            return 240f;   // unknown length ⇒ nominal 4 min so the clock still advances
-        }
-
-        // Measure a track's total frames + rate (header read), cached so idle sync doesn't re-open files.
-        private static void ProbeLength(string file, out long frames, out int rate)
-        {
-            if (_lenFrames.TryGetValue(file, out frames)) { rate = _lenRate[file]; return; }
-            frames = 0; rate = 0;
-            IntPtr dec = AudioDecoder.OpenNativeHandle(file, out int kind, out _, out int r, out long total);
-            if (dec != IntPtr.Zero) { frames = total; rate = r; AudioDecoder.CloseNativeHandle(dec, kind); }
-            _lenFrames[file] = frames; _lenRate[file] = rate;
-        }
-
-        // Keep _pool in sync with the source: rebuild on a source-STRING change, and — the "hotswap"
-        // parity with normal contexts — rebuild when the folder/playlist CONTENTS change on disk (tracks
-        // added/removed), on a throttled change-signature stat. Pure pool maintenance: the REACTION to
-        // the on-air track vanishing is the caller's job (idle re-picks silently in StationSyncIdle;
-        // a live voice interrupts + swaps in MaintainPlayingStation), because the right reaction depends
-        // on whether we're currently playing. Called from StationSyncIdle / PickStationTrack / Start /
-        // MaintainPlayingStation; the throttle makes re-entry (PickStationTrack) a no-op.
-        private static void EnsurePool()
-        {
-            Contexts ctx = RadioContext();
-            string src = ctx != null ? ctx.Source : CMMConfig.WorldEmitterSource;
-            bool recursive = ctx != null ? ctx.IncludeSubfolders : true;
-
-            if (_pool == null || !string.Equals(_poolSource, src, StringComparison.OrdinalIgnoreCase))
-            {
-                _pool = BuildPool(src, recursive);
-                _poolSource = src;
-                _poolSig = SourceSignature(src, recursive);
-                _stationTrack = null;   // source changed → restart the station
-                _stationUpNext.Clear();  // the queued upcoming tracks belong to the old source
-                return;
-            }
-
-            // Same source: watch the folder for adds/removes on a modest cadence. A recursive signature
-            // walks every subdir, so don't stat it at the 4 Hz tick rate.
-            if (Time.realtimeSinceStartup < _nextPoolCheck) return;
-            _nextPoolCheck = Time.realtimeSinceStartup + PoolCheckInterval;
-
-            // An EMPTY pool is the recovery-critical case: a track added to a folder that was empty must
-            // bring the station back. The folder-mtime signature can't be trusted to catch that — Windows
-            // can stamp the empty dir and the re-filled dir with the SAME time when the add lands inside one
-            // filesystem-precision window (FAT/exFAT/network shares are coarser still). This is exactly what
-            // the context FileWatch guards with its `previouslyEmpty` special-case; the pool needs the same
-            // guard or a station whose folder started empty never picks up its first track. So while the
-            // pool is empty, always re-enumerate rather than short-circuit on an unchanged signature.
-            bool poolEmpty = _pool.Length == 0;
-            DateTime sig = SourceSignature(src, recursive);
-            if (!poolEmpty && sig == _poolSig) return;
-            _poolSig = sig;
-
-            _pool = BuildPool(src, recursive) ?? _pool;   // keep the old pool on a transient read failure
-        }
-
-        // Cheap change-signature for the pool source, reusing the exact helpers the context file-watch
-        // uses: a playlist's own mtime, or the folder's write-time (folding in subdirs when recursive).
-        private static DateTime SourceSignature(string src, bool recursive)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(src)) return DateTime.MinValue;
-                string ext = Path.GetExtension(src).ToLowerInvariant();
-                if (ext == ".m3u" || ext == ".m3u8")
-                    return SourceScan.PlaylistWriteSignatureUtc(PlaylistSource.ResolveFullPath(src));
-                string dir = Path.IsPathRooted(src) ? src : Path.Combine(ContextMusicManager.MusicDirectory, src);
-                return SourceScan.ContextWriteSignatureUtc(dir, recursive);
-            }
-            catch { return DateTime.MinValue; }
-        }
-
-        private static bool PoolContains(string file)
-        {
-            if (_pool == null) return false;
-            for (int i = 0; i < _pool.Length; i++)
-                if (string.Equals(_pool[i], file, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
-        }
-
-        // Remove a single (dead) track from the pool in place — used when a pick fails to open so we
-        // don't immediately re-pick the same missing file. Self-corrects on the next full pool rebuild.
-        private static void DropFromPool(string file)
-        {
-            if (_pool == null) return;
-            int n = 0;
-            for (int i = 0; i < _pool.Length; i++)
-                if (!string.Equals(_pool[i], file, StringComparison.OrdinalIgnoreCase)) _pool[n++] = _pool[i];
-            if (n != _pool.Length) Array.Resize(ref _pool, n);
-        }
-
-        // Quick fade-out on stop (destroyed speaker / out of range / disabled). Short so destroying a
-        // speaker cuts crisply — WorldEmitterFade is the gentle fade-IN; a matching long fade-OUT here
-        // is what made a smashed speaker seem to keep playing. Just long enough to avoid a click.
-        private const float StopFade = 0.12f;
-
-        private static void Stop()
-        {
-            if (_voiceId == 0) return;
-            CmmMixer.Instance?.RemoveEmitter(_voiceId, StopFade);
-            CMMConfig.D("[CMM] World emitter station stopped.");
-            _voiceId = 0;
-            _voiceTrack = null;
-            _occlPending = false;   // abandon any in-flight amortized flood (its finish targets this voice)
-        }
-
-        // A measurement for `file` just landed — if the live station voice is airing that exact track,
-        // ease its loudness gain in (it started at whatever gain was known at Start, often neutral 1.0).
-        // Called from the shared loudness pipeline (ContextMusicManager.EnsureLoudnessMeasured). Main-thread.
+        // A measurement for `file` just landed — if a live station voice is airing that exact track,
+        // ease its loudness gain in. Called from the shared loudness pipeline. Main-thread.
         internal static void SettleLoudness(string file)
         {
-            if (_voiceId == 0 || string.IsNullOrEmpty(file)) return;
-            if (!string.Equals(_voiceTrack, file, StringComparison.OrdinalIgnoreCase)) return;
-            float g = LoudnessStore.GetTrackGain(file);
-            if (Mathf.Abs(g - _voiceGainApplied) < 1e-4f) return;
-            _voiceGainApplied = g;
-            CmmMixer.Instance?.SetVoiceTrackGain(_voiceId, g, 0.2f);   // short ramp = ease, no lurch
+            if (string.IsNullOrEmpty(file)) return;
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0) continue;
+                if (!string.Equals(st.VoiceTrack, file, StringComparison.OrdinalIgnoreCase)) continue;
+                float g = LoudnessStore.GetTrackGain(file);
+                if (Mathf.Abs(g - st.VoiceGainApplied) < 1e-4f) continue;
+                st.VoiceGainApplied = g;
+                CmmMixer.Instance?.SetVoiceTrackGain(st.VoiceId, g, 0.2f);   // short ramp = ease, no lurch
+            }
         }
 
-        // The station's loudness working set — the on-air track(s) plus the whole pre-measured up-next
-        // queue — appended to the loudness eviction keep-set so RetainOnly does NOT drop measurements the
-        // station is about to use. Without this the look-ahead prewarm and the per-tick sweep fight: each
-        // tick prewarms the queue, the sweep evicts it (the emitter voice is not a context cache entry),
-        // and next tick re-decodes it — a runaway re-measure loop. Main-thread only, like the sweep.
+        // The stations' loudness working set — every airing track plus the deterministic up-next of
+        // each station with tracked speakers — appended to the loudness eviction keep-set so
+        // RetainOnly doesn't drop measurements a station is about to use.
         internal static void AppendLoudnessKeep(List<string> dst)
         {
-            if (_voiceTrack != null)   dst.Add(_voiceTrack);
-            if (_stationTrack != null) dst.Add(_stationTrack);
-            for (int i = 0; i < _stationUpNext.Count; i++) dst.Add(_stationUpNext[i]);
-        }
-
-        // Keep the pre-picked up-next queue filled LoudnessMeasureAhead deep and request a background
-        // measurement for the airing track + every queued track, so an advance always plays an
-        // already-normalized track (no on-demand decode). Cheap + dedup'd: RequestPrewarm no-ops on
-        // already-measured / in-flight files. Called each tick.
-        private static void MaintainUpNext()
-        {
-            if (!CMMConfig.LoudnessNormalizationEnabled) return;
-            if (_pool == null || _pool.Length == 0) return;
             int ahead = CMMConfig.LoudnessMeasureAhead;
             if (ahead < 0) ahead = 0;
-            while (_stationUpNext.Count < ahead)
-                _stationUpNext.Add(_pool[_rng.Next(_pool.Length)]);
-            if (_stationTrack != null) ContextMusicManager.RequestPrewarm(_stationTrack);
-            for (int i = 0; i < _stationUpNext.Count; i++)
-                ContextMusicManager.RequestPrewarm(_stationUpNext[i]);
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceTrack != null) dst.Add(st.VoiceTrack);
+                if (!st.Ready || st.NearestDist == float.MaxValue) continue;
+                if (st.OnAir != null) dst.Add(st.OnAir);
+                for (int k = 1; k <= ahead && k < st.Order.Length; k++)
+                    dst.Add(st.Order[(st.OnAirIdx + k) % st.Order.Length]);
+            }
         }
 
-        // ── Config via the "Radio" context ──────────────────────────────────────────────────────────
-        // WorldEmitterSource may NAME a context defined in contexts.xml (e.g. "Radio"). When it does,
-        // that context is the definition home for the station: its Source is the music folder/playlist,
-        // its FadeInDuration is the start crossfade, its VolumeOverride is the level, its IncludeSubfolders
-        // the recursion. When it doesn't match a context, the key is treated as a raw folder/playlist
-        // (the historical behavior) with WorldEmitterFade + the global volume.
-        private static Contexts RadioContext() => ContextMusicManager.GetContext(CMMConfig.WorldEmitterSource);
-
-        // Start crossfade: the context's fade-in when defined, else the standalone WorldEmitterFade.
-        private static float StartFade()
+        // Keep every idle nearby station's on-air pointer current (so a start is instant and never
+        // stale) and request background loudness measurement for the airing track + the next few
+        // DETERMINISTIC schedule entries — an advance always plays an already-normalized track.
+        // Cheap + dedup'd (RequestPrewarm no-ops on measured / in-flight files). Each decision tick.
+        private static void MaintainOnAir()
         {
-            Contexts c = RadioContext();
-            return c != null ? c.FadeInDuration : CMMConfig.WorldEmitterFade;
+            double B = BroadcastSeconds();
+            int ahead = CMMConfig.LoudnessNormalizationEnabled ? CMMConfig.LoudnessMeasureAhead : 0;
+            if (ahead < 0) ahead = 0;
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (!st.Ready || st.NearestDist == float.MaxValue) continue;
+                if (st.VoiceId == 0) ResolveOnAir(st, B);   // idle: track the broadcast virtually
+                if (ahead == 0 || st.OnAir == null) continue;
+                ContextMusicManager.RequestPrewarm(st.OnAir);
+                for (int k = 1; k <= ahead && k < st.Order.Length; k++)
+                    ContextMusicManager.RequestPrewarm(st.Order[(st.OnAirIdx + k) % st.Order.Length]);
+            }
         }
 
         // Push the world-radio's OWN master: the game's music SLIDER × the Radio context's own volume
-        // (unset ⇒ 1). Deliberately NOT × VolumeModifier and NOT × the current music context's volume —
-        // the diegetic radio is independent of the soundtrack's level and scales only to the slider and
-        // its own context volume. Pushed every tick (the slider can move live). Native has a dedicated
-        // emitter master (cmm_mix_set_emitter_master) so this doesn't touch the music master.
+        // (unset ⇒ 1). Deliberately NOT × VolumeModifier and NOT × the current music context's volume.
         private static void PushEmitterMaster()
         {
             Contexts c = RadioContext();
             float ctxVol = (c != null && c.VolumeOverride >= 0f) ? c.VolumeOverride : 1f;
             float slider = GamePrefs.GetFloat(EnumGamePrefs.OptionsMusicVolumeLevel);
             CmmMixer.Instance?.SetEmitterMaster(slider * ctxVol);
-        }
-
-        // A random track from the resolved source (Radio context's Source, or a raw folder / .m3u), pool
-        // cached until that source changes. The station advances track-to-track (loop:false in Start).
-        // Resolve the source string to a track pool: an .m3u playlist reads its listed tracks; any
-        // other value is a folder (relative to the Music dir, or absolute) scanned for supported audio
-        // — mirroring how a context source is enumerated (SourceScan/PlaylistSource).
-        private static string[] BuildPool(string src, bool recursive)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(src)) return null;   // sentinel/empty context source → no audio
-                string ext = Path.GetExtension(src).ToLowerInvariant();
-                if (ext == ".m3u" || ext == ".m3u8")
-                    return PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(src));
-
-                string dir = Path.IsPathRooted(src) ? src : Path.Combine(ContextMusicManager.MusicDirectory, src);
-                if (!Directory.Exists(dir)) return null;
-                return SourceScan.EnumerateFolderPoolRaw(dir, recursive, claimed: new string[0], out _);
-            }
-            catch { return null; }
         }
     }
 }

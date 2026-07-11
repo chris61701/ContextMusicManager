@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
@@ -10,9 +11,26 @@ namespace CMM
     // Live controls for whatever music is currently audible (menu or in-game):
     //   • next / previous track   — skip within the playing context
     //   • per-track volume up/down — adjusts the current track's manual loudness trim
-    // Keys + modifiers are configurable in Config/settings.xml (Ctrl+Alt+Arrows by
-    // default). This is the MonoBehaviour's single Update(); the debug HUD's toggle
-    // is folded in here because a component may declare Update() only once.
+    //   • ban / favourite          — flag the current track (persisted with the trim
+    //                                in Cache/loudness.xml): banned tracks are never
+    //                                picked again, favourites play more often
+    //   • undo ban                 — unban the most recently banned track (walks
+    //                                back through up to 25 bans from this session)
+    //   • combat music (toggle)    — mute/unmute ALL combat contexts for this
+    //                                session; fights keep the music already playing
+    //   • now playing (toggle)     — persistent top-left readout of the audible
+    //                                track + context, independent of the debug HUD.
+    //                                Line 2 also carries time remaining/total and
+    //                                the trim %, and every keybind notice
+    //                                (ban/unban, favourite, combat toggle) swaps
+    //                                onto it briefly; with the readout off, the
+    //                                box appears just for the notice.
+    // Keys + modifiers are configurable in Config/settings.xml (Alt+Arrows for
+    // skip/volume, Alt+Del/Ins/Home/End for ban/favourite/combat-toggle/undo-ban,
+    // Alt+Num7 for now-playing by default — deliberately not letters, which the
+    // game binds under free-look).
+    // This is the MonoBehaviour's single Update(); the debug HUD's toggle is folded
+    // in here because a component may declare Update() only once.
 
     public partial class ContextMusicManager
     {
@@ -20,17 +38,35 @@ namespace CMM
         // so key-mashing can't stack overlapping clip loads / transitions.
         private static bool _skipInProgress = false;
 
-        // ── Volume popup state ─────────────────────────────────────────────────
-        // Shown for VolumePopupHoldSeconds after the last volume key press, then it
-        // fades out. Set by TrimCurrentTrack, drawn by DrawVolumePopup.
-        private const float VolumePopupHoldSeconds = 4f;
-        private static float  _volPopupUntil = -1f;
-        private static string _volPopupTrack = null;
-        private static float  _volPopupTrim  = -1f;    // <0 = not measured yet; else 0.1..1.0
-        private const string SavedText = "Track Volume Saved";
-        private int _popupSavedFontSize = 0;           // computed once to fit the box
-        private Texture2D _popupBg, _popupBarBg, _popupBarFill;
-        private GUIStyle  _popupTitleStyle, _popupValueStyle, _popupSavedStyle;
+        // ── Overlay state (Now Playing + keybind notices, one box) ─────────────
+        // A single top-left box serves as BOTH the Now Playing readout and the
+        // keybind notification surface. Line 1 = the audible track's title (live,
+        // scrolling) — or "Vanilla music" / "Nothing playing" when CMM has no voice.
+        // Line 2 = "♪ context" with time-remaining/total and the track's volume trim
+        // percentage to its right; a keypress notice ("Banned: …", "★ Favourite", …)
+        // replaces the whole line for NoticeHoldSeconds. With the overlay toggled ON
+        // (KeyNowPlaying) the box is persistent; toggled OFF, it appears just for
+        // the notice and fades away with it. Drawn by DrawOverlayBox.
+        private const float NoticeHoldSeconds = 4f;
+        private static float _noticeUntil = -1f;
+        private static GUIContent _noticeText;            // non-null → line-2 message swap
+        private static GUIContent _noticeFallbackTitle;   // line 1 when nothing is audible
+        private static bool NoticeActive => Time.realtimeSinceStartup < _noticeUntil;
+
+        private Texture2D _popupBg;
+        private GUIStyle  _popupTitleStyle, _popupValueStyle, _npSubtitleStyle;
+
+        // Arm a notice. message != null swaps line 2 with it; message null just makes
+        // the box visible for the hold window (volume keys — the trim percentage on
+        // line 2 updates live, so there's nothing to say, only something to show).
+        // fallbackTitle fills line 1 only when no track is audible at draw time (a
+        // ban that emptied its folder, a combat toggle during the vanilla handoff).
+        private static void ShowNotice(string message = null, string fallbackTitle = null)
+        {
+            _noticeText = message != null ? new GUIContent(message) : null;
+            _noticeFallbackTitle = fallbackTitle != null ? new GUIContent(fallbackTitle) : null;
+            _noticeUntil = Time.realtimeSinceStartup + NoticeHoldSeconds;
+        }
 
         private void Update()
         {
@@ -39,6 +75,8 @@ namespace CMM
             CMMPerf.FrameTick(LiveMusicCoroutineCount);
 
             HandleMusicKeybinds();
+            // Personal radio (all versions): self-throttled; no-op while dialed Off.
+            PersonalRadio.Tick();
 #if GV_V3
             // World-emitter audio layer (experimental, 3.0 only): self-throttled; no-op unless
             // enabled + configured. Plays a diegetic station near detected in-world speakers.
@@ -51,7 +89,13 @@ namespace CMM
 
         private void OnGUI()
         {
-            DrawVolumePopup();
+            // The SP pause menu's options live in the same top-left corner as our overlays —
+            // hide BOTH while the game is paused. Draw-time gate ONLY: NowPlaying/notice/HUD
+            // state is untouched, so on unpause everything reappears exactly as it was.
+            // (IsPaused() is forced false in MP and on the main menu — see Patch_GamePause —
+            // so this never hides the overlay outside an SP pause.)
+            if (inGame && (GameManager.Instance?.IsPaused() ?? false)) return;
+            DrawOverlayBox();
 #if CMM_DEBUG_HUD
             DrawDebugHud();
 #endif
@@ -73,6 +117,13 @@ namespace CMM
             else if (Input.GetKeyDown(CMMConfig.KeyPrevTrack))  SkipTrack(previous: true);
             else if (Input.GetKeyDown(CMMConfig.KeyVolumeUp))   TrimCurrentTrack(+CMMConfig.UserTrimStep);
             else if (Input.GetKeyDown(CMMConfig.KeyVolumeDown)) TrimCurrentTrack(-CMMConfig.UserTrimStep);
+            else if (Input.GetKeyDown(CMMConfig.KeyBanTrack))          ToggleBanCurrentTrack();
+            else if (Input.GetKeyDown(CMMConfig.KeyUndoBan))           UndoLastBan();
+            else if (Input.GetKeyDown(CMMConfig.KeyFavouriteTrack))    ToggleFavouriteCurrentTrack();
+            else if (Input.GetKeyDown(CMMConfig.KeyToggleCombatMusic)) ToggleCombatMusic();
+            else if (Input.GetKeyDown(CMMConfig.KeyNowPlaying))        ToggleNowPlaying();
+            else if (Input.GetKeyDown(CMMConfig.KeyRadioNext))         PersonalRadio.Step(+1);
+            else if (Input.GetKeyDown(CMMConfig.KeyRadioPrev))         PersonalRadio.Step(-1);
         }
 
         // The context backing the music actually playing. _nativeActiveContext names what
@@ -89,6 +140,10 @@ namespace CMM
         private void SkipTrack(bool previous)
         {
             if (_skipInProgress) return;
+            // The radio broadcast is deterministic (world clock) — there is no "next track" to
+            // force. This also keeps the skip path (which calls StartNativeContext DIRECTLY,
+            // bypassing the StartContextCoroutine radio gate) from restarting context music.
+            if (PersonalRadio.SuppressesMusic) return;
 
             string ctxName = AudibleContextName();
             if (ctxName == null) return;
@@ -99,16 +154,20 @@ namespace CMM
             if (!ContextHasFiles(ctxName)) return;                     // borrowed vanilla / empty
             if (!cacheMap.TryGetValue(ctxName, out ContextCache cache)) return;
 
-            // "Previous" plays the one-deep remembered track — but only if it still
-            // exists on disk; otherwise fall through and pick a fresh track like Next.
+            // "Previous" steps back through the context's play history (music-player
+            // style; deleted files are pruned in the walk). At the very start of the
+            // history there is nothing earlier — the press does nothing rather than
+            // surprising with a random pick. "Next" is handled inside the same-context
+            // switch: it replays forward through rewound history first, then picks fresh.
             string forced = null;
             if (previous)
             {
-                string prev = cache.previousPlayedFile;
-                if (!string.IsNullOrEmpty(prev) && File.Exists(prev))
-                    forced = prev;
-                else
-                    CMMConfig.D($"[CMM] Prev track: no valid previous for {ctxName}; picking a new one.");
+                forced = cache.HistoryBack();
+                if (forced == null)
+                {
+                    CMMConfig.D($"[CMM] Prev track: at the start of {ctxName}'s history — nothing earlier.");
+                    return;
+                }
             }
 
             CMM_CoRoutines.StartCoroutine(ForceSkipCoroutine(ctxName, forced));
@@ -125,11 +184,13 @@ namespace CMM
             if (_crossFadeCoroutine   != null) { CMM_CoRoutines.StopCoroutine(_crossFadeCoroutine);   _crossFadeCoroutine   = null; }
 
             // Skip = a same-context next-track on the native mixer (forcedFile for prev).
+            // A manual skip crossfades at ManualSkipFadeDuration — keypress-fast —
+            // instead of the context/transition fade an automatic advance uses.
             if (ContextHasFiles(contextName))
             {
                 int natId = ++_transitionId;
                 Log.Out($"[CMM] {(forcedFile != null ? "Prev" : "Next")} track [{contextName}] (native)");
-                StartNativeContext(contextName, true, natId, forcedFile);
+                StartNativeContext(contextName, true, natId, forcedFile, CMMConfig.ManualSkipFadeDuration);
             }
             else
             {
@@ -147,6 +208,9 @@ namespace CMM
         // ── Per-track volume trim ──────────────────────────────────────────────
         private void TrimCurrentTrack(float delta)
         {
+            // Radio tracks follow the station's broadcast, not the context caches this reads;
+            // per-track trim doesn't apply to them (bans/favourites likewise, below).
+            if (PersonalRadio.SuppressesMusic) return;
             string ctxName = AudibleContextName();
             if (ctxName == null) return;
             // playingFile, not lastPlayedFile: the latter has already advanced to the
@@ -158,19 +222,20 @@ namespace CMM
 
             float trim = LoudnessStore.AdjustUserTrim(cache.playingFile, delta);
 
-            // Arm the on-screen popup (held VolumePopupHoldSeconds past the last press).
-            _volPopupTrack = Path.GetFileNameWithoutExtension(cache.playingFile);
-            _volPopupTrim  = trim;   // <0 carries "not measured yet" through to the draw
-            _volPopupUntil = Time.realtimeSinceStartup + VolumePopupHoldSeconds;
-
             if (trim < 0f)
             {
                 // Unmeasured tracks have no Measurement to attach the trim to yet; the
                 // background sweep measures every track within seconds of load.
+                ShowNotice("measuring loudness — try again shortly");
                 CMMConfig.D($"[CMM] Volume trim: {Path.GetFileName(cache.playingFile)} " +
                         "not measured yet — try again shortly.");
                 return;
             }
+            // The trim percentage lives permanently on the overlay's line 2 — flag its
+            // cache stale so the new value shows this frame, and flash the box up in
+            // case the persistent readout is toggled off.
+            _npRightDirty = true;
+            ShowNotice();
 
             // The per-track gain was baked into the live voice at Play time. Push the new trim
             // straight to that voice so the change is audible immediately on the track you're
@@ -190,68 +255,336 @@ namespace CMM
                     $"[{Path.GetFileName(cache.playingFile)}]: trim → {trim * 100f:0}%{note}");
         }
 
-        // ── Volume popup ───────────────────────────────────────────────────────
-        // A small top-left overlay showing the current track and its volume as a
-        // percentage (the trim: 100% = the track's normalized level and maximum, down
-        // to 10%). Armed by TrimCurrentTrack and fading out once VolumePopupHoldSeconds
-        // elapse with no further press. Works on the menu and in-game.
-        private void DrawVolumePopup()
+        // ── Ban / favourite the current track ──────────────────────────────────
+        // Both act on the track that's audibly playing (same target rule as the
+        // volume trim) and persist via the loudness store, so they survive restarts
+        // and follow a file that's later moved or renamed. Banning also skips ahead.
+        // Like the trim, the flag needs the track's content hash, which exists once
+        // it's measured — the sweep measures the playing track within seconds.
+
+        // The last tracks banned by the key this session, most recent last — the
+        // undo key (Alt+End by default) unbans them in reverse order. Session-only
+        // (the bans themselves persist; this is just the undo order), capped like
+        // the play history. A manual unban (Alt+Delete on the playing track) drops
+        // its entry so undo never re-visits it.
+        private const int BanUndoDepth = 25;
+        private static readonly List<string> _banUndoStack = new List<string>();
+
+        private void ToggleBanCurrentTrack()
         {
-            if (_volPopupTrack == null) return;
-            float remaining = _volPopupUntil - Time.realtimeSinceStartup;
-            if (remaining <= 0f) { _volPopupTrack = null; return; }
+            if (_skipInProgress) return;   // mid-skip: playingFile is in flux
+            if (PersonalRadio.SuppressesMusic) return;   // bans don't apply to radio stations
+            string file = AudiblePlayingFile();
+            if (file == null) return;
 
-            EnsureVolumePopupStyles();
-
-            // Fade over the final 0.6s of the hold window.
-            float alpha = Mathf.Clamp01(remaining / 0.6f);
-            Color prevColor = GUI.color;
-            GUI.color = new Color(1f, 1f, 1f, alpha);
-
-            const float bw = 390f, bh = 82f;
-            const float bx = 12f, by = 12f;
-
-            GUI.DrawTexture(new Rect(bx, by, bw, bh), _popupBg, ScaleMode.StretchToFill);
-
-            // During the fade-out, a "saved" confirmation fills the box (the trim is
-            // persisted to Cache/loudness.xml by the debounced save loop). Only for a
-            // real adjustment, not the "measuring" state.
-            if (remaining < 2.0f && _volPopupTrim >= 0f)
+            string title = Path.GetFileNameWithoutExtension(file);
+            bool? banned = LoudnessStore.ToggleBanned(file);
+            if (banned == null)
             {
-                EnsureSavedFontSize(bw - 28f);
-                GUI.Label(new Rect(bx, by, bw, bh), SavedText, _popupSavedStyle);
+                ShowNotice("measuring loudness — try again shortly");
+                return;
+            }
+            Log.Out($"[CMM] Track {(banned.Value ? "banned" : "unbanned")} [{Path.GetFileName(file)}] " +
+                    $"({LoudnessStore.BannedCount} banned total)");
+            // Keep the undo stack in step: a ban goes on top (deduped), a manual
+            // unban leaves nothing behind for the undo key to re-visit.
+            _banUndoStack.Remove(file);
+            if (banned.Value)
+            {
+                _banUndoStack.Add(file);
+                if (_banUndoStack.Count > BanUndoDepth) _banUndoStack.RemoveAt(0);
+
+                // The skip below lands on the NEXT track, so the overlay's title line
+                // will already show it — the notice names the track that was banned.
+                ShowNotice("Banned: " + title, fallbackTitle: "Track banned");
+                // Normally skip to the next track; but if that ban was the folder's
+                // LAST unbanned track the context is now unplayable (SkipTrack would
+                // bail on ContextHasFiles) — resolve to the fallback chain instead.
+                string ctxName = AudibleContextName();
+                if (ctxName != null && !ContextHasFiles(ctxName))
+                    ReResolveNow();
+                else
+                    SkipTrack(previous: false);
             }
             else
             {
-                DrawScrollingLabel(new Rect(bx + 14f, by + 8f, bw - 28f, 22f), _volPopupTrack, _popupTitleStyle);
+                ShowNotice("Ban removed");
+            }
+        }
 
-                if (_volPopupTrim < 0f)
+        // Unban the most recently banned track (Alt+End by default), walking down
+        // the undo stack. Entries whose ban was already lifted some other way are
+        // skipped silently. Re-resolves afterwards in case the unban made an
+        // all-banned context playable again (ReResolveNow only re-triggers when
+        // resolution actually changed).
+        private void UndoLastBan()
+        {
+            while (_banUndoStack.Count > 0)
+            {
+                string file = _banUndoStack[_banUndoStack.Count - 1];
+                _banUndoStack.RemoveAt(_banUndoStack.Count - 1);
+                if (!LoudnessStore.IsBannedPath(file)) continue;   // unbanned elsewhere
+                if (LoudnessStore.ToggleBanned(file) != false) continue;   // couldn't unban
+
+                Log.Out($"[CMM] Ban undone [{Path.GetFileName(file)}] " +
+                        $"({LoudnessStore.BannedCount} banned total, {_banUndoStack.Count} more undoable)");
+                ShowNotice("Ban removed: " + Path.GetFileNameWithoutExtension(file),
+                           fallbackTitle: "Undo ban");
+                ReResolveNow();
+                return;
+            }
+            CMMConfig.D("[CMM] Undo ban: nothing to undo this session.");
+        }
+
+        private void ToggleFavouriteCurrentTrack()
+        {
+            if (PersonalRadio.SuppressesMusic) return;   // favourites don't apply to radio stations
+            string file = AudiblePlayingFile();
+            if (file == null) return;
+
+            bool? fav = LoudnessStore.ToggleFavourite(file);
+            if (fav == null)
+            {
+                ShowNotice("measuring loudness — try again shortly");
+                return;
+            }
+            Log.Out($"[CMM] Track {(fav.Value ? "favourited" : "unfavourited")} [{Path.GetFileName(file)}] " +
+                    $"({LoudnessStore.FavouriteCount} favourite(s) total)");
+            ShowNotice(fav.Value ? "★ Favourite — plays more often" : "Favourite removed");
+        }
+
+        // The file audibly playing right now, or null when there's nothing to act on.
+        // playingFile (not lastPlayedFile) for the same reason as the volume trim: the
+        // latter has already advanced to the preloaded next track during a transition.
+        private static string AudiblePlayingFile()
+        {
+            string ctxName = AudibleContextName();
+            if (ctxName == null) return null;
+            if (!cacheMap.TryGetValue(ctxName, out ContextCache cache) ||
+                string.IsNullOrEmpty(cache.playingFile))
+                return null;
+            return cache.playingFile;
+        }
+
+        // ── Combat-music toggle ────────────────────────────────────────────────
+        // One switch for ALL combat contexts (the tiers, the biome variants,
+        // Blood_Moon_Combat — see RebuildCombatContextSet). While muted they resolve
+        // through their fallback chains as if their folders were empty, and the
+        // linked vanilla Combat/Bloodmoon sections are held back too — so a fight
+        // keeps whatever ambient/POI music was already playing. Session-only:
+        // nothing is persisted, a restart resets to on.
+        private void ToggleCombatMusic()
+        {
+            bool muted = ToggleCombatMusicMuted();
+            Log.Out($"[CMM] Combat music {(muted ? "OFF" : "ON")} " +
+                    $"({CombatContextCount} combat context(s) covered)");
+            ShowNotice(muted ? "Combat music off — fights keep the current music"
+                             : "Combat music back on",
+                       fallbackTitle: "Combat music");
+            ReResolveNow();
+        }
+
+        // Re-resolve immediately after a keybind changed what resolution would pick
+        // (combat music toggled, last track of a folder banned), so the key
+        // feels instant — in-game the scan loop would also converge within a tick via
+        // its playability change detection, but the menu has no scan loop at all.
+        // Priority-bypassed so a LOWER-priority context can take over from the one
+        // that was just switched off. Every branch re-triggers ONLY when the change
+        // altered what resolution picks — a re-send that lands back on the playing
+        // context would needlessly restart its track.
+        internal static void ReResolveNow()   // internal: PersonalRadio hands music back through this
+        {
+            if (!inGame)
+            {
+                // Always evaluate from "Menu" — the menu's entry context — NOT from
+                // currentContext: after the menu fell back (e.g. every menu track
+                // banned → Vanilla took over), currentContext IS the fallback, which
+                // trivially resolves to itself and would mask a Menu that just became
+                // playable again (an unban). Nothing on the menu resolves from any
+                // other entry point, so "Menu" is the one question worth asking.
+                if (ResolvePlayableContext("Menu") != currentContext?.Context)
                 {
-                    GUI.Label(new Rect(bx + 14f, by + 40f, bw - 28f, 26f),
-                            "measuring loudness…", _popupTitleStyle);
+                    _pendingContext = null;
+                    SendContextUpdate("Menu");
                 }
-                else
+                return;
+            }
+            string top = GetTopContext();
+            if (top == null)
+            {
+                // Nothing playable and DMS is off — fade to silence (mirrors the scan loop).
+                if (currentContext?.Context != "Silence")
                 {
-                    // Bar = volume trim (0.1–1.0 → 10–100%); 100% is the track's normalized
-                    // level and the maximum — the keys only attenuate from there.
-                    float barX = bx + 16f, barY = by + 46f, barW = bw - 96f, barH = 12f;
-                    GUI.DrawTexture(new Rect(barX, barY, barW, barH), _popupBarBg, ScaleMode.StretchToFill);
-                    GUI.DrawTexture(new Rect(barX, barY, barW * Mathf.Clamp01(_volPopupTrim), barH),
-                            _popupBarFill, ScaleMode.StretchToFill);
-                    GUI.Label(new Rect(bx + bw - 74f, barY - 8f, 60f, 26f),
-                            (_volPopupTrim * 100f).ToString("0") + "%", _popupValueStyle);
+                    _pendingContext = null;
+                    currentContext = GetContext("Silence");
+                    ++_transitionId;
+                    FadeToSilence();
                 }
+                return;
+            }
+            if (top != currentContext?.Context)
+            {
+                _pendingContext = null;
+                SendContextUpdate(top, 0);
+            }
+        }
+
+        // ── The overlay box (Now Playing + notices) ────────────────────────────
+        // Toggled persistent by KeyNowPlaying (Alt+Numpad7 by default — the key that
+        // used to flip the debug A/B dormant arm). Independent of the debug HUD,
+        // which steps below the box whenever it's visible. The persistent readout
+        // hides while CMM has nothing voiced (vanilla handoff / silence); notices
+        // always show, transiently. NowPlayingEnabled in settings.xml picks the
+        // state at launch; the key owns it from then on.
+        private static bool? _nowPlayingOn;   // null until first toggle → config default
+        private static bool NowPlayingOn => _nowPlayingOn ?? CMMConfig.NowPlayingEnabled;
+
+        // Box metrics + the shift it imposes on elements stacked beneath it. With
+        // the readout ON the box is always up (it shows the vanilla/silence state
+        // rather than disappearing), so the HUD clearance keys off the same rule.
+        private const float OverlayBoxH = 58f;
+        internal const float OverlayClearanceHeight = 12f + OverlayBoxH + 8f;
+        internal static bool OverlayOnScreen => NowPlayingOn || NoticeActive;
+
+        // Draw caches, rebuilt only when the audible track/context changes so the
+        // persistent overlay doesn't allocate strings every OnGUI pass.
+        private static string _npFile, _npContext;
+        private static GUIContent _npTitle, _npSubtitle;
+        // Right-hand segment of line 2: "-remaining / total   trim%". Rebuilt when
+        // the displayed second ticks over, the track changes, or a volume key fires
+        // (_npRightDirty) — never per frame. Null when the voice has no known length.
+        private static GUIContent _npRight;
+        private static int  _npRightSecs = int.MinValue;
+        private static bool _npRightDirty;
+        // Fixed line-1/line-2 content for the no-voice states.
+        private static readonly GUIContent VanillaTitle = new GUIContent("Vanilla music");
+        private static readonly GUIContent NothingTitle = new GUIContent("Nothing playing");
+        private static readonly GUIContent VanillaSub   = new GUIContent("♪  game soundtrack");
+        private static readonly GUIContent SilenceSub   = new GUIContent("♪  silence");
+
+        // The file audibly playing right now (same target rule as the keybinds), or
+        // null when CMM has nothing voiced.
+        private static string NowPlayingFile()
+        {
+            string ctxName = AudibleContextName();
+            if (ctxName == null) return null;
+            if (!cacheMap.TryGetValue(ctxName, out ContextCache cache) ||
+                string.IsNullOrEmpty(cache.playingFile))
+                return null;
+            return cache.playingFile;
+        }
+
+        private void ToggleNowPlaying()
+        {
+            _nowPlayingOn = !NowPlayingOn;
+            Log.Out($"[CMM] Now Playing overlay {(_nowPlayingOn.Value ? "shown" : "hidden")}.");
+        }
+
+        private void DrawOverlayBox()
+        {
+            bool notice = NoticeActive;
+            bool persistent = NowPlayingOn;
+            if (!persistent && !notice) return;
+
+            EnsureOverlayStyles();
+
+            // Line-1/line-2 caches follow the LIVE track; with no voice the box
+            // stays up and states what's happening instead (vanilla / nothing).
+            // While the personal radio owns the music layer, IT is the audible
+            // source: its track titles the box and line 2 reads "Radio: <station>"
+            // (all of it cached on state edges — no per-frame allocation).
+            bool radio = PersonalRadio.SuppressesMusic;
+            string file = radio ? PersonalRadio.PlayingTrack : NowPlayingFile();
+            string ctxName = radio ? PersonalRadio.OverlayContextName : AudibleContextName();
+            if (file != null && (!ReferenceEquals(file, _npFile) || ctxName != _npContext))
+            {
+                _npFile = file;
+                _npContext = ctxName;
+                _npTitle = new GUIContent(Path.GetFileNameWithoutExtension(file));
+                _npSubtitle = new GUIContent("♪  " + ctxName);
+                _npRightDirty = true;
+            }
+            GUIContent title, subtitle;
+            if (file != null) { title = _npTitle; subtitle = _npSubtitle; }
+            else if (radio) { title = PersonalRadio.OverlayIdleTitle; subtitle = PersonalRadio.OverlayIdleSub ?? SilenceSub; }
+            else if (vanillaIsActive) { title = VanillaTitle; subtitle = VanillaSub; }
+            else { title = NothingTitle; subtitle = SilenceSub; }
+            // A notice raised when nothing was audible carries its own subject line.
+            if (file == null && notice && _noticeFallbackTitle != null)
+                title = _noticeFallbackTitle;
+
+            // Without the persistent readout the box lives only as long as the
+            // notice — fade it out over the notice's final 0.6 s.
+            Color prevColor = GUI.color;
+            if (!persistent)
+                GUI.color = new Color(1f, 1f, 1f,
+                        Mathf.Clamp01((_noticeUntil - Time.realtimeSinceStartup) / 0.6f));
+
+            const float bw = 390f, bx = 12f, by = 12f;
+            GUI.DrawTexture(new Rect(bx, by, bw, OverlayBoxH), _popupBg, ScaleMode.StretchToFill);
+            DrawScrollingLabel(new Rect(bx + 14f, by + 7f, bw - 28f, 22f), title, _popupTitleStyle);
+
+            if (notice && _noticeText != null)
+            {
+                // Keypress notice replaces the whole second line for the hold window.
+                DrawScrollingLabel(new Rect(bx + 14f, by + 31f, bw - 28f, 20f),
+                        _noticeText, _npSubtitleStyle);
+            }
+            else
+            {
+                if (file != null) RefreshOverlayRight(file);
+                // Context on the left; "-remaining / total   trim%" on the right.
+                float rightW = file != null && _npRight != null ? 170f : 0f;
+                DrawScrollingLabel(new Rect(bx + 14f, by + 31f, bw - 28f - rightW, 20f),
+                        subtitle, _npSubtitleStyle);
+                if (rightW > 0f)
+                    GUI.Label(new Rect(bx + bw - 14f - rightW, by + 31f, rightW, 20f),
+                            _npRight, _popupValueStyle);
             }
 
             GUI.color = prevColor;
+        }
+
+        // Rebuild the right-hand segment of line 2 when its displayed second ticks
+        // over (or a track change / volume key flagged it stale). One native state
+        // query + one small string per second while the overlay is up — not per frame.
+        private static void RefreshOverlayRight(string file)
+        {
+            // The radio's voice lives outside the context system's _nativeVoiceId.
+            long vid = PersonalRadio.SuppressesMusic
+                ? PersonalRadio.VoiceId
+                : System.Threading.Interlocked.Read(ref _nativeVoiceId);
+            if (vid == 0) { _npRight = null; _npRightSecs = int.MinValue; return; }
+            if (!(CmmMixer.Instance?.TryGetState(vid, out double pos, out double len, out bool active) ?? false)
+                || !active || len <= 0.0 || double.IsInfinity(len))
+            {
+                _npRight = null;
+                _npRightSecs = int.MinValue;
+                return;
+            }
+
+            int remaining = (int)(len - pos + 0.5);
+            if (remaining < 0) remaining = 0;
+            if (!_npRightDirty && remaining == _npRightSecs) return;
+
+            int total = (int)(len + 0.5);
+            float trimPct = LoudnessStore.GetUserTrim(file) * 100f;
+            _npRight = new GUIContent(
+                    $"-{remaining / 60}:{remaining % 60:00} / {total / 60}:{total % 60:00}   {trimPct:0}%");
+            _npRightSecs = remaining;
+            _npRightDirty = false;
         }
 
         // Draws text centred when it fits, or — when wider than the rect — clipped to
         // the rect and scrolled horizontally back and forth (ping-pong, with a short
         // dwell at each end) like a music player's now-playing display.
         private void DrawScrollingLabel(Rect rect, string text, GUIStyle style)
+            => DrawScrollingLabel(rect, new GUIContent(text), style);
+
+        // GUIContent overload for persistent callers (the Now Playing overlay) that
+        // cache their content and must not allocate per OnGUI pass.
+        private void DrawScrollingLabel(Rect rect, GUIContent content, GUIStyle style)
         {
-            var content = new GUIContent(text);
             float textW = style.CalcSize(content).x;
             if (textW <= rect.width)
             {
@@ -279,14 +612,10 @@ namespace CMM
             GUI.EndGroup();
         }
 
-        private void EnsureVolumePopupStyles()
+        private void EnsureOverlayStyles()
         {
             if (_popupBg == null)
-            {
-                _popupBg      = MakeTex(new Color(0f, 0f, 0f, 0.80f));
-                _popupBarBg   = MakeTex(new Color(1f, 1f, 1f, 0.16f));
-                _popupBarFill = MakeTex(new Color(1f, 0.78f, 0.35f, 1f));   // amber
-            }
+                _popupBg = MakeTex(new Color(0f, 0f, 0f, 0.80f));
             if (_popupTitleStyle == null)
             {
                 _popupTitleStyle = new GUIStyle(GUI.skin.label)
@@ -301,35 +630,29 @@ namespace CMM
             }
             if (_popupValueStyle == null)
             {
+                // Right side of line 2: "-2:12 / 3:45   70%".
                 _popupValueStyle = new GUIStyle(GUI.skin.label)
                 {
-                    fontSize = 15,
+                    fontSize = 13,
                     fontStyle = FontStyle.Bold,
                     alignment = TextAnchor.MiddleRight,
+                    wordWrap = false,
+                    clipping = TextClipping.Clip,
                 };
                 _popupValueStyle.normal.textColor = new Color(1f, 0.85f, 0.4f);
             }
-            if (_popupSavedStyle == null)
+            if (_npSubtitleStyle == null)
             {
-                _popupSavedStyle = new GUIStyle(GUI.skin.label)
+                // Left side of line 2: "♪ context" (and full-width notice messages).
+                _npSubtitleStyle = new GUIStyle(GUI.skin.label)
                 {
-                    fontStyle = FontStyle.Bold,
-                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = 13,
+                    alignment = TextAnchor.MiddleLeft,
                     wordWrap = false,
+                    clipping = TextClipping.Clip,
                 };
-                _popupSavedStyle.normal.textColor = Color.white;
+                _npSubtitleStyle.normal.textColor = new Color(1f, 0.85f, 0.4f);   // amber
             }
-        }
-
-        // Sizes the "saved" confirmation once so it spans the box without overflowing.
-        private void EnsureSavedFontSize(float maxWidth)
-        {
-            if (_popupSavedFontSize > 0) return;
-            _popupSavedStyle.fontSize = 24;
-            float w = _popupSavedStyle.CalcSize(new GUIContent(SavedText)).x;
-            int size = w > 1f ? Mathf.FloorToInt(24f * maxWidth / w) : 18;
-            _popupSavedFontSize = Mathf.Clamp(size, 12, 26);
-            _popupSavedStyle.fontSize = _popupSavedFontSize;
         }
 
         private static Texture2D MakeTex(Color c)

@@ -123,15 +123,9 @@ namespace CMM
                 CMMConfig.D("[CMM] GC gauge window reset.");
             }
 
-            // Numpad 7 flips the functionally-dormant A/B arm: CMM's steady-state loops go
-            // no-op (see _functionallyDormant). Re-arm the GC window on the flip so the new
-            // arm's collection counts start clean and are directly comparable.
-            if (_hudMode != 0 && Input.GetKeyDown(KeyCode.Keypad7))
-            {
-                _functionallyDormant = !_functionallyDormant;
-                ArmGcWindow();
-                CMMConfig.D($"[CMM] Functionally dormant: {_functionallyDormant} (GC window re-armed).");
-            }
+            // (Numpad 7 used to flip the functionally-dormant A/B arm; that key now
+            // belongs to the Now Playing overlay — see KeyNowPlaying in Keybinds.cs.
+            // _functionallyDormant itself remains, just with no key bound to it.)
         }
 
         // (Re)start the GC measurement window: snapshot the current heap and per-generation
@@ -296,7 +290,9 @@ namespace CMM
             // Self-throttled; the line reports how many emitter blocks are tracked, plus the nearest
             // and its distance, so you can walk a POI and watch them appear/update/drop.
 #if GV_V3
-            if (inGame)
+            // EmitterCompat gate: the cross-version DLL carries this call onto A20/A21/2.6, where
+            // Poll()'s voxel/prefab scan would bind 3.0-shaped game APIs.
+            if (inGame && EmitterCompat.RuntimeSupported)
             {
                 EmitterRegistry.Poll();
                 lines.Add(Row("Emitters:", EmitterRegistry.HudLine()));
@@ -315,10 +311,8 @@ namespace CMM
             float g0PerMin = dg0 * 60f / gcWin;
             lines.Add(Row("Heap:", $"{_hudHeapMB:0} MB  (peak {_hudGcPeakHeapMB:0}  •  " +
                                    $"Δ {_hudHeapMB - _hudGcBaseHeapMB:+0;-0;0} MB since arm)"));
-            string armBadge = _functionallyDormant
-                ? "  •  <color=#ffd27f>DORMANT (B)</color>" : "  •  ENABLED (A)";
             lines.Add(Row("GC:", $"gen0 +{dg0}  gen1 +{dg1}  gen2 +{dg2}  over {Clock(gcWin)}" +
-                                 $"  •  {g0PerMin:0.0} g0/min  •  scan {_lastScanBytesPerTick:0} B/tick{armBadge}"));
+                                 $"  •  {g0PerMin:0.0} g0/min  •  scan {_lastScanBytesPerTick:0} B/tick"));
 
             // Memory diagnostics on one line: the directory snapshots (every eligible
             // file path per context) plus the normalized (loudness-measured) files held
@@ -356,7 +350,10 @@ namespace CMM
             string body = string.Join("\n", lines);
 
             // ── Draw ───────────────────────────────────────────────────────────
-            const float x = 10f, y = 10f;
+            // The overlay box (Now Playing readout + keybind notices) owns the very
+            // top-left while it's up — step below it so it's never covered.
+            const float x = 10f;
+            float y = 10f + (OverlayOnScreen ? OverlayClearanceHeight : 0f);
             float w = _hudMode == 2 ? 720f : 540f;   // wider so the expanded context grid fits
             const float padX = 12f, headerH = 24f;
             var bodyContent = new GUIContent(body);
@@ -366,7 +363,7 @@ namespace CMM
             // Dark translucent backdrop so the text stays legible over any scene.
             GUI.DrawTexture(new Rect(x, y, w, h), _hudBgTex, ScaleMode.StretchToFill);
             GUI.Label(new Rect(x + padX, y + 6f, w - padX * 2f, 22f),
-                $"CMM • Context ({(_hudMode == 2 ? "expanded" : "compact")})  [Num8 cycle • Num9 reset GC • Num7 A/B dormant]",
+                $"CMM • Context ({(_hudMode == 2 ? "expanded" : "compact")})  [Num8 cycle • Num9 reset GC]",
                 _hudHeaderStyle);
             GUI.Label(new Rect(x + padX, y + 6f + headerH, w - padX * 2f, bodyH), bodyContent, _hudBodyStyle);
         }
