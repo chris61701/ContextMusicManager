@@ -12,10 +12,15 @@ Backlog of planned and in-development features. Status tags: **(done)**, **(in p
 - [x] **Radio distortion / coloration DSP** — "through a speaker" bandpass + soft-clip +
   low static (audio stage 3c). Built (ABI 26, `WorldEmitterColor*` knobs); in-game test pending.
 - [ ] **DJ system** — Fallout 3/4-style station DJ/announcer. *(idea, maybe 1.0.6)*
-- [ ] **Radio sync** — world emitters and the personal radio still drift audibly apart
-  (should stay within ~1 s). The unpause re-glue (2026-07-10) helps but does not fully
-  fix it — instrument the actual voice-vs-paper offsets to find the remaining source.
-  *(in progress)*
+- [x] **Radio sync** — world emitters and the personal radio drifted audibly apart.
+  Instrumented (`[CMM SYNC]` audit lines, DebugLogging builds), root cause measured:
+  the game's `worldTime` advances at only ~0.89× realtime while decoders run 1.0×, so
+  every voice outran the worldTime paper schedule at ~7 s/min and consumers re-glued at
+  different moments. Fixed by making the broadcast clock local: worldTime-anchored at
+  world entry, realtime-rate in play, frozen during SP pause, worldTime jumps carried.
+  Round 2: 3.0 saves the world synchronously on the pause edge (~2.5 s stall) — clock
+  intervals are now attributed to their START pause-state so the stall counts, and
+  sub-second pauses accumulate resync debt. Play-tested 2026-07-11: sync confirmed good.
 - [ ] **Diegetic authenticity pass** — emitters are functional but far from satisfactory
   as in-world objects; polish the spatial/acoustic presentation until a placed radio
   reads as a real thing in the world. *(not started)*
@@ -25,8 +30,11 @@ Backlog of planned and in-development features. Status tags: **(done)**, **(in p
 - [x] **Now Playing overlay** — on-screen current-track display. Built: Alt+Num7
   toggles a persistent top-left track+context readout; in-game test pending.
 - [x] **DebugHud** — done, just hasn't shipped with a release version yet.
-- [ ] **Hide DebugHud while the console is open** — the F1 console overlaps it; gate the
-  HUD (and Now Playing?) the same way the SP-pause hide works. *(not started)*
+- [x] **Hide DebugHud while the console is open** — the F1 console overlaps it; gate the
+  HUD (and Now Playing?) the same way the SP-pause hide works. Built: draw-time gate on
+  `GUIWindowConsole` being open hides DebugHud + Now Playing/notices (all versions, MP and
+  menu included); music keybinds are also suppressed while the console is open so console
+  scrolling (PgUp/PgDn = radio dial) and line editing can't drive them. Verified 2026-07-11.
 
 ## Contexts
 

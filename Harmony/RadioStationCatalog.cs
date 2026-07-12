@@ -122,16 +122,66 @@ namespace CMM
         private const int WalkCap = 4096;
 
         // ── Broadcast clock ─────────────────────────────────────────────────────────────────────
-        // The world's elapsed time in REAL seconds: worldTime advances 24000 ticks per in-game day,
-        // and a day lasts DayNightLength real minutes — so every session/client of a save derives
-        // the same broadcast position (a relog rejoins the same song at the same point). Freezes
-        // with the SP pause menu; the EOF-advance paths guard against the resulting small drift.
+        // worldTime is the shared EPOCH (every session/client of a save anchors to the same
+        // broadcast position), but it is NOT a realtime-rate clock: measured in-game 2026-07-11
+        // (sync audit, log 19-31-53) it advances at only ~0.89× realtime during normal play, while
+        // the audio decoders run at exactly 1.0× — so a paper schedule read straight off worldTime
+        // falls behind every live voice at ~0.11 s/s (6-7 s/minute). No re-glue cadence can chase
+        // that, and consumers re-gluing at DIFFERENT moments (dial, EOF, unpause) was the audible
+        // emitter-vs-personal desync.
+        //
+        // So the clock consumers actually resolve against is LOCAL: anchored to the worldTime-
+        // derived position at world entry, advanced by REALTIME while playing (matching the
+        // decoders — voices stay on paper indefinitely), FROZEN during the SP pause (worldTime
+        // freezes too; voices decode on under the duck and the unpause ResyncToClock re-glues —
+        // a pause still doesn't skip content), and carrying any genuine worldTime JUMP (admin
+        // settime / server correction) so those still retune everyone identically. All consumers
+        // read this one clock, so they agree with each other by construction; the worldTime
+        // deficit only surfaces as a modest jump-back of the anchor on relog (some broadcast
+        // replays — the save's own time authority wins across sessions).
+        // Main-thread only (GameManager/Time), like every resolve path.
+        private static bool   _clkInit;
+        private static double _clkB;        // the local broadcast clock (seconds)
+        private static float  _clkRt;       // realtime stamp of the last advance
+        private static double _clkLastRaw;  // last worldTime-derived position (jump detection)
+        private static bool   _clkWasPaused;// pause state at the START of the current interval
+
         internal static double BroadcastSeconds()
         {
             World w = GameManager.Instance?.World;
-            if (w == null) return 0;
+            if (w == null) { _clkInit = false; return 0; }
+
             int dnl = GamePrefsCompat.DayNightLengthMinutes();   // by-name: enum ordinal drifts cross-version
-            return w.worldTime * (dnl * 60.0 / 24000.0);
+            double raw = w.worldTime * (dnl * 60.0 / 24000.0);
+            float rt = Time.realtimeSinceStartup;
+            bool pausedNow = GameManager.Instance?.IsPaused() ?? false;
+
+            if (!_clkInit)
+            {
+                _clkInit = true;
+                _clkB = raw; _clkRt = rt; _clkLastRaw = raw; _clkWasPaused = pausedNow;
+                return _clkB;
+            }
+
+            double rawStep = raw - _clkLastRaw;
+            _clkLastRaw = raw;
+            float dt = rt - _clkRt;
+            _clkRt = rt;
+
+            if (Math.Abs(rawStep) > 60.0)
+                _clkB += rawStep;   // worldTime JUMPED (settime / server catch-up): carry it verbatim
+            else if (dt > 0f && !_clkWasPaused)
+                _clkB += dt;        // normal play: realtime rate — glued to the decoders
+            // Each interval is attributed to the pause state at its START, not its end: 3.0's
+            // updatePauseState runs SaveWorld() synchronously on the PAUSE edge (~2.5 s main-
+            // thread stall) BEFORE gamePaused flips, so the first call after the stall reads
+            // paused — deciding by the current state discarded that whole stall even though the
+            // mixer (own thread) played straight through it, bleeding ~a save-duration of lead
+            // into every voice per ESC tap (measured: log 20-50-00). Start-state attribution
+            // counts the stall and mis-books at most one call interval (~0.25 s) per edge.
+            _clkWasPaused = pausedNow;
+
+            return _clkB;
         }
 
         // ── Schedule (anchored gapless windows on the world-time clock) ─────────────────────────
@@ -222,6 +272,34 @@ namespace CMM
                 catch { /* a failed walk resolves as dead air; the next window retries */ }
                 finally { st.WalkWindow = k; st.WalkPending = false; }
             });
+        }
+
+        // ── Sync audit (debug instrumentation) ──────────────────────────────────────────────────
+        // One log line comparing a consumer's ACTUAL audible playhead (native voice position via
+        // TryGetState — absolute seconds into the file, seek offset included) against the PAPER
+        // schedule (ResolveAt at the same broadcast second). Both radio consumers call it on a
+        // cadence plus one-shot at joins, so a desync session log answers directly: WHICH consumer
+        // is off paper, by how much, and whether the delta is born at a join, grows at track
+        // boundaries (the next-at-0 pause-drift guard), or jumps across an SP pause.
+        //   Δ = voice − paper: positive = the voice runs AHEAD of the schedule (pause lead),
+        //   negative = BEHIND (join/open latency). OFF-PAPER = playing a different track entirely.
+        internal const float AuditInterval = 5f;
+        internal static void AuditVoice(string consumer, RadioStation st, string voiceTrack, long voiceId)
+        {
+            if (!CMMConfig.DebugLogging || st == null || voiceId == 0) return;
+            CmmMixer mx = CmmMixer.Instance;
+            if (mx == null || !mx.TryGetState(voiceId, out double pos, out _, out _)) return;
+            double B = BroadcastSeconds();
+            string vn = voiceTrack != null ? Path.GetFileName(voiceTrack) : "?";
+            if (!ResolveAt(st, B, out string pf, out _, out double poff))
+            {
+                Log.Out($"[CMM SYNC] {consumer} '{st.Name}': voice {vn} @{pos:F2}s | paper UNRESOLVED (B={B:F1})");
+                return;
+            }
+            if (voiceTrack != null && string.Equals(pf, voiceTrack, StringComparison.OrdinalIgnoreCase))
+                Log.Out($"[CMM SYNC] {consumer} '{st.Name}': {vn} voice@{pos:F2}s paper@{poff:F2}s Δ={pos - poff:+0.00;-0.00}s (B={B:F1})");
+            else
+                Log.Out($"[CMM SYNC] {consumer} '{st.Name}': OFF-PAPER voice {vn} @{pos:F2}s | paper {Path.GetFileName(pf)} @{poff:F2}s (B={B:F1})");
         }
 
         // Fills the station's shared OnAir/OnAirIdx/OnAirOffset scratch (emitter-layer consumer).

@@ -53,6 +53,7 @@ namespace CMM
         private static string _gainWaitFile;          // join track we're holding for (loudness measure)
         private static float  _gainWaitUntil;         // bounded — see StartFromClock
         private static string _advanceCarry;          // AdvanceOverride preserved across gated retries
+        private static float  _nextAuditAt;           // sync-audit cadence (RadioStationCatalog.AuditVoice)
 
         // ── Async start state ───────────────────────────────────────────────────────────────────
         // A radio start opens a decoder and SEEKS minutes into the file (cmm_mix_add runs the
@@ -330,6 +331,13 @@ namespace CMM
 
             if (_voiceId != 0)
             {
+                // Sync audit: periodic voice-vs-paper delta (see RadioStationCatalog.AuditVoice).
+                if (Time.realtimeSinceStartup >= _nextAuditAt)
+                {
+                    _nextAuditAt = Time.realtimeSinceStartup + RadioStationCatalog.AuditInterval;
+                    RadioStationCatalog.AuditVoice("personal", st, _track, _voiceId);
+                }
+
                 // Soft-handoff prep: within a minute of the window boundary, warm the NEXT
                 // window's chain so the EOF that crosses the boundary rejoins instantly.
                 long kNow = RadioStationCatalog.WindowIndex(Bnow);
@@ -499,6 +507,11 @@ namespace CMM
             ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if unmeasured
             Log.Out($"[CMM] Radio: '{station}' playing {Path.GetFileName(file)} @ {off:0}s " +
                     $"(B={RadioStationCatalog.BroadcastSeconds():0}s).");
+            // Sync audit, one-shot at the join: Δ here isolates the async-start latency (offset
+            // was resolved at DISPATCH on the main thread; open+seek ran on a worker since).
+            if (_tunedName != null && RadioStationCatalog.ByName.TryGetValue(_tunedName, out RadioStation ast))
+                RadioStationCatalog.AuditVoice("personal-join", ast, file, id);
+            _nextAuditAt = Time.realtimeSinceStartup + RadioStationCatalog.AuditInterval;
         }
 
         // Ramp the voice's track gain to 0 and forget it: silent immediately, retires itself at

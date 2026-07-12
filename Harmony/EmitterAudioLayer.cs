@@ -572,12 +572,22 @@ namespace CMM
         // with contexts — the user is fine with a cut) and advance stations whose track ENDED (the
         // decoder EOF is authoritative; runs even out of range so a warm voice stays on the
         // schedule's timeline and re-entry rejoins seamlessly).
+        // Sync-audit cadence (shared across all voiced stations; see MaintainPlayingStations).
+        private static float _nextAuditAt;
+
         private static void MaintainPlayingStations(EntityPlayerLocal player)
         {
+            // Sync audit: periodic voice-vs-paper delta per voiced station, same cadence and
+            // format as the personal radio's (RadioStationCatalog.AuditVoice) so one grep
+            // ("CMM SYNC") lines both consumers up against the same paper schedule.
+            bool audit = CMMConfig.DebugLogging && Time.realtimeSinceStartup >= _nextAuditAt;
+            if (audit) _nextAuditAt = Time.realtimeSinceStartup + RadioStationCatalog.AuditInterval;
+
             for (int i = 0; i < _stations.Count; i++)
             {
                 Station st = _stations[i];
                 if (st.VoiceId == 0) continue;
+                if (audit) RadioStationCatalog.AuditVoice("emitter", st, st.VoiceTrack, st.VoiceId);
 
                 if (st.NearestDist == float.MaxValue)
                 {
