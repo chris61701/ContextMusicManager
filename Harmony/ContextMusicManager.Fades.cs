@@ -67,6 +67,7 @@ namespace CMM
         // the menu (GameManager.updatePauseState), so this only ever engages during SP play.
         private static volatile bool _pauseDucked;
         private static float _pauseDuckedAt;   // realtime stamp of the duck edge (0 = no pause pending)
+        private static float _pauseDebt;       // un-resynced pause seconds, summed across short pauses
         internal static void OnGamePauseChanged(bool paused)
         {
             // Only ever engage in-game. When not in a world (menu / mid-quit teardown) there's no
@@ -75,12 +76,40 @@ namespace CMM
             // back in over the exit fade. The quit path continues the fade to silence itself.
             // (_pauseDuckedAt clears too, so a pause that ended in a quit can't trigger a stale
             // radio resync on the next world's first unpause edge.)
-            if (!inGame) { _pauseDuckedAt = 0f; return; }
+            if (!inGame)
+            {
+                _pauseDuckedAt = 0f;
+                // A quit that began while paused must also release the add-revive hold, or the
+                // menu device could never wake (StopAllNow clears it natively too — belt). Clear
+                // the edge flag with it so this runs once, not every menu frame — the flag was
+                // going to be reset by FadeOutAndCleanup anyway; doing it here just can't touch
+                // the output gain, so the exit fade is unaffected.
+                if (_pauseDucked) { _pauseDucked = false; CmmMixer.Instance?.HoldOutputGain(false); }
+                return;
+            }
             if (paused == _pauseDucked) return;          // no edge — cheap per-frame guard
             _pauseDucked = paused;
+            // Order matters on the PAUSE edge: assert the hold BEFORE ducking, so a voice add
+            // racing the edge (EOF advance on the scheduler thread) can't slip a revive in
+            // between. On UNPAUSE the gain target returns to 1 first (adds then have nothing
+            // to revive), and only then is the hold released.
+            if (paused) CmmMixer.Instance?.HoldOutputGain(true);
             CmmMixer.Instance?.SetOutputGain(paused ? 0f : 1f, PauseFadeDuration);
+            if (!paused) CmmMixer.Instance?.HoldOutputGain(false);
             CMMConfig.D($"[CMM] native: pause {(paused ? "duck" : "restore")} ({PauseFadeDuration:F2}s)");
-            if (paused) { _pauseDuckedAt = Time.realtimeSinceStartup; return; }
+            if (paused)
+            {
+                // 3.0's pause screen fades the vanilla TITLE THEME in (BackgroundMusicMono.Update
+                // treats a paused game like the menu), and MenuMusicPatch lets its Play() through
+                // whenever vanillaIsActive — the intermittent "hint of menu music" heard over the
+                // pause duck. CMM's pause is silence: keep the menu loops muted for the pause.
+                // No unmute here — in-game they must stay muted, and the quit-to-menu path retires
+                // the vanilla handoff (Patch_GameEnded → DeactivateVanilla) so a later menu
+                // ActivateVanilla fade-in is what unmutes them.
+                MenuMusicPatch.SetMenuMusicMuted(true);
+                _pauseDuckedAt = Time.realtimeSinceStartup;
+                return;
+            }
 
             // Unpause: the SP pause froze the broadcast clock (worldTime) while every live RADIO
             // voice kept decoding in realtime under the duck — each is now AHEAD of the paper
@@ -91,8 +120,14 @@ namespace CMM
             // hearing it (a pause no longer skips content), and both radio layers stay aligned.
             float pausedFor = _pauseDuckedAt > 0f ? Time.realtimeSinceStartup - _pauseDuckedAt : 0f;
             _pauseDuckedAt = 0f;
-            if (pausedFor > 1f)
+            // Accumulate ACROSS pauses: each sub-second ESC tap leaves its own small lead
+            // (clock frozen, voices decoding), individually below the resync bar but additive —
+            // measured 20-50-00: rapid taps built a multi-second emitter offset that never
+            // resynced. Debt clears whenever a resync fires.
+            _pauseDebt += pausedFor;
+            if (_pauseDebt > 1f)
             {
+                _pauseDebt = 0f;
                 PersonalRadio.ResyncToClock();
 #if GV_V3
                 EmitterAudioLayer.ResyncToClock();

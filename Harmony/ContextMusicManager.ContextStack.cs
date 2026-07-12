@@ -364,6 +364,13 @@ namespace CMM
         {
             _pendingContext = "Vanilla";
             vanillaIsActive = true;
+            // Drop the governed-section anchor. It was last updated while the Conductor was
+            // MUTED under CMM's own music, so it names whatever the game happened to propose
+            // back then — nothing the player actually heard. Handing off with that stale
+            // anchor let the cmmOwns/warming hold pin audible vanilla to the wrong section
+            // for minutes (Trader Rekt, log 17-29-54: anchor poisoned, held ~7 min). None ⇒
+            // the game's live proposal stands and re-anchors on the first governed frame.
+            _lastGovernedSection = SectionType.None;
             currentContext = GetContext("Vanilla");
             FadeToSilence();
             if (inGame)
@@ -402,8 +409,15 @@ namespace CMM
                 // Fade the vanilla menu music out over the crossfade window instead of
                 // an instant mute, so it doesn't abruptly cut when CMM's menu music
                 // (which fades in over the same window) takes over after files appear.
-                if (_menuVanillaFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_menuVanillaFadeCoroutine); _menuVanillaFadeCoroutine = null; }
-                _menuVanillaFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutMenuVanillaCoroutine(CrossFadeDuration));
+                // Runner unavailable (e.g. the world-exit prefix during teardown) → hard
+                // mute; this runs inside Harmony prefixes, so it must never throw.
+                if (Instance != null && CMM_CoRoutines != null)
+                {
+                    if (_menuVanillaFadeCoroutine != null) { CMM_CoRoutines.StopCoroutine(_menuVanillaFadeCoroutine); _menuVanillaFadeCoroutine = null; }
+                    _menuVanillaFadeCoroutine = CMM_CoRoutines.StartCoroutine(Instance.FadeOutMenuVanillaCoroutine(CrossFadeDuration));
+                }
+                else
+                    MenuMusicPatch.SetMenuMusicMuted(true);
             }
             CMMConfig.D("[CMM] Reclaiming from Vanilla.");
         }
@@ -572,6 +586,21 @@ namespace CMM
                 }
                 _pendingVanillaSection = SectionType.None;
                 return fallback;
+            }
+
+            // Vanilla is the ACTIVE music layer: CMM's own resolution already ran and chose it,
+            // so nothing on the CMM stack claimed this moment. The warming/cmmOwns hold below
+            // exists to keep the game's section inaudible while CMM plays (or is about to);
+            // applying it while vanilla is audible instead pins the Conductor to the anchor —
+            // wrong music indefinitely when CMM never claims the linked context (the Trader
+            // Rekt hold). Let the game's live proposal stand; if CMM claims the context later,
+            // DeactivateVanilla's crossfade covers the takeover. Suppressed sections are still
+            // rewritten above.
+            if (vanillaIsActive)
+            {
+                _pendingVanillaSection = SectionType.None;
+                _lastLoggedHold = SectionType.None;
+                return proposed;
             }
 
             // Which CMM context governs this vanilla section? Unlinked (or None) → defer to the

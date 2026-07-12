@@ -105,6 +105,10 @@ namespace CMM
         // as a helper rather than its own Update). Compiled only with the HUD.
         private void HandleDebugHudToggle()
         {
+            // Numpad digits typed into the F1 console (teleport coords, command args) must
+            // not cycle the HUD or reset the GC gauge behind it — same gate as the music keys.
+            if (ConsoleIsOpen()) return;
+
             // Numpad 8 cycles the HUD: hidden → compact → expanded → hidden. Cheap per-frame
             // check, no allocation.
             if (Input.GetKeyDown(KeyCode.Keypad8))

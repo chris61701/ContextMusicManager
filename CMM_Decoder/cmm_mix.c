@@ -180,6 +180,10 @@ static int g_tightFill, g_maxFill, g_lowWater, g_targetFill;
 static int g_lastStarveMs, g_flushUntilMs;
 static int g_prevDeep;
 static float g_outGainTarget = 1.0f;
+/* v33: while set, cmm_mix_add's output-gain revive is suppressed — the SP pause duck owns
+ * the gain and a mid-pause voice add (music EOF advance, radio/emitter start) must start
+ * SILENT under it instead of snapping the whole device back to full. */
+static int g_outGainHold = 0;
 
 /* Live buffer-health stats for the debug HUD (producer-updated, read+reset via
  * cmm_mix_get_output_stats). g_minQueued = lowest queued depth seen since the last read;
@@ -580,6 +584,7 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_masterVol   = 1.0f;
     g_emMasterVol = 1.0f;
     g_outGainTarget = 1.0f;
+    g_outGainHold = 0;
     g_minQueued   = 0x7fffffff;
     g_underruns   = 0;
     g_wasEmpty    = 0;
@@ -659,8 +664,9 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
     v->id = id;
 
     /* A transition fade left the output gain ramping toward silence; this is new music
-     * that must be audible. Discard the faded queue + restore output gain atomically. */
-    float reviveFrom = (g_out && g_outGainTarget != 1.0f) ? g_outGainTarget : 1.0f;
+     * that must be audible. Discard the faded queue + restore output gain atomically.
+     * EXCEPT under the v33 hold: the pause duck owns the gain — start silent under it. */
+    float reviveFrom = (g_out && g_outGainTarget != 1.0f && !g_outGainHold) ? g_outGainTarget : 1.0f;
     if (reviveFrom != 1.0f) {
         cmm_out_reset_gain(g_out, 1.0f);
         g_outGainTarget = 1.0f;
@@ -930,6 +936,9 @@ CMM_API void cmm_mix_stop(float fade, int closeWhenIdle) {
 CMM_API void cmm_mix_stop_all_now(void) {
     int i;
     mix_lock(&g_lock);
+    /* Defensive hold clear (v33): this is the menu↔game teardown path — a pause hold that
+     * somehow survived to here would leave the NEXT menu Play unable to revive the gain. */
+    g_outGainHold = 0;
     for (i = g_voiceCount - 1; i >= 0; i--) {
         if (g_voices[i]->isEmitter) continue;
         retire_voice(g_voices[i]); free(g_voices[i]); remove_at(i);
@@ -1022,6 +1031,15 @@ CMM_API void cmm_mix_set_output_gain(float target, float seconds) {
     mix_lock(&g_lock);
     g_outGainTarget = target;
     if (g_out) cmm_out_set_gain(g_out, target, seconds > 0.0f ? (int)(seconds * g_busRate) : 0);
+    mix_unlock(&g_lock);
+}
+
+/* v33 — see cmm_decoder.h: suppress cmm_mix_add's output-gain revive while the SP pause
+ * duck owns the gain. Set on the pause edge, cleared on unpause (and defensively by
+ * cmm_mix_start / cmm_mix_stop_all_now). */
+CMM_API void cmm_mix_hold_output(int hold) {
+    mix_lock(&g_lock);
+    g_outGainHold = hold ? 1 : 0;
     mix_unlock(&g_lock);
 }
 

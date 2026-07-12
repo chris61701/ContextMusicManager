@@ -262,11 +262,35 @@ namespace CMM
         {
             lock (_natCommitLock)
             {
-                if (_nativeActiveContext != null)
-                    CMMConfig.D($"[CMM] native: releasing context voice to the radio (was {_nativeActiveContext}).");
+                string ctxName = _nativeActiveContext;
+                if (ctxName != null)
+                    CMMConfig.D($"[CMM] native: releasing context voice to the radio (was {ctxName}).");
                 _nativeActiveContext = null;
                 long vid = Interlocked.Exchange(ref _nativeVoiceId, 0);
-                if (vid != 0) CmmMixer.Instance?.SetVoiceTrackGain(vid, 0f, fade);
+                if (vid != 0)
+                {
+                    // Master-governance handoff continuity: the instant _nativeVoiceId clears,
+                    // PlayOnceStingerActive goes false and the bus master flips from this
+                    // context's volume (× VolumeModifier) to the radio's — which deliberately
+                    // ignores VolumeModifier. The released voice still rides that shared master
+                    // while its gain fades below, so a flip UP re-exposed its tail (repro:
+                    // VolumeModifier=0 → Spawn stinger dead silent, then audibly bleeding in for
+                    // the crossfade tail once the radio's master landed). Rescale the voice's
+                    // gain by old/new master so its audible level is continuous across the flip:
+                    // 0 under a muted modifier, an exact level match otherwise.
+                    float mOld = CMMConfig.GetVolume(inGame, ctxName != null ? (GetContext(ctxName)?.VolumeOverride ?? -1f) : -1f);
+                    float mNew = CMMConfig.GetVolume(inGame, PersonalRadio.MasterVolumeOverride);
+                    if (mNew > 0.0001f && Mathf.Abs(mOld - mNew) > 0.0001f)
+                    {
+                        float g = 1f;
+                        if (ctxName != null && cacheMap.TryGetValue(ctxName, out ContextCache cc)
+                            && cc.playingFile != null)
+                            g = LoudnessStore.GetTrackGain(cc.playingFile);
+                        float levelMatched = Mathf.Clamp(g * (mOld / mNew), 0f, 4f);
+                        CmmMixer.Instance?.SetVoiceTrackGain(vid, levelMatched, 0f);   // snap, then fade from there
+                    }
+                    CmmMixer.Instance?.SetVoiceTrackGain(vid, 0f, fade);
+                }
             }
         }
 

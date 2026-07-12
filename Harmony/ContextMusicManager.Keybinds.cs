@@ -97,15 +97,34 @@ namespace CMM
             // (IsPaused() is forced false in MP and on the main menu — see Patch_GamePause —
             // so this never hides the overlay outside an SP pause.)
             if (inGame && (GameManager.Instance?.IsPaused() ?? false)) return;
+            // The F1 console covers the same corner (and works in MP and on the menu, where
+            // the pause gate above never fires) — same draw-time-only hide while it's open.
+            if (ConsoleIsOpen()) return;
             DrawOverlayBox();
 #if CMM_DEBUG_HUD
             DrawDebugHud();
 #endif
         }
 
+        // True while the F1 command console is open. The window is registered under its
+        // type name on every supported version (A20/A21 set ID = typeof(...).Name, 3.0
+        // passes the literal to its base ctor), so the string form is the one signal that
+        // compiles and works everywhere. Dictionary lookup — cheap enough for OnGUI.
+        private static bool ConsoleIsOpen()
+        {
+            var wm = LocalPlayerUI.primaryUI?.windowManager;
+            return wm != null && wm.IsWindowOpen("GUIWindowConsole");
+        }
+
         private void HandleMusicKeybinds()
         {
             if (!CMMConfig.KeybindsEnabled) return;
+
+            // Typing/scrolling in the F1 console must not drive music keys: PgUp/PgDn
+            // (console scroll) would dial the personal radio, and with the debug config's
+            // bare bindings Home/End while editing a command would toggle combat music or
+            // undo a ban. The overlays are hidden while it's open anyway (OnGUI gate).
+            if (ConsoleIsOpen()) return;
 
             // Cheap modifier gate first — short-circuits almost every frame.
             if (CMMConfig.KeybindRequireCtrl &&

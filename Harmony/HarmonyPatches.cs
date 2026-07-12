@@ -287,6 +287,15 @@ namespace CMM
             // would stay deep-buffered. The idle menu wants the tight, responsive cushion.
             ContextMusicManager._gameIsLoading = false;
             ContextMusicManager._contextStack.Clear();
+            // Retire an in-game vanilla handoff properly instead of leaking the stale flag to
+            // the menu. inGame is already false, so this takes the MENU branch: it fades the
+            // BackgroundMusicMono loops to MUTED — the baseline every menu path expects (the
+            // pause-screen mute in OnGamePauseChanged relies on it too). The menu's own
+            // resolution then decides fresh: vanilla menu music re-enters via ActivateVanilla's
+            // fade-in (which unmutes), CMM menu music leaves the loops muted. A stale
+            // vanillaIsActive skipped BOTH of those paths (SendContextUpdate early-outs on it).
+            if (ContextMusicManager.vanillaIsActive)
+                ContextMusicManager.DeactivateVanilla();
             ContextMusicManager._pendingContext = "Silence";
             ContextMusicManager.ResetVanillaGovernance();   // forget the governed vanilla section + warmup timer
             ScriptHost.Reset();   // clear the Lua script's cross-tick state on world-unload

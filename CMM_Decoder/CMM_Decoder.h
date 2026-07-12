@@ -133,8 +133,11 @@ typedef struct cmm_decoder cmm_decoder;
  *   v32:+ SLOT FLUSH (cmm_mix_emitter_flush_slot → per-slot flag serviced by the callback): discard
  *        a slot's queued dry ring + reset its render state (LPF/color/slews) when a DIFFERENT
  *        station acquires the slot — without it, up to a cushion's worth of the previous station's
- *        audio played through the new station's speaker positions on a steal/identity change. */
-#define CMM_DECODER_ABI 32
+ *        audio played through the new station's speaker positions on a steal/identity change.
+ *   v33:+ OUTPUT-GAIN HOLD (cmm_mix_hold_output) — suppresses cmm_mix_add's output-gain revive
+ *        while the SP pause duck owns the gain, so a voice added mid-pause (music EOF advance,
+ *        radio/emitter start) can no longer un-duck the device through the pause screen. */
+#define CMM_DECODER_ABI 33
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -600,6 +603,15 @@ CMM_API double cmm_mix_remaining(long long id);
 /* Consumer-side output-gain ramp over `seconds` (<=0 snaps) — menu↔game transition fades,
  * heard in real output time regardless of cushion depth (forwards to cmm_out_set_gain). */
 CMM_API void cmm_mix_set_output_gain(float target, float seconds);
+
+/* v33: while hold != 0, cmm_mix_add's output-gain REVIVE is suppressed. The revive exists
+ * for menu-transition fades that park the device silent (new music must wake it); the SP
+ * pause duck uses the SAME gain, so without the hold any voice added mid-pause (music EOF
+ * auto-advance, a radio advance, an emitter station start) snapped the whole device — music
+ * AND emitters — back to full through the pause screen. Managed sets it on the pause-duck
+ * edge and clears it on unpause; cmm_mix_start / cmm_mix_stop_all_now clear it defensively
+ * so a missed edge can never leave the mixer permanently un-revivable. */
+CMM_API void cmm_mix_hold_output(int hold);
 
 /* Proactive deep-cushion flags: deep = world loading (its falling edge snap-flushes tight),
  * extra = post-spawn/teleport grace (drains naturally, no flush → no track teleport). */

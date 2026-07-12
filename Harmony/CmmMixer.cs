@@ -139,6 +139,9 @@ namespace CMM
         internal static extern void cmm_mix_set_output_gain(float target, float seconds);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_hold_output(int hold);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_cushion(int deep, int extra);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -390,6 +393,16 @@ namespace CMM
         public void SetOutputGain(float target, float seconds)
         {
             NativeMix.cmm_mix_set_output_gain(target, seconds);
+        }
+
+        // While held, a voice add no longer revives the output gain (v33). The revive exists
+        // for menu-transition fades that park the device silent; the SP pause duck uses the
+        // SAME gain, so a mid-pause track advance / radio / emitter start used to snap the
+        // whole device back to full through the pause screen. Hold on the pause edge, release
+        // on unpause AFTER the gain target is back at 1 (then adds have nothing to revive).
+        public void HoldOutputGain(bool hold)
+        {
+            NativeMix.cmm_mix_hold_output(hold ? 1 : 0);
         }
 
         // Reverse-fade reclaim: a voice we recently started fading out (a crossfade we're
