@@ -39,7 +39,13 @@ namespace CMM
             "  cmm nativeplay <context> - (experimental) play a track via CMM's own\n" +
             "                             audio output, off Unity's threads\n" +
             "  cmm nativenext           - crossfade to another track in that context\n" +
-            "  cmm nativestop           - stop the native-output player";
+            "  cmm nativestop           - stop the native-output player"
+#if GV_V3
+            + "\n" +
+            "  cmm acsweep <poi|here>   - export a POI's acoustic voxel grid + parity\n" +
+            "                             floods for the offline judge (also: list/status/cancel)"
+#endif
+            ;
 
         // ── Command behavior (the emitted overrides call straight into these) ─────────
         // Public so the runtime-generated type (a separate dynamic assembly) can `call` them.
@@ -74,6 +80,13 @@ namespace CMM
                 Out(ContextMusicManager.NativeDebugStop());
                 return;
             }
+#if GV_V3
+            if (sub == "acsweep")
+            {
+                Out(EmitterSweep.Command(_params));
+                return;
+            }
+#endif
 
             Out("unknown subcommand '" + _params[0] + "'.\n" + Help);
         }

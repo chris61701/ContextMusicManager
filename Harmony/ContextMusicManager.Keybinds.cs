@@ -81,6 +81,8 @@ namespace CMM
             // World-emitter audio layer (experimental, 3.0 only): self-throttled; no-op unless
             // enabled + configured. Plays a diegetic station near detected in-world speakers.
             EmitterAudioLayer.Tick();
+            // Acoustics sweep exporter (`cmm acsweep`): no-op unless a sweep is running.
+            EmitterSweep.Tick();
 #endif
 #if CMM_DEBUG_HUD
             HandleDebugHudToggle();

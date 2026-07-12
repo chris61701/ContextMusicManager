@@ -194,15 +194,23 @@ namespace CMM
                     EmitterRegistry.RefreshSnapshot(w, player.position);
 
                     // Advance the amortized occlusion flood by one time slice per FRAME; when it
-                    // completes, land every culled station's output from the finished field.
+                    // completes, land every culled station's output from the finished field —
+                    // unless it was a ROOM-ONLY flood (field-cache path): its job is just the
+                    // connected-air reverb measure, which FloodStep publishes on completion; the
+                    // station gains came from the cached fields and must not be overwritten.
                     if (_occlPending && EmitterAcoustics.OcclusionStep(w, EmitterAcoustics.AnyDoorAnimating ? DoorFloodBudgetMs : FloodBudgetMs))
-                        FinishOcclusion(player, w);
+                    {
+                        if (_floodRoomOnly) _occlPending = false;
+                        else FinishOcclusion(player, w);
+                    }
+                    // Advance any in-flight per-speaker field build one slice (Phase 2 cache).
+                    if (CMMConfig.WorldEmitterFieldCache) EmitterFieldCache.BuildStep(w);
                 }
             }
 
             // A door toggled since the last tick → collapse the wait; an in-flight flood was built
             // from the PRE-toggle door state — abandon it so the restart samples the swing fresh.
-            if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; }
+            if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; _floodRoomOnly = false; }
             if (Time.realtimeSinceStartup < _nextTick) return;
             _nextTick = Time.realtimeSinceStartup + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
 
@@ -245,10 +253,33 @@ namespace CMM
             World world = GameManager.Instance?.World;
             if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && world != null)
             {
+                // ── PHASE 2 (field cache): sample each speaker's CACHED static field instead of
+                // re-flooding around the moving ear — spatial continuity by construction (the
+                // offline judge measured −83…97% adjacent-cell jumps; tools/CmmAcousticsJudge).
+                // Falls back to the legacy ear-anchored path while fields warm up, and ALWAYS
+                // during a door swing — the tuned mid-swing acoustics live on the legacy path;
+                // fields drop + rebuild once the swing settles (see EmitterFieldCache.Maintain).
+                if (CMMConfig.WorldEmitterFieldCache && !EmitterAcoustics.AnyDoorAnimating &&
+                    TryFieldOcclusion(player, world, audibleR))
+                {
+                    // Keep a listener-anchored ROOM flood running alongside the field samples:
+                    // AirRoomSize follows bends the ray probe can't see, and losing it made caves
+                    // read drier on the field path (user 2026-07-11). Room-ONLY: when it lands,
+                    // only the Air* statics publish — never the station gains (see the stepper).
+                    // An in-flight LEGACY flood is simply demoted to room-only (harmless: same
+                    // field, we just skip its FinishSpeakers).
+                    if (!_occlPending)
+                    {
+                        _occlEar = ListenerWorldPos(player);
+                        EmitterAcoustics.OcclusionBegin(_occlEar, world);
+                        _occlPending = true;
+                    }
+                    _floodRoomOnly = true;
+                }
                 // Routed occlusion = the expensive flood → AMORTIZE. ONE flood serves every audible
                 // station (the field is per-ear; each station's speakers sample it independently in
                 // the finish). If the previous tick's flood is still in flight, let it land first.
-                if (!_occlPending)
+                else if (!_occlPending)
                 {
                     _occlEar = ListenerWorldPos(player);
                     _occlStations.Clear();
@@ -264,6 +295,7 @@ namespace CMM
                     {
                         EmitterAcoustics.OcclusionBegin(_occlEar, world);
                         _occlPending = true;
+                        _floodRoomOnly = false;   // full legacy flood: FinishSpeakers on landing
                         // DOOR RUSH: while a door is mid-swing, try to complete the flood in ONE big
                         // inline slice so the openness change lands THIS frame (door acoustics were
                         // tuned on the synchronous path).
@@ -307,6 +339,57 @@ namespace CMM
                 }
                 PushReverb(player);
             }
+        }
+
+        // ── PHASE 2: occlusion from the per-speaker field cache ─────────────────────────────
+        // Synchronous (sampling static fields is O(points)): request/maintain fields for every
+        // audible station's speakers; if ALL are ready, publish every station from field samples
+        // and return true. Any not-ready field ⇒ false, and the caller runs the legacy amortized
+        // flood this tick (warm-up / post-door rebuild window). The reverb room measure is
+        // listener-anchored by nature, so the field path zeroes AirCellCount — PushReverb then
+        // takes its existing ray-probe fallback instead of a stale legacy flood's room.
+        private static readonly List<Vector3i> _fieldWanted = new List<Vector3i>();
+        private static bool _floodRoomOnly;   // the pending ear flood is for the ROOM measure only
+        private static bool TryFieldOcclusion(EntityPlayerLocal player, World world, float audibleR)
+        {
+            _fieldWanted.Clear();
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                for (int k = 0; k < st.PtCount; k++)
+                    _fieldWanted.Add(new Vector3i(Mathf.FloorToInt(st.Pts[k * 3]),
+                                                  Mathf.FloorToInt(st.Pts[k * 3 + 1]),
+                                                  Mathf.FloorToInt(st.Pts[k * 3 + 2])));
+            }
+            if (_fieldWanted.Count == 0) return false;
+            EmitterFieldCache.Maintain(world, _fieldWanted);
+            for (int i = 0; i < _fieldWanted.Count; i++)
+                if (!EmitterFieldCache.Ready(_fieldWanted[i])) return false;
+
+            Vector3 ear = ListenerWorldPos(player);
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                if (st.PtCount == 0)
+                {
+                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, 0);
+                    RecordPtPush(st, 0);
+                    continue;
+                }
+                if (!EmitterFieldCache.SampleStation(world, ear, st.Pts, st.PtCount, st.PtGain,
+                                                     out float seal, out float solid, out float depth))
+                    return false;   // ready flipped under us — legacy covers this tick
+                st.Seal = seal; st.Solid = solid; st.Depth = depth;
+                PostProcessGains(st);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtCount);
+                RecordPtPush(st, st.PtCount);
+            }
+            // Air*/room measure comes from the room-only ear flood the caller keeps running —
+            // PushReverb blends the last completed flood's connected-air size with the probe.
+            PushReverb(player);
+            return true;
         }
 
         // Land a completed occlusion flood: for EVERY station culled at begin, per-speaker gains +
@@ -872,6 +955,25 @@ namespace CMM
                     depth = (CMMConfig.WorldEmitterOcclusion && st.Depth < 511f)
                         ? st.Depth
                         : (st.NearestDist < float.MaxValue ? st.NearestDist : 0f);
+
+                    // BOUNCE-ENERGY depth ("sound should bounce until it runs out of energy",
+                    // user 2026-07-11): instead of grading the carry by raw route METERS, grade
+                    // it by energy surviving the BOUNCES along that route — bounces ≈ depth /
+                    // mean-free-path (the room's typical wall-to-wall run), each keeping
+                    // `reflect` of the energy. A reflective stone cave barely loses energy per
+                    // bounce ⇒ the carry stays alive around corner after corner; an absorptive
+                    // wood room eats it in a few. Implemented as a WARP of the depth we push, so
+                    // the native curve exp(−1.2·DepthAmt·(d−1)/48) lands on reflect^bounces —
+                    // managed-only, no ABI change. Uses the LISTENER's room reflect/size as a
+                    // proxy for the path's spaces (honest approximation; the route mostly runs
+                    // through the space you're in).
+                    if (CMMConfig.WorldEmitterReverbBounce && CMMConfig.WorldEmitterOcclusion)
+                    {
+                        float mfp = Mathf.Max(4f, roomSize);
+                        float r = Mathf.Clamp(reflect, 0.15f, 0.97f);
+                        float A = Mathf.Max(0.05f, CMMConfig.WorldEmitterReverbDepth);
+                        depth = 1f + 48f * (depth / mfp) * (-Mathf.Log(r)) / (1.2f * A);
+                    }
                 }
                 _revWetSmooth[s] += (carry - _revWetSmooth[s]) * (carry > _revWetSmooth[s] ? aUp : aDn);
                 _revWets[s] = _revWetSmooth[s];

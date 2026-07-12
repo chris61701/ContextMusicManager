@@ -114,6 +114,21 @@
        dial toward 1 for reverb-forward, toward 24 for routing-forward. Hot-reloads live. -->
   <WorldEmitterPathRouting>true</WorldEmitterPathRouting>
   <WorldEmitterFloodRadius>32</WorldEmitterFloodRadius>
+  <!-- FIELD CACHE ("Phase 2"): occlusion comes from one CACHED sound field per speaker (built once,
+       rebuilt only when doors/blocks change) instead of re-computing around you as you move — walking
+       past walls and floors now fades smoothly instead of stepping. Door swings and the first seconds
+       near a newly-met speaker still use the classic path while its field builds. FieldRadius = how far
+       (blocks) each speaker's field reaches (16-48; bigger = smoother far away, ~3.6 MB per speaker at
+       48). FieldRefresh = seconds between quiet rebuilds (catches world edits). All hot-reload;
+       FieldCache false = exact pre-Phase-2 behavior. -->
+  <WorldEmitterFieldCache>true</WorldEmitterFieldCache>
+  <WorldEmitterFieldRadius>48</WorldEmitterFieldRadius>
+  <WorldEmitterFieldRefresh>60</WorldEmitterFieldRefresh>
+  <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's
+       wall bounces (reflective caves ring around corner after corner until the sound truly runs out
+       of energy; absorptive wood rooms still eat it fast) instead of by raw route meters. Hot;
+       false = the old distance-graded carry. -->
+  <WorldEmitterReverbBounce>true</WorldEmitterReverbBounce>
   <!-- Directional occlusion: when the straight line to a speaker runs through solid rock, the sound is
        re-aimed to arrive from the OPEN ROUTE (down the corridor) instead of straight through the wall.
        Only the direction changes; loudness/muffle are unchanged. Needs PathRouting on. Hot-reloads. -->

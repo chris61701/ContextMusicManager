@@ -115,6 +115,10 @@ namespace CMM
                 CMMConfig.WorldEmitterOcclusionFadeRate     = ReadFloat(root, "WorldEmitterOcclusionFadeRate",     CMMConfig.WorldEmitterOcclusionFadeRate);
                 CMMConfig.WorldEmitterPathRouting       = ReadBool (root, "WorldEmitterPathRouting",       CMMConfig.WorldEmitterPathRouting);
                 CMMConfig.WorldEmitterFloodRadius       = ReadInt  (root, "WorldEmitterFloodRadius",       CMMConfig.WorldEmitterFloodRadius);
+                CMMConfig.WorldEmitterFieldCache        = ReadBool (root, "WorldEmitterFieldCache",        CMMConfig.WorldEmitterFieldCache);
+                CMMConfig.WorldEmitterFieldRadius       = ReadInt  (root, "WorldEmitterFieldRadius",       CMMConfig.WorldEmitterFieldRadius);
+                CMMConfig.WorldEmitterFieldRefresh      = ReadFloat(root, "WorldEmitterFieldRefresh",      CMMConfig.WorldEmitterFieldRefresh);
+                CMMConfig.WorldEmitterReverbBounce      = ReadBool (root, "WorldEmitterReverbBounce",      CMMConfig.WorldEmitterReverbBounce);
                 CMMConfig.WorldEmitterOcclusionDirectional = ReadBool (root, "WorldEmitterOcclusionDirectional", CMMConfig.WorldEmitterOcclusionDirectional);
                 CMMConfig.WorldEmitterReverbEnabled     = ReadBool (root, "WorldEmitterReverbEnabled",     CMMConfig.WorldEmitterReverbEnabled);
                 CMMConfig.WorldEmitterReverbWet         = ReadFloat(root, "WorldEmitterReverbWet",         CMMConfig.WorldEmitterReverbWet);

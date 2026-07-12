@@ -377,3 +377,9 @@ FodyWeavers.xsd
 temp*Config/
 temp*ModInfo.xml
 UpgradeLog.htm
+
+# Acoustics judge data: acsweep game-truth dumps (regenerable via `cmm acsweep`)
+# and generated viewer slice HTMLs. ~90 MB, not source.
+/tools/CmmAcousticsJudge/dumps/
+/tools/CmmAcousticsJudge/dumps-v2/
+/tools/CmmAcousticsJudge/viewer/

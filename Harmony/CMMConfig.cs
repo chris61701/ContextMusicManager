@@ -149,6 +149,23 @@ namespace CMM
         // reverb blooms. Hot-reloadable: dial 1 (reverb-forward) ↔ 24 (routing-forward) live to taste.
         public static bool   WorldEmitterPathRouting = true;
         public static int    WorldEmitterFloodRadius = 8;
+        // FIELD CACHE ("Phase 2", 2026-07-11): occlusion from ONE CACHED cost field PER SPEAKER
+        // (seeded at the static speaker, box filled — no node budget) instead of re-flooding
+        // around the moving ear each tick. The listener samples a stationary field ⇒ walking is
+        // spatially continuous (offline judge: −83…97% adjacent-cell >12 dB jumps vs the ear-
+        // anchored flood). Legacy path still serves door mid-swings (its tuned per-tick openness
+        // sampling), the warm-up window while fields build, and stays the architecture for future
+        // MOVING sources. FieldRadius = field half-extent in blocks (16–48; 48 ≈ 3.6 MB/speaker);
+        // FieldRefresh = seconds between quiet rebuilds (catches block edits; door toggles force
+        // an immediate rebuild). All hot-reloadable; toggle off ⇒ pure legacy behavior.
+        public static bool   WorldEmitterFieldCache  = true;
+        public static int    WorldEmitterFieldRadius = 48;
+        public static float  WorldEmitterFieldRefresh = 60f;
+        // Bounce-energy reverb carry: grade the next-room/around-corner reverb by the ENERGY
+        // surviving the route's wall BOUNCES (route length ÷ room mean-free-path, ×reflectivity
+        // per bounce) instead of raw meters — reflective caves ring around corners until the
+        // energy is truly spent; absorptive rooms still die fast. Hot; false = distance grading.
+        public static bool   WorldEmitterReverbBounce = true;
         // DIRECTIONAL occlusion: when the direct line to a speaker runs through solid rock, re-aim the
         // virtual source to the direction the sound actually ARRIVES from — the air route the flood found
         // (down the corridor), not the straight-through-the-wall bearing. Distance/attenuation are

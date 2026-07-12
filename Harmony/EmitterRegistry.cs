@@ -435,6 +435,16 @@ namespace CMM
             return true;
         }
 
+        // Sweep support: is this block type one of the world-emitter target blocks? Resolves the
+        // name→id table on first use (false until the block table exists). Lets the acoustics sweep
+        // find real speakers in a POI volume without duplicating the target list.
+        internal static bool TryGetTargetName(int blockType, out string name)
+        {
+            name = null;
+            if (!EnsureTargetIds()) return false;
+            return _targetIds.TryGetValue(blockType, out name);
+        }
+
         // Block id for a resolved emitter name (reverse of _targetIds; the set is tiny).
         private static int BlockIdFor(string name)
         {

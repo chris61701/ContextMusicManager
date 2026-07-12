@@ -338,7 +338,8 @@ namespace CMM
         // `gate` (out) = the SOLID hard-stop factor 0..1 (0 = open air / detour only, 1 = sealed by material).
         // Reused by the reverb to decide whether reflections carry (air path) or are blocked (walled).
         private const float RefRangeBlocks = 30f;   // the range all absolute occlusion knobs are tuned at
-        private static float ShapeOcclusion(float rawExtra, float solid, float solidGate, float range, out float gate)
+        // internal: EmitterFieldCache shapes its field-sampled occlusion through the SAME curves.
+        internal static float ShapeOcclusion(float rawExtra, float solid, float solidGate, float range, out float gate)
         {
             float k = range / RefRangeBlocks;
             if (k < 0.05f) k = 0.05f;
@@ -1357,6 +1358,30 @@ namespace CMM
             else                                                                              r = 0.6f;
             _reflectCache[cat] = r;
             return r;
+        }
+
+        // ── Sweep/debug accessors (EmitterAcousticsSweep only) ──────────────────────────────────────
+        // The acoustics sweep exporter needs the model's raw ingredients — per-cell loss, the settled
+        // flood field, the cost quantisation — to write game-truth dumps the offline judge replays.
+        // Read-only views; nothing here changes model behaviour.
+        internal static bool FloodInProgress => _floodRunning;
+        internal static int  DebugCostScale  => CostScale;
+
+        internal static float DebugCellLoss(BlockValue bv, World world, int x, int y, int z)
+            => CellLoss(bv, world, x, y, z);
+
+        // Enumerate the COMPLETED flood field (call right after a synchronous ComputeOcclusion; the
+        // buffers stay valid until the next FloodBegin). Emits world x,y,z + the SCALED cost / solid-
+        // only cost exactly as the field holds them (÷ CostScale for blocks).
+        internal static void DebugExportFlood(System.Action<int, int, int, int, int> perCell)
+        {
+            for (int i = 0; i < _touchCount; i++)
+            {
+                int idx = _touched[i];
+                if (_cost[idx] == Inf) continue;
+                int lz = idx / Dim2, rem = idx - lz * Dim2, ly = rem / Dim, lx = rem - ly * Dim;
+                perCell(lx + _fMinX, ly + _fMinY, lz + _fMinZ, _cost[idx], _wallCost[idx]);
+            }
         }
 
         // Map the room estimate → reverb params (all 0..1). wet: how much reverb — enclosed + reflective
