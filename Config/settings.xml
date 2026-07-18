@@ -45,6 +45,50 @@
        but slightly more file headers read when joining a station. Everyone in an MP world should
        use the same value — it shapes the shared broadcast, like the station folders do. -->
   <RadioAnchorSeconds>3600</RadioAnchorSeconds>
+  <!-- Personal-radio UI sounds (synthesized in the native mixer — no audio files): a static hash
+       while dialing between / joining stations, a click when the radio powers on, a clunk when it
+       powers off (also plays when the radio powers itself off because every station was deleted).
+       Volume is 0..1 before the music master — the sounds scale with the radio itself. Both
+       hot-reload. -->
+  <RadioSfxEnabled>true</RadioSfxEnabled>
+  <RadioSfxVolume>0.5</RadioSfxVolume>
+  <!-- Tuning-static character. ALL hot-reload and take effect on the very next ping — even
+       mid-hash — so dial between stations while editing and hear each change immediately.
+         StaticVolume  : the static's own level 0..1; -1 = inherit RadioSfxVolume (clicks always
+                         use RadioSfxVolume, so you can run quiet static under audible clicks).
+         StaticLowHz   : low cut (50..4000). Lower = fuller/warmer body; higher = thin AM hiss.
+         StaticHighHz  : top cap (400..12000, kept above the low cut). Higher = brighter hiss;
+                         lower = dull rumble.
+         StaticCrackle : 0..1 sputter depth. 0 = smooth "shhh"; 1 = full pops-and-sputter radio
+                         crackle (random dropouts a few ms to ~30 ms long). -->
+  <RadioStaticVolume>-1</RadioStaticVolume>
+  <RadioStaticLowHz>350</RadioStaticLowHz>
+  <RadioStaticHighHz>2000</RadioStaticHighHz>
+  <RadioStaticCrackle>0.8</RadioStaticCrackle>
+  <!-- Power-click character, one set per click (all hot-reload — heard on the next dial):
+         Hz       : tone cap (300..10000) — higher = bright tick, lower = dull thud.
+         Snap     : 0..1 — balance of the bright noise ping vs the low thump. 1 = all snap
+                    (a sharp tick), 0 = all thud (a soft pop).
+         LengthMs : the thump's decay (5..120); the whole click lasts about 3.3× this.
+         Body     : 0..1 — the shell-knock resonator, the "tok" of a real dial body. 0 = off.
+         BodyHz   : the knock's ring pitch (200..3000; plastic ~900-1400, bakelite ~500-800).
+         Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
+                    release then the stop landing — the mechanical "cl-ick"). 0 = single.
+         Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. -->
+  <RadioClickOnHz>3200</RadioClickOnHz>
+  <RadioClickOnSnap>0.7</RadioClickOnSnap>
+  <RadioClickOnLengthMs>18</RadioClickOnLengthMs>
+  <RadioClickOnBody>0.4</RadioClickOnBody>
+  <RadioClickOnBodyHz>1000</RadioClickOnBodyHz>
+  <RadioClickOnDouble>0.35</RadioClickOnDouble>
+  <RadioClickOnVolume>-1</RadioClickOnVolume>
+  <RadioClickOffHz>1300</RadioClickOffHz>
+  <RadioClickOffSnap>0.45</RadioClickOffSnap>
+  <RadioClickOffLengthMs>28</RadioClickOffLengthMs>
+  <RadioClickOffBody>0.4</RadioClickOffBody>
+  <RadioClickOffBodyHz>750</RadioClickOffBodyHz>
+  <RadioClickOffDouble>0.2</RadioClickOffDouble>
+  <RadioClickOffVolume>-1</RadioClickOffVolume>
   <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
        MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;
                     beyond it the volume fades to silence at Range.
@@ -183,6 +227,13 @@
   <WorldEmitterColorDrive>0</WorldEmitterColorDrive>
   <WorldEmitterColorStatic>0</WorldEmitterColorStatic>
   <WorldEmitterColorVoice>0</WorldEmitterColorVoice>
+  <!-- HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
+       speakers keep the set above). A ham is a small communications speaker, so it defaults ON —
+       voiced narrow, driven slightly, a whisper of static ("slightly distorted" is its character).
+       Set all three to 0 for a clean ham. All hot-reload. -->
+  <WorldEmitterHamColorDrive>0.3</WorldEmitterHamColorDrive>
+  <WorldEmitterHamColorStatic>0.04</WorldEmitterHamColorStatic>
+  <WorldEmitterHamColorVoice>0.65</WorldEmitterHamColorVoice>
 
   <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
        When enabled, each track is measured once (integrated LUFS) and played back

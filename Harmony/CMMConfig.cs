@@ -97,6 +97,45 @@ namespace CMM
         // opens, pool-size independent). Longer = rarer re-anchor jumps, slightly costlier joins.
         // MP clients must share the value (it shapes the schedule, like the station folders do).
         public static float  RadioAnchorSeconds  = 3600f;
+        // Personal-radio UI sounds (synthesized natively — no audio assets): a tuning static hash
+        // while dialing / joining a station, a click on power-on, a clunk on power-off (also
+        // played when the radio powers itself off because every station was deleted). Volume is
+        // pre-master 0..1 (the sounds ride the music master exactly like the radio voice).
+        public static bool   RadioSfxEnabled = true;
+        public static float  RadioSfxVolume  = 0.5f;
+        // Tuning-static character (all hot-reload — heard on the very next ping, even mid-hash,
+        // so you can dial between stations while editing to taste):
+        //   StaticVolume  = the static's OWN level; -1 = inherit RadioSfxVolume (clicks keep that).
+        //   StaticLowHz   = low cut — lower = fuller/warmer body, higher = thinner.
+        //   StaticHighHz  = top cap — higher = brighter hiss, lower = duller rumble.
+        //   StaticCrackle = 0..1 sputter depth — 0 = smooth "shhh", 1 = full radio crackle.
+        public static float  RadioStaticVolume  = -1f;
+        public static float  RadioStaticLowHz   = 350f;
+        public static float  RadioStaticHighHz  = 2000f;
+        public static float  RadioStaticCrackle = 0.8f;
+        // Power-click character, one set per click (all hot-reload — heard on the next dial):
+        //   Hz       = tone cap — higher = bright tick, lower = dull thud.
+        //   Snap     = 0..1 balance of the bright noise ping vs the low thump (1 = all snap).
+        //   LengthMs = the thump's decay; the whole click lasts ~3.3× this.
+        //   Body     = 0..1 mix of the shell-knock resonator — the "tok" of a real dial body.
+        //   BodyHz   = the knock's ring pitch (plastic ~900-1400, wood/bakelite ~500-800).
+        //   Double   = 0..1 level of a second micro-impact ~12ms after the first (the detent's
+        //              spring release then the stop landing — the mechanical "cl-ick"; 0 = single).
+        //   Volume   = that click's own level; -1 = inherit RadioSfxVolume.
+        public static float  RadioClickOnHz        = 3200f;
+        public static float  RadioClickOnSnap      = 0.7f;
+        public static float  RadioClickOnLengthMs  = 18f;
+        public static float  RadioClickOnBody      = 0.4f;
+        public static float  RadioClickOnBodyHz    = 1000f;
+        public static float  RadioClickOnDouble    = 0.35f;
+        public static float  RadioClickOnVolume    = -1f;
+        public static float  RadioClickOffHz       = 1300f;
+        public static float  RadioClickOffSnap     = 0.45f;
+        public static float  RadioClickOffLengthMs = 28f;
+        public static float  RadioClickOffBody     = 0.4f;
+        public static float  RadioClickOffBodyHz   = 750f;
+        public static float  RadioClickOffDouble   = 0.2f;
+        public static float  RadioClickOffVolume   = -1f;
         // ── Spatial curve (live-tunable; pushed to the native spatializer every tick) ──────────────
         // MinDistance = full-volume plateau radius (move freely inside it, level flat); past it the
         // level fades to silence at Range. Falloff = fade steepness (1 = straight amplitude ramp, >1
@@ -252,6 +291,13 @@ namespace CMM
         public static float  WorldEmitterColorDrive  = 0f;
         public static float  WorldEmitterColorStatic = 0f;
         public static float  WorldEmitterColorVoice  = 0f;
+        // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead
+        // of the speaker set above, so a ham always reads as a small communications speaker: voiced
+        // narrow, driven slightly, a whisper of static. ON by default ("slightly distorted" is the
+        // ham's character, not a tuning option); hot-reloads like the speaker set.
+        public static float  WorldEmitterHamColorDrive  = 0.3f;
+        public static float  WorldEmitterHamColorStatic = 0.04f;
+        public static float  WorldEmitterHamColorVoice  = 0.65f;
 
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track

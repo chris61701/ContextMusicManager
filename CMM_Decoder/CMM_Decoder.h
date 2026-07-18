@@ -136,8 +136,29 @@ typedef struct cmm_decoder cmm_decoder;
  *        audio played through the new station's speaker positions on a steal/identity change.
  *   v33:+ OUTPUT-GAIN HOLD (cmm_mix_hold_output) — suppresses cmm_mix_add's output-gain revive
  *        while the SP pause duck owns the gain, so a voice added mid-pause (music EOF advance,
- *        radio/emitter start) can no longer un-duck the device through the pause screen. */
-#define CMM_DECODER_ABI 33
+ *        radio/emitter start) can no longer un-duck the device through the pause screen.
+ *   v34:+ PER-POINT RENDER FLAGS + PER-CLASS COLORATION — cmm_mix_set_emitter_points gains a
+ *        per-point `flags` array (bit0 = HAM class; bits 1-2 reserved for the stereo-pair channel
+ *        split). Each class (speaker/ham) is an independently colored + low-passed signal within
+ *        its slot; cmm_mix_set_emitter_color gains the ham set's drive/static/voice so a radioHam
+ *        always sounds like a small communications speaker while shelf speakers stay clean. The
+ *        carry reverb feeds the DOMINANT (loudest) class's signal.
+ *   v35:+ RADIO UI SFX (cmm_mix_play_sfx) — synthesized one-shots (tuning static burst, power
+ *        on/off clicks) rendered into the music bus outside the voice list, so the crossfade/
+ *        stinger/eviction machinery never touches them and no audio assets ship.
+ *   v36:  KEEPALIVE STATIC + cmm_mix_stop_sfx — a static ping while one is live EXTENDS the hash
+ *        (one seamless noise however long the station join takes; overlapping one-shot bursts
+ *        audibly double-fired), and stop_sfx releases it (~90ms) the moment the voice lands.
+ *   v37:+ TUNEABLE STATIC (cmm_mix_set_static_tone) — band edges (Hz) + CRACKLE depth (sample-
+ *        and-hold amplitude sputter; 0 = smooth hiss) captured at every ping, so settings.xml
+ *        edits are heard mid-hash while dialing.
+ *   v38:+ TUNEABLE CLICKS (cmm_mix_set_click_tone) — per-click tone cap Hz, SNAP (bright ping vs
+ *        low thump balance) and length ms for the power-on/off clicks, captured per click.
+ *   v39:  DIAL-DETENT CLICKS — cmm_mix_set_click_tone gains per-click BODY (a damped two-pole
+ *        resonator at BodyHz: the knock of the dial's shell) and DOUBLE (a second micro-impact
+ *        ~12ms after the first: the detent's spring release then the stop landing). Body/Double
+ *        at 0 reproduce the v38 click exactly. */
+#define CMM_DECODER_ABI 39
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -394,10 +415,11 @@ CMM_API int cmm_out_drain(cmm_out* o, int frames);
 int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames);
 
 /* Relay one SLOT's live spatial state: `count` speaker positions (interleaved xyz) with per-speaker
- * occlusion virtual distances. count 0 = this slot inaudible this block (residual mono discarded).
+ * occlusion virtual distances and per-speaker render flags (v34: bit0 = ham class; NULL = all 0).
+ * count 0 = this slot inaudible this block (residual mono discarded).
  * The listener basis + curve tuning are GLOBAL (shared by every slot). Lock-free. */
 void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, const float* lisRight3,
-                                 const float* pts, const float* gains, int count,
+                                 const float* pts, const float* gains, const int* flags, int count,
                                  float minDist, float maxDist, float falloffExp, float muffle,
                                  float stereoWidth);
 
@@ -409,8 +431,10 @@ void cmm_out_set_emitter_reverb(cmm_out* o, const float* wets, const float* dept
                                 float room, float damp, float rangeMult, float pan,
                                 float depthAmt, float localWet);
 
-/* Relay the live radio-coloration params (v26). All 0..1; all 0 = clean bypass. Lock-free. */
-void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice);
+/* Relay the live radio-coloration params (v26; v34 adds the HAM class's own set). All 0..1;
+ * all 0 = clean bypass. Lock-free. */
+void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice,
+                               float hamDrive, float hamStatic, float hamVoice);
 
 /* Request a full emitter acoustic-state reset (v30): reverb tails, LPF/pan/mix slews, per-slot
  * smooth state — serviced by the audio callback before its next block. Called when a NEW station
@@ -530,8 +554,11 @@ CMM_API void cmm_mix_set_emitter_pos(long long id, float x, float y, float z);
 /* v18/v19 — set the FULL set of speaker positions playing this station: `xyz` holds `count`
  * interleaved x,y,z triples (clamped to 8), `gains` holds `count` per-speaker gains (occlusion:
  * 1=clear, <1=muffled; NULL = all clear). The render sums each point's pan+attenuation×gain so every
- * speaker is heard at once from the one decode. count<=0/xyz NULL silences until the next update. */
-CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains, int count);
+ * speaker is heard at once from the one decode. count<=0/xyz NULL silences until the next update.
+ * v34: `flags` holds `count` per-speaker render flags — bit0 = HAM class (that point's signal gets
+ * the ham coloration set); bits 1-2 reserved for the stereo-pair channel split. NULL = all speaker. */
+CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains,
+                                        const int* flags, int count);
 
 /* v21 — set the LIVE spatial-curve tuning applied by the output spatializer, so it can be dialled
  * in-game from config without a rebuild. minDist = full-volume plateau radius; maxDist = audible
@@ -569,12 +596,45 @@ CMM_API void cmm_mix_set_emitter_reverb(const float* wets, const float* depths,
  * ~250 Hz, no highs above ~4 kHz). Applied to the emitter mono BEFORE the distance low-pass and the
  * reverb feed, so distance muffle, occlusion, pan and reflections all act on the colored signal — the
  * static hisses from the radio's position like everything else. All 0 = exact bypass. Lock-free;
- * call every tick. Applies to the single shared station. */
-CMM_API void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice);
+ * call every tick.
+ * v34: the ham* trio is the HAM class's own set (same semantics) — per-point flags decide which set
+ * a speaker's signal gets, so a radioHam can stay slightly distorted while shelf speakers are clean. */
+CMM_API void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice,
+                                       float hamDrive, float hamStatic, float hamVoice);
 
 /* v24 — set the EMITTER (world-radio) master volume, separate from the music master. Feed the game's
  * music slider × the Radio context's own volume. Clamped to >= 0. Lock-free; call every tick. */
 CMM_API void cmm_mix_set_emitter_master(float vol);
+
+/* v35 — fire one synthesized radio-UI sound: kind 1 = tuning static (v36: KEEPALIVE — ping at any
+ * rate ≥ ~2 Hz to sustain one seamless band-passed hash; it releases ~0.4s after the pings stop,
+ * or immediately via cmm_mix_stop_sfx), 2 = power-on click, 3 = power-off clunk. `gain` 0..1,
+ * applied pre-master (the SFX ride the music master exactly like the radio voice they decorate).
+ * Ensures the output device like cmm_mix_add; never touches the output gain (a click during the
+ * SP pause duck stays ducked). Fixed 4-slot pool, oldest stolen. */
+CMM_API void cmm_mix_play_sfx(int kind, float gain);
+
+/* v36 — release every live SFX of `kind` now (its release ramp runs, ~90ms for the static).
+ * Call when the sound's REASON ends — e.g. the dialed station's voice just landed. */
+CMM_API void cmm_mix_stop_sfx(int kind);
+
+/* v37 — set the tuning static's TONE: lowHz = low cut (thin ↔ full-bodied; clamped 50..4000),
+ * highHz = top cap (muffled ↔ bright hiss; clamped 400..12000, always above the low cut),
+ * crackle = 0..1 sputter depth (0 = smooth hiss, 1 = full radio crackle). Captured at every
+ * ping — including keepalive extensions — so config edits are heard live mid-hash. */
+CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle);
+
+/* v38/v39 — set the power-click TONES, both kinds at once. Per kind: `hz` = tone cap (bright
+ * tick ↔ dull thud; clamped 300..10000), `snap` = 0..1 bright-noise-ping vs low-thump balance
+ * (1 = all snap, 0 = all thud), `lenMs` = the thump's decay in ms (clamped 5..120; the ping
+ * decays 4× faster, the whole click runs ~3.3× this), `body` = 0..1 mix of the shell-knock
+ * resonator (v39), `bodyHz` = its ring pitch (clamped 200..3000; the "tok" of the dial body),
+ * `dbl` = 0..1 level of the second detent micro-impact ~12ms after the first (0 = single).
+ * Captured when a click fires, so config edits are heard on the next dial. */
+CMM_API void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
+                                    float onBody, float onBodyHz, float onDouble,
+                                    float offHz, float offSnap, float offLenMs,
+                                    float offBody, float offBodyHz, float offDouble);
 
 /* Fade ALL voices out over `fade`. closeWhenIdle!=0 closes the device once silent;
  * pass 0 to keep it open for a hand-off (e.g. a menu→game fade into the spawn stinger). */

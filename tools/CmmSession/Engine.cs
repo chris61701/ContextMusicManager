@@ -124,6 +124,9 @@ namespace CMM
             Add("Ambient_Wasteland",         "ambient/wasteland",           "Ambient",                   priority:11);
             Add("Ambient_Night",             "ambient/_night",              "Stack",                     priority:11);
             Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10);
+            // Inert carrier for the world-emitter/personal radio (source/fades/volume);
+            // never activated by the resolver — mirrored so the table count matches.
+            Add("Radio",                     "Radio",                      "Stack",                     priority:10, volume:0.5f);
             Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0);
             Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:-1);
             Add("Menu",     "menu", "Vanilla", resume:false, stale:0, cool:5, fadeintime:2, bypass:true, priority:0);

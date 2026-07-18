@@ -89,6 +89,10 @@ struct cmm_out {
         volatile int   ptCount;     /* speakers audible now (0 = this slot silent this block) */
         volatile float pts[CMM_MAX_EMIT_PTS * 3];
         volatile float gains[CMM_MAX_EMIT_PTS];   /* per-speaker occlusion VIRTUAL DISTANCE (extra blocks; 0 = clear) */
+        volatile int   ptFlags[CMM_MAX_EMIT_PTS]; /* v34 per-point render flags: bit0 = HAM CLASS (small
+                                     * communications speaker — gets the ham coloration set instead of the
+                                     * speaker set). Bits 1-2 reserved for the stereo-pair channel split
+                                     * (0 = mono, 1 = left, 2 = right — not rendered yet). */
         float ptsSmooth[CMM_MAX_EMIT_PTS * 3]; /* per-point WORLD POSITION slewed at audio rate. Directional
                                      * occlusion re-aims a speaker to its air-route bearing; that target can flip
                                      * in one 4Hz tick when the line-of-sight opens/closes around a corner. Panning
@@ -100,16 +104,20 @@ struct cmm_out {
                                      * smooth state from the target instead of gliding from whatever stale
                                      * value the previous voice/point-set left behind (the "burst of audio
                                      * at the wrong level when a radio starts / re-enters range" bug). */
-        /* Distance/occlusion low-pass state — callback-thread only. lpf is the one-pole's running
-         * mono output; lpfCoef its live coefficient (1 = open/bypass, small = muffled), slewed to
-         * avoid zipper clicks. The spectral distance cue: far & occluded goes DULL, not just quiet. */
-        float lpf;
-        float lpfCoef;
-        /* Radio coloration filter state (per slot — each station is an independent stream). The
-         * coloration PARAMS are global (emCol*); the cutoff coefficients too. */
-        float colLo;                /* one-pole low tracker (~250 Hz) — subtracted for the voicing HPF */
-        float colHi;                /* one-pole low-pass (~4.2 kHz) — the voicing's top cap */
-        unsigned int colRng;        /* LCG state for the static hiss (seeded per slot) */
+        /* Distance/occlusion low-pass state — callback-thread only, PER CLASS (v34: index 0 =
+         * speaker points, 1 = ham points; a station can voice through both at once and each class
+         * is an independently colored signal). lpf is the one-pole's running mono output; lpfCoef
+         * its live coefficient (1 = open/bypass, small = muffled), slewed to avoid zipper clicks.
+         * The spectral distance cue: far & occluded goes DULL, not just quiet. */
+        float lpf[2];
+        float lpfCoef[2];
+        /* Radio coloration filter state (per slot per CLASS — each station is an independent
+         * stream, and its ham points are colored separately from its speaker points). The
+         * coloration PARAMS are global (emCol* for speakers, emColHam* for hams); cutoffs too. */
+        float colLo[2];             /* one-pole low tracker (~250 Hz) — subtracted for the voicing HPF */
+        float colHi[2];             /* one-pole low-pass (~4.2 kHz) — the voicing's top cap */
+        unsigned int colRng;        /* LCG state for the static hiss (seeded per slot; shared by both
+                                     * classes — they draw different samples, so no correlation) */
         /* Per-slot CARRY reverb send (v31): the managed side's seal-gated next-room level for THIS
          * station, and its air-route depth. The send is applied INPUT-side into the one shared carry
          * reverb (input scaling ≡ the old output wet gain for one station — the reverb is linear —
@@ -143,6 +151,12 @@ struct cmm_out {
     volatile float emColDrive;    /* soft-clip amount 0..1 (0 = clean) */
     volatile float emColStatic;   /* static-hiss bed level 0..1 (0 = none) */
     volatile float emColVoice;    /* band-pass voicing blend 0..1 (0 = full-range, 1 = small speaker) */
+    /* v34 — the HAM class's own coloration set (a ham radio is a small communications speaker:
+     * voiced narrower + driven harder than the shelf speakers, always slightly distorted). Same
+     * semantics as the three above; per-point flags decide which set a point's signal gets. */
+    volatile float emColHamDrive;
+    volatile float emColHamStatic;
+    volatile float emColHamVoice;
     float emColLoCoef, emColHiCoef;  /* fixed cutoffs, computed from the device rate at open */
 
     /* Reverb (room reflections) — ONE shared pair of buses for every slot (reverb is a property of
@@ -206,9 +220,13 @@ struct cmm_out {
 #define CMM_EMIT_REV_DEPTH_REF 48.0f
 /* Frames per sample-loop chunk (matches the slot scratch buf size). */
 #define CMM_EMIT_CHUNK 512
-static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float* gL, float* gR, float* bright, float* wet, float* wetPan)
+/* v34: gains/brightness are accumulated PER CLASS (index 0 = speaker points, 1 = ham points —
+ * ptFlags bit0) since each class renders an independently colored signal. `domClass` returns the
+ * class of the single loudest point (the carry reverb feeds that class's signal — "the sound
+ * you're mostly hearing"); wet level/pan stay slot-level (the room doesn't care which class). */
+static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2], float gR[2], float bright[2], float* wet, float* wetPan, int* domClass)
 {
-    float totalL = 0.0f, totalR = 0.0f;
+    float totalL[2] = { 0.0f, 0.0f }, totalR[2] = { 0.0f, 0.0f };
     int count = sl->ptCount, p;
     if (count > CMM_MAX_EMIT_PTS) count = CMM_MAX_EMIT_PTS;
     float lx = o->emLisPos[0], ly = o->emLisPos[1], lz = o->emLisPos[2];
@@ -216,7 +234,9 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float* gL, f
     float mn = o->emMinDist, mx = o->emMaxDist, span = mx - mn;
     if (span < 0.0001f) span = 0.0001f;
     float fexp = o->emFalloffExp, muffle = o->emMuffle;
-    float bestContrib = -1.0f, bestBright = 1.0f, bestWetAtt = 0.0f, bestWetPan = 0.0f;
+    float bestContrib[2] = { -1.0f, -1.0f }, bestBright[2] = { 1.0f, 1.0f };
+    float bestContribAll = -1.0f, bestWetAtt = 0.0f, bestWetPan = 0.0f;
+    int   dom = 0;
     for (p = 0; p < count; p++) {
         /* Slew this speaker's WORLD position toward the relayed target, then pan/attenuate from the SLEWED
          * position — so a redirected bearing (directional occlusion routing the sound around a corner) EASES
@@ -288,22 +308,25 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float* gL, f
 
         float cL = cosf(theta) * att;
         float cR = sinf(theta) * att;
-        totalL += cL;
-        totalR += cR;
+        int cls = sl->ptFlags[p] & 1;   /* v34: 0 = speaker, 1 = ham — independent colored signals */
+        totalL[cls] += cL;
+        totalR[cls] += cR;
 
-        /* Track the loudest speaker; its EFFECTIVE distance sets the tone colour (far/occluded = dull).
-         * The tone cue is measured against a FIXED reference distance (CMM_EMIT_MUFFLE_REF blocks), NOT
-         * the full Range: normalizing to Range meant a large Range (e.g. 100) diluted muffle to nothing
-         * at any audible distance, and diluted occlusion's virtual distance too. With an absolute ref,
-         * the tone is fully dulled (per Muffle strength) by ~ref blocks of effective distance regardless
-         * of how far the volume carries — and a wall's added virtual distance now audibly dulls. */
+        /* Track the loudest speaker PER CLASS; its EFFECTIVE distance sets that class's tone colour
+         * (far/occluded = dull). The tone cue is measured against a FIXED reference distance
+         * (CMM_EMIT_MUFFLE_REF blocks), NOT the full Range: normalizing to Range meant a large Range
+         * (e.g. 100) diluted muffle to nothing at any audible distance, and diluted occlusion's
+         * virtual distance too. With an absolute ref, the tone is fully dulled (per Muffle strength)
+         * by ~ref blocks of effective distance regardless of how far the volume carries — and a
+         * wall's added virtual distance now audibly dulls. */
         float contrib = cL * cL + cR * cR;
-        if (contrib > bestContrib) {
-            bestContrib = contrib;
+        if (contrib > bestContrib[cls]) {
+            bestContrib[cls] = contrib;
             float nd = (dEff - mn) / CMM_EMIT_MUFFLE_REF;
             if (nd < 0.0f) nd = 0.0f; else if (nd > 1.0f) nd = 1.0f;
-            bestBright = 1.0f - muffle * nd;             /* farther / more-occluded ⇒ duller (one curve) */
+            bestBright[cls] = 1.0f - muffle * nd;        /* farther / more-occluded ⇒ duller (one curve) */
         }
+        if (contrib > bestContribAll) { bestContribAll = contrib; dom = cls; }
 
         /* Wet (reverb) level, tracked as the MAX over speakers = the NEAREST reverberant one. Kept SEPARATE
          * from the dry `contrib` pick on purpose: past the dry range the dry att is 0, so a contrib-gated wet
@@ -327,10 +350,25 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float* gL, f
         }
     }
     sl->prevPtCount = count;   /* point slots ≥ count are inactive → re-init from target when they return */
-    float mag = sqrtf(totalL*totalL + totalR*totalR);
-    if (mag > 1.4f) { float s = 1.4f / mag; totalL *= s; totalR *= s; }
-    if (bestBright < 0.0f) bestBright = 0.0f; else if (bestBright > 1.0f) bestBright = 1.0f;
-    *gL = totalL; *gR = totalR; *bright = bestBright; *wet = bestWetAtt; *wetPan = bestWetPan;
+    /* Anti-clip magnitude cap on the TOTAL across classes (both sum into the same output), scaling
+     * both classes by the same factor so their balance is preserved. */
+    {
+        float tl = totalL[0] + totalL[1], tr = totalR[0] + totalR[1];
+        float mag = sqrtf(tl*tl + tr*tr);
+        if (mag > 1.4f) {
+            float s = 1.4f / mag;
+            totalL[0] *= s; totalR[0] *= s;
+            totalL[1] *= s; totalR[1] *= s;
+        }
+    }
+    {
+        int c;
+        for (c = 0; c < 2; c++) {
+            if (bestBright[c] < 0.0f) bestBright[c] = 0.0f; else if (bestBright[c] > 1.0f) bestBright[c] = 1.0f;
+            gL[c] = totalL[c]; gR[c] = totalR[c]; bright[c] = bestBright[c];
+        }
+    }
+    *wet = bestWetAtt; *wetPan = bestWetPan; *domClass = dom;
 }
 
 /* Realtime consumer: drain the ring into `output`. Runs on miniaudio's audio
@@ -424,7 +462,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             o->emRevPanSmooth = 0.0f;
             for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
                 struct cmm_emit_slot* sl = &o->emSlots[s];
-                sl->lpf = 0.0f; sl->lpfCoef = 1.0f;
+                sl->lpf[0] = sl->lpf[1] = 0.0f; sl->lpfCoef[0] = sl->lpfCoef[1] = 1.0f;
                 sl->prevPtCount = 0;   /* every point slot re-inits its smooth state from target */
                 sl->revSendSm = 0.0f; sl->revDepthSm = sl->revDepth;
             }
@@ -447,8 +485,8 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                     ea -= n;
                 }
             }
-            sl->lpf = 0.0f; sl->lpfCoef = 1.0f;
-            sl->colLo = 0.0f; sl->colHi = 0.0f;
+            sl->lpf[0] = sl->lpf[1] = 0.0f; sl->lpfCoef[0] = sl->lpfCoef[1] = 1.0f;
+            sl->colLo[0] = sl->colLo[1] = 0.0f; sl->colHi[0] = sl->colHi[1] = 0.0f;
             sl->prevPtCount = 0;      /* point smooth state re-inits from the new station's targets */
             sl->revSendSm = 0.0f;
         }
@@ -456,8 +494,12 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         /* Per-slot spatial gains, LPF targets and carry-send targets — once per callback, exactly as
          * the old single-station path did. The DOMINANT slot (loudest carry send) drives the shared
          * bus's pan, output darkening and damping bias. */
-        float gL[CMM_MAX_EMIT_VOICES], gR[CMM_MAX_EMIT_VOICES];
-        float aLvl[CMM_MAX_EMIT_VOICES], coef[CMM_MAX_EMIT_VOICES];
+        /* v34: gains/level/LPF are PER CLASS (index 0 = speaker points, 1 = ham points) — each class
+         * is an independently colored signal. domCls picks which class's signal feeds the carry. */
+        float gL[CMM_MAX_EMIT_VOICES][2], gR[CMM_MAX_EMIT_VOICES][2];
+        float aLvl[CMM_MAX_EMIT_VOICES][2], coef[CMM_MAX_EMIT_VOICES][2];
+        int   clsAud[CMM_MAX_EMIT_VOICES][2];
+        int   domCls[CMM_MAX_EMIT_VOICES];
         float sendT[CMM_MAX_EMIT_VOICES];
         int   audible[CMM_MAX_EMIT_VOICES];
         int   anyAudible = 0;
@@ -465,14 +507,22 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         float bestSend = 0.0f, bestPan = 0.0f, bestNdep1 = 0.0f;
         for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
             struct cmm_emit_slot* sl = &o->emSlots[s];
-            float bright, attWet, wetPan;
-            cmm_emitter_gains(o, sl, &gL[s], &gR[s], &bright, &attWet, &wetPan);
-            audible[s] = (sl->ptCount > 0) && (gL[s] != 0.0f || gR[s] != 0.0f);
+            float bright[2], attWet, wetPan;
+            cmm_emitter_gains(o, sl, gL[s], gR[s], bright, &attWet, &wetPan, &domCls[s]);
+            clsAud[s][0] = (sl->ptCount > 0) && (gL[s][0] != 0.0f || gR[s][0] != 0.0f);
+            clsAud[s][1] = (sl->ptCount > 0) && (gL[s][1] != 0.0f || gR[s][1] != 0.0f);
+            audible[s] = clsAud[s][0] || clsAud[s][1];
             if (audible[s]) anyAudible = 1;
-            /* Arriving level for the LOCAL bus: magnitude of the summed spatial gains (equal-power
-             * pan preserves per-speaker energy ⇒ ≈ the distance+occlusion attenuation applied). */
-            float al = sqrtf(gL[s]*gL[s] + gR[s]*gR[s]); if (al > 1.0f) al = 1.0f;
-            aLvl[s] = al;
+            /* Arriving level for the LOCAL bus, per class: magnitude of the summed spatial gains
+             * (equal-power pan preserves per-speaker energy ⇒ ≈ the distance+occlusion attenuation
+             * applied). */
+            {
+                int c;
+                for (c = 0; c < 2; c++) {
+                    float al = sqrtf(gL[s][c]*gL[s][c] + gR[s][c]*gR[s][c]); if (al > 1.0f) al = 1.0f;
+                    aLvl[s][c] = al;
+                }
+            }
 
             /* DEPTH GRADING (v27, per slot): sink this slot's carry send with its air-route depth
              * (slewed ~0.5s so 4Hz pushes glide). LEVEL decays exponentially (much slower than the
@@ -487,16 +537,21 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             float ndep1 = ndep > 1.0f ? 1.0f : ndep;
             if (send > bestSend) { bestSend = send; bestPan = wetPan; bestNdep1 = ndep1; }
 
-            /* Map brightness → this slot's one-pole LPF coefficient (1 = open/bypass, small =
-             * muffled), then SLEW the live coefficient toward it (±0.05/callback) so a distance/
-             * occlusion step doesn't click. bright² dulls faster with distance; the 0.03 floor
-             * keeps a little air even fully occluded so it never goes to pure DC. */
-            float bb = bright * bright;
-            float ct = 0.03f + 0.97f * bb;
-            float c = sl->lpfCoef;
-            float dc = ct - c;
-            if (dc > 0.05f) dc = 0.05f; else if (dc < -0.05f) dc = -0.05f;
-            coef[s] = c + dc;
+            /* Map brightness → this slot's one-pole LPF coefficient PER CLASS (1 = open/bypass,
+             * small = muffled), then SLEW the live coefficient toward it (±0.05/callback) so a
+             * distance/occlusion step doesn't click. bright² dulls faster with distance; the 0.03
+             * floor keeps a little air even fully occluded so it never goes to pure DC. */
+            {
+                int c;
+                for (c = 0; c < 2; c++) {
+                    float bb = bright[c] * bright[c];
+                    float ct = 0.03f + 0.97f * bb;
+                    float cc = sl->lpfCoef[c];
+                    float dc = ct - cc;
+                    if (dc > 0.05f) dc = 0.05f; else if (dc < -0.05f) dc = -0.05f;
+                    coef[s][c] = cc + dc;
+                }
+            }
         }
 
         /* BRIGHTNESS/darkening for the shared carry OUTPUT — from the dominant slot's depth: near =
@@ -559,14 +614,24 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         }
         if (locOn) cmm_reverb_set(&o->reverbLocal, o->emRevRoom, o->emRevDamp);
 
-        /* Radio coloration per-block constants (shared params; per-slot filter STATE). The soft-clip
-         * is level-compensated at a 0.25 reference (typical music peak after loudness normalization):
-         * quiet material passes near-unity, peaks get crushed — grit without a volume jump. */
-        float colDrive = o->emColDrive, colStatic = o->emColStatic, colVoice = o->emColVoice;
-        int colOn = (colDrive > 0.001f) || (colStatic > 0.001f) || (colVoice > 0.001f);
-        float colPre = 1.0f + colDrive * 5.0f;
-        float colMk = 0.25f / tanhf(colPre * 0.25f);
-        float colNoiseAmp = colStatic * 0.08f;
+        /* Radio coloration per-block constants, PER CLASS (v34: [0] = speaker set, [1] = ham set;
+         * shared params, per-slot-per-class filter STATE). The soft-clip is level-compensated at a
+         * 0.25 reference (typical music peak after loudness normalization): quiet material passes
+         * near-unity, peaks get crushed — grit without a volume jump. */
+        float colDrive[2], colStatic[2], colVoice[2];
+        float colPre[2], colMk[2], colNoiseAmp[2];
+        int   colOn[2];
+        colDrive[0] = o->emColDrive;    colStatic[0] = o->emColStatic;    colVoice[0] = o->emColVoice;
+        colDrive[1] = o->emColHamDrive; colStatic[1] = o->emColHamStatic; colVoice[1] = o->emColHamVoice;
+        {
+            int c;
+            for (c = 0; c < 2; c++) {
+                colOn[c] = (colDrive[c] > 0.001f) || (colStatic[c] > 0.001f) || (colVoice[c] > 0.001f);
+                colPre[c] = 1.0f + colDrive[c] * 5.0f;
+                colMk[c] = 0.25f / tanhf(colPre[c] * 0.25f);
+                colNoiseAmp[c] = colStatic[c] * 0.08f;
+            }
+        }
 
         /* Render whenever ANY dry is audible OR there's reverb to run. The carry wet is NOT occluded
          * (it carries around corners/through walls — the "it bounced / next room" cue), so it MUST
@@ -604,46 +669,57 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                         struct cmm_emit_slot* sl = &o->emSlots[s];
                         /* Slew this slot's carry send even when silent, so it decays cleanly to 0. */
                         sl->revSendSm += (sendT[s] - sl->revSendSm) * mixCoef;
-                        if (!audible[s] && sl->revSendSm <= 1e-5f) continue;   /* nothing arrives, nothing carries */
-                        /* Radio coloration — BEFORE the distance LPF and the reverb feed, so muffle,
-                         * pan, occlusion and reflections all act on the colored ("through a speaker")
-                         * signal. All params 0 ⇒ x is the raw mono, exact bypass. */
-                        float x = sl->buf[f];
-                        if (colOn) {
-                            /* Static bed first, so the hiss shares the voicing + drive (it comes out
-                             * of the same speaker — and downstream it's distance-faded/panned too). */
-                            if (colNoiseAmp > 0.0f) {
-                                sl->colRng = sl->colRng * 1664525u + 1013904223u;
-                                x += (float)(int)sl->colRng * (1.0f / 2147483648.0f) * colNoiseAmp;
+                        int carrying = sl->revSendSm > 1e-5f;
+                        if (!audible[s] && !carrying) continue;   /* nothing arrives, nothing carries */
+                        /* Radio coloration PER CLASS (v34: 0 = speaker set, 1 = ham set) — BEFORE the
+                         * distance LPF and the reverb feed, so muffle, pan, occlusion and reflections
+                         * all act on the colored ("through a speaker") signal. A class is computed
+                         * only when something consumes it: its own audible points, or the carry (fed
+                         * the DOMINANT class's signal). All params 0 ⇒ x is the raw mono, exact bypass. */
+                        float raw = sl->buf[f];
+                        float xc[2];
+                        int c;
+                        for (c = 0; c < 2; c++) {
+                            if (!clsAud[s][c] && !(carrying && domCls[s] == c)) continue;
+                            float x = raw;
+                            if (colOn[c]) {
+                                /* Static bed first, so the hiss shares the voicing + drive (it comes out
+                                 * of the same speaker — and downstream it's distance-faded/panned too). */
+                                if (colNoiseAmp[c] > 0.0f) {
+                                    sl->colRng = sl->colRng * 1664525u + 1013904223u;
+                                    x += (float)(int)sl->colRng * (1.0f / 2147483648.0f) * colNoiseAmp[c];
+                                }
+                                /* Band-pass voicing: strip lows (~250 Hz) and highs (~4.2 kHz) — the
+                                 * "small speaker" body — blended by `voice` (0 keeps full-range). */
+                                if (colVoice[c] > 0.0f) {
+                                    sl->colLo[c] += o->emColLoCoef * (x - sl->colLo[c]);
+                                    float bp = x - sl->colLo[c];                 /* highs + mids (lows removed) */
+                                    sl->colHi[c] += o->emColHiCoef * (bp - sl->colHi[c]); /* cap the top */
+                                    x += (sl->colHi[c] - x) * colVoice[c];
+                                }
+                                /* Soft-clip drive (Padé tanh, exact ±1 at the ±3 clamp). */
+                                if (colDrive[c] > 0.001f) {
+                                    float t = x * colPre[c];
+                                    if (t > 3.0f) t = 3.0f; else if (t < -3.0f) t = -3.0f;
+                                    float t2 = t * t;
+                                    x = t * (27.0f + t2) / (27.0f + 9.0f * t2) * colMk[c];
+                                }
                             }
-                            /* Band-pass voicing: strip lows (~250 Hz) and highs (~4.2 kHz) — the
-                             * "small speaker" body — blended by `voice` (0 keeps full-range). */
-                            if (colVoice > 0.0f) {
-                                sl->colLo += o->emColLoCoef * (x - sl->colLo);
-                                float bp = x - sl->colLo;                 /* highs + mids (lows removed) */
-                                sl->colHi += o->emColHiCoef * (bp - sl->colHi); /* cap the top */
-                                x += (sl->colHi - x) * colVoice;
-                            }
-                            /* Soft-clip drive (Padé tanh, exact ±1 at the ±3 clamp). */
-                            if (colDrive > 0.001f) {
-                                float t = x * colPre;
-                                if (t > 3.0f) t = 3.0f; else if (t < -3.0f) t = -3.0f;
-                                float t2 = t * t;
-                                x = t * (27.0f + t2) / (27.0f + 9.0f * t2) * colMk;
+                            xc[c] = x;
+                            if (clsAud[s][c]) {
+                                sl->lpf[c] += coef[s][c] * (x - sl->lpf[c]);   /* one-pole distance/occlusion low-pass */
+                                op[f * o->channels]     += sl->lpf[c] * gL[s][c];
+                                op[f * o->channels + 1] += sl->lpf[c] * gR[s][c];
+                                /* LOCAL bus input: the muffled arriving dry × its applied attenuation, so
+                                 * occlusion/distance/water/hard-stop govern it exactly as the dry. */
+                                locIn += sl->lpf[c] * aLvl[s][c];
                             }
                         }
-                        if (audible[s]) {
-                            sl->lpf += coef[s] * (x - sl->lpf);   /* one-pole distance/occlusion low-pass */
-                            op[f * o->channels]     += sl->lpf * gL[s];
-                            op[f * o->channels + 1] += sl->lpf * gR[s];
-                            /* LOCAL bus input: the muffled arriving dry × its applied attenuation, so
-                             * occlusion/distance/water/hard-stop govern it exactly as the dry. */
-                            locIn += sl->lpf * aLvl[s];
-                        }
-                        /* CARRY input: the colored (pre-occlusion-LPF) mono × this slot's slewed send —
-                         * NOT occluded, so reflections carry around/through walls at the seal-gated,
-                         * depth-graded level the managed side computed for THIS station. */
-                        carryIn += x * sl->revSendSm;
+                        /* CARRY input: the DOMINANT class's colored (pre-occlusion-LPF) mono × this
+                         * slot's slewed send — NOT occluded, so reflections carry around/through walls
+                         * at the seal-gated, depth-graded level the managed side computed for THIS
+                         * station. */
+                        if (carrying) carryIn += xc[domCls[s]] * sl->revSendSm;
                     }
                     if (wetOn) {
                         float wl, wr;
@@ -665,7 +741,10 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             }
             base += chunk;
         }
-        for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) o->emSlots[s].lpfCoef = coef[s];
+        for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
+            o->emSlots[s].lpfCoef[0] = coef[s][0];
+            o->emSlots[s].lpfCoef[1] = coef[s][1];
+        }
         /* Clip-guard the summed output (music + emitters can exceed unity). */
         if (render) {
             float* p = (float*)output;
@@ -742,6 +821,7 @@ static cmm_out* cmm_out_alloc_ring(int sampleRate, int channels, int ringFrames,
     o->emRevLpL = 0.0f; o->emRevLpR = 0.0f; o->emRevLpCoef = 1.0f;           /* wet LPF starts transparent */
     /* Coloration off (clean bypass) until config relays; fixed voicing cutoffs from the device rate. */
     o->emColDrive = 0.0f; o->emColStatic = 0.0f; o->emColVoice = 0.0f;
+    o->emColHamDrive = 0.0f; o->emColHamStatic = 0.0f; o->emColHamVoice = 0.0f;
     o->emColLoCoef = 1.0f - expf(-6.2831853f * 250.0f  / (float)sampleRate);
     o->emColHiCoef = 1.0f - expf(-6.2831853f * 4200.0f / (float)sampleRate);
     o->emRevLocWet = 0.0f; o->emRevLocMix = 0.0f; o->emRevLocHold = 0.0f;    /* local bus idle until relayed */
@@ -751,7 +831,8 @@ static cmm_out* cmm_out_alloc_ring(int sampleRate, int channels, int ringFrames,
         int s;
         for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
             struct cmm_emit_slot* sl = &o->emSlots[s];
-            sl->lpf = 0.0f; sl->lpfCoef = 1.0f;   /* LPF starts open (bypass) until a distance is relayed */
+            sl->lpf[0] = sl->lpf[1] = 0.0f;       /* LPF starts open (bypass) until a distance is relayed */
+            sl->lpfCoef[0] = sl->lpfCoef[1] = 1.0f;
             sl->colRng = 0x2545F491u + (unsigned int)s * 0x9E3779B9u;   /* decorrelated hiss per slot */
             sl->revWet = 0.0f; sl->revDepth = 0.0f; sl->revSendSm = 0.0f; sl->revDepthSm = 0.0f;
             if (ma_pcm_rb_init(ma_format_f32, 1, (ma_uint32)ringFrames, NULL, NULL, &sl->rb) == MA_SUCCESS)
@@ -897,10 +978,11 @@ int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames)
     return written;
 }
 
-/* v20/v31 — relay one SLOT's live spatial state (plus the shared listener + curve tuning). Lock-free
- * volatile writes (a torn read mis-pans at most one ~10ms callback). count clamps to CMM_MAX_EMIT_PTS. */
+/* v20/v31/v34 — relay one SLOT's live spatial state (plus the shared listener + curve tuning). Lock-free
+ * volatile writes (a torn read mis-pans at most one ~10ms callback). count clamps to CMM_MAX_EMIT_PTS.
+ * v34: `flags` = per-point render flags (bit0 = ham class; NULL = all 0 = speaker class). */
 void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, const float* lisRight3,
-                                 const float* pts, const float* gains, int count,
+                                 const float* pts, const float* gains, const int* flags, int count,
                                  float minDist, float maxDist, float falloffExp, float muffle,
                                  float stereoWidth)
 {
@@ -914,8 +996,9 @@ void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, con
     o->emFalloffExp = falloffExp; o->emMuffle = muffle;
     o->emStereoWidth = stereoWidth;
     int k;
-    for (k = 0; k < count * 3; k++) sl->pts[k]   = pts   ? pts[k]   : 0.0f;
-    for (k = 0; k < count;     k++) sl->gains[k] = gains ? gains[k] : 1.0f;
+    for (k = 0; k < count * 3; k++) sl->pts[k]    = pts   ? pts[k]   : 0.0f;
+    for (k = 0; k < count;     k++) sl->gains[k]  = gains ? gains[k] : 1.0f;
+    for (k = 0; k < count;     k++) sl->ptFlags[k] = flags ? flags[k] : 0;
     sl->ptCount = count;   /* publish count LAST so the callback never reads points for a larger count */
 }
 
@@ -968,15 +1051,21 @@ void cmm_out_emitter_flush_slot(cmm_out* o, int slot)
     o->emSlots[slot].flushReq = 1;
 }
 
-/* v26 — relay the live radio-coloration params from config. All 0..1; all 0 = clean bypass. Lock-free
+/* v26/v34 — relay the live radio-coloration params from config: the SPEAKER set and the HAM set
+ * (per-point flags pick which set a point's signal gets). All 0..1; all 0 = clean bypass. Lock-free
  * volatile writes like the rest of the emitter state (a torn read colors one ~10ms callback oddly). */
-void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice)
+void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float voice,
+                               float hamDrive, float hamStatic, float hamVoice)
 {
     if (!o) return;
     if (drive     < 0.0f) drive     = 0.0f; else if (drive     > 1.0f) drive     = 1.0f;
     if (staticLvl < 0.0f) staticLvl = 0.0f; else if (staticLvl > 1.0f) staticLvl = 1.0f;
     if (voice     < 0.0f) voice     = 0.0f; else if (voice     > 1.0f) voice     = 1.0f;
+    if (hamDrive  < 0.0f) hamDrive  = 0.0f; else if (hamDrive  > 1.0f) hamDrive  = 1.0f;
+    if (hamStatic < 0.0f) hamStatic = 0.0f; else if (hamStatic > 1.0f) hamStatic = 1.0f;
+    if (hamVoice  < 0.0f) hamVoice  = 0.0f; else if (hamVoice  > 1.0f) hamVoice  = 1.0f;
     o->emColDrive = drive; o->emColStatic = staticLvl; o->emColVoice = voice;
+    o->emColHamDrive = hamDrive; o->emColHamStatic = hamStatic; o->emColHamVoice = hamVoice;
 }
 
 /* Frames of free space available to write right now (for the producer to pace

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmSfxLab — radio-SFX tuning lab (out-of-game).
+
+       Plays the personal radio's synthesized dial sounds (tuning static, power
+       on/off clicks) through the REAL native synth — the same CMM_Decoder.dll
+       the mod ships, driven over the same cmm_mix_* exports the game uses — so
+       what you hear here is exactly what the game plays. Sliders map 1:1 onto
+       the Radio* keys in Config\settings.xml; Load/Save round-trip that file
+       (comments preserved), so a dialed-in sound ships on the next build.
+
+         Run via "dotnet run" from tools/CmmSfxLab (or launch the built exe).
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmSfxLab</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Native CMM_Decoder.dll is Windows x64. -->
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!-- Native synth — copied next to the exe so DllImport("CMM_Decoder") resolves. -->
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

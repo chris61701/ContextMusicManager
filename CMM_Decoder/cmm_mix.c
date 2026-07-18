@@ -108,6 +108,7 @@ typedef struct mix_voice {
     int    emitSlot;            /* station render slot (0..CMM_MAX_EMIT_VOICES-1); voices sharing a slot sum */
     float  emitPts[MAX_EMIT_PTS * 3]; /* emitter: world positions of every speaker playing this station */
     float  emitPtGain[MAX_EMIT_PTS];  /* emitter: per-speaker gain multiplier (occlusion: 1=clear, <1=muffled) */
+    int    emitPtFlags[MAX_EMIT_PTS]; /* emitter (v34): per-point render flags (bit0 = ham class) */
     int    emitPtCount;         /* number of active positions in emitPts */
     float  emitMinDist, emitMaxDist;  /* emitter: full volume within min; silent beyond max */
 } mix_voice;
@@ -174,6 +175,68 @@ static volatile float g_emRevLocWet = 0.0f;      /* LOCAL bus level (v28): ear-r
 static volatile float g_emColDrive  = 0.0f;   /* soft-clip amount */
 static volatile float g_emColStatic = 0.0f;   /* static-hiss bed level */
 static volatile float g_emColVoice  = 0.0f;   /* band-pass "small speaker" voicing blend */
+/* v34: the HAM class's own coloration set (per-point flags pick the set; managed defaults keep
+ * hams always slightly distorted). */
+static volatile float g_emColHamDrive  = 0.0f;
+static volatile float g_emColHamStatic = 0.0f;
+static volatile float g_emColHamVoice  = 0.0f;
+
+/* ── Radio UI SFX (v35): tiny synthesized one-shots — tuning static, power on/off clicks ──
+ * No files, no decoders: a click is a filtered noise ping over a low thump, the tuning
+ * static is enveloped band-passed noise. Rendered by the producer into the MUSIC bus right
+ * after the voice sum, so they ride the same master as the radio voice they belong to —
+ * but OUTSIDE the voice list, so the music crossfade / stinger duck / eviction machinery
+ * never sees them (an add can't fade a click out, a click can't steal a voice slot).
+ * Control thread arms a slot under g_lock; the producer renders under the same lock. */
+#define SFX_KIND_STATIC    1
+#define SFX_KIND_CLICK_ON  2
+#define SFX_KIND_CLICK_OFF 3
+#define SFX_MAX 4
+typedef struct {
+    int kind;              /* 0 = idle slot */
+    int pos, len;          /* frames rendered / total */
+    int atkLen, relLen;    /* static envelope ramps (frames) */
+    float gain;
+    unsigned rng;          /* per-voice noise LCG */
+    float lo, hi;          /* one-pole filter states (band-pass pair / tone cap) */
+    float kLo, kHi;        /* their coefficients */
+    float ping, pingK;     /* click: bright noise ping level + per-frame decay */
+    float thump, thumpK;   /* click: low thud level + per-frame decay */
+    /* v39 — dial-detent character: a BODY RESONATOR (damped two-pole ring at BodyHz — the knock
+     * of the dial's shell) plus an optional SECOND micro-impact ~12ms after the first (the
+     * detent's spring release then the stop landing — what reads as "mechanical"). */
+    float pingInit, thumpInit; /* re-kick levels for the second strike */
+    float body;                /* resonator mix 0..1 (0 = the pre-v39 click) */
+    float rc1, rc2;            /* resonator coefficients (ring pitch + decay) */
+    float ry1, ry2;            /* resonator state */
+    int   strike2At;           /* frame of the second micro-impact (0 = single strike) */
+    float strike2Lvl;          /* its level relative to the first */
+    /* v37 — static CRACKLE: a sample-and-hold amplitude sputter (random level held for a random
+     * 3..30ms, slewed) that turns the smooth hiss into radio-tuning sputter. Depth 0 = smooth. */
+    float crackle;         /* modulation depth 0..1 (captured from the tone globals per ping) */
+    int   modHold;         /* frames until the next random level draw */
+    float modCur;          /* current drawn level target (biased toward dips) */
+    float modLev;          /* slewed applied level (anti-click) */
+} sfx_voice;
+static sfx_voice g_sfx[SFX_MAX];
+static unsigned  g_sfxSeed = 0x9E3779B9u;
+/* v37 — live static TONE (from settings.xml via cmm_mix_set_static_tone; captured onto the voice
+ * at every ping, so keepalive extension follows a hot-reloaded config mid-hash). Defaults mirror
+ * the managed defaults so the first pings before a push are sane. */
+static volatile float g_sfxStaticLoHz    = 350.0f;
+static volatile float g_sfxStaticHiHz    = 2000.0f;
+static volatile float g_sfxStaticCrackle = 0.8f;
+/* v38 — live click TONE, per kind ([0] = power-on, [1] = power-off): tone cap Hz (bright tick ↔
+ * dull thud), SNAP 0..1 (the bright-noise-ping vs low-thump balance: 1 = all snap, 0 = all
+ * thud), and length ms (the thump's decay constant; the ping decays 4× faster and the voice
+ * runs ~3.3× this). Defaults reproduce the v35 hardcoded clicks. */
+static volatile float g_sfxClickHz[2]    = { 3200.0f, 1300.0f };
+static volatile float g_sfxClickSnap[2]  = { 0.7f, 0.45f };
+static volatile float g_sfxClickLenMs[2] = { 18.0f, 28.0f };
+/* v39 — detent character: body-knock mix / its ring pitch / second-strike level (0 = single). */
+static volatile float g_sfxClickBody[2]   = { 0.4f, 0.4f };
+static volatile float g_sfxClickBodyHz[2] = { 1000.0f, 750.0f };
+static volatile float g_sfxClickDouble[2] = { 0.35f, 0.2f };
 
 /* adaptive ring state (see cmm_out.c / ComputeFillTargetLocked) */
 static int g_tightFill, g_maxFill, g_lowWater, g_targetFill;
@@ -398,7 +461,77 @@ static void teardown_device_locked(void) {
     int i;
     for (i = 0; i < g_voiceCount; i++) { retire_voice(g_voices[i]); free(g_voices[i]); }
     g_voiceCount = 0;
+    memset(g_sfx, 0, sizeof g_sfx);   /* a half-rendered click must not resume into the NEXT device's first block */
     if (g_out) { cmm_out_close(g_out); g_out = NULL; }
+}
+
+/* Render every live SFX voice additively into g_bus (stereo, `n` frames). Producer thread,
+ * under g_lock (the slots are armed from the control thread under the same lock). Mono synth
+ * duplicated to both channels; the music master + clip guard downstream apply as to any voice. */
+static void render_sfx_add(int n) {
+    int s, f;
+    for (s = 0; s < SFX_MAX; s++) {
+        sfx_voice* v = &g_sfx[s];
+        if (!v->kind) continue;
+        for (f = 0; f < n && v->pos < v->len; f++, v->pos++) {
+            v->rng = v->rng * 1664525u + 1013904223u;
+            float noise = (float)(int)v->rng * (1.0f / 2147483648.0f);
+            float x;
+            if (v->kind == SFX_KIND_STATIC) {
+                /* Band-passed noise (the same one-pole pair as the radio coloration voicing)
+                 * under a linear attack/release envelope — the dial-between-stations hash. */
+                v->lo += v->kLo * (noise - v->lo);
+                float bp = noise - v->lo;
+                v->hi += v->kHi * (bp - v->hi);
+                x = v->hi * 0.9f;
+                /* CRACKLE (v37): sample-and-hold amplitude sputter. A random level (squared —
+                 * biased toward dips) holds for a random 3..30ms, slewed ~1ms so it never
+                 * clicks; depth blends it in. 0 = the smooth hiss, 1 = full radio sputter. */
+                if (v->crackle > 0.001f) {
+                    if (--v->modHold <= 0) {
+                        v->rng = v->rng * 1664525u + 1013904223u;
+                        float u = (float)(v->rng >> 8) * (1.0f / 16777216.0f);
+                        v->modCur = u * u;
+                        v->rng = v->rng * 1664525u + 1013904223u;
+                        float uh = (float)(v->rng >> 8) * (1.0f / 16777216.0f);
+                        v->modHold = (int)((float)g_busRate * (0.003f + 0.027f * uh));
+                        if (v->modHold < 1) v->modHold = 1;
+                    }
+                    v->modLev += (v->modCur - v->modLev) * 0.02f;
+                    x *= 1.0f - v->crackle * (1.0f - v->modLev);
+                }
+                float env = 1.0f;
+                if (v->pos < v->atkLen) env = (float)v->pos / (float)v->atkLen;
+                int rem = v->len - v->pos;
+                if (rem < v->relLen) { float e = (float)rem / (float)v->relLen; if (e < env) env = e; }
+                x *= env;
+            } else {
+                /* Power click (v39: a dial detent): up to TWO micro-impacts — the spring release
+                 * and, ~12ms later, the stop landing — each firing a bright noise ping, a low
+                 * thump, and a knock into the BODY RESONATOR (damped two-pole ring at BodyHz,
+                 * the dial's shell). Everything tone-capped by one LPF. Body/Double at 0 = the
+                 * plain ping+thump click. */
+                float excite = 0.0f;
+                if (v->pos == 0) excite = 1.0f;
+                else if (v->strike2At && v->pos == v->strike2At) {
+                    excite = v->strike2Lvl;
+                    v->ping  += v->pingInit  * v->strike2Lvl;
+                    v->thump += v->thumpInit * v->strike2Lvl;
+                }
+                float ry = v->rc1 * v->ry1 + v->rc2 * v->ry2 + excite;
+                v->ry2 = v->ry1; v->ry1 = ry;
+                x = noise * v->ping + v->thump + ry * v->body;
+                v->ping  *= v->pingK;
+                v->thump *= v->thumpK;
+                v->hi += v->kHi * (x - v->hi);
+                x = v->hi;
+            }
+            x *= v->gain;
+            g_bus[f * 2]     += x;
+            g_bus[f * 2 + 1] += x;
+        }
+        if (v->pos >= v->len) v->kind = 0;
+    }
 }
 
 /* ── Producer thread ──────────────────────────────────────────────────────*/
@@ -468,6 +601,10 @@ static void pump_body(void) {
                 }
             }
 
+            /* Radio UI SFX (v35) sum in after the voices — same bus, same master, but never
+             * part of the crossfade/duck/eviction machinery above. */
+            render_sfx_add(n);
+
             /* Relay each slot's live spatial state to the output for consumer-side spatialization.
              * Per slot, pick its newest emitter voice (normally one; briefly two during a track-
              * advance overlap — the newer voice carries the fresher point set). A slot with no
@@ -488,11 +625,12 @@ static void pump_body(void) {
                         /* min/max come from the LIVE tuning globals (not the voice's baked-in values)
                          * so range + plateau are hot-tunable; falloff + muffle likewise. */
                         cmm_out_set_emitter_spatial(dev, s, lp, lr, em->emitPts, em->emitPtGain,
-                                                    em->emitPtCount, g_emMinDist, g_emMaxDist,
+                                                    em->emitPtFlags, em->emitPtCount,
+                                                    g_emMinDist, g_emMaxDist,
                                                     g_emFalloffExp, g_emMuffle, g_emStereoWidth);
                         wets[s] = g_emRevWet[s]; depths[s] = g_emRevDepth[s];
                     } else {
-                        cmm_out_set_emitter_spatial(dev, s, NULL, NULL, NULL, NULL, 0,
+                        cmm_out_set_emitter_spatial(dev, s, NULL, NULL, NULL, NULL, NULL, 0,
                                                     g_emMinDist, g_emMaxDist,
                                                     g_emFalloffExp, g_emMuffle, g_emStereoWidth);
                         wets[s] = 0.0f; depths[s] = 0.0f;
@@ -501,10 +639,11 @@ static void pump_body(void) {
                 if (any) {
                     cmm_out_set_emitter_reverb(dev, wets, depths, g_emRevRoom, g_emRevDamp,
                                                g_emRevRangeMult, g_emRevPan, g_emRevDepthAmt, g_emRevLocWet);
-                    cmm_out_set_emitter_color(dev, g_emColDrive, g_emColStatic, g_emColVoice);
+                    cmm_out_set_emitter_color(dev, g_emColDrive, g_emColStatic, g_emColVoice,
+                                              g_emColHamDrive, g_emColHamStatic, g_emColHamVoice);
                 } else {
                     cmm_out_set_emitter_reverb(dev, NULL, NULL, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 0.0f);
-                    cmm_out_set_emitter_color(dev, 0.0f, 0.0f, 0.0f);
+                    cmm_out_set_emitter_color(dev, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
                 }
             }
         }
@@ -871,12 +1010,173 @@ CMM_API void cmm_mix_set_emitter_reverb(const float* wets, const float* depths,
     g_emRevLocWet = localWet;
 }
 
-/* v26 — live radio-coloration params from config (see header). All 0..1, all 0 = clean bypass. */
-CMM_API void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice) {
+/* v26/v34 — live radio-coloration params from config (see header): the SPEAKER set and the HAM set
+ * (per-point flags pick the set). All 0..1, all 0 = clean bypass. */
+CMM_API void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice,
+                                       float hamDrive, float hamStatic, float hamVoice) {
     if (drive     < 0.0f) drive     = 0.0f; else if (drive     > 1.0f) drive     = 1.0f;
     if (staticLvl < 0.0f) staticLvl = 0.0f; else if (staticLvl > 1.0f) staticLvl = 1.0f;
     if (voice     < 0.0f) voice     = 0.0f; else if (voice     > 1.0f) voice     = 1.0f;
+    if (hamDrive  < 0.0f) hamDrive  = 0.0f; else if (hamDrive  > 1.0f) hamDrive  = 1.0f;
+    if (hamStatic < 0.0f) hamStatic = 0.0f; else if (hamStatic > 1.0f) hamStatic = 1.0f;
+    if (hamVoice  < 0.0f) hamVoice  = 0.0f; else if (hamVoice  > 1.0f) hamVoice  = 1.0f;
     g_emColDrive = drive; g_emColStatic = staticLvl; g_emColVoice = voice;
+    g_emColHamDrive = hamDrive; g_emColHamStatic = hamStatic; g_emColHamVoice = hamVoice;
+}
+
+/* v37 — capture the live static-tone globals onto a voice, clamped sane (low cut always below the
+ * top cap). Runs at EVERY static ping — arm and keepalive extend — so editing settings.xml while
+ * dialing is heard on the very next ping, mid-hash. */
+static void sfx_capture_static_tone(sfx_voice* v) {
+    float rate = (float)g_busRate;
+    float lo = g_sfxStaticLoHz, hi = g_sfxStaticHiHz, cr = g_sfxStaticCrackle;
+    if (lo < 50.0f) lo = 50.0f; else if (lo > 4000.0f) lo = 4000.0f;
+    if (hi < 400.0f) hi = 400.0f; else if (hi > 12000.0f) hi = 12000.0f;
+    if (hi < lo + 100.0f) hi = lo + 100.0f;
+    if (cr < 0.0f) cr = 0.0f; else if (cr > 1.0f) cr = 1.0f;
+    v->kLo = 1.0f - expf(-6.2831853f * lo / rate);
+    v->kHi = 1.0f - expf(-6.2831853f * hi / rate);
+    v->crackle = cr;
+}
+
+/* v37 — set the live static TONE from config: band edges in Hz (low cut / top cap) + crackle
+ * depth 0..1 (0 = smooth hiss, 1 = full sputter). Lock-free volatiles, clamped at capture;
+ * takes effect on the next ping, including mid-hash keepalive extensions. */
+CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
+    g_sfxStaticLoHz = lowHz; g_sfxStaticHiHz = highHz; g_sfxStaticCrackle = crackle;
+}
+
+/* v38 — capture the live click-tone globals onto a voice (`which`: 0 = on, 1 = off), clamped
+ * sane. Snap maps to the ping/thump pair so its extremes stay musical (never fully silent):
+ * ping = 0.4 + 0.7·snap, thump = 1.0 − 0.55·snap — the v35 hardcoded clicks sit at snap
+ * 0.7 (on) and 0.45 (off). Length is the thump decay; the ping decays 4× faster. */
+static void sfx_capture_click_tone(sfx_voice* v, int which) {
+    float rate = (float)g_busRate;
+    float hz = g_sfxClickHz[which], snap = g_sfxClickSnap[which], ms = g_sfxClickLenMs[which];
+    float body = g_sfxClickBody[which], bodyHz = g_sfxClickBodyHz[which], dbl = g_sfxClickDouble[which];
+    if (hz < 300.0f) hz = 300.0f; else if (hz > 10000.0f) hz = 10000.0f;
+    if (snap < 0.0f) snap = 0.0f; else if (snap > 1.0f) snap = 1.0f;
+    if (ms < 5.0f) ms = 5.0f; else if (ms > 120.0f) ms = 120.0f;
+    if (body < 0.0f) body = 0.0f; else if (body > 1.0f) body = 1.0f;
+    if (bodyHz < 200.0f) bodyHz = 200.0f; else if (bodyHz > 3000.0f) bodyHz = 3000.0f;
+    if (dbl < 0.0f) dbl = 0.0f; else if (dbl > 1.0f) dbl = 1.0f;
+    float sec = ms * 0.001f;
+    v->kHi   = 1.0f - expf(-6.2831853f * hz / rate);
+    v->ping  = 0.4f + 0.7f * snap;   v->pingK  = expf(-1.0f / (0.25f * sec * rate));
+    v->thump = 1.0f - 0.55f * snap;  v->thumpK = expf(-1.0f / (sec * rate));
+    v->pingInit = v->ping; v->thumpInit = v->thump;
+    /* Body resonator: damped two-pole ring at BodyHz, decaying at half the thump's constant —
+     * the knock rings the shell briefly, it doesn't hum. */
+    v->body = body;
+    {
+        float w = 6.2831853f * bodyHz / rate;
+        float R = expf(-1.0f / (0.5f * sec * rate));
+        v->rc1 = 2.0f * R * cosf(w);
+        v->rc2 = -(R * R);
+    }
+    v->ry1 = v->ry2 = 0.0f;
+    /* Second micro-impact ~12ms after the first — the detent's "cl-ick". */
+    v->strike2At  = dbl > 0.001f ? (int)(rate * 0.012f) : 0;
+    v->strike2Lvl = dbl;
+    v->len = (int)(rate * (sec * 3.3f + (v->strike2At ? 0.012f : 0.0f)));
+    if (v->len < 1) v->len = 1;
+}
+
+/* v38/v39 — set the live click TONE from config, both kinds at once (see the globals above).
+ * Lock-free volatiles, clamped at capture; the next click plays with the new character. */
+CMM_API void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
+                                    float onBody, float onBodyHz, float onDouble,
+                                    float offHz, float offSnap, float offLenMs,
+                                    float offBody, float offBodyHz, float offDouble) {
+    g_sfxClickHz[0] = onHz;  g_sfxClickSnap[0] = onSnap;  g_sfxClickLenMs[0] = onLenMs;
+    g_sfxClickHz[1] = offHz; g_sfxClickSnap[1] = offSnap; g_sfxClickLenMs[1] = offLenMs;
+    g_sfxClickBody[0] = onBody;  g_sfxClickBodyHz[0] = onBodyHz;  g_sfxClickDouble[0] = onDouble;
+    g_sfxClickBody[1] = offBody; g_sfxClickBodyHz[1] = offBodyHz; g_sfxClickDouble[1] = offDouble;
+}
+
+/* v35 — fire one synthesized radio-UI one-shot (SFX_KIND_*: 1 = tuning static burst, 2 = power-on
+ * click, 3 = power-off click) at `gain` (0..1, pre-master). Ensures the device like cmm_mix_add
+ * (a power-on click may precede the radio voice's own add). Steals the most-finished slot when all
+ * are busy. Does NOT touch the output gain (a click during the SP pause duck stays ducked). */
+CMM_API void cmm_mix_play_sfx(int kind, float gain) {
+    if (kind < SFX_KIND_STATIC || kind > SFX_KIND_CLICK_OFF) return;
+    if (gain <= 0.0f) return;
+    if (gain > 1.0f) gain = 1.0f;
+    mix_lock(&g_lock);
+    if (!g_started) { mix_unlock(&g_lock); return; }
+    ensure_device_locked();
+    if (!g_out) { mix_unlock(&g_lock); return; }
+    /* v36 — the STATIC is KEEPALIVE, not one-shot: a ping while a static is already live EXTENDS
+     * the live hash (env stays flat until pings stop, then the release runs) instead of layering
+     * a second burst on top — retriggered bursts audibly double-fired whenever a station join
+     * outlived one burst. The caller pings at its tick rate; cmm_mix_stop_sfx releases early. */
+    if (kind == SFX_KIND_STATIC) {
+        int i;
+        for (i = 0; i < SFX_MAX; i++) {
+            sfx_voice* live = &g_sfx[i];
+            if (live->kind != SFX_KIND_STATIC) continue;
+            live->len  = live->pos + (int)((float)g_busRate * 0.40f);  /* hold ~0.4s past this ping */
+            live->gain = gain;                                          /* follow a hot-reloaded volume */
+            sfx_capture_static_tone(live);                              /* tone edits land mid-hash too */
+            mix_unlock(&g_lock);
+            return;
+        }
+    }
+    {
+        int i, pick = 0; float bestProg = -1.0f;
+        for (i = 0; i < SFX_MAX; i++) {
+            if (!g_sfx[i].kind) { pick = i; break; }
+            float prog = g_sfx[i].len > 0 ? (float)g_sfx[i].pos / (float)g_sfx[i].len : 1.0f;
+            if (prog > bestProg) { bestProg = prog; pick = i; }
+        }
+        sfx_voice* v = &g_sfx[pick];
+        memset(v, 0, sizeof *v);
+        g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+        v->rng = g_sfxSeed | 1u;
+        v->kind = kind;
+        v->gain = gain;
+        float rate = (float)g_busRate;
+        switch (kind) {
+        case SFX_KIND_STATIC:
+            /* Band-passed hash (tone + crackle from the live globals — cmm_mix_set_static_tone),
+             * 10ms in / 90ms out. KEEPALIVE (v36): each ping extends the live hash ~0.4s (see
+             * above), so ping at any rate ≥ ~2 Hz = one seamless "searching" noise that releases
+             * shortly after the pings stop (or on cmm_mix_stop_sfx). */
+            v->len    = (int)(rate * 0.40f);
+            v->atkLen = (int)(rate * 0.010f);
+            v->relLen = (int)(rate * 0.090f);
+            sfx_capture_static_tone(v);
+            v->modLev = 1.0f;   /* crackle modulator starts open (first draw lands within ~30ms) */
+            break;
+        case SFX_KIND_CLICK_ON:
+            /* Power-on click — tone/snap/length from the live globals (cmm_mix_set_click_tone). */
+            sfx_capture_click_tone(v, 0);
+            break;
+        case SFX_KIND_CLICK_OFF:
+            /* Power-off clunk — same, its own parameter set. */
+            sfx_capture_click_tone(v, 1);
+            break;
+        }
+        if (v->len < 1) v->len = 1;
+        if (v->atkLen < 1) v->atkLen = 1;
+        if (v->relLen < 1) v->relLen = 1;
+    }
+    mix_unlock(&g_lock);
+}
+
+/* v36 — release every live SFX voice of `kind` NOW: its length shortens to "current position +
+ * its release ramp", so a keepalive static ends cleanly (~90ms) the moment its reason ends (the
+ * station voice landed) instead of running out its hold over the music. Never extends. */
+CMM_API void cmm_mix_stop_sfx(int kind) {
+    int i;
+    mix_lock(&g_lock);
+    for (i = 0; i < SFX_MAX; i++) {
+        sfx_voice* v = &g_sfx[i];
+        if (v->kind != kind) continue;
+        int rel = v->relLen > 0 ? v->relLen : 1;
+        if (v->len > v->pos + rel) v->len = v->pos + rel;
+    }
+    mix_unlock(&g_lock);
 }
 
 /* v17 — set a live emitter voice to a SINGLE world position. Missing/non-emitter id = no-op. */
@@ -894,12 +1194,14 @@ CMM_API void cmm_mix_set_emitter_pos(long long id, float x, float y, float z) {
     mix_unlock(&g_lock);
 }
 
-/* v18/v19 — set the FULL set of speaker positions playing this station (interleaved xyz, `count`
+/* v18/v19/v34 — set the FULL set of speaker positions playing this station (interleaved xyz, `count`
  * points, clamped to MAX_EMIT_PTS) plus a per-speaker gain (occlusion: 1=clear, <1=muffled by walls;
- * `gains` may be NULL for all-clear). The render sums every point's pan+attenuation×gain, so all the
- * speakers are heard at once. count<=0 (or xyz NULL) silences the spatial output until the next
- * update. Missing/non-emitter id = no-op. */
-CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains, int count) {
+ * `gains` may be NULL for all-clear) and per-speaker render flags (v34: bit0 = ham class — that
+ * point's signal gets the HAM coloration set; `flags` may be NULL for all-speaker). The render sums
+ * every point's pan+attenuation×gain, so all the speakers are heard at once. count<=0 (or xyz NULL)
+ * silences the spatial output until the next update. Missing/non-emitter id = no-op. */
+CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains,
+                                        const int* flags, int count) {
     int i, k;
     if (id == 0) return;
     if (count < 0 || xyz == NULL) count = 0;
@@ -910,6 +1212,7 @@ CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const fl
         if (v->id != id || !v->isEmitter) continue;
         for (k = 0; k < count * 3; k++) v->emitPts[k] = xyz[k];
         for (k = 0; k < count; k++)     v->emitPtGain[k] = gains ? gains[k] : 1.0f;
+        for (k = 0; k < count; k++)     v->emitPtFlags[k] = flags ? flags[k] : 0;
         v->emitPtCount = count;
         break;
     }

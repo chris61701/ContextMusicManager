@@ -245,7 +245,7 @@ namespace CMM
                 Station st = _stations[i];
                 if (st.VoiceId == 0) continue;
                 if (st.NearestDist <= audibleR) { anyAudible = true; continue; }
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, 0);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
                 RecordPtPush(st, 0);
             }
             if (!anyAudible) { _occlPending = false; return; }
@@ -307,7 +307,7 @@ namespace CMM
                         for (int i = 0; i < _occlStations.Count; i++)
                         {
                             Station st = _occlStations[i];
-                            CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, 0);
+                            CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
                             RecordPtPush(st, 0);
                         }
                         PushReverb(player);
@@ -334,7 +334,7 @@ namespace CMM
                     else
                         for (int k = 0; k < st.PtCount; k++) st.PtGain[k] = 0f;   // clear line (virtual distance 0)
                     PostProcessGains(st);
-                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtCount);
+                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                     RecordPtPush(st, st.PtCount);
                 }
                 PushReverb(player);
@@ -374,7 +374,7 @@ namespace CMM
                 if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
                 if (st.PtCount == 0)
                 {
-                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, 0);
+                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
                     RecordPtPush(st, 0);
                     continue;
                 }
@@ -383,7 +383,7 @@ namespace CMM
                     return false;   // ready flipped under us — legacy covers this tick
                 st.Seal = seal; st.Solid = solid; st.Depth = depth;
                 PostProcessGains(st);
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtCount);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
             }
             // Air*/room measure comes from the room-only ear flood the caller keeps running —
@@ -407,7 +407,7 @@ namespace CMM
                 st.Solid = EmitterAcoustics.ReverbSolid;
                 st.Depth = EmitterAcoustics.ReverbDepth;
                 PostProcessGains(st);
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtCount);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
             }
             PushReverb(player);
@@ -545,26 +545,32 @@ namespace CMM
                 // (silent) until the folder returns or the next world entry recomputes the pins.
                 if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st)) continue;
                 st.LastSeenAt = now;
-                if (e.Dist < st.NearestDist) { st.NearestDist = e.Dist; st.NearestPos = e.Pos; }
+                // Render class rides per-point flags (bit0 = ham): a radioHam gets the HAM coloration
+                // (always slightly distorted, mono communications speaker) in the native render while
+                // shelf speakers get the (clean-by-default) speaker set. Name is the registry's interned
+                // display-name string, so this compare is a reference check in practice.
+                int fl = e.Name == "radioHam" ? 1 : 0;
+                if (e.Dist < st.NearestDist) { st.NearestDist = e.Dist; st.NearestPos = e.Pos; st.NearestFlags = fl; }
                 if (e.Dist > range) continue;
                 if (st.PtCount < MaxPoints)
                 {
-                    WritePoint(st, st.PtCount, e.Pos); st.PtDist[st.PtCount] = e.Dist; st.PtCount++;
+                    WritePoint(st, st.PtCount, e.Pos, fl); st.PtDist[st.PtCount] = e.Dist; st.PtCount++;
                 }
                 else
                 {
                     // Buffer full: replace the current farthest slot if this speaker is nearer.
                     int far = 0;
                     for (int k = 1; k < MaxPoints; k++) if (st.PtDist[k] > st.PtDist[far]) far = k;
-                    if (e.Dist < st.PtDist[far]) { WritePoint(st, far, e.Pos); st.PtDist[far] = e.Dist; }
+                    if (e.Dist < st.PtDist[far]) { WritePoint(st, far, e.Pos, fl); st.PtDist[far] = e.Dist; }
                 }
             }
         }
 
-        private static void WritePoint(Station st, int slot, Vector3i p)
+        private static void WritePoint(Station st, int slot, Vector3i p, int flags)
         {
             int o = slot * 3;
             st.Pts[o] = p.x + 0.5f; st.Pts[o + 1] = p.y + 0.5f; st.Pts[o + 2] = p.z + 0.5f;
+            st.PtFlags[slot] = flags;
         }
 
         // ── Voice lifecycle ─────────────────────────────────────────────────────────────────────
@@ -806,13 +812,13 @@ namespace CMM
             {
                 if (!fresh && st.LastPtPushCount > 0 && Time.realtimeSinceStartup - st.LastPtPushAt < 1f)
                 {
-                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.LastPtPushCount);
+                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.PtFlags, st.LastPtPushCount);
                 }
                 else
                 {
-                    WritePoint(st, 0, st.NearestPos);
+                    WritePoint(st, 0, st.NearestPos, st.NearestFlags);
                     st.PtGain[0] = CMMConfig.WorldEmitterRange;   // muted until the first flood lands
-                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, 1);
+                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.PtFlags, 1);
                 }
                 _forceRefresh = true;
             }
@@ -905,7 +911,10 @@ namespace CMM
                                                 CMMConfig.WorldEmitterStereoWidth);
             CmmMixer.Instance?.SetEmitterColor(CMMConfig.WorldEmitterColorDrive,
                                                CMMConfig.WorldEmitterColorStatic,
-                                               CMMConfig.WorldEmitterColorVoice);
+                                               CMMConfig.WorldEmitterColorVoice,
+                                               CMMConfig.WorldEmitterHamColorDrive,
+                                               CMMConfig.WorldEmitterHamColorStatic,
+                                               CMMConfig.WorldEmitterHamColorVoice);
         }
 
         // Probe the room around the listener once and push the reverb params: the ROOM (size, damp,

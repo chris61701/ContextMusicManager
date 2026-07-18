@@ -55,6 +55,15 @@ namespace CMM
         private static string _advanceCarry;          // AdvanceOverride preserved across gated retries
         private static float  _nextAuditAt;           // sync-audit cadence (RadioStationCatalog.AuditVoice)
 
+        // ── Radio UI sounds (v35/v36 native synth) ─────────────────────────────────────────────
+        // A USER DIAL arms the tuning static; Tick PINGS the native keepalive hash at 4 Hz until
+        // the dialed station's voice lands (StopStatic then releases it), so the async open/seek
+        // and the loudness gain-gate's "tuning…" hold are audibly "searching" instead of dead —
+        // one seamless noise per dial, never stacked bursts. Spontaneous joins (world entry, EOF
+        // advance, stinger rejoin, unpause resync) never arm it.
+        private static bool  _staticWanted;
+        private static float _nextStaticAt;
+
         // ── Async start state ───────────────────────────────────────────────────────────────────
         // A radio start opens a decoder and SEEKS minutes into the file (cmm_mix_add runs the
         // resume seek on the CALLER's thread — a mid-file mp3 seek walks every frame to the
@@ -160,7 +169,7 @@ namespace CMM
             int n = sts.Count;
             if (n == 0)
             {
-                if (_on) { TurnOff(player); return; }
+                if (_on) { TurnOff(player, "Radio: off (no stations)"); return; }
                 Notify(player, "Radio: no stations found");
                 return;
             }
@@ -187,16 +196,64 @@ namespace CMM
             Tune(sts[target].Name, player);
         }
 
-        private static void TurnOff(EntityPlayerLocal player)
+        private static void TurnOff(EntityPlayerLocal player, string notice = "Radio: off")
         {
             _on = false;
             _offAir = false;
+            _staticWanted = false;
+            StopStatic();
             Save();
             RefreshOverlayCaches();
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
-            Notify(player, "Radio: off");
+            Sfx(CmmMixer.SfxClickOff);   // the power-down clunk (manual dial AND the all-stations-deleted auto-off)
+            Notify(player, notice);
             // Hand music back: the resolver restarts whatever context should be playing.
             ContextMusicManager.ReResolveNow();
+        }
+
+        // Fire one radio-UI one-shot (native synth; no asset files). Config-gated + hot-tunable;
+        // the native side ensures the output device, so a power-on click can precede the radio
+        // voice's own add, and it never touches the output gain (pause duck stays ducked).
+        private static void Sfx(int kind)
+        {
+            if (!CMMConfig.RadioSfxEnabled) return;
+            float vol = CMMConfig.RadioSfxVolume;
+            try
+            {
+                CmmMixer mixer = CmmMixer.GetOrCreate();
+                if (kind == CmmMixer.SfxTuningStatic)
+                {
+                    // The static has its own level (-1 = inherit) and a live tone: pushing the
+                    // tone on EVERY ping is what makes settings.xml edits audible mid-hash.
+                    if (CMMConfig.RadioStaticVolume >= 0f) vol = CMMConfig.RadioStaticVolume;
+                    mixer.SetStaticTone(CMMConfig.RadioStaticLowHz,
+                                        CMMConfig.RadioStaticHighHz,
+                                        CMMConfig.RadioStaticCrackle);
+                }
+                else
+                {
+                    // Clicks likewise: their own levels (-1 = inherit) + the live tone pair,
+                    // pushed before every click so a hot-reloaded edit lands on the next dial.
+                    if (kind == CmmMixer.SfxClickOn  && CMMConfig.RadioClickOnVolume  >= 0f) vol = CMMConfig.RadioClickOnVolume;
+                    if (kind == CmmMixer.SfxClickOff && CMMConfig.RadioClickOffVolume >= 0f) vol = CMMConfig.RadioClickOffVolume;
+                    mixer.SetClickTone(CMMConfig.RadioClickOnHz,  CMMConfig.RadioClickOnSnap,  CMMConfig.RadioClickOnLengthMs,
+                                       CMMConfig.RadioClickOnBody,  CMMConfig.RadioClickOnBodyHz,  CMMConfig.RadioClickOnDouble,
+                                       CMMConfig.RadioClickOffHz, CMMConfig.RadioClickOffSnap, CMMConfig.RadioClickOffLengthMs,
+                                       CMMConfig.RadioClickOffBody, CMMConfig.RadioClickOffBodyHz, CMMConfig.RadioClickOffDouble);
+                }
+                if (vol <= 0f) return;
+                mixer.PlaySfx(kind, vol);
+            }
+            catch { /* a missing native DLL already disables all playback — a silent click is moot */ }
+        }
+
+        // End the keepalive tuning static NOW (its ~90ms release runs) — call wherever
+        // _staticWanted goes false, so the hash stops the moment its reason does instead of
+        // running out its ping hold over the music.
+        private static void StopStatic()
+        {
+            try { CmmMixer.Instance?.StopSfx(CmmMixer.SfxTuningStatic); }
+            catch { /* see Sfx */ }
         }
 
         private static void Tune(string name, EntityPlayerLocal player)
@@ -223,6 +280,9 @@ namespace CMM
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
             _nextStartFade = CMMConfig.ManualSkipFadeDuration;   // keypress-fast
             _nextTick = 0f;                                      // dispatch next frame, not in ≤250 ms
+            if (!wasOn) Sfx(CmmMixer.SfxClickOn);                // the power-on click
+            _staticWanted = true;                                // tuning static rolls until the voice lands
+            _nextStaticAt = 0f;
             Notify(player, RadioStationCatalog.ByName.ContainsKey(name)
                 ? $"Radio: {name}" : $"Radio: {name} (tuning…)");
         }
@@ -293,12 +353,24 @@ namespace CMM
             // their own background window walks — there is no probe loop to tick.)
             RadioStationCatalog.EnsureCatalog();
 
+            // EVERY station/track is gone (folders deleted or emptied): power the radio OFF —
+            // with the power-down clunk — instead of holding silent dead air forever. The tuned
+            // name persists, so restoring the files and dialing back on resumes as usual. (One
+            // missing station with others still present stays the revivable "off air" hold below.)
+            if (RadioStationCatalog.Stations.Count == 0)
+            {
+                TurnOff(player, "Radio: off (no stations)");
+                return;
+            }
+
             if (_tunedName == null || !RadioStationCatalog.ByName.TryGetValue(_tunedName, out RadioStation st))
             {
                 // Tuned station is gone (folder removed/renamed, or the whole catalog emptied):
                 // dead air — silent, still on, still suppressing music. The catalog watch revives
                 // it within ~2 s of the folder returning. Static comes later.
                 FadeVoiceOut(SilenceFade);
+                _staticWanted = false;   // off air = deliberate silence, not "searching"
+                StopStatic();
                 if (!_offAir)
                 {
                     _offAir = true;
@@ -364,6 +436,17 @@ namespace CMM
                     StartFromClock(st, AdvanceOverride: ended);
                 }
                 return;
+            }
+
+            // A user dial is still waiting for its voice (async open/seek in flight, or the
+            // loudness gain-gate's "tuning…" hold): keep the tuning static alive. The static is
+            // a native KEEPALIVE (v36) — each ping extends ONE seamless hash rather than layering
+            // bursts (which audibly double-fired), and StopStatic ends it the moment the voice
+            // lands.
+            if (_staticWanted && Time.realtimeSinceStartup >= _nextStaticAt)
+            {
+                _nextStaticAt = Time.realtimeSinceStartup + TickInterval;
+                Sfx(CmmMixer.SfxTuningStatic);
             }
 
             // Idle but on (world entry with a persisted on-state, a gain-wait retry, or it just
@@ -503,6 +586,8 @@ namespace CMM
                 return;
             }
             _voiceId = id; _track = file; _gainApplied = gain;
+            _staticWanted = false;  // the dialed station is voicing — the tuning static ends
+            StopStatic();
             _advanceCarry = null;   // consumed — the next idle start is a plain join
             ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if unmeasured
             Log.Out($"[CMM] Radio: '{station}' playing {Path.GetFileName(file)} @ {off:0}s " +

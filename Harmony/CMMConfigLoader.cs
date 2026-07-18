@@ -102,6 +102,26 @@ namespace CMM
                 CMMConfig.WorldEmitterRange   = ReadFloat (root, "WorldEmitterRange",   CMMConfig.WorldEmitterRange);
                 CMMConfig.WorldEmitterFade    = ReadFloat (root, "WorldEmitterFade",    CMMConfig.WorldEmitterFade);
                 CMMConfig.RadioAnchorSeconds  = ReadFloat (root, "RadioAnchorSeconds",  CMMConfig.RadioAnchorSeconds);
+                CMMConfig.RadioSfxEnabled     = ReadBool  (root, "RadioSfxEnabled",     CMMConfig.RadioSfxEnabled);
+                CMMConfig.RadioSfxVolume      = ReadFloat (root, "RadioSfxVolume",      CMMConfig.RadioSfxVolume);
+                CMMConfig.RadioStaticVolume   = ReadFloat (root, "RadioStaticVolume",   CMMConfig.RadioStaticVolume);
+                CMMConfig.RadioStaticLowHz    = ReadFloat (root, "RadioStaticLowHz",    CMMConfig.RadioStaticLowHz);
+                CMMConfig.RadioStaticHighHz   = ReadFloat (root, "RadioStaticHighHz",   CMMConfig.RadioStaticHighHz);
+                CMMConfig.RadioStaticCrackle  = ReadFloat (root, "RadioStaticCrackle",  CMMConfig.RadioStaticCrackle);
+                CMMConfig.RadioClickOnHz        = ReadFloat(root, "RadioClickOnHz",        CMMConfig.RadioClickOnHz);
+                CMMConfig.RadioClickOnSnap      = ReadFloat(root, "RadioClickOnSnap",      CMMConfig.RadioClickOnSnap);
+                CMMConfig.RadioClickOnLengthMs  = ReadFloat(root, "RadioClickOnLengthMs",  CMMConfig.RadioClickOnLengthMs);
+                CMMConfig.RadioClickOnBody      = ReadFloat(root, "RadioClickOnBody",      CMMConfig.RadioClickOnBody);
+                CMMConfig.RadioClickOnBodyHz    = ReadFloat(root, "RadioClickOnBodyHz",    CMMConfig.RadioClickOnBodyHz);
+                CMMConfig.RadioClickOnDouble    = ReadFloat(root, "RadioClickOnDouble",    CMMConfig.RadioClickOnDouble);
+                CMMConfig.RadioClickOnVolume    = ReadFloat(root, "RadioClickOnVolume",    CMMConfig.RadioClickOnVolume);
+                CMMConfig.RadioClickOffHz       = ReadFloat(root, "RadioClickOffHz",       CMMConfig.RadioClickOffHz);
+                CMMConfig.RadioClickOffSnap     = ReadFloat(root, "RadioClickOffSnap",     CMMConfig.RadioClickOffSnap);
+                CMMConfig.RadioClickOffLengthMs = ReadFloat(root, "RadioClickOffLengthMs", CMMConfig.RadioClickOffLengthMs);
+                CMMConfig.RadioClickOffBody     = ReadFloat(root, "RadioClickOffBody",     CMMConfig.RadioClickOffBody);
+                CMMConfig.RadioClickOffBodyHz   = ReadFloat(root, "RadioClickOffBodyHz",   CMMConfig.RadioClickOffBodyHz);
+                CMMConfig.RadioClickOffDouble   = ReadFloat(root, "RadioClickOffDouble",   CMMConfig.RadioClickOffDouble);
+                CMMConfig.RadioClickOffVolume   = ReadFloat(root, "RadioClickOffVolume",   CMMConfig.RadioClickOffVolume);
                 CMMConfig.WorldEmitterBirthFade = ReadFloat(root, "WorldEmitterBirthFade", CMMConfig.WorldEmitterBirthFade);
                 if (CMMConfig.RadioAnchorSeconds < 300f) CMMConfig.RadioAnchorSeconds = 300f;   // tiny windows = constant re-anchoring
                 CMMConfig.WorldEmitterMinDistance = ReadFloat(root, "WorldEmitterMinDistance", CMMConfig.WorldEmitterMinDistance);
@@ -136,6 +156,9 @@ namespace CMM
                 CMMConfig.WorldEmitterColorDrive        = ReadFloat(root, "WorldEmitterColorDrive",        CMMConfig.WorldEmitterColorDrive);
                 CMMConfig.WorldEmitterColorStatic       = ReadFloat(root, "WorldEmitterColorStatic",       CMMConfig.WorldEmitterColorStatic);
                 CMMConfig.WorldEmitterColorVoice        = ReadFloat(root, "WorldEmitterColorVoice",        CMMConfig.WorldEmitterColorVoice);
+                CMMConfig.WorldEmitterHamColorDrive     = ReadFloat(root, "WorldEmitterHamColorDrive",     CMMConfig.WorldEmitterHamColorDrive);
+                CMMConfig.WorldEmitterHamColorStatic    = ReadFloat(root, "WorldEmitterHamColorStatic",    CMMConfig.WorldEmitterHamColorStatic);
+                CMMConfig.WorldEmitterHamColorVoice     = ReadFloat(root, "WorldEmitterHamColorVoice",     CMMConfig.WorldEmitterHamColorVoice);
 
                 CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
                 CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);

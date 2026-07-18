@@ -64,11 +64,13 @@ namespace CMM
         // Per-tick registry grouping (rebuilt each emitter decision tick).
         public float NearestDist = float.MaxValue;   // over ALL tracked speakers of this station
         public Vector3i NearestPos;
+        public int NearestFlags;                     // render flags of that nearest speaker (bit0 = ham)
         public float LastSeenAt = -999f;             // last tick this station had ANY tracked speaker
         public int PtCount;                          // culled in-Range points below
         public readonly float[] Pts    = new float[MaxPoints * 3];
         public readonly float[] PtGain = new float[MaxPoints];
         public readonly float[] PtDist = new float[MaxPoints];
+        public readonly int[]   PtFlags = new int[MaxPoints];   // per-point render flags (bit0 = ham class)
 
         // The most recent landed point push (count + when): a track ADVANCE retires and re-adds
         // the native voice; seeding the new voice from this (same speakers, same ear, ≤ a tick

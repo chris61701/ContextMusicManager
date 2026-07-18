@@ -84,7 +84,7 @@ namespace CMM
         // v18/v19 — every speaker position playing the station (interleaved xyz) + per-speaker
         // occlusion gain (1=clear, <1=muffled; may be null for all-clear).
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_emitter_points(long id, float[] xyz, float[] gains, int count);
+        internal static extern void cmm_mix_set_emitter_points(long id, float[] xyz, float[] gains, int[] flags, int count);
 
         // v21 — live spatial-curve tuning (plateau, range, falloff steepness, distance-muffle), pushed
         // from config each tick so it can be dialled in-game without a rebuild.
@@ -107,12 +107,33 @@ namespace CMM
         // v26 — live radio coloration ("through a speaker"): soft-clip drive, static-hiss bed,
         // band-pass voicing blend. All 0..1; all 0 = clean bypass.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice);
+        internal static extern void cmm_mix_set_emitter_color(float drive, float staticLvl, float voice,
+                                                              float hamDrive, float hamStatic, float hamVoice);
 
         // v24 — the world-radio's OWN master (game music slider × Radio context volume), separate from
         // the music master so the radio isn't scaled by VolumeModifier or the current music context.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_master(float vol);
+
+        // v35 — synthesized radio-UI one-shots (tuning static / power clicks); see PlaySfx.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_play_sfx(int kind, float gain);
+
+        // v36 — release a live SFX now (keepalive static ends the moment its reason does).
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_stop_sfx(int kind);
+
+        // v37 — tuning static tone: band edges (Hz) + crackle depth (0 = smooth hiss).
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle);
+
+        // v38/v39 — power-click tones, both kinds: tone cap Hz, snap (ping vs thump), length ms,
+        // body (shell-knock resonator mix), bodyHz (its ring pitch), double (second detent strike).
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
+                                                           float onBody, float onBodyHz, float onDouble,
+                                                           float offHz, float offSnap, float offLenMs,
+                                                           float offBody, float offBodyHz, float offDouble);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_stop(float fade, int closeWhenIdle);
@@ -311,11 +332,13 @@ namespace CMM
 
         // Set the FULL set of speaker positions playing this station: `xyz` holds `count` interleaved
         // x,y,z triples and `gains` holds `count` per-speaker occlusion gains (1=clear, <1=muffled by
-        // walls; null = all clear). Caller reuses the buffers to avoid GC. All heard at once from the
-        // one decode. count 0 silences the voice's spatial output until the next update.
-        public void SetEmitterPoints(long id, float[] xyz, float[] gains, int count)
+        // walls; null = all clear). `flags` holds `count` per-speaker render flags (v34: bit0 = ham
+        // class — that point gets the HAM coloration; null = all speaker-class). Caller reuses the
+        // buffers to avoid GC. All heard at once from the one decode. count 0 silences the voice's
+        // spatial output until the next update.
+        public void SetEmitterPoints(long id, float[] xyz, float[] gains, int[] flags, int count)
         {
-            NativeMix.cmm_mix_set_emitter_points(id, xyz, gains, count);
+            NativeMix.cmm_mix_set_emitter_points(id, xyz, gains, flags, count);
         }
 
         // Push the live spatial-curve tuning (full-volume plateau radius, audible range, falloff
@@ -334,16 +357,56 @@ namespace CMM
             NativeMix.cmm_mix_set_emitter_reverb(wets, depths, room, damp, rangeMult, pan, depthAmt, localWet);
         }
 
-        // Push the live radio coloration (soft-clip drive, static bed, band-pass voicing). Every tick.
-        public void SetEmitterColor(float drive, float staticLvl, float voice)
+        // Push the live radio coloration (soft-clip drive, static bed, band-pass voicing) — the
+        // speaker set and the ham set (per-point flags pick which set a speaker gets). Every tick.
+        public void SetEmitterColor(float drive, float staticLvl, float voice,
+                                    float hamDrive, float hamStatic, float hamVoice)
         {
-            NativeMix.cmm_mix_set_emitter_color(drive, staticLvl, voice);
+            NativeMix.cmm_mix_set_emitter_color(drive, staticLvl, voice, hamDrive, hamStatic, hamVoice);
         }
 
         // Push the world-radio's own master (game music slider × Radio context volume). Every tick.
         public void SetEmitterMaster(float vol)
         {
             NativeMix.cmm_mix_set_emitter_master(vol);
+        }
+
+        // Fire one synthesized radio-UI one-shot (v35). Rides the music master like the radio
+        // voice; never part of the crossfade/stinger machinery; ensures the device (a power-on
+        // click may precede the radio voice's own add).
+        public const int SfxTuningStatic = 1;
+        public const int SfxClickOn      = 2;
+        public const int SfxClickOff     = 3;
+        public void PlaySfx(int kind, float gain)
+        {
+            NativeMix.cmm_mix_play_sfx(kind, gain);
+        }
+
+        // Release a live SFX now (v36). The tuning static is a KEEPALIVE: PlaySfx pings sustain
+        // one seamless hash, and this ends it (~90ms release) the moment the station voice lands.
+        public void StopSfx(int kind)
+        {
+            NativeMix.cmm_mix_stop_sfx(kind);
+        }
+
+        // Push the tuning static's tone (v37): low cut / top cap in Hz + crackle depth 0..1.
+        // Captured at every ping, so a hot-reloaded settings.xml edit is heard mid-hash.
+        public void SetStaticTone(float lowHz, float highHz, float crackle)
+        {
+            NativeMix.cmm_mix_set_static_tone(lowHz, highHz, crackle);
+        }
+
+        // Push the power-click tones (v38/v39), both kinds at once: tone cap Hz (bright tick ↔
+        // dull thud), snap 0..1 (bright ping vs low thump), length ms, body 0..1 (shell-knock
+        // resonator — the dial's "tok"), bodyHz (its ring pitch), double 0..1 (second detent
+        // micro-impact ~12ms later). Captured when a click fires.
+        public void SetClickTone(float onHz, float onSnap, float onLenMs,
+                                 float onBody, float onBodyHz, float onDouble,
+                                 float offHz, float offSnap, float offLenMs,
+                                 float offBody, float offBodyHz, float offDouble)
+        {
+            NativeMix.cmm_mix_set_click_tone(onHz, onSnap, onLenMs, onBody, onBodyHz, onDouble,
+                                             offHz, offSnap, offLenMs, offBody, offBodyHz, offDouble);
         }
 
         public bool TryGetState(long id, out double positionSec, out double lengthSec, out bool active)

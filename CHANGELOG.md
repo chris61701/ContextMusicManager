@@ -6,6 +6,29 @@ All notable changes to Context Music Manager are documented here.
 
 ### Added
 
+- **Radio dial sounds.** The personal radio now sounds like a physical device: a click when
+  it powers on, a lower clunk when it powers off, and a static "searching" hash while
+  dialing between stations or joining one that's still tuning in — the static rolls for
+  exactly as long as the join takes and tails off under the music's fade-in. And instead of
+  sitting in silent dead air forever, the radio now powers itself off (with the clunk) when
+  every station and track has been deleted; the tuned station is remembered, so restoring
+  the files and dialing back on resumes as usual. All three sounds are synthesized inside
+  the native mixer — no audio files ship, nothing to replace or mispackage — and ride the
+  music volume exactly like the radio itself. `RadioSfxEnabled` / `RadioSfxVolume` in
+  `settings.xml` (hot-reload), and every sound's character is yours to dial in live: the
+  static's `RadioStaticLowHz` / `RadioStaticHighHz` (band body vs brightness),
+  `RadioStaticCrackle` (0 = smooth hiss, 1 = full sputter) and `RadioStaticVolume`; the
+  clicks' `RadioClickOn*` / `RadioClickOff*` (tone cap Hz, snap = sharp tick vs soft thud,
+  length, volume). Edits are audible mid-static / on the next dial. Native ABI 38.
+- **Ham radios sound like ham radios.** The `radioHam` block now has its own always-on
+  "small communications speaker" voicing — narrowed band, a touch of soft-clip breakup, a
+  whisper of static — while store shelf speakers keep playing clean. Under the hood every
+  speaker point now carries a render class through to the native mixer, and each class is
+  colored and distance-muffled as an independent signal (a station playing through a ham
+  AND a shelf speaker at once renders both characters correctly; the room reverb follows
+  whichever you're mostly hearing). Tunable via the new `WorldEmitterHamColorDrive` /
+  `WorldEmitterHamColorStatic` / `WorldEmitterHamColorVoice` settings (hot-reload; all 0 =
+  clean ham). Native ABI 34.
 - **Personal radio.** Tune your own radio to any station with two keys (**Alt+PageUp** /
   **Alt+PageDown**, rebindable): the dial steps `Off → station → station → Off`, wrapping both
   ways, and shows the station in the game's own notification area above the toolbelt. Your
@@ -124,6 +147,27 @@ All notable changes to Context Music Manager are documented here.
 - **Overlays hide while the game is paused.** The Now Playing box and the debug HUD sit in
   the same top-left corner as the pause menu's options; both now hide during a single-player
   pause and come back exactly as they were on unpause.
+- **Overlays hide — and CMM's keys go inert — while the F1 console is open.** The console
+  covers the same corner (including on the main menu and in multiplayer, where the pause
+  hide can't apply). Every CMM key is also disabled while it's open: scrolling the console
+  is PageUp/PageDown — the radio dial keys — and numpad digits typed into a command could
+  silently cycle the debug HUD. Everything returns exactly as it was when the console closes.
+- **World-emitter occlusion rebuilt on per-speaker acoustic fields.** Occlusion used to be
+  re-computed around the listener several times a second inside a hard node budget, which
+  produced abrupt loudness jumps while walking (adjacent-step cliffs of 12 dB+, an audible
+  "ring" at the computation boundary, and one-block-thick floors/roofs leaking sound
+  upward). Each speaker now gets one cached, budget-free acoustic field that the moving
+  listener simply samples — validated offline against exported game-world data, cutting
+  adjacent loudness cliffs by 83–97% across test POIs. Door swings keep their tuned
+  fast path; fields quietly rebuild when a door settles or the world changes. New
+  hot-reloaded knobs: `WorldEmitterFieldCache` (on/off, off = the old behavior),
+  `WorldEmitterFieldRadius`, `WorldEmitterFieldRefresh`.
+- **Around-corner reverb now carries by bounce energy.** The reverb heard around corners
+  was graded by raw route distance, which read as "muffled" one corner in. It's now graded
+  by how much energy survives the bounces (route length ÷ the room's mean free path, at
+  the room's measured reflectivity) — in a reflective stone cave the reverb follows you
+  around corner after corner until it genuinely runs out of energy; in an absorptive wood
+  room it still dies quickly. New hot-reloaded `WorldEmitterReverbBounce` (default on).
 
 ### Fixed
 
@@ -137,6 +181,41 @@ All notable changes to Context Music Manager are documented here.
   live stations ahead of the shared broadcast — world radios and the personal radio audibly
   drifted apart over a session. On unpause they now rejoin the broadcast, which also means a
   pause no longer skips music: the song resumes where you stopped hearing it.
+- **World radios and the personal radio no longer drift apart at all (broadcast clock
+  rebuilt).** Beyond the pause bug above, measurement showed the game's world time itself
+  advances noticeably slower than real time during play (~10% on the test machine), so every
+  radio slowly outran the world-time broadcast schedule and re-joined it at different moments
+  (a dial, a track ending, an unpause) — ending up seconds apart, occasionally even on
+  different songs. The broadcast clock now runs at true real time, anchored to world time at
+  world entry — so relogs and other players still share the same broadcast — and two pause
+  subtleties are handled with it: the game saves the world on the pause edge (a multi-second
+  stall that used to be double-counted against the clock), and several quick sub-second
+  pauses now add up toward the same broadcast rejoin that one long pause gets. Radios now
+  hold within a fraction of a second of each other indefinitely.
+- **A hint of the main-menu theme could be heard while paused.** The game deliberately fades
+  the title theme in over the single-player pause screen, and while CMM's vanilla-music
+  fallback was active it slipped through the pause silence. The menu music now stays muted
+  through every pause, and quitting to the menu hands menu music back through its proper
+  fade-in (it could previously skip that handoff entirely after an in-game vanilla fallback).
+- **A track ending during a pause unmuted everything (CMM_Decoder ABI 33).** The pause
+  silence is a device-wide gain duck, and starting any new audio revived that gain (a
+  mechanism menu transitions rely on) — so when the playing track hit its end mid-pause and
+  auto-advanced, the new track and every nearby world radio became audible through the
+  pause screen. A voice started during the pause now stays silent under it and is simply
+  in progress when you unpause.
+- **Fully-silenced spawn stingers bled in right at their end.** With `VolumeModifier` at 0
+  and the radio resuming after a spawn, the stinger's last seconds became audible during its
+  release fade: the shared volume governance flips from the stinger's volume (which honours
+  `VolumeModifier`) to the radio's (which deliberately doesn't) while the released voice is
+  still fading. The released voice's level is now matched across that flip — silent stays
+  silent, and normal configurations sound unchanged.
+- **Vanilla fallback could hold the wrong music for minutes near a trader.** While CMM's
+  own music plays, the mod tracks (muted) what the game's music system proposes, and holds
+  vanilla sections back so they can't bleed under CMM's tracks. After handing off TO vanilla,
+  that same hold kept applying — pinning the game to whatever section happened to be current
+  when the handoff happened, sometimes for minutes (observed at Trader Rekt). While vanilla
+  is the active layer the game's live section choice now plays; user-disabled sections stay
+  suppressed.
 - **Hitches while the radio plays and when switching stations.** Three causes: with the radio
   owning the music layer the context engine re-asserted its "music should be playing" recovery
   ~9× a second for the whole radio session; every station switch opened and seeked minutes into
@@ -247,6 +326,12 @@ All notable changes to Context Music Manager are documented here.
 
 - **VS Code "Package (Release zip)" task** now invokes the single-zip `Package` MSBuild
   target (was `PackageAll`).
+- **Acoustics validation tooling** (development only): an in-game `cmm acsweep` console
+  command exports a POI's voxel grid, occlusion floods and acoustic fields as game-truth
+  dumps, and `tools/CmmAcousticsJudge/judge3d.js` replays the shipped model against them
+  bit-for-bit offline (parity checks, defect detectors, variant comparison, browser slice
+  viewers). This loop found and validated the per-speaker field rework above. Debug builds
+  also log `[CMM SYNC]` broadcast-drift audit lines (the data behind the clock rebuild).
 
 ## 1.0.4
 
