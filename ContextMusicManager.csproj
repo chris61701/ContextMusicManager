@@ -154,6 +154,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Compile Include="Harmony\CMMConfigLoader.cs" />
+    <Compile Include="Harmony\CmmGuard.cs" />
     <Compile Include="Harmony\ContextMusicManager.cs" />
     <Compile Include="Harmony\ContextMusicManager.FileWatch.cs" />
     <Compile Include="Harmony\ContextMusicManager.ConfigWatch.cs" />

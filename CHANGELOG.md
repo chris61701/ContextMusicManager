@@ -171,6 +171,33 @@ All notable changes to Context Music Manager are documented here.
 
 ### Fixed
 
+- **Installing the mod on a dedicated server no longer freezes joining players.** CMM is
+  client-side only, but server admins sometimes install it server-side anyway — and the full
+  client stack (patches, coroutines, audio init) used to start up on the headless server,
+  with one hook sitting directly on the server's world-load path where any hiccup stalled
+  world readiness and hung every joining client at the loading screen. The mod now detects a
+  dedicated server at init and stays completely inert there (no patches, no threads, no
+  audio), logging one clear line telling the admin it's safe to leave installed. Three more
+  layers make the CLIENT side of a multiplayer join bulletproof regardless of the server:
+  - Every Harmony patch body is now exception-contained (new `CmmGuard`): a CMM failure
+    inside a vanilla lifecycle method (spawn, world load, save/teardown) can no longer
+    abort that method — the game always completes the spawn, CMM logs the suppressed error
+    (rate-limited) and recovers on its next scan tick.
+  - The world polls that run at spawn now tolerate the partial game state a multiplayer
+    client sees mid-join: POI and trader lookups survive the game's own unguarded
+    chunk-provider dereference (`GetPOIAtPosition` / `GetTraderAreaAt` NRE on unstreamed
+    chunks), the sleepers-cleared quest hook retries instead of throwing, and a resolver
+    failure yields "no contexts" instead of killing the 10 Hz scan loop for the session.
+  - The native mixer no longer opens or closes the audio device while holding its global
+    lock (ABI 40): the lazy device open used to run under the lock on the first spawn-sting
+    start, so a wedged Windows audio endpoint froze the game's main thread the moment it
+    touched any mixer call — at exactly the spawn moment. Device open/close now lives
+    solely on the mixer's own producer thread, outside the lock; a stalled audio driver
+    just delays music, never the game. (Bonus: a radio power-click fired during the brief
+    device-open window now plays instead of being dropped.)
+  Verified end-to-end: dedi server (V 3.0.1) with the full mod installed boots inert with
+  the one log line, a modded 3.0.1 client joins, spawns, and plays context music in
+  multiplayer with zero suppressed exceptions.
 - **World radios could be silent after quitting to the menu and continuing.** The menu↔game
   handoff parks the audio output's gain at zero and relied on the next music start (normally
   the spawn sting) to restore it — with the personal radio off and no spawn track, the world

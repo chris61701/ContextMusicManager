@@ -226,6 +226,12 @@ namespace CMM
     {
         static MethodBase TargetMethod() => AccessTools.Method(typeof(SdtdConsole), "RegisterCommands");
         static bool Prepare() => TargetMethod() != null;
-        static void Postfix(SdtdConsole __instance) => CmmConsole.Register(__instance);
+        static void Postfix(SdtdConsole __instance)
+        {
+            // Guarded: Register runs Reflection.Emit against a version-divergent base class;
+            // a failure must not escape into SdtdConsole.RegisterCommands (console init).
+            try { CmmConsole.Register(__instance); }
+            catch (Exception e) { CmmGuard.Report("SdtdConsole.RegisterCommands postfix", e); }
+        }
     }
 }

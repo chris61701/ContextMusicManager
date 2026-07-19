@@ -64,19 +64,35 @@ namespace CMM
         static int _poiLogCleared = -1;
 
         // Subscribe (once) to the quest system's sleepers-cleared event. Idempotent and
-        // cheap to call every tick — guarded by _poiClearHooked.
+        // cheap to call every tick — guarded by _poiClearHooked, which flips only on
+        // SUCCESS so a failed subscribe retries next tick. QuestEventManager.Current
+        // self-instantiates on every supported version (verified A20/A21/3.0 decompiles)
+        // so it can't be null today — the guard is version-drift armor: if subscription
+        // ever throws, the exception must not escape into the spawn-path caller.
         static void EnsurePoiClearHook()
         {
             if (_poiClearHooked) return;
-            _poiClearHooked = true;
-            QuestEventManager.Current.SleepersCleared += OnSleepersCleared;
-            CMMConfig.D("[CMM POI] Subscribed to QuestEventManager.SleepersCleared.");
+            try
+            {
+                QuestEventManager.Current.SleepersCleared += OnSleepersCleared;
+                _poiClearHooked = true;
+                CMMConfig.D("[CMM POI] Subscribed to QuestEventManager.SleepersCleared.");
+            }
+            catch (Exception e) { CMMConfig.D($"[CMM POI] SleepersCleared subscribe failed (will retry): {e.Message}"); }
         }
 
         // The event fires with a world position inside the cleared POI. Resolve it back to
         // the prefab and stage a one-shot POI_Cleared for that POI. Logged unconditionally
         // so the in-game test can confirm whether/when this event reaches the client.
         static void OnSleepersCleared(Vector3 pos)
+        {
+            // Guarded: this runs inside the quest system's event dispatch — a throw here
+            // would escape into whatever game code fired the event.
+            try { OnSleepersClearedBody(pos); }
+            catch (Exception e) { CmmGuard.Report("SleepersCleared handler", e); }
+        }
+
+        static void OnSleepersClearedBody(Vector3 pos)
         {
             var world = GameManager.Instance?.World;
             PrefabInstance pi = PoiAt(world, pos);
@@ -287,13 +303,21 @@ namespace CMM
         static PrefabInstance PoiAt(World world, Vector3 pos)
         {
             if (world == null) return null;
-            if (_poiAt != null) return _poiAt(world, pos);      // compiled: no per-call allocation
-            // Reflection fallback (Expression.Compile unavailable on the host Mono): clone the
-            // args template per call so the two call sites stay re-entrancy-safe.
-            if (_getPoiAtMethod == null || _getPoiArgsTemplate == null) return null;
-            var args = (object[])_getPoiArgsTemplate.Clone();
-            args[0] = pos;
-            return (PrefabInstance)_getPoiAtMethod.Invoke(world, args);
+            // Guarded: World.GetPOIAtPosition dereferences ChunkCache.ChunkProvider with no
+            // null check of its own (all versions) — on an MP client mid-join/teardown that
+            // NREs. null is the fully-handled "no POI here" path for every caller. The
+            // reflection fallback additionally surfaces failures as TargetInvocationException.
+            try
+            {
+                if (_poiAt != null) return _poiAt(world, pos);      // compiled: no per-call allocation
+                // Reflection fallback (Expression.Compile unavailable on the host Mono): clone the
+                // args template per call so the two call sites stay re-entrancy-safe.
+                if (_getPoiAtMethod == null || _getPoiArgsTemplate == null) return null;
+                var args = (object[])_getPoiArgsTemplate.Clone();
+                args[0] = pos;
+                return (PrefabInstance)_getPoiAtMethod.Invoke(world, args);
+            }
+            catch { return null; }
         }
 
         // "Real dungeon" gate for the MP client fallback, using only client-available
@@ -492,21 +516,29 @@ namespace CMM
             // prefab's protect bounds AND the trader must be open (daytime). TraderName is
             // left null unless both hold; "" means open but unnamed (still → generic Trader).
             gameState.TraderName = null;
-            TraderArea traderArea = world.GetTraderAreaAt(player.GetBlockPosition());
-            if (traderArea != null)
+            // Guarded: GetTraderAreaAt dereferences ChunkCache.ChunkProvider with no null
+            // check of its own (all versions) — NREs on an MP client mid-join/teardown —
+            // and the reflection Invoke wraps anything GetTrader() throws. On failure
+            // TraderName stays null (the pre-set "not at a trader" default above).
+            try
             {
-                // TraderArea.GetTrader() exists only in 3.0 (resolved via _getTraderMethod);
-                // older versions have no area→trader link, so resolve the trader entity by
-                // its area instead. 3.0 runs its real GetTrader() (owningTrader, then a
-                // bounds scan); 2.6/A20/A21 run the reference-match scan — each identical to
-                // that version's dedicated build.
-                EntityTrader traderEntity = _getTraderMethod != null
-                    ? (EntityTrader)_getTraderMethod.Invoke(traderArea, null)
-                    : FindTraderForArea(world, traderArea);
-                var traderInfo = traderEntity?.TraderInfo;
-                if (traderInfo != null && _traderIsOpen(traderInfo))
-                    gameState.TraderName = traderEntity.EntityName?.ToLowerInvariant() ?? "";
+                TraderArea traderArea = world.GetTraderAreaAt(player.GetBlockPosition());
+                if (traderArea != null)
+                {
+                    // TraderArea.GetTrader() exists only in 3.0 (resolved via _getTraderMethod);
+                    // older versions have no area→trader link, so resolve the trader entity by
+                    // its area instead. 3.0 runs its real GetTrader() (owningTrader, then a
+                    // bounds scan); 2.6/A20/A21 run the reference-match scan — each identical to
+                    // that version's dedicated build.
+                    EntityTrader traderEntity = _getTraderMethod != null
+                        ? (EntityTrader)_getTraderMethod.Invoke(traderArea, null)
+                        : FindTraderForArea(world, traderArea);
+                    var traderInfo = traderEntity?.TraderInfo;
+                    if (traderInfo != null && _traderIsOpen(traderInfo))
+                        gameState.TraderName = traderEntity.EntityName?.ToLowerInvariant() ?? "";
+                }
             }
+            catch (Exception e) { CmmGuard.Report("trader poll", e); }
 
             // Biome: store the raw name. null when the chunk at the player's position
             // isn't streamed in yet (e.g. immediately after a debug teleport in A20);
@@ -780,12 +812,20 @@ namespace CMM
         // resolver — there is no built-in C# decision path anymore.
         public static List<string> ResolveContext()
         {
-            GameState gameState;
-            using (CMMPerf.Measure(CMMPerf.Phase.ScanPoll))
-                gameState = BuildSnapshot();
-            if (gameState == null) return _noContexts;
-            using (CMMPerf.Measure(CMMPerf.Phase.ScanResolve))
-                return ScriptHost.Resolve(gameState);
+            // Guarded: every consumer (spawn patch, 10 Hz scan loop, teleport) must survive
+            // a poll-time throw — BuildSnapshot reads MP-fragile world state, and an uncaught
+            // exception in a Unity coroutine kills that coroutine for the whole session.
+            // _noContexts is the established "world not ready" result.
+            try
+            {
+                GameState gameState;
+                using (CMMPerf.Measure(CMMPerf.Phase.ScanPoll))
+                    gameState = BuildSnapshot();
+                if (gameState == null) return _noContexts;
+                using (CMMPerf.Measure(CMMPerf.Phase.ScanResolve))
+                    return ScriptHost.Resolve(gameState);
+            }
+            catch (Exception e) { CmmGuard.Report("ResolveContext", e); return _noContexts; }
         }
     }
 }

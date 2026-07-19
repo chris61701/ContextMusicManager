@@ -14,6 +14,19 @@ namespace CMM
     {
         public void InitMod(Mod __instance)
         {
+            // CMM is CLIENT-SIDE ONLY. On a dedicated server there is no audio device, no
+            // local player, and no menu — and several patches (e.g. WorldBuiltMenuFade on
+            // NetPackageWorldInfo.PrepareWorldHashes) sit inside the server's world-load
+            // coroutine, where any CMM exception stalls world readiness and hangs every
+            // joining client at spawn. Detect the dedi (public static property, identical
+            // shape on every supported version; its getter only scans the command line for
+            // -dedicated, so it is safe this early) and stay fully inert: no patches, no
+            // GameObject, no coroutines, no native DLL load, no folder scan.
+            if (GameManager.IsDedicatedServer)
+            {
+                Log.Out("[CMM] Dedicated server detected - ContextMusicManager is a client-side mod and stays inactive on this server. Players who install it on their own clients get the full experience; the server needs no CMM patches. It is safe to leave the mod installed here.");
+                return;
+            }
             // NOTE: MoonSharp.Interpreter.dll MUST ship in the mod ROOT, not a subfolder.
             // The game discovers this IModApi by scanning every type in the assembly
             // (Mod.InitModCode → IsAssignableFrom over GetTypes()), which eagerly LOADS
@@ -61,7 +74,15 @@ namespace CMM
         // Conductor's hot Update path, and the string is only read by the 3s diag log.
         static MusicUtils.Enums.SectionType _lastSectionType;
         static bool _sectionTypeInit;
+        // Guarded: per-frame prefix inside Conductor.Update; on failure vanilla must keep
+        // ticking (it runs blood-moon state on SP hosts), so the wrapper returns true.
         static bool Prefix(DynamicMusic.Conductor __instance)
+        {
+            try { return PrefixBody(__instance); }
+            catch (Exception e) { CmmGuard.Report("Conductor.Update prefix", e); return true; }
+        }
+
+        static bool PrefixBody(DynamicMusic.Conductor __instance)
         {
             CachedInstance = __instance;
             var section = __instance.CurrentSectionType;
@@ -121,6 +142,12 @@ namespace CMM
 
         static void Postfix(float _vol)
         {
+            try { PostfixBody(_vol); }
+            catch (Exception e) { CmmGuard.Report("SetDynamicMusicVolume postfix", e); }
+        }
+
+        static void PostfixBody(float _vol)
+        {
             if (ContextMusicManager._ownDmsWrite) return;          // our own set, not a game clobber
             if (_vol == 0f) return;                                // game already muted it — nothing to do
             if (!ContextMusicManager.inGame || ContextMusicManager.vanillaIsActive) return;
@@ -148,7 +175,10 @@ namespace CMM
 
         static void Postfix(ref MusicUtils.Enums.SectionType __result)
         {
-            __result = ContextMusicManager.GovernVanillaSection(__result);
+            // Guarded inline (ref param can't cross into a helper delegate): on failure
+            // __result keeps the game's own section selection.
+            try { __result = ContextMusicManager.GovernVanillaSection(__result); }
+            catch (Exception e) { CmmGuard.Report("SectionSelector.Select postfix", e); }
         }
     }
 
@@ -184,13 +214,19 @@ namespace CMM
 
         static void Prefix(IList<MusicUtils.Enums.SectionType> _sectionTypes, out bool __state)
         {
-            __state = _sectionTypes != null && _sectionTypes.Contains(MusicUtils.Enums.SectionType.Combat);
+            __state = false;   // guarded: on failure the postfix becomes a no-op (vanilla throttle stands)
+            try { __state = _sectionTypes != null && _sectionTypes.Contains(MusicUtils.Enums.SectionType.Combat); }
+            catch (Exception e) { CmmGuard.Report("FrequencyLimiter.Filter prefix", e); }
         }
 
         static void Postfix(bool __state, IList<MusicUtils.Enums.SectionType> __result)
         {
-            if (__state && __result != null && !__result.Contains(MusicUtils.Enums.SectionType.Combat))
-                __result.Add(MusicUtils.Enums.SectionType.Combat);
+            try
+            {
+                if (__state && __result != null && !__result.Contains(MusicUtils.Enums.SectionType.Combat))
+                    __result.Add(MusicUtils.Enums.SectionType.Combat);
+            }
+            catch (Exception e) { CmmGuard.Report("FrequencyLimiter.Filter postfix", e); }
         }
     }
 
@@ -237,7 +273,14 @@ namespace CMM
             return CachedInstance != null ? CachedInstance.GetComponents<AudioSource>() : null;
         }
 
+        // Guarded: on failure return true = vanilla menu music plays rather than dead silence.
         static bool Prefix(BackgroundMusicMono __instance)
+        {
+            try { return PrefixBody(__instance); }
+            catch (Exception e) { CmmGuard.Report("BackgroundMusicMono prefix", e); return true; }
+        }
+
+        static bool PrefixBody(BackgroundMusicMono __instance)
         {
             CachedInstance = __instance;
             if (ContextMusicManager.vanillaIsActive) return true;
@@ -268,9 +311,13 @@ namespace CMM
 
         static void Postfix(BackgroundMusicMono __instance)
         {
-            if (ContextMusicManager.vanillaIsActive) return;
-            MenuMusicPatch.CachedInstance = __instance;
-            MenuMusicPatch.SetMenuMusicMuted(true);
+            try
+            {
+                if (ContextMusicManager.vanillaIsActive) return;
+                MenuMusicPatch.CachedInstance = __instance;
+                MenuMusicPatch.SetMenuMusicMuted(true);
+            }
+            catch (Exception e) { CmmGuard.Report("BackgroundMusicMono.Start postfix", e); }
         }
     }
 
@@ -278,7 +325,15 @@ namespace CMM
     [HarmonyPatch(typeof(GameManager), "SaveAndCleanupWorld")]
     public class Patch_GameEnded
     {
+        // Guarded: an exception escaping this prefix would abort the vanilla world
+        // save/teardown it runs inside of.
         static void Prefix()
+        {
+            try { PrefixBody(); }
+            catch (Exception e) { CmmGuard.Report("GameManager.SaveAndCleanupWorld prefix", e); }
+        }
+
+        static void PrefixBody()
         {
             ContextMusicManager.inGame = false;
             ContextMusicManager.playerIsDead = true;
@@ -311,7 +366,18 @@ namespace CMM
     [HarmonyPatch(typeof(EntityPlayerLocal), "AfterPlayerRespawn")]
     public class PlayerRespawn
     {
+        // Guarded: this postfix runs INSIDE the vanilla spawn method, and the body reads
+        // MP-fragile world state (entities, POIs, traders) that can be partial on a client
+        // mid-join — an escaping exception aborts AfterPlayerRespawn and strands the
+        // loading screen ("freeze on spawn"). On failure CMM self-recovers via the 10 Hz
+        // scan loop; the spawn must always complete.
         static void Postfix()
+        {
+            try { PostfixBody(); }
+            catch (Exception e) { CmmGuard.Report("EntityPlayerLocal.AfterPlayerRespawn postfix", e); }
+        }
+
+        static void PostfixBody()
         {
             ContextMusicManager._gameIsLoading = false;
             // Clear the deep cushion SYNCHRONOUSLY here, not via the 0.1s-polled VolumeSyncLoop:
@@ -388,11 +454,15 @@ namespace CMM
     {
         static void Postfix()
         {
-            if (!ContextMusicManager.playerIsDead)
+            try
             {
-                ContextMusicManager.playerIsDead = true;
-                ContextMusicManager.SendContextUpdate("Death");
+                if (!ContextMusicManager.playerIsDead)
+                {
+                    ContextMusicManager.playerIsDead = true;
+                    ContextMusicManager.SendContextUpdate("Death");
+                }
             }
+            catch (Exception e) { CmmGuard.Report("EntityPlayerLocal.OnDeathUpdate postfix", e); }
         }
     }
 
@@ -417,8 +487,11 @@ namespace CMM
 
         static bool Prepare() => TargetMethod() != null;
 
-        static void Postfix(GameManager __instance) =>
-            ContextMusicManager.OnGamePauseChanged(__instance.IsPaused());
+        static void Postfix(GameManager __instance)
+        {
+            try { ContextMusicManager.OnGamePauseChanged(__instance.IsPaused()); }
+            catch (Exception e) { CmmGuard.Report("GameManager pause postfix", e); }
+        }
     }
 
     // This patch exist for debuff purposes
@@ -439,16 +512,22 @@ namespace CMM
     {
         public static bool Handle(string soundGroupName)
         {
-            // Guarded at the call site: this prefix fires for EVERY in-head sound the game
-            // plays, and the interpolation would allocate before D() checked the flag.
-            if (CMMConfig.DebugLogging)
-                CMMConfig.D($"[CMM Audio Spy] PlayInsidePlayerHead: {soundGroupName}");
-            switch (soundGroupName)
+            // Guarded here (one place, both PlayInsidePlayerHead prefixes route through):
+            // on failure return true = the vanilla stinger plays.
+            try
             {
-                case "player_death_stinger": return !ContextMusicManager.ContextHasFiles("Death");
-                case "spawnInStinger": return !ContextMusicManager.ContextHasFiles("Spawn");
-                default: return true;
+                // Guarded at the call site: this prefix fires for EVERY in-head sound the game
+                // plays, and the interpolation would allocate before D() checked the flag.
+                if (CMMConfig.DebugLogging)
+                    CMMConfig.D($"[CMM Audio Spy] PlayInsidePlayerHead: {soundGroupName}");
+                switch (soundGroupName)
+                {
+                    case "player_death_stinger": return !ContextMusicManager.ContextHasFiles("Death");
+                    case "spawnInStinger": return !ContextMusicManager.ContextHasFiles("Spawn");
+                    default: return true;
+                }
             }
+            catch (Exception e) { CmmGuard.Report("PlayInsidePlayerHead prefix", e); return true; }
         }
     }
 
@@ -482,8 +561,12 @@ namespace CMM
 
         static bool Prefix()
         {
-            CMMConfig.D("[CMM] Game is loading, from LoadChecker.");
-            ContextMusicManager._gameIsLoading = true;
+            try
+            {
+                CMMConfig.D("[CMM] Game is loading, from LoadChecker.");
+                ContextMusicManager._gameIsLoading = true;
+            }
+            catch (Exception e) { CmmGuard.Report("World.LoadWorld prefix", e); }
             return true;
         }
     }
@@ -512,7 +595,16 @@ namespace CMM
 
         static bool Prepare() => TargetMethod() != null;
 
+        // Guarded: this postfix sits inside GameManager.StartAsServer's world-load
+        // coroutine (SP/listen host) — an escaping exception stalls world readiness
+        // and hangs every joining client at the loading screen.
         static void Postfix()
+        {
+            try { PostfixBody(); }
+            catch (Exception e) { CmmGuard.Report("PrepareWorldHashes postfix", e); }
+        }
+
+        static void PostfixBody()
         {
             // inGame is still false here (player not spawned, Conductor hasn't ticked), and
             // PrepareWorldHashes runs once per world load, so this fades the menu exactly once.
@@ -549,8 +641,12 @@ namespace CMM
 
         static void Prefix()
         {
-            CMMConfig.D("[CMM] Game is loading, from StartGame (early deep-buffer arm).");
-            ContextMusicManager._gameIsLoading = true;
+            try
+            {
+                CMMConfig.D("[CMM] Game is loading, from StartGame (early deep-buffer arm).");
+                ContextMusicManager._gameIsLoading = true;
+            }
+            catch (Exception e) { CmmGuard.Report("GameManager.StartGame prefix", e); }
         }
     }
 }

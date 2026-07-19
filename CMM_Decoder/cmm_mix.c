@@ -126,6 +126,13 @@ static cmm_out* g_out;
 static int      g_busRate = 48000, g_busChannels = 2;   /* bus is fixed stereo */
 static int      g_closeWhenIdle;
 static volatile int g_reinitRequested;
+/* v40 — control threads no longer open the device themselves (ma_device_init/start can
+ * block for seconds on a wedged WASAPI endpoint, and it used to run while HOLDING g_lock,
+ * freezing every g_lock caller — including the game main thread at the spawn stinger).
+ * They set this flag instead; the producer thread, the sole device-lifecycle owner, opens
+ * and closes OUTSIDE g_lock. One open attempt per request (retry cadence = per add, as
+ * before), so a missing endpoint never turns into an open storm. */
+static volatile int g_deviceWanted;
 /* Headless mode (offline stress harness): the output "device" is a ring with NO
  * ma_device — the caller drains it via cmm_mix_pump_out. Everything else (producer
  * thread, voices, crossfades, retire/free churn) runs exactly as in-game, so the
@@ -439,30 +446,29 @@ static void flush_tight_locked(void) {
     g_flushUntilMs = mix_now_ms() + FLUSH_GRACE_MS;
 }
 
-/* Open (or reopen) the output device. Ring is allocated at the MAX depth; the live
- * cushion floats between tight and max. Caller holds the lock. */
-static void open_device_locked(void) {
+/* v40 — publish an ALREADY-OPENED device (the producer opened it outside g_lock). Ring is
+ * allocated at the MAX depth; the live cushion floats between tight and max. Caller holds
+ * the lock. */
+static void device_publish_locked(cmm_out* o) {
     g_lowWater = g_tightFill / 2;
     if (g_lowWater < g_busRate / 50) g_lowWater = g_busRate / 50;   /* >=20ms */
     g_targetFill = g_tightFill;
     g_flushUntilMs = mix_now_ms() + FLUSH_GRACE_MS;
     g_prevDeep = g_deep;
     g_outGainTarget = 1.0f;
-    int err = 0;
-    g_out = g_headless ? cmm_out_open_null(g_busRate, g_busChannels, g_maxFill, &err)
-                       : cmm_out_open(g_busRate, g_busChannels, g_maxFill, &err);
+    g_out = o;
 }
 
-static void ensure_device_locked(void) {
-    if (g_out == NULL) open_device_locked();
-}
-
-static void teardown_device_locked(void) {
+/* v40 — retire every voice and DETACH the device (returned for the caller — the producer —
+ * to close outside g_lock; cmm_out_close blocks on the audio backend). Caller holds the lock. */
+static cmm_out* teardown_detach_locked(void) {
     int i;
+    cmm_out* out = g_out;
     for (i = 0; i < g_voiceCount; i++) { retire_voice(g_voices[i]); free(g_voices[i]); }
     g_voiceCount = 0;
     memset(g_sfx, 0, sizeof g_sfx);   /* a half-rendered click must not resume into the NEXT device's first block */
-    if (g_out) { cmm_out_close(g_out); g_out = NULL; }
+    g_out = NULL;
+    return out;
 }
 
 /* Render every live SFX voice additively into g_bus (stereo, `n` frames). Producer thread,
@@ -539,11 +545,22 @@ static void pump_body(void) {
     while (g_running) {
         cmm_out* dev; int freeFrames = 0, queued = 0, target = 0;
         int closeIdle = 0;
+        cmm_out* toClose = NULL;
+        int wantOpen = 0, openRate = 0, openCh = 0, openMaxFill = 0, openHeadless = 0;
 
         mix_lock(&g_lock);
         if (g_reinitRequested) {
             g_reinitRequested = 0;
-            if (g_out) { cmm_out_close(g_out); open_device_locked(); }
+            /* Detach under the lock, close+reopen OUTSIDE it (both block on the backend). */
+            if (g_out) { toClose = g_out; g_out = NULL; g_deviceWanted = 1; }
+        }
+        if (g_deviceWanted) {
+            g_deviceWanted = 0;   /* one attempt per request — no open storm without an endpoint */
+            if (g_out == NULL) {
+                wantOpen = 1;
+                openRate = g_busRate; openCh = g_busChannels;
+                openMaxFill = g_maxFill; openHeadless = g_headless;
+            }
         }
         dev = g_out;
         if (dev) {
@@ -568,6 +585,22 @@ static void pump_body(void) {
             }
         }
         mix_unlock(&g_lock);
+
+        /* v40 — device lifecycle, outside g_lock: a wedged ma_device_init/uninit now stalls
+         * only this thread (which has nothing to render without a device) while every
+         * g_lock ABI on the game's threads keeps returning immediately. */
+        if (toClose) cmm_out_close(toClose);
+        if (wantOpen) {
+            int err = 0;
+            cmm_out* o = openHeadless ? cmm_out_open_null(openRate, openCh, openMaxFill, &err)
+                                      : cmm_out_open(openRate, openCh, openMaxFill, &err);
+            if (o) {
+                mix_lock(&g_lock);
+                device_publish_locked(o);
+                mix_unlock(&g_lock);
+                continue;   /* re-enter with the fresh device — no 5ms idle sleep first */
+            }
+        }
 
         if (!dev) { mix_sleep_ms(5); continue; }
         if (queued >= target || freeFrames < 64) { mix_sleep_ms(2); continue; }
@@ -647,14 +680,18 @@ static void pump_body(void) {
                 }
             }
         }
+        cmm_out* idleDetached = NULL;
         if (g_closeWhenIdle && g_voiceCount == 0) {
-            teardown_device_locked();
+            idleDetached = teardown_detach_locked();
             g_closeWhenIdle = 0;
             closeIdle = 1;
         }
         mix_unlock(&g_lock);
 
-        if (closeIdle) continue;   /* device gone; loop picks up dev==NULL */
+        if (closeIdle) {
+            if (idleDetached) cmm_out_close(idleDetached);   /* blocks on the backend — outside g_lock */
+            continue;   /* device gone; loop picks up dev==NULL */
+        }
 
         /* Master volume + hard clip-guard (raw f32 device wraps past 0dBFS). */
         float master = g_masterVol;
@@ -796,7 +833,7 @@ CMM_API long long cmm_mix_add(cmm_decoder* dec, int kind, int srcRate, int srcCh
     v->framesRead = startFrame;
 
     mix_lock(&g_lock);
-    ensure_device_locked();
+    g_deviceWanted = 1;   /* v40: producer opens outside g_lock (was ensure_device_locked) */
     g_closeWhenIdle = 0;
 
     long long id = ++g_nextId;
@@ -909,7 +946,7 @@ CMM_API long long cmm_mix_add_emitter(cmm_decoder* dec, int kind, int srcRate, i
         retire_voice(v); free(v);
         return 0;
     }
-    ensure_device_locked();
+    g_deviceWanted = 1;   /* v40: producer opens outside g_lock (was ensure_device_locked) */
     g_closeWhenIdle = 0;
 
     long long id = ++g_nextId;
@@ -1104,8 +1141,10 @@ CMM_API void cmm_mix_play_sfx(int kind, float gain) {
     if (gain > 1.0f) gain = 1.0f;
     mix_lock(&g_lock);
     if (!g_started) { mix_unlock(&g_lock); return; }
-    ensure_device_locked();
-    if (!g_out) { mix_unlock(&g_lock); return; }
+    /* v40: producer opens outside g_lock (was ensure_device_locked + !g_out early-out). The
+     * voice arms immediately and renders when the device arrives a few ms later — a click no
+     * longer drops during the open window (it only stays silent if no endpoint ever opens). */
+    g_deviceWanted = 1;
     /* v36 — the STATIC is KEEPALIVE, not one-shot: a ping while a static is already live EXTENDS
      * the live hash (env stays flat until pings stop, then the release runs) instead of layering
      * a second burst on top — retriggered bursts audibly double-fired whenever a station join

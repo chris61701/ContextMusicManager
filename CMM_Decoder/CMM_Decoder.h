@@ -157,8 +157,17 @@ typedef struct cmm_decoder cmm_decoder;
  *   v39:  DIAL-DETENT CLICKS — cmm_mix_set_click_tone gains per-click BODY (a damped two-pole
  *        resonator at BodyHz: the knock of the dial's shell) and DOUBLE (a second micro-impact
  *        ~12ms after the first: the detent's spring release then the stop landing). Body/Double
- *        at 0 reproduce the v38 click exactly. */
-#define CMM_DECODER_ABI 39
+ *        at 0 reproduce the v38 click exactly.
+ *   v40:  DEVICE LIFECYCLE OFF g_lock (no interface change) — ma_device_init/start/uninit used
+ *        to run while HOLDING the mixer lock (lazy open inside cmm_mix_add = the spawn stinger,
+ *        reinit inside the producer). A wedged WASAPI endpoint there froze every lock caller —
+ *        including the game main thread (SetOutputGain/get_state at spawn) — forever. Control
+ *        threads now only flag g_deviceWanted; the producer thread is the sole device owner and
+ *        opens/closes OUTSIDE the lock, so a stalled backend idles the producer (which has
+ *        nothing to render anyway) while every control ABI keeps returning immediately. Also:
+ *        cmm_mix_play_sfx no longer drops the click during the open window — the voice arms and
+ *        renders when the device arrives. */
+#define CMM_DECODER_ABI 40
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
