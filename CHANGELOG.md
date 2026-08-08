@@ -36,7 +36,7 @@ All notable changes to Context Music Manager are documented here.
   every world radio and every other player tuned to it), non-spatially, replacing the normal
   context music while it's on — dial back to Off and the situational soundtrack returns. The
   tuned station and on/off state persist across sessions. Works on EVERY supported game
-  version (A20/A21/2.6/3.0) — only the in-world emitters remain 3.0-only.
+  version (A20/A21/2.6/3.1) — only the in-world emitters remain 3.0+ only.
 - **Station folders can be removed live.** Deleting a station's folder mid-game no longer
   silently retunes every radio in the world: radios tuned to it go quiet ("off air" — static
   is planned), everything else keeps its station, and the moment the folder returns (~2 s
@@ -133,7 +133,7 @@ All notable changes to Context Music Manager are documented here.
   the music slider exactly as the game's own stages do, so Overall 70% with Music 20% lands at
   14% — matching vanilla to well under a tenth of a decibel. Slider changes still take effect
   within about a tenth of a second, and now ramp instead of stepping, so dragging a slider no
-  longer clicks.
+  longer clicks. Native ABI 41.
 - **World speakers follow the Ambient slider, not the music slider.** A radio playing out of a
   block in the world is an environmental sound, so it now rides **Ambient Sound Volume**
   (together with Overall) like everything else in the world — turning the *music* down no longer
@@ -370,6 +370,11 @@ All notable changes to Context Music Manager are documented here.
 
 ### Build
 
+- **Now built against 3.1.0 (b14) instead of 3.0.** The supported set is unchanged in spirit —
+  one DLL still runs on Alpha 20.7, Alpha 21.2, 2.6 and current 3.x — but 3.0 is no longer a
+  build target (Steam upgrades that install in place, so there is no 3.0 left to compile
+  against). 3.1 broke none of the game APIs this mod touches: all four versions compile clean
+  with no source changes. The release zip is named `... for A20-A21-2.6-3.1.zip` accordingly.
 - **VS Code "Package (Release zip)" task** now invokes the single-zip `Package` MSBuild
   target (was `PackageAll`).
 - **Acoustics validation tooling** (development only): an in-game `cmm acsweep` console
