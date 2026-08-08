@@ -166,8 +166,17 @@ typedef struct cmm_decoder cmm_decoder;
  *        opens/closes OUTSIDE the lock, so a stalled backend idles the producer (which has
  *        nothing to render anyway) while every control ABI keeps returning immediately. Also:
  *        cmm_mix_play_sfx no longer drops the click during the open window — the voice arms and
- *        renders when the device arrives. */
-#define CMM_DECODER_ABI 40
+ *        renders when the device arrives.
+ *   v41:  SLEWED MASTERS (no interface change) — cmm_mix_set_master / cmm_mix_set_emitter_master
+ *        now set a TARGET the producer walks toward at a bounded rate (25ms full-scale) instead
+ *        of a value applied as a per-block constant. An instant master change was a step
+ *        discontinuity at a block boundary, i.e. an audible click; the game's volume sliders move
+ *        in 5% notches and managed re-pushes at 10Hz, so dragging one produced a train of them.
+ *        Surfaced when CMM started honouring the Overall/Ambient sliders (both masters now move
+ *        with them). The ramp is per FRAME so channels share a gain (no stereo shift), emitter
+ *        slots all ramp from one start value so the K slots stay locked, and both masters snap to
+ *        target on device attach so a fresh device opens at level instead of fading in. */
+#define CMM_DECODER_ABI 41
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
