@@ -33,7 +33,7 @@
        reflection; ModInfo.xml is dual-format), so neither the staging folder nor the
        zip name encodes a version. Add a version by copying a block below. -->
   <PropertyGroup>
-    <GameVersion Condition="'$(GameVersion)' == ''">3.0.0 b259</GameVersion>
+    <GameVersion Condition="'$(GameVersion)' == ''">3.1.0 b14</GameVersion>
     <!-- Debug builds rewrite the DEPLOYED settings.xml MusicPath to this; override with
          -p:DebugMusicPath=... . Release ships the committed value ("Music") untouched. -->
     <DebugMusicPath Condition="'$(DebugMusicPath)' == ''">J:\7D2D Custom Music</DebugMusicPath>
@@ -46,7 +46,9 @@
     <CMMDeployAll Condition="'$(CMMDeployAll)' == ''">true</CMMDeployAll>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(GameVersion)' == '3.0.0 b259'">
+  <!-- The Steam install tracks the CURRENT release; it is 3.1.0 b14 today (3.0 is gone —
+       Steam upgraded it in place, so there is no 3.0 install left to build against). -->
+  <PropertyGroup Condition="'$(GameVersion)' == '3.1.0 b14'">
     <GameInstallDir>C:\_Games\Steam\steamapps\common\7 Days To Die</GameInstallDir>
     <GameVersionDefine>GV_V3</GameVersionDefine>
   </PropertyGroup>
@@ -365,7 +367,7 @@
        'type not found' errors from missing game assemblies. -->
   <Target Name="ValidateGameVersion" BeforeTargets="Build">
     <Error Condition="'$(GameInstallDir)' == ''"
-           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.0.0 b259', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
+           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.1.0 b14', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
     <Error Condition="!Exists('$(GameManagedDir)')"
            Text="Game Managed folder not found for GameVersion '$(GameVersion)': $(GameManagedDir)" />
     <Warning Condition="!Exists('$(HarmonyHintPath)')"
@@ -409,8 +411,8 @@
   </Target>
 
   <!-- Release only: zip the staged mod as
-       'ContextMusicManager V<modversion> for A20-A21-2.6-3.0.zip' under dist\ — ONE
-       cross-version artifact. The version list is spelled out (NOT a range like A20-3.0)
+       'ContextMusicManager V<modversion> for A20-A21-2.6-3.1.zip' under dist\ — ONE
+       cross-version artifact. The version list is spelled out (NOT a range like A20-3.1)
        to make explicit that 1.x is NOT supported. Runs after the Music scaffold target
        so the empty drop-in tree is included. The mod version is read from ModInfo.xml
        (its authoritative source). -->
@@ -422,7 +424,7 @@
     <PropertyGroup>
       <_ModVersion>@(_ModVersionItem)</_ModVersion>
       <_StageParent>$(MSBuildProjectDirectory)\dist\staging</_StageParent>
-      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion) for A20-A21-2.6-3.0.zip</_ZipPath>
+      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion) for A20-A21-2.6-3.1.zip</_ZipPath>
     </PropertyGroup>
     <Delete Files="$(_ZipPath)" />
     <!-- SourceDirectory is the parent of ContextMusicManager\, so the folder itself
@@ -435,7 +437,7 @@
        to fan a Debug build/deploy out across every install for compile-testing. Keep in
        sync with the GameVersion PropertyGroups near the top. -->
   <ItemGroup>
-    <CMMGameVersions Include="3.0.0 b259" />
+    <CMMGameVersions Include="3.1.0 b14" />
     <CMMGameVersions Include="2.6 b12" />
     <CMMGameVersions Include="Alpha 21.2 b37" />
     <CMMGameVersions Include="Alpha 20.7 b1" />
@@ -461,8 +463,8 @@
        the OTHER versions by COPYING that finished payload into each install's Mods folder.
        This is valid because divergent game-API members are bound by name via reflection
        (see ContextResolver's version bridges), so one compiled DLL runs on all four. The
-       ONE #if GV_V3 fork (the world-emitter radio, 3.0-only) IS included in this payload —
-       it's built against the default GameVersion (3.0) — and self-disables at runtime on
+       ONE #if GV_V3 fork (the world-emitter radio, 3.x-only) IS included in this payload —
+       it's built against the default GameVersion (3.x) — and self-disables at runtime on
        older games via EmitterCompat.RuntimeSupported (with the TEFeatureDoor Harmony hook
        resolved by NAME, since that type doesn't exist pre-1.0 and a hard token would abort
        PatchAll on A20/A21). Copying
@@ -509,8 +511,8 @@
        currently-active Configuration:
          dotnet msbuild ContextMusicManager.csproj -t:Package
        One compiled DLL runs on every supported game version, so this produces exactly
-       ONE artifact: dist\ContextMusicManager V<ver> for A20-A21-2.6-3.0.zip. It MUST build
-       against the default GameVersion (3.0): the world-emitter radio is #if GV_V3, so a
+       ONE artifact: dist\ContextMusicManager V<ver> for A20-A21-2.6-3.1.zip. It MUST build
+       against the default GameVersion (3.x): the world-emitter radio is #if GV_V3, so a
        DLL built against any other version would silently ship WITHOUT that feature.
        (Including it is always safe — it runtime-disables itself on pre-3.0 games via
        EmitterCompat.RuntimeSupported.) -->

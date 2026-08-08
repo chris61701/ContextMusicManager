@@ -11,11 +11,11 @@ scan cadence lowered `0.5s → 0.1s` (commit `0c445a0`). Compile-verified agains
 **Build/verify recipe** (compile-check without deploying):
 
 ```
-MSBuild ContextMusicManager.csproj /t:Build /p:CMMDeployAll=false /p:OutputPath=temp_build /p:GameVersion="3.0.0 b259"
+MSBuild ContextMusicManager.csproj /t:Build /p:CMMDeployAll=false /p:OutputPath=temp_build /p:GameVersion="3.1.0 b14"
 ```
 
-The shipped binary is compiled **once** against 3.0 and runs on A20/A21/2.6/3.0 via
-reflection bridges — so the 3.0 compile is the gate. MSBuild is at
+The shipped binary is compiled **once** against the current release (3.1.0 b14) and runs
+on A20/A21/2.6/3.1 via reflection bridges — so the 3.x compile is the gate. MSBuild is at
 `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`.
 Clean up the `temp_build`/`temp_buildConfig` leftovers afterward.
 
