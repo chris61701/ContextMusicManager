@@ -830,8 +830,18 @@ namespace CMM
                 // voice state plus the listener (still the final volume/pause gate in-game).
                 if (_diagListener == null) _diagListener = FindObjectOfType<AudioListener>();
                 AudioListener listener = _diagListener;
+                // All four playback sliders, not just music: CMM's output bypasses Unity, so it
+                // applies Overall itself (music AND emitters) and Ambient (emitters only) — when a
+                // level looks wrong, this line says which slider is responsible. listenerVol is the
+                // game's Overall applied Unity-side, i.e. what VANILLA audio is riding; ours is the
+                // `overall` figure. The two should track each other.
                 CMMConfig.D($"[CMM AUDIBLE] nativeBusy={NativeOutputBusy()}" +
                         $" | masterVol={CmmMixer.MasterVolume:F2}" +
+                        $" | overall={CMMConfig.OverallVolume:F2}" +
+                        $" | ambient={CMMConfig.AmbientVolume:F2}" +
+                        $" | music={gameMusicVol:F2}" +
+                        $" | menuMusic={GamePrefs.GetFloat(EnumGamePrefs.OptionsMenuMusicVolumeLevel):F2}" +
+                        $" | emitterTrim={CMMConfig.WorldEmitterVolume:F2}" +
                         $" | listenerVol={AudioListener.volume:F2}" +
                         $" | listenerPaused={AudioListener.pause}" +
                         $" | listener={(listener != null ? listener.name : "NONE")}");

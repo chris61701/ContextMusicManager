@@ -140,11 +140,24 @@ static volatile int g_deviceWanted;
 static int      g_headless;
 
 static volatile float g_masterVol   = 1.0f;
+/* v41 — DE-ZIPPER for the music master. g_masterVol is a TARGET; the producer walks the
+ * actually-applied gain toward it at a bounded per-frame rate (below). Applying the target
+ * directly made every master change a step discontinuity at a block boundary — audible as a
+ * click. The game's volume sliders move in 5% notches and managed re-pushes the master at
+ * 10Hz, so dragging one produced a train of clicks (reported in-game once CMM started
+ * honouring the Overall slider; the same latent step was always there on the music slider).
+ * Producer-thread ONLY — never touched from the control thread, so no atomicity concern. */
+static float g_masterApplied = 1.0f;
+/* Full-scale (0->1) traverse time for the slew. 25ms is long enough that no step in it is
+ * audible as a click and short enough to read as instant: one 5% notch lands in ~1.25ms. */
+#define MASTER_SLEW_MS 25.0f
 /* Emitter (world-radio) master — DELIBERATELY SEPARATE from g_masterVol. The music master folds in
  * VolumeModifier and the current context's volume; the diegetic radio must NOT ride those (a quiet
  * music context shouldn't quiet the radio). Managed sets this to the game's music SLIDER × the Radio
  * context's own volume, so the radio scales only to the in-game slider (and its context level). */
 static volatile float g_emMasterVol = 1.0f;
+/* v41 — de-zipper for the emitter master, mirroring g_masterApplied. Producer-thread only. */
+static float g_emMasterApplied = 1.0f;
 static volatile int   g_deep;        /* DeepBuffer (loading) */
 static volatile int   g_extra;       /* ExtraCushion (post-spawn grace) — excluded from falling-edge flush */
 
@@ -456,6 +469,11 @@ static void device_publish_locked(cmm_out* o) {
     g_flushUntilMs = mix_now_ms() + FLUSH_GRACE_MS;
     g_prevDeep = g_deep;
     g_outGainTarget = 1.0f;
+    /* Snap the slewed master to its target on device attach: the first block of a fresh device
+     * must open AT the level managed already pushed, not ramp up to it from the last device's
+     * residual value (which would fade the first ~25ms of every track start). */
+    g_masterApplied = g_masterVol;
+    g_emMasterApplied = g_emMasterVol;
     g_out = o;
 }
 
@@ -693,12 +711,34 @@ static void pump_body(void) {
             continue;   /* device gone; loop picks up dev==NULL */
         }
 
-        /* Master volume + hard clip-guard (raw f32 device wraps past 0dBFS). */
+        /* Master volume + hard clip-guard (raw f32 device wraps past 0dBFS). The master is
+         * SLEWED per frame toward its target rather than applied as a per-block constant —
+         * see g_masterApplied. A block whose gain is already settled costs one compare. */
         float master = g_masterVol;
         int total = n * g_busChannels, i;
-        for (i = 0; i < total; i++) {
-            float s = g_bus[i] * master;
-            g_bus[i] = s > 1.0f ? 1.0f : (s < -1.0f ? -1.0f : s);
+        if (g_masterApplied == master) {
+            for (i = 0; i < total; i++) {
+                float s = g_bus[i] * master;
+                g_bus[i] = s > 1.0f ? 1.0f : (s < -1.0f ? -1.0f : s);
+            }
+        } else {
+            /* Max gain change per FRAME (not per sample — every channel of a frame must share
+             * one gain or the stereo image shifts during the ramp). */
+            float step = 1.0f / (MASTER_SLEW_MS * 0.001f * (float)g_busRate);
+            float cur = g_masterApplied;
+            int f, ch;
+            for (f = 0; f < n; f++) {
+                float d = master - cur;
+                if (d > step)       cur += step;
+                else if (d < -step) cur -= step;
+                else                cur = master;   /* arrived: exact, no residual creep */
+                for (ch = 0; ch < g_busChannels; ch++) {
+                    int k = f * g_busChannels + ch;
+                    float s = g_bus[k] * cur;
+                    g_bus[k] = s > 1.0f ? 1.0f : (s < -1.0f ? -1.0f : s);
+                }
+            }
+            g_masterApplied = cur;
         }
 
         int pushed = 0;
@@ -714,13 +754,38 @@ static void pump_body(void) {
          * of zeros. No clip here (the callback clips the summed output). */
         {
             float emMaster = g_emMasterVol;   /* the radios' OWN master, not the music master */
+            float emStart  = g_emMasterApplied;
             int s;
+            /* SLEWED like the music master (see g_masterApplied) — the emitter master now tracks
+             * the game's Ambient/Overall sliders, so dragging one steps this value and an
+             * unramped step is an audible click. Every slot must ramp from the SAME start, so
+             * the end value is computed once here rather than carried out of the slot loop. */
+            float emStep = 1.0f / (MASTER_SLEW_MS * 0.001f * (float)g_busRate);
+            float emEnd  = emStart;
+            if (emStart != emMaster) {
+                float d = emMaster - emStart, span = emStep * (float)n;
+                if (d > span)       emEnd = emStart + span;
+                else if (d < -span) emEnd = emStart - span;
+                else                emEnd = emMaster;   /* arrives within this block */
+            }
             for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
                 if (!emActive[s]) continue;
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
-                for (i = 0; i < n; i++) lane[i] *= emMaster;
+                if (emStart == emMaster) {
+                    for (i = 0; i < n; i++) lane[i] *= emMaster;
+                } else {
+                    float cur = emStart;
+                    for (i = 0; i < n; i++) {
+                        float d = emMaster - cur;
+                        if (d > emStep)       cur += emStep;
+                        else if (d < -emStep) cur -= emStep;
+                        else                  cur = emMaster;
+                        lane[i] *= cur;
+                    }
+                }
                 cmm_out_write_emitter(dev, s, lane, n);
             }
+            g_emMasterApplied = emEnd;
         }
     }
 }
@@ -758,7 +823,9 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_tightFill   = tightFrames > 0 ? tightFrames : g_busRate / 5;   /* ~200ms default */
     g_maxFill     = maxFrames > g_tightFill ? maxFrames : g_tightFill;
     g_masterVol   = 1.0f;
+    g_masterApplied = 1.0f;
     g_emMasterVol = 1.0f;
+    g_emMasterApplied = 1.0f;
     g_outGainTarget = 1.0f;
     g_outGainHold = 0;
     g_minQueued   = 0x7fffffff;

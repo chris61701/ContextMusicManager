@@ -100,6 +100,7 @@ namespace CMM
                 CMMConfig.WorldEmitterEnabled = ReadBool  (root, "WorldEmitterEnabled", CMMConfig.WorldEmitterEnabled);
                 CMMConfig.WorldEmitterSource  = ReadString(root, "WorldEmitterSource",  CMMConfig.WorldEmitterSource);
                 CMMConfig.WorldEmitterRange   = ReadFloat (root, "WorldEmitterRange",   CMMConfig.WorldEmitterRange);
+                CMMConfig.WorldEmitterVolume  = ReadFloat (root, "WorldEmitterVolume",  CMMConfig.WorldEmitterVolume);
                 CMMConfig.WorldEmitterFade    = ReadFloat (root, "WorldEmitterFade",    CMMConfig.WorldEmitterFade);
                 CMMConfig.RadioAnchorSeconds  = ReadFloat (root, "RadioAnchorSeconds",  CMMConfig.RadioAnchorSeconds);
                 CMMConfig.RadioSfxEnabled     = ReadBool  (root, "RadioSfxEnabled",     CMMConfig.RadioSfxEnabled);

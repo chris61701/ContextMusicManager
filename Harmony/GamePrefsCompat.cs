@@ -10,10 +10,12 @@ namespace CMM
     // yields the running version's ordinal. Invisible to every compile check — only decompile
     // comparison or runtime misbehaviour reveals it (cross-version divergence #10).
     //
-    // Members that predate the drift (OptionsMusicVolumeLevel = 3, OptionsMenuMusicVolumeLevel = 4,
-    // stable across A20→3.0) are safe to reference directly; anything deeper into the enum must go
-    // through here. When adding a member, verify its name exists in ALL supported versions'
-    // decompiles and give it a sensible fallback for when it doesn't.
+    // Members that predate the drift are safe to reference directly; anything deeper into the enum
+    // must go through here. The whole audio-volume block sits at the very front and is byte-stable
+    // across A20 / A21 / 2.6 / 3.1 (verified in all four decompiles): OptionsAmbientVolumeLevel = 2,
+    // OptionsMusicVolumeLevel = 3, OptionsMenuMusicVolumeLevel = 4, OptionsOverallAudioVolumeLevel
+    // = 5 — CMMConfig reads all four directly. When adding a member, verify its name AND ordinal
+    // exist in ALL supported versions' decompiles and give it a sensible fallback for when it doesn't.
     internal static class GamePrefsCompat
     {
         private static readonly EnumGamePrefs? _dynamicMusicEnabled = Resolve("OptionsDynamicMusicEnabled");

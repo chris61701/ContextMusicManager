@@ -1082,14 +1082,25 @@ namespace CMM
             }
         }
 
-        // Push the world-radio's OWN master: the game's music SLIDER × the Radio context's own volume
-        // (unset ⇒ 1). Deliberately NOT × VolumeModifier and NOT × the current music context's volume.
+        // Push the world-radio's OWN master: the game's OVERALL × AMBIENT sliders × the emitters'
+        // own WorldEmitterVolume trim. Deliberately NOT × VolumeModifier and NOT × the current
+        // music context's volume.
+        //
+        // AMBIENT, not the music slider (which is what this used to read): a radio playing out of a
+        // block in the world is a diegetic environmental sound — the same category the game puts
+        // every other world sound in — so muting MUSIC must leave it playing. OVERALL is applied
+        // by hand for the same reason CMMConfig.GetVolume does it: the game applies that slider as
+        // AudioListener.volume, which only reaches Unity AudioSources, and our audio leaves through
+        // its own device.
+        //
+        // The trim is WorldEmitterVolume (settings.xml), NOT the Radio context's volume in
+        // contexts.xml — that one now trims ONLY the personal radio (PersonalRadio
+        // .MasterVolumeOverride). The two share a station catalog but not a level: a speaker across
+        // the room and a radio in your head want different trims.
         private static void PushEmitterMaster()
         {
-            Contexts c = RadioContext();
-            float ctxVol = (c != null && c.VolumeOverride >= 0f) ? c.VolumeOverride : 1f;
-            float slider = GamePrefs.GetFloat(EnumGamePrefs.OptionsMusicVolumeLevel);
-            CmmMixer.Instance?.SetEmitterMaster(slider * ctxVol);
+            float trim = Mathf.Clamp01(CMMConfig.WorldEmitterVolume);
+            CmmMixer.Instance?.SetEmitterMaster(CMMConfig.OverallVolume * CMMConfig.AmbientVolume * trim);
         }
     }
 }

@@ -31,6 +31,15 @@
        until the folder returns or you re-enter the world; other stations are unaffected). -->
   <WorldEmitterSource>Radio</WorldEmitterSource>   <!-- J:\7D2D Custom Music\Radio, or an .m3u, or an absolute path -->
   <WorldEmitterRange>100</WorldEmitterRange>
+  <!-- Volume 0..1: the world speakers' own level, multiplied onto the game's "Overall" and
+       "Ambient Sound" sliders. The emitters follow AMBIENT, not the music slider — a radio
+       playing out of a block is an environmental sound, so turning the music down leaves it
+       playing. This is SEPARATE from the Radio context's volume="..." in contexts.xml, which
+       now trims only the personal radio (Alt+PgUp/PgDn): a speaker across the room and a radio
+       in your head want different levels. Hot-reloads — edit and save while the game runs.
+       NOTE Ambient defaults to 100% where Music defaults to 60%, so at 0.5 the speakers are
+       ~4.4 dB louder than they used to be; 0.3 reproduces the old level exactly. -->
+  <WorldEmitterVolume>0.5</WorldEmitterVolume>
   <WorldEmitterFade>1.0</WorldEmitterFade>
   <!-- Placement ("birth") fade, seconds: how long a just-placed speaker takes to fade in — both
        when it joins a station that's already playing (per-speaker ramp) and when placing it is

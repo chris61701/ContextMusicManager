@@ -141,6 +141,13 @@ namespace CMM
         public IEnumerator FadeInVanillaCoroutine(float duration)
         {
             float startVol = _currentVanillaVolume;
+            // RAW music slider — do NOT fold in the Overall slider here, unlike CMMConfig
+            // .GetVolume. This target drives the GAME's own SetDynamicMusicVolume (the dmsVol
+            // mixer param), and the game's mixer output already passes through
+            // AudioListener.volume, which IS the Overall slider. Multiplying it in here would
+            // apply Overall twice, so vanilla music would fall off quadratically as the master
+            // came down. CMM applies Overall itself only because our native output bypasses the
+            // listener entirely — vanilla's doesn't.
             float targetVol = GamePrefs.GetFloat(EnumGamePrefs.OptionsMusicVolumeLevel);
             CMMConfig.D($"[CMM] FadeInVanilla: {startVol:F2} → {targetVol:F2} over {duration:F1}s");
             float elapsed = 0f;

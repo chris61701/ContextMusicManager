@@ -125,6 +125,25 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **The game's audio sliders now work on CMM's music.** CMM's audio leaves through its own
+  output device rather than Unity's, which meant the **Overall Volume** slider — implemented by
+  the game as a Unity-wide setting — never reached any of it. Turning the master to zero
+  silenced the whole game *except* this mod. Overall is now applied to everything CMM emits:
+  context music, menu music, the personal radio and the radio dial sounds. It multiplies with
+  the music slider exactly as the game's own stages do, so Overall 70% with Music 20% lands at
+  14% — matching vanilla to well under a tenth of a decibel. Slider changes still take effect
+  within about a tenth of a second, and now ramp instead of stepping, so dragging a slider no
+  longer clicks.
+- **World speakers follow the Ambient slider, not the music slider.** A radio playing out of a
+  block in the world is an environmental sound, so it now rides **Ambient Sound Volume**
+  (together with Overall) like everything else in the world — turning the *music* down no longer
+  silences the radios in a POI. They also have their own trim, `WorldEmitterVolume` in
+  `settings.xml` (hot-reload), which replaces the Radio context's `volume` for this purpose; that
+  context setting now trims **only** the personal radio (Alt+PgUp/PgDn), since a speaker across
+  the room and a radio in your head rarely want the same level. Note that Ambient defaults to
+  100% where Music defaults to 60%, so on default settings world speakers are about 4.4 dB louder
+  than before — set `WorldEmitterVolume` to `0.3` for the old level.
+
 - **Radio stations start instantly at any library size.** Station broadcasts no longer scan
   every track's length up front (a large playlist station could sit silent for a minute after
   a fresh launch). Schedules now re-anchor once per hour of world time (`RadioAnchorSeconds`)

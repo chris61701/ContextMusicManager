@@ -26,6 +26,41 @@ namespace CMM
             new HashSet<SectionType>();
 
         public static float VolumeModifier = 1.0f;
+
+        // ── The game's "Overall Volume" slider ────────────────────────────────
+        // The game applies this pref as `AudioListener.volume` (GameOptionsManager), a Unity-side
+        // global that attenuates Unity AudioSources — and NOTHING CMM emits is one. Music, the
+        // world radios and the synthesized radio SFX all leave through our own miniaudio device
+        // on our own mix thread, so the master slider physically cannot reach them: without this
+        // read, Overall=0 silences the whole game EXCEPT CMM (confirmed in-game — vanilla music
+        // attenuates, ours doesn't). So we apply it ourselves, as the outermost gain stage.
+        //
+        // Vanilla composes its sliders as independent gain stages in series (per-group mixer
+        // param, then AudioListener.volume at the listener), so the stages MULTIPLY: Overall 0.7
+        // with Music 0.2 lands at 0.14. The group params go through LogarithmicCurve(2, 6, -80, 0)
+        // into a dB mixer, but that curve is near-identity in amplitude (slider s → s^0.9966,
+        // ≤0.9% error at the bottom of the range) — so multiplying the raw pref values reproduces
+        // vanilla to well under a tenth of a dB. No curve port needed.
+        //
+        // Clamped to [0,1], mirroring the game's own startup clamp (GameOptionsManager
+        // .ApplyAllOptions does Math.Min(pref, 1f)). The pref carries no min/max validator in
+        // GamePrefs — the 0-100% range is enforced only by the options UI — so a hand-edited
+        // prefs file could otherwise hand us a value >1 and drive the native bus into clipping.
+        // Direct enum use is safe: OptionsOverallAudioVolumeLevel sits at ordinal 5 in A20, A21,
+        // 2.6 AND 3.1 (verified against all four decompiles).
+        public static float OverallVolume
+            => Mathf.Clamp01(GamePrefs.GetFloat(EnumGamePrefs.OptionsOverallAudioVolumeLevel));
+
+        // ── The game's "Ambient Sound Volume" slider ──────────────────────────
+        // The slider the game labels "sets environmental sound volume" (mixer param ambVol).
+        // The world emitters ride THIS, not the music slider: a radio playing out of a block is a
+        // diegetic object in the world, the same category as every other environmental sound, so
+        // turning the MUSIC down must not silence it. Same near-identity curve as Overall above,
+        // so the raw pref value is the right multiplier. Ordinal 2 in A20/A21/2.6/3.1 (verified),
+        // so the direct enum reference is safe. Music playback does NOT use this.
+        public static float AmbientVolume
+            => Mathf.Clamp01(GamePrefs.GetFloat(EnumGamePrefs.OptionsAmbientVolumeLevel));
+
         // A non-negative volumeOverride replaces the global VolumeModifier for this
         // call (used by contexts that set their own volume, e.g. POI_Cleared).
         public static float GetVolume(bool inGame, float volumeOverride = -1f)
@@ -38,7 +73,9 @@ namespace CMM
                     inGame ? EnumGamePrefs.OptionsMusicVolumeLevel : EnumGamePrefs.OptionsMenuMusicVolumeLevel);
 
             float modifier = volumeOverride >= 0f ? volumeOverride : VolumeModifier;
-            return inGameVolume * modifier;
+            // Overall multiplies LAST — every caller of this method is setting the native bus
+            // master (CmmMixer.MasterVolume), which is the one place all our audio passes through.
+            return OverallVolume * inGameVolume * modifier;
         }
 
         // ── Native audio output (miniaudio) ───────────────────────────────────
@@ -86,6 +123,13 @@ namespace CMM
         public static bool   WorldEmitterEnabled = false;
         public static string WorldEmitterSource  = "";
         public static float  WorldEmitterRange   = 100f;
+        //   Volume: the world emitters' OWN trim (0..1), multiplied onto the Ambient and Overall
+        //   sliders to form the emitter master. DELIBERATELY SEPARATE from the Radio context's
+        //   `volume` in contexts.xml, which now trims ONLY the personal radio (Alt+PgUp/PgDn) —
+        //   the two share a station catalog but are different things: one is a speaker across the
+        //   room, the other is in your head, and a level that suits one rarely suits the other.
+        //   0.5 keeps the level the Radio context's trim used to give the emitters.
+        public static float  WorldEmitterVolume  = 0.5f;
         // Fade (seconds) when the station starts (a speaker comes in range) / stops (all leave range).
         public static float  WorldEmitterFade    = 1.0f;
         // Placement ("birth") ramp for a speaker that APPEARS while its station is already
