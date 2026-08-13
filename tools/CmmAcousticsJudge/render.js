@@ -236,11 +236,16 @@ function main() {
     },
     {
       name: "pastdoor",
-      note: "stay in room B, walk parallel to the wall past the open doorway (localisation)",
+      note: "strafe along the wall past the open doorway, FACING it (localisation)",
       seconds: 16,
       states: () => [st(OPEN)],
-      waypoints: [ { t: 0, x: 23, y: 3, z: 3, yaw: Math.PI * 0.5 },
-                   { t: 16, x: 23, y: 3, z: 21, yaw: Math.PI * 0.5 } ],
+      // Facing must be ACROSS the walk, not along it. Looking down the direction of travel
+      // put the doorway permanently on the listener's right, so the image only got more or
+      // less right-biased -- an arc, never a sweep -- and equal-power panning carries no
+      // front/back cue to make up for it. Facing the wall while strafing puts the doorway
+      // left, then centre, then right, which is the thing this scenario exists to test.
+      waypoints: [ { t: 0, x: 23, y: 3, z: 3, yaw: Math.PI },
+                   { t: 16, x: 23, y: 3, z: 21, yaw: Math.PI } ],
     },
     {
       name: "swing",
