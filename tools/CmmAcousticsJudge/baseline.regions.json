@@ -1,0 +1,74 @@
+{
+ "spec": [
+  {
+   "name": "S2 door OPEN, wood wall",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -3
+  },
+  {
+   "name": "S1 door SHUT, wood wall",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -6.8
+  },
+  {
+   "name": "S3 door SHUT, concrete wall",
+   "pass": true,
+   "probe": "B off-set",
+   "value": -33.8
+  },
+  {
+   "name": "S4 VAULT door in WOOD wall (should NOT seal)",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -9.7
+  },
+  {
+   "name": "S4 VAULT door in CONCRETE wall (should seal)",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -34.6
+  },
+  {
+   "name": "S4 VAULT in 3-thick CONCRETE (bunker)",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -97.1
+  }
+ ],
+ "smooth": [
+  {
+   "route": "approach",
+   "model": "new",
+   "worst": 2.63,
+   "mean": 0.48,
+   "over1": 5.5,
+   "over3": 0
+  },
+  {
+   "route": "pastdoor",
+   "model": "new",
+   "worst": 3.13,
+   "mean": 0.62,
+   "over1": 18.1,
+   "over3": 2.8
+  },
+  {
+   "route": "throughdoor",
+   "model": "new",
+   "worst": 1.86,
+   "mean": 0.42,
+   "over1": 1.6,
+   "over3": 0
+  },
+  {
+   "route": "alongwall-shut",
+   "model": "new",
+   "worst": 0.44,
+   "mean": 0.22,
+   "over1": 0,
+   "over3": 0
+  }
+ ]
+}
