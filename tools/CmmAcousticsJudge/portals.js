@@ -97,6 +97,11 @@ const FRESNEL_PTS = (() => {
   return out;
 })();
 const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
+// Calibration standing in for the energy balance an exponential distance law does not provide:
+// SLOPE dB/block is not inverse-square, so 4*P_in/R cannot be evaluated in absolute units. This
+// offset sets where the diffuse field sits relative to the direct component, and it is the one
+// honestly empirical constant in the model.
+const DIFFUSE_CAL = 0;   // held at 0 until the field is continuous across boundaries
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
 const APERTURE_MAX = 0.75;   // a node pinched below this much of its own cross-section IS an aperture
 const PRUNE_DB = 25;         // ignore an arrival this far below the strongest: <0.4% of energy
@@ -625,6 +630,9 @@ function makeNewEvaluator(D, G, src) {
     }
     const fanDb = fanPow > 0 ? -powToDb(fanPow) : 120;
     const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
+    // which region/node the listener stands in (floored: the position is a float now)
+    const nd = D.inB(Math.floor(wx), Math.floor(wy), Math.floor(wz))
+      ? G.nodeOf[D.idx(Math.floor(wx), Math.floor(wy), Math.floor(wz))] : -1;
 
     const arrivals = [];
     let pow = 0, bestDb = -Infinity, bestIdx = -1;
@@ -657,17 +665,46 @@ function makeNewEvaluator(D, G, src) {
       pow += w * dbToPow(db);
       if (db > bestDb) { bestDb = db; bestIdx = arrivals.length - 1; }
     }
+    // ── TERM 4: THE DIFFUSE FIELD ────────────────────────────────────────────────
+    // In an enclosed space, sound bounces off every surface and builds a field that is
+    // essentially UNIFORM -- it does not vary with listener position -- and beyond the critical
+    // distance it DOMINATES the direct component. Its absence is why walking past a door felt
+    // harsh: every dB of the dry path's variation was heard naked, with nothing underneath it.
+    //
+    //     P_diffuse = 4 * P_entering_the_space / R,    R = S*alpha/(1-alpha)
+    //
+    // Power entering the listener's region is the power arriving at each of its boundaries, plus
+    // the source itself if it is in that region. Omnidirectional by nature, so no position.
+    let diffDb = -120;
+    const myNode = nd >= 0 ? G.nodes[nd] : null;
+    if (myNode && myNode.roomR !== undefined) {
+      let pIn = 0;
+      if (seeded.has(nd)) pIn += dbToPow(-minSeed);
+      for (const pid of myNode.edges) {
+        const pc = cost[pid];
+        if (!pc) continue;
+        pIn += dbToPow(-(pc.add - constrictDb(pc.bneck)));
+      }
+      if (pIn > 0) diffDb = powToDb(4 * pIn / Math.max(1, myNode.roomR)) + DIFFUSE_CAL;
+    }
+    if (diffDb > -110) {
+      arrivals.push({ db: diffDb, w: 1, px: lx, py: ly, pz: lz, legMat: 0, len: d, isDiffuse: true });
+      pow += dbToPow(diffDb);
+      if (diffDb > bestDb) { bestDb = diffDb; bestIdx = arrivals.length - 1; }
+    }
+
     // contribution prune, applied after the fact so the set itself never changed
     let kept = 0;
     for (const a of arrivals) if (a.db >= bestDb - PRUNE_DB) kept++;
 
     const total = pow > 0 ? powToDb(pow) : -120;
     const dom = arrivals[bestIdx] || null;
-    const airs = arrivals.filter(a => !a.isSrc && a.db >= bestDb - PRUNE_DB);
+    const airs = arrivals.filter(a => !a.isSrc && !a.isDiffuse && a.db >= bestDb - PRUNE_DB);
     const solid = arrivals.find(a => a.isSrc);
     return {
       d, total,
       airDb: airs.length ? powToDb(airs.reduce((s, a) => s + a.w * dbToPow(a.db), 0)) : -120,
+      diffDb,
       solidDb: solid ? solid.db : -120,
       matDb: centerMat, airLen: dom ? dom.len : d,
       entry: dom, airs, arrivals, kept,

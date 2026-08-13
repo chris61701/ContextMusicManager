@@ -113,7 +113,7 @@ function segment(D, open, thick) {
     if (seen < 0 && thick[i] >= SEED_MIN) {
       // A genuine local maximum in reasonably open air: a room centre.
       const id = regions.length;
-      regions.push({ id, n: 0, sx: 0, sy: 0, sz: 0, core: thick[i], edges: new Map() });
+      regions.push({ id, n: 0, sx: 0, sy: 0, sz: 0, core: thick[i], surf: 0, absorb: 0, edges: new Map() });
       label[i] = id;
     } else if (seen < 0) {
       // Thin and isolated -- a crack with no wider space attached. Still a region, but it must
@@ -123,7 +123,7 @@ function segment(D, open, thick) {
       // A wall-hugging skin is not a room. Below SEED_MIN, voxels join a room instead of
       // founding one.
       const id = regions.length;
-      regions.push({ id, n: 0, sx: 0, sy: 0, sz: 0, core: thick[i], edges: new Map() });
+      regions.push({ id, n: 0, sx: 0, sy: 0, sz: 0, core: thick[i], surf: 0, absorb: 0, edges: new Map() });
       label[i] = id;
     } else {
       // join the (thickest-neighbour) region; a conflict means we are ON a boundary, and the
@@ -133,6 +133,25 @@ function segment(D, open, thick) {
     }
     const R = regions[label[i]];
     R.n++; R.sx += x; R.sy += y; R.sz += z;
+    // Surface area and area-weighted absorption of the enclosure, for the diffuse field
+    // (MODEL.md term 4: R = S*alpha/(1-alpha)). Every face this voxel presents to something
+    // non-open is a piece of the room's boundary. Absorption comes from what that face is made
+    // of: dense hard material is REFLECTIVE (low alpha), soft porous material absorbs -- so
+    // alpha runs opposite to the transmission loss fraction, which is a density proxy.
+    for (const [dx, dy, dz] of nb6) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      const oob = nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz;
+      const f = oob ? 0 : open[li(nx, ny, nz)];
+      if (f > OPEN_EPS) continue;                       // opening, not surface
+      // Out of bounds is OPEN SKY, not a wall: sound crossing it never comes back, so it is a
+      // perfect absorber. Treating it as reflective gave the outdoor region a room constant and a
+      // critical distance of 10.7 blocks -- implying a strong diffuse field outdoors, where there
+      // is no enclosure at all. With alpha ~1 the outdoor room constant goes huge and its diffuse
+      // field vanishes, which is the correct behaviour and falls out rather than being special-cased.
+      const alpha = oob ? 0.95
+        : Math.max(0.03, Math.min(0.8, 0.6 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
+      R.surf++; R.absorb += alpha;
+    }
     if (thick[i] < (R.minT === undefined ? Infinity : R.minT)) R.minT = thick[i];
   }
   return { label, regions };
@@ -297,16 +316,27 @@ function asGraph(D, mergeH) {
     if (id === undefined) continue;
     nodeOf[i] = id;
     let a = acc.get(id);
-    if (!a) { a = { n: 0, sx: 0, sy: 0, sz: 0 }; acc.set(id, a); }
+    if (!a) { a = { n: 0, sx: 0, sy: 0, sz: 0, surf: 0, absorb: 0 }; acc.set(id, a); }
     a.n++; a.sx += x; a.sy += y; a.sz += z;
+  }
+  // surface/absorption must be summed over the RAW regions that merged into each final one
+  for (const reg of r.regions) {
+    const id = r.regionOf(reg.id);
+    if (id === undefined) continue;
+    const a = acc.get(id);
+    if (!a) continue;
+    a.surf += reg.surf || 0; a.absorb += reg.absorb || 0;
   }
   const nodes = [];
   for (let id = 0; id < r.kept; id++) {
-    const a = acc.get(id) || { n: 1, sx: 0, sy: 0, sz: 0 };
+    const a = acc.get(id) || { n: 1, sx: 0, sy: 0, sz: 0, surf: 6, absorb: 0.6 };
     nodes.push({
       id, n: a.n, throat: 1,
       px: D.x0 + a.sx / a.n + 0.5, py: D.y0 + a.sy / a.n + 0.5, pz: D.z0 + a.sz / a.n + 0.5,
       tpx: D.x0 + a.sx / a.n + 0.5, tpy: D.y0 + a.sy / a.n + 0.5, tpz: D.z0 + a.sz / a.n + 0.5,
+      // room constant R = S*alpha/(1-alpha); the diffuse field is 4*P_in/R
+      surf: Math.max(1, a.surf), alpha: a.surf > 0 ? a.absorb / a.surf : 0.5,
+      get roomR() { const al = Math.max(0.02, Math.min(0.95, this.alpha)); return this.surf * al / (1 - al); },
       edges: [],
     });
   }
