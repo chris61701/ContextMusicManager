@@ -24,6 +24,8 @@
 "use strict";
 const fs = require("fs"), path = require("path");
 const { loadDump, makeEvaluator } = require("./judge3d.js");
+const REGIONS = process.env.CMM_REGIONS === "1";
+const Rg = require("./regions.js");
 const { buildGraph, makeNewEvaluator, SLOPE } = require("./portals.js");
 
 const CELL = parseInt((process.argv.find(a => a.startsWith("--cell=")) || "=4").split("=")[1], 10) || 4;
@@ -67,7 +69,7 @@ function samples(r) {
 function measureRoute(r) {
   const D = loadDump(path.join(__dirname, "synth", r.dump));
   const em = D.emitters[0];
-  const G = buildGraph(D, CELL);
+  const G = REGIONS ? Rg.asGraph(D, 0.62) : buildGraph(D, CELL);
   const nEval = makeNewEvaluator(D, G, em);
   const oEval = makeEvaluator(D, em);
   const pts = samples(r);

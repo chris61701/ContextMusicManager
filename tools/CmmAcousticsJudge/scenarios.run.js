@@ -17,6 +17,8 @@
 "use strict";
 const fs = require("fs"), path = require("path");
 const { loadDump, makeEvaluator } = require("./judge3d.js");
+const REGIONS = process.env.CMM_REGIONS === "1";
+const Rg = require("./regions.js");
 const { buildGraph, makeNewEvaluator, SLOPE } = require("./portals.js");
 const { MATRIX, SPK } = require("./synth.js");
 
@@ -48,7 +50,7 @@ function run(file) {
   const D = loadDump(file);
   const raw = JSON.parse(fs.readFileSync(file, "utf8"));
   const em = D.emitters[0];
-  const G = buildGraph(D, CELL);
+  const G = REGIONS ? Rg.asGraph(D, 0.62) : buildGraph(D, CELL);
   const nEval = makeNewEvaluator(D, G, em);
   const oEval = makeEvaluator(D, em);
   const out = { tag: raw.tag, probes: {} };

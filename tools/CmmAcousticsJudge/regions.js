@@ -35,6 +35,7 @@ const { loadDump } = require("./judge3d.js");
 const { makeOpenTest } = require("./portals.js");
 
 const OPEN_EPS = 0.02;
+const THICK_CAP = 6.0;  // clearance beyond this is just "open"; do not subdivide it
 const SEED_MIN = 1.6;   // a room's core must be at least this open; below it, join rather than seed
 
 // ── 1. thickness: chamfer distance from every open voxel to the nearest closed one ──
@@ -72,6 +73,14 @@ function thickness(D, open) {
   for (let i = fwdOrder.length - 1; i >= 0; i--) bwdOrder.push(fwdOrder[i]);
   sweep(fwdOrder, fwd);
   sweep(bwdOrder, bwd);
+  // CAP the field. Beyond a few blocks of clearance a space is simply "open" and there is
+  // nothing meaningful left to subdivide -- but an uncapped field keeps rising into the sky
+  // around a POI, which then generates hundreds of spurious local maxima. The victorian dump is
+  // 85% air with a median core of 10.4 blocks (against the mansard's 62% and 4.1), so most of
+  // its 381 raw regions were subdivisions of empty sky, and greedy merging over that many edges
+  // collapsed the whole POI -- whether the cascade halts was ordering luck, not a criterion.
+  // Capping makes all wide-open air one plateau, hence one seed, and the merge graph small.
+  for (let i = 0; i < n; i++) if (t[i] > THICK_CAP) t[i] = THICK_CAP;
   return t;
 }
 
@@ -229,7 +238,9 @@ function build(D, mergeH = 0.62) {
     seen.set(k, q); finalPorts.push(q);
   }
   return { thick, label, regions, rawRegions: regions.length, kept, ports: finalPorts,
-           timing: { tThick, tSeg, tPort }, merged };
+           timing: { tThick, tSeg, tPort }, merged,
+           // the merge's union-find, so callers can map a raw label to its surviving region
+           rootOf: a => find(a) };
 }
 
 function main() {
@@ -251,3 +262,73 @@ function main() {
 }
 if (require.main === module) main();
 module.exports = { build, thickness, segment };
+
+// ── adapter: present regions in the shape portals.js already consumes ──────────
+// Deliberately minimal, so the model can be run on either structure and compared without
+// touching the model at all. The mapping is mostly a simplification:
+//
+//   region  -> node, with throat = 1. A region has no internal pinch BY CONSTRUCTION -- that
+//              is exactly what the segmentation guarantees -- so the whole node-throat
+//              apparatus, and its cell-relative normalisation, simply goes away.
+//   boundary -> portal AND aperture. They are the same object here: a boundary between two
+//              regions IS a constriction, found from the geometry rather than detected by a
+//              heuristic on an arbitrary cell.
+//
+// openFrac is the boundary's open area against the smaller adjoining region's cross-section,
+// estimated as n^(2/3) -- a region of n voxels has roughly that much area across its middle.
+function asGraph(D, mergeH) {
+  const r = build(D, mergeH);
+  const { label, thick } = r;
+  const open = makeOpenTest(D);
+
+  // regions surviving the merge, renumbered, with weighted centroids
+  const idOf = new Map();
+  for (const p of r.ports) { if (!idOf.has(p.a)) idOf.set(p.a, idOf.size); if (!idOf.has(p.b)) idOf.set(p.b, idOf.size); }
+  const nodeOf = new Int32Array(D.n).fill(-1);
+  const acc = new Map();
+  const sx = D.sx, sy = D.sy, sz = D.sz, li = (x, y, z) => x + sx * (z + sz * y);
+  // r.label holds RAW labels; map them through the merge by re-deriving from ports is unsafe, so
+  // rebuild from the label field using the same union the build performed (exposed as r.rootOf).
+  for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+    const i = li(x, y, z);
+    if (open[i] <= OPEN_EPS) continue;
+    const root = r.rootOf ? r.rootOf(label[i]) : label[i];
+    let id = idOf.get(root);
+    if (id === undefined) { id = idOf.size; idOf.set(root, id); }
+    nodeOf[i] = id;
+    let a = acc.get(id);
+    if (!a) { a = { n: 0, sx: 0, sy: 0, sz: 0 }; acc.set(id, a); }
+    a.n++; a.sx += x; a.sy += y; a.sz += z;
+  }
+  const nodes = [];
+  for (let id = 0; id < idOf.size; id++) {
+    const a = acc.get(id) || { n: 1, sx: 0, sy: 0, sz: 0 };
+    nodes.push({
+      id, n: a.n, throat: 1,
+      px: D.x0 + a.sx / a.n + 0.5, py: D.y0 + a.sy / a.n + 0.5, pz: D.z0 + a.sz / a.n + 0.5,
+      tpx: D.x0 + a.sx / a.n + 0.5, tpy: D.y0 + a.sy / a.n + 0.5, tpz: D.z0 + a.sz / a.n + 0.5,
+      edges: [],
+    });
+  }
+  const portals = [];
+  for (const p of r.ports) {
+    const a = idOf.get(p.a), b = idOf.get(p.b);
+    if (a === undefined || b === undefined || a === b) continue;
+    const ref = Math.max(1, Math.pow(Math.min(nodes[a].n, nodes[b].n), 2 / 3));
+    const id = portals.length;
+    portals.push({
+      a, b, area: p.area, openFrac: Math.min(1, p.area / ref),
+      px: p.px, py: p.py, pz: p.pz,
+      x0: Math.floor(p.px) - 1, y0: Math.floor(p.py) - 1, z0: Math.floor(p.pz) - 1,
+      x1: Math.floor(p.px), y1: Math.floor(p.py), z1: Math.floor(p.pz),
+    });
+    nodes[a].edges.push(id); nodes[b].edges.push(id);
+  }
+  // A boundary IS an aperture. Position at the boundary centroid, throat from its openness.
+  const apertures = portals.map(p => ({
+    nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
+  }));
+  return { open, nodeOf, nodes, portals, apertures, cell: 4, thick,
+           cellsWithAir: nodes.length, cellsSplit: 0, regionCount: nodes.length };
+}
+module.exports.asGraph = asGraph;
