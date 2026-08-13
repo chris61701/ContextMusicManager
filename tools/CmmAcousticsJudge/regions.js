@@ -35,6 +35,9 @@ const { loadDump } = require("./judge3d.js");
 const { makeOpenTest } = require("./portals.js");
 
 const OPEN_EPS = 0.02;
+// First-Fresnel-zone area in blocks^2 at typical room geometry: radius ~2.5 blocks for music
+// wavelengths over ~10 block path legs. The coherent extent of the wavefront an opening samples.
+const FRESNEL_AREA = 20.0;
 const THICK_CAP = 6.0;  // clearance beyond this is just "open"; do not subdivide it
 const SEED_MIN = 1.6;   // a room's core must be at least this open; below it, join rather than seed
 
@@ -344,10 +347,21 @@ function asGraph(D, mergeH) {
   for (const p of r.ports) {
     const a = p.a, b = p.b;                     // already final ids
     if (a === b || a >= r.kept || b >= r.kept) continue;
-    const ref = Math.max(1, Math.pow(Math.min(nodes[a].n, nodes[b].n), 2 / 3));
+    // CONSTRICTION IS RELATIVE TO THE FRESNEL ZONE, not to a room or a cell.
+    // State the quantity (MODEL.md rule 1): openFrac is the share of the arriving WAVEFRONT that
+    // the opening actually passes. The wavefront's coherent extent is the first Fresnel zone --
+    // radius sqrt(lambda*d1*d2/(d1+d2)), which for music wavelengths over room distances is a
+    // couple of metres, so an area of order 10-50 blocks^2. An opening larger than that is
+    // effectively unconstricted; smaller, and it passes its share.
+    //
+    // Referencing a ROOM's cross-section was wrong by scale: it made a doorway in a large room
+    // read as -11.3 dB, suppressing the aperture arrival so the transmission path carried the
+    // sound and its roughness showed (the pastdoor regression). Referencing a CELL slice, as the
+    // grid did, happened to give about the right answer for an accidental reason -- a cell slice
+    // is coincidentally near Fresnel scale at cell=4. This is the same number for a stated reason.
     const id = portals.length;
     portals.push({
-      a, b, area: p.area, openFrac: Math.min(1, p.area / ref),
+      a, b, area: p.area, openFrac: Math.min(1, p.area / FRESNEL_AREA),
       px: p.px, py: p.py, pz: p.pz,
       x0: Math.floor(p.px) - 1, y0: Math.floor(p.py) - 1, z0: Math.floor(p.pz) - 1,
       x1: Math.floor(p.px), y1: Math.floor(p.py), z1: Math.floor(p.pz),

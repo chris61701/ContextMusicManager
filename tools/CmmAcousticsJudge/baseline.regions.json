@@ -4,7 +4,7 @@
    "name": "S2 door OPEN, wood wall",
    "pass": true,
    "probe": "B on-axis",
-   "value": -3
+   "value": -2.6
   },
   {
    "name": "S1 door SHUT, wood wall",
@@ -41,25 +41,25 @@
   {
    "route": "approach",
    "model": "new",
-   "worst": 2.63,
-   "mean": 0.48,
-   "over1": 5.5,
+   "worst": 2.99,
+   "mean": 0.41,
+   "over1": 7.8,
    "over3": 0
   },
   {
    "route": "pastdoor",
    "model": "new",
-   "worst": 3.13,
-   "mean": 0.62,
-   "over1": 18.1,
-   "over3": 2.8
+   "worst": 2.38,
+   "mean": 0.47,
+   "over1": 8.3,
+   "over3": 0
   },
   {
    "route": "throughdoor",
    "model": "new",
-   "worst": 1.86,
-   "mean": 0.42,
-   "over1": 1.6,
+   "worst": 2.99,
+   "mean": 0.47,
+   "over1": 9.4,
    "over3": 0
   },
   {
