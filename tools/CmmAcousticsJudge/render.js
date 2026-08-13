@@ -87,10 +87,17 @@ function arrivalsNew(ev, em, lx, ly, lz) {
   // the doorway it actually came through, and two doorways into a room both contribute.
   // Keying the slot by portal id keeps each one's filter and pan state continuous even as
   // the set changes; taking only the loudest made the image snap between portals.
-  for (const a of (r.airs || [])) out.push({ id: `air${a.id}`, db: a.db, at: [a.px, a.py, a.pz], fc: airFc(a.len) });
-  if (!out.length) out.push({ id: "air", db: -120, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: airFc(r.d) });
+  // EACH ARRIVAL'S WEIGHT MUST BE APPLIED. The model weights arrivals in the power domain
+  // (pow += w * dbToPow(db)) -- the Fresnel weight is what stops an aperture collinear with the
+  // direct path being counted twice. Rendering a.db at face value discarded it, so the moment a
+  // door went fully open and its apertures appeared they were summed at FULL strength: the model
+  // said -8.82 dB and the renderer produced -5.37, a 3.5 dB jump in one step. Author heard it as
+  // the volume "seemingly doubling" at the end of the swing, and was right.
+  for (const a of (r.airs || []))
+    out.push({ id: `air${a.id}`, db: a.db, w: a.w === undefined ? 1 : a.w, at: [a.px, a.py, a.pz], fc: airFc(a.len) });
+  if (!out.length) out.push({ id: "air", db: -120, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: airFc(r.d) });
   // SOLID — through the barrier, so it points at the speaker and is heavily dulled.
-  out.push({ id: "solid", db: r.solidDb, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: solidFc(r.matDb) });
+  out.push({ id: "solid", db: r.solidDb, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: solidFc(r.matDb) });
   return out;
 }
 
@@ -100,7 +107,7 @@ function arrivalsOld(ev, em, cfg, lx, ly, lz) {
   let nd = (r.dEff - cfg.minDistance) / OLD_MUFFLE_REF;
   nd = Math.max(0, Math.min(1, nd));
   const bright = 1 - OLD_MUFFLE * nd;              // shipped cue: one number, saturates fast
-  return [{ id: "direct", db, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: 200 + bright * bright * 19800 }];
+  return [{ id: "direct", db, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: 200 + bright * bright * 19800 }];
 }
 
 // ── render one path ───────────────────────────────────────────────────────────
@@ -168,12 +175,13 @@ function render({ name, states, waypoints, seconds, music, model }) {
     for (const k of free) {
       const s = slots.get(k);
       if (s.g < 1e-4) { slots.delete(k); continue; }
-      arr.push({ key: k, db: -120, at: s.at, fc: 20000 });
+      arr.push({ key: k, db: -120, w: 1, at: s.at, fc: 20000 });
     }
     for (const a of arr) {
       const s = slots.get(a.key);
       s.at = a.at;
-      const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20);
+      const wAmp = Math.sqrt(a.w === undefined ? 1 : a.w);   // model weights power; gain is amplitude
+      const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20) * wAmp;
       let dx = a.at[0] - (wp.x + 0.5), dy = a.at[1] - (wp.y + 0.5), dz = a.at[2] - (wp.z + 0.5);
       const dl = Math.hypot(dx, dy, dz) || 1;
       const panTarget = Math.max(-1, Math.min(1, (dx * right[0] + dy * right[1] + dz * right[2]) / dl)) * STEREO_WIDTH;
