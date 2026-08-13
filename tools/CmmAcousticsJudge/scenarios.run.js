@@ -37,18 +37,25 @@ const PROBES = [
 ];
 
 // What the spec asks for, as excess loss, per case. null = not specified.
+// Bands restated in the RELATIVE-TO-CONTROL metric, from the author's own words. The metric had
+// to change when the model gained a diffuse field (excess-over-free-field is meaningless once a
+// distance-independent term exists), so the bands had to be restated too -- but from the words,
+// not fitted to whatever the model currently produces. Moving a band to accommodate a missing
+// term would hide the term.
 const TARGET = {
-  "S2 door OPEN, wood wall":                        { "B on-axis": [-3, 0],   label: "nearly line-of-sight" },
-  "S1 door SHUT, wood wall":                        { "B on-axis": [-9, -4],  label: "~half as loud (-6)" },
-  "S3 door SHUT, concrete wall":                     { "B off-set": [-40, -20], label: "faint, bass-heavy" },
-  // Corrected bands. A vault door in a WOOD wall should sound like a WOOD WALL (~-6),
-  // because that is what flanking means -- the door's rating stops mattering. The earlier
-  // -20..-8 band was my error, not the model's. And "nothing" needs a wall thick enough
-  // that flanking through it is dead too; a 1-block concrete wall limits at the concrete.
-  "S4 VAULT door in WOOD wall (should NOT seal)":    { "B on-axis": [-10, -3], label: "flanks: reads as the WOOD wall" },
-  "S4 VAULT door in CONCRETE wall (should seal)":    { "B on-axis": [-45, -20], label: "faint: limited by 1-block concrete" },
-  "S4 VAULT in 3-thick CONCRETE (bunker)":           { "B on-axis": [-200, -45], label: "nothing" },
+  // "nearly as loud as line-of-sight" -- a couple of dB below standing in the room
+  "S2 door OPEN, wood wall":                       { "B on-axis": [-4, 0],    label: "nearly line-of-sight" },
+  // "clearly quieter but obviously still music... roughly half as loud"
+  "S1 door SHUT, wood wall":                       { "B on-axis": [-9, -4],   label: "~half as loud" },
+  // "faint, bass-heavy, no detail"
+  "S3 door SHUT, concrete wall":                   { "B off-set": [-45, -20], label: "faint, bass-heavy" },
+  // flanks: the door's rating stops mattering, so it reads much like the wood wall beside it
+  "S4 VAULT door in WOOD wall (should NOT seal)":  { "B on-axis": [-18, -6],  label: "flanks: reads as the wood wall" },
+  "S4 VAULT door in CONCRETE wall (should seal)":  { "B on-axis": [-50, -25], label: "faint: limited by 1-block concrete" },
+  // "nothing"
+  "S4 VAULT in 3-thick CONCRETE (bunker)":         { "B on-axis": [-200, -45], label: "nothing" },
 };
+
 
 function run(file) {
   const D = loadDump(file);

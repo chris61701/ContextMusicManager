@@ -103,7 +103,7 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // honestly empirical constant in the model.
 const DIFFUSE_CAL = 16;  // set so the diffuse field sits ~+5 dB on the direct component at 5 blocks
                          // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
-const DIFFUSE_BLEND = 8.0;   // blocks: centroid-distance scale for blending coupled rooms
+const WALL_FEED = 1.0;       // held at 1: see the note in roomField -- this stand-in is the wrong shape
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
 const APERTURE_MAX = 0.75;   // a node pinched below this much of its own cross-section IS an aperture
 const PRUNE_DB = 25;         // ignore an arrival this far below the strongest: <0.4% of energy
@@ -590,6 +590,22 @@ function makeNewEvaluator(D, G, src) {
   }
 
   // wx/wy/wz are BLOCK COORDS and may be fractional.
+  // Power driven into each region THROUGH ITS SURFACE by the source: a property of the room and
+  // the source, not of the listener, so memoised once. Evaluated at the region's centroid.
+  const wallFeedCache = new Map();
+  const wallFeedOf = (rid) => {
+    if (wallFeedCache.has(rid)) return wallFeedCache.get(rid);
+    const node = G.nodes[rid];
+    let v = 0;
+    if (node) {
+      const dd = Math.hypot(node.px - sx5, node.py - sy5, node.pz - sz5);
+      const m = segDbAt(D, sx5, sy5, sz5, node.px, node.py, node.pz);
+      v = dbToPow(-(SLOPE * dd + m));
+    }
+    wallFeedCache.set(rid, v);
+    return v;
+  };
+
   return function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
     const lx = wx + 0.5, ly = wy + 0.5, lz = wz + 0.5;
@@ -710,6 +726,23 @@ function makeNewEvaluator(D, G, src) {
         if (!pc) continue;
         pIn += dbToPow(-(pc.add - constrictDb(pc.bneck)));
       }
+      // POWER ALSO ENTERS THROUGH THE WALLS, not only through openings. A sealed room next to a
+      // loud one does build a weak reverberant field -- its whole surface is driven and radiates
+      // inward. Counting apertures alone gave a sealed room NO field at all, which is why a shut
+      // interior door read -16 dB against the author's "roughly half as loud" (~-6): the reference
+      // room had reverberation and the shut room had none, so the gap was the full difference
+      // rather than the door's transmission loss.
+      //
+      // Estimated from the transmitted arrival already computed for this listener, spread over the
+      // room's surface: the same wall that passes the direct sound passes power into the room.
+      // Approximate rather than exact -- the exact form is a coupled system over all regions --
+      // but it is present, and it scales with the barrier, which is what matters here.
+      // Evaluated at the REGION, not at the listener. Feeding this from the listener's own
+      // transmitted arrival made the "diffuse" field position-dependent, which contradicts what a
+      // diffuse field IS -- and it showed up immediately as a smoothness regression (pastdoor
+      // 2.38 -> 2.68). A room's surface drive is a property of the room and the source, so it is
+      // computed once per region from the source to the region's centroid.
+      pIn += wallFeedOf(rid) * WALL_FEED;
       return pIn > 0 ? 4 * pIn / Math.max(1, node.roomR) : 0;
     };
     let diffDb = -120;
