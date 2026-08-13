@@ -180,3 +180,52 @@ existing arrival set into an echo pattern for free, and the geometry decides the
 Delay was simply never wired up — the renderer applies level, pan and filtering per
 arrival and ignores path length in time. That is an omission, not a limitation, and it is
 the most likely single reason caves have never sounded right.
+
+### G. Whatever transmits or diffracts becomes a SOURCE, radiating into your space
+
+> *"If I'm standing behind a wall that is alternately made of glass and steel columns, the
+> difference in sound based on what object is immediately between me and the speaker
+> shouldn't be that much different. It should be pouring through the glass, radiated
+> outward, to my ears."*
+
+> *"If I walk by a door and the volume goes from 50 to 80% then to 50% shortly after passing
+> by it, in reality the sound would not fall off that quickly. It would radiate outward
+> instead of falling off so jarringly."*
+
+These are the same principle at two scales, and it is the single most important correction
+so far. The wrong question is *what is directly between me and the speaker*. The right one
+is *what is radiating into the space I am in, and from where*.
+
+Three consequences, all of which the prototype got wrong in the same way:
+
+**A barrier is a surface of secondary sources.** A glass panel beside a steel column
+transmits, and then radiates from its own position. Standing behind the column, the glass is
+two blocks to the side: a little more distance, no more blockage, so the level barely moves
+as you walk past. Sampling a disc AT THE LISTENER and asking what each offset ray crosses
+answers the wrong question -- it charges you for the column. The disc belongs AT THE BARRIER,
+with each patch radiating from where it actually is.
+
+**A doorway is an aperture radiator, not a point.** Finite size, so the level is roughly
+constant across its face near it rather than obeying an inverse law from a point.
+
+**An enclosed room has a diffuse field, and it dominates.** Sound entering through an opening
+bounces off every surface and builds a field that is essentially UNIFORM in the room -- it
+does not vary with position. For the test geometry (24x10x22) the critical distance, where
+diffuse equals direct, is about 2.6 m; at the 5 m you would walk past a door the diffuse
+field sits roughly 5 dB ABOVE the direct-from-doorway component. So the position-dependent
+part is a small perturbation riding on a much larger constant, and the walking-past
+trajectory should be nearly flat.
+
+The prototype renders dry arrivals with nothing underneath them, so every dB of variation is
+heard naked. That is why walking past a door sounds harsh, and it is NOT a smoothness bug --
+the direct path's variation may be roughly right, it is just missing what should dominate it.
+Same omission as the cave echo (F), seen from another angle: no diffuse energy, no time
+structure.
+
+Author also confirmed: walking THROUGH a doorway being a fast change is correct and wants no
+flattening. It is walking PAST, at a distance, inside a room, that must be gentle. The diffuse
+field distinguishes them -- it flattens the first case and barely touches the second.
+
+Priority consequence: measuring dry-path smoothness in isolation measures something the
+listener never hears alone. The diffuse field is not later polish; it is the largest single
+term for any indoor listener.
