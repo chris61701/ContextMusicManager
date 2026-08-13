@@ -63,6 +63,8 @@ const AIR_FLAG = 1;
 const SOLID_FAN = [[0,0,0],[2,0,0],[-2,0,0],[0,2,0],[0,-2,0],[0,0,2],[0,0,-2]];
 const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
+const APERTURE_MAX = 0.75;   // a node pinched below this much of its own cross-section IS an aperture
+const PRUNE_DB = 25;         // ignore an arrival this far below the strongest: <0.4% of energy
 
 // ── going around must COST something ──────────────────────────────────────────
 // First measurement pass charged only path LENGTH, so the air arrival won 90-100% of
@@ -107,6 +109,17 @@ const MIN_APERTURE_DB = -30; // floor on the bottleneck's constriction (a pinhol
 // applied per voxel before summing or a 2-voxel wall reads as one twice as dense.
 // Amanatides-Woo DDA, endpoints excluded, mirroring segLoss's traversal exactly.
 function segDb(D, x0, y0, z0, x1, y1, z1) {
+  // A LINE INTEGRAL, not a voxel count. Counting whole voxels made the result flip by a
+  // material's full value as the ray angle changed: a ONE-voxel-thick wall clips one or two
+  // of its voxels depending on the angle, so a diagonal crossing read 12 dB where a
+  // perpendicular one read 6, and a single block of listener movement could swap them. That
+  // was the root of the 10-16 dB/block cliffs -- not the portal graph, which is why fixing
+  // the candidate set three different ways never removed them, and why alongwall-shut was
+  // rough despite barely involving the graph at all.
+  //
+  // Weighting each voxel by the length of the ray actually inside it is both smooth and more
+  // correct: a diagonal path through a wall IS slightly longer than a perpendicular one, and
+  // it varies continuously with angle instead of stepping.
   const fx = x0 + 0.5, fy = y0 + 0.5, fz = z0 + 0.5;
   const tx = x1 + 0.5, ty = y1 + 0.5, tz = z1 + 0.5;
   let dx = tx - fx, dy = ty - fy, dz = tz - fz;
@@ -118,17 +131,20 @@ function segDb(D, x0, y0, z0, x1, y1, z1) {
   const tM = (o, d, c, s) => Math.abs(d) < 1e-6 ? Infinity : ((s > 0 ? c + 1 : c) - o) / d;
   const tD = d => Math.abs(d) < 1e-6 ? Infinity : Math.abs(1 / d);
   let tmx = tM(fx, dx, x, sX), tmy = tM(fy, dy, y, sY), tmz = tM(fz, dz, z, sZ);
-  const tdx = tD(dx), tdy = tD(dy), tdz = tD(dz);
-  let db = 0;
-  for (let g = 0; g < 512; g++) {
-    if (x === x1 && y === y1 && z === z1) break;
-    if (tmx <= tmy && tmx <= tmz) { x += sX; tmx += tdx; }
-    else if (tmy <= tmz) { y += sY; tmy += tdy; }
-    else { z += sZ; tmz += tdz; }
-    if (x === x1 && y === y1 && z === z1) break;
-    if (y < 0 || y >= 256) continue;
-    const f = D.lossAt(x, y, z);
-    if (f > 1e-4) db += Math.min(DB_VOXEL_MAX, DB_MAT * Math.pow(f, MAT_POW));
+  const tDx = tD(dx), tDy = tD(dy), tDz = tD(dz);
+  let db = 0, tPrev = 0;
+  for (let g = 0; g < 1024; g++) {
+    const tNext = Math.min(tmx, tmy, tmz, dist);
+    const seg = tNext - tPrev;                    // ray length inside the CURRENT voxel
+    if (seg > 1e-6 && y >= 0 && y < 256 && !(x === x0 && y === y0 && z === z0) && !(x === x1 && y === y1 && z === z1)) {
+      const f = D.lossAt(x, y, z);
+      if (f > 1e-4) db += Math.min(DB_VOXEL_MAX, DB_MAT * Math.pow(f, MAT_POW)) * seg;
+    }
+    if (tNext >= dist - 1e-9) break;
+    tPrev = tNext;
+    if (tmx <= tmy && tmx <= tmz) { x += sX; tmx += tDx; }
+    else if (tmy <= tmz) { y += sY; tmy += tDy; }
+    else { z += sZ; tmz += tDz; }
   }
   return db;
 }
@@ -301,6 +317,19 @@ function buildGraph(D, cell) {
     nodes[p.b].edges.push(id);
   }
 
+  // ── APERTURES ────────────────────────────────────────────────────────────────
+  // The real openings in the air space: nodes whose own cross-section pinches. Unlike
+  // portals -- which are artifacts of where the cell grid happens to fall -- an aperture is
+  // a feature of the geometry, so it is stable, sparse, and canonical. That matters because
+  // the arrival set can then be FIXED: a set that never changes as the listener moves cannot
+  // put a step in the field, which is what every previous keying (own node, one hop, spatial
+  // radius) did. Cliffs of 11-16 dB/block all traced to the candidate set changing.
+  const apertures = [];
+  for (const nd of nodes) {
+    if (nd.throat >= APERTURE_MAX) continue;
+    apertures.push({ nid: nd.id, px: nd.tpx, py: nd.tpy, pz: nd.tpz, throat: nd.throat });
+  }
+
   const split = new Map();
   for (const nd of nodes) {
     const k = `${nd.cxs},${nd.cys},${nd.czs}`;
@@ -309,7 +338,7 @@ function buildGraph(D, cell) {
   let multi = 0;
   for (const v of split.values()) if (v > 1) multi++;
 
-  return { open, nodeOf, nodes, portals, cx, cy, cz, cell,
+  return { open, nodeOf, nodes, portals, apertures, cx, cy, cz, cell,
            cellsWithAir: split.size, cellsSplit: multi };
 }
 
@@ -425,136 +454,100 @@ function solveAir(D, G, src) {
 
 // ── per-voxel evaluation: AIR arrivals + SOLID arrival, energy-summed ──────────
 function makeNewEvaluator(D, G, src) {
-  const { cost, seeded, srcPt } = solveAir(D, G, src);
+  const { cost, seeded } = solveAir(D, G, src);
   const sx5 = src.x + 0.5, sy5 = src.y + 0.5, sz5 = src.z + 0.5;
+  const minSeed = seeded.size ? Math.min(...seeded.values()) : 0;
+
+  // ── the FIXED candidate set ────────────────────────────────────────────────
+  // One entry per aperture, plus the source itself. Fixed for the whole field: the listener
+  // never gathers, selects by hop count, or searches a radius, because every one of those
+  // makes the set a step function of position and puts a cliff in the field. Pruning is by
+  // CONTRIBUTION only (PRUNE_DB below the strongest, i.e. under 0.4% of the energy), so the
+  // error it can introduce is bounded at hundredths of a dB rather than being topological.
+  //
+  // An aperture's cost is the cheapest way for sound to arrive AT it -- the best of its own
+  // node's portals plus the hop to the pinch point -- and then its own constriction, since
+  // anything using it must squeeze through.
+  const cands = [{ cost: minSeed, px: sx5, py: sy5, pz: sz5, routeLen: 0, isSrc: true }];
+  for (const A of G.apertures) {
+    let bestDb = Infinity, bestLen = 0;
+    if (seeded.has(A.nid)) {
+      bestDb = seeded.get(A.nid) + SLOPE * Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5);
+      bestLen = Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5);
+    }
+    for (const pid of G.nodes[A.nid].edges) {
+      const pc = cost[pid];
+      if (!pc) continue;
+      const P = G.portals[pid];
+      const hop = Math.hypot(A.px - P.px, A.py - P.py, A.pz - P.pz);
+      const cand = pc.add - constrictDb(pc.bneck) + SLOPE * hop;
+      if (cand < bestDb) { bestDb = cand; bestLen = pc.len + hop; }
+    }
+    if (!Number.isFinite(bestDb)) continue;
+    cands.push({ cost: bestDb - constrictDb(A.throat), px: A.px, py: A.py, pz: A.pz,
+                 routeLen: bestLen, throat: A.throat });
+  }
 
   return function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
     const lx = wx + 0.5, ly = wy + 0.5, lz = wz + 0.5;
-    // Material on the LISTENER's own line of sight -- distinct from the transmission fan's
-    // best ray, which deliberately hunts for a weaker patch of barrier nearby.
-    const centerMat = segDb(D, src.x, src.y, src.z, wx, wy, wz);
 
-    const nd = G.nodeOf[D.idx(wx, wy, wz)];
-    const cands = [];
-
-    // Candidate 1: the source itself, when the listener shares one of its seeded pockets.
-    // Exact free field, so the same-room case has no portal arithmetic in it at all.
-    if (nd >= 0 && seeded.has(nd)) {
-      cands.push({ id: -1, db: -(seeded.get(nd) + SLOPE * d), px: sx5, py: sy5, pz: sz5, len: d });
-    }
-
-    // Candidates 2..n: every opening bounding the space the listener is standing in, each
-    // acting as a virtual source carrying its route cost. The last leg is measured to the
-    // point of the opening nearest the straight source-listener line (a taut pull, not the
-    // centroid) and pays for any material actually on it, so a portal the listener cannot
-    // see through contributes nothing without needing a visibility test bolted on.
-    if (nd >= 0) {
-      // CANDIDATE SET IS NOT NODE-KEYED. Storing route cost per portal was necessary but not
-      // sufficient: while the listener only CONSIDERED the portals of its own node, adjacent
-      // positions still weighed different sets, and the trace showed a 1-block move changing
-      // the level by 3.0 dB where 1 block should cost 0.35. Taking the portals of the
-      // listener's node AND of every node one hop away means neighbouring positions share
-      // their dominant candidates, so what changes between them is only the far fringe --
-      // which is already quiet and gets dropped by clustering.
-      const consider = new Set(G.nodes[nd].edges);
-      for (const pid of G.nodes[nd].edges) {
-        const P0 = G.portals[pid];
-        const other = P0.a === nd ? P0.b : P0.a;
-        for (const q of G.nodes[other].edges) consider.add(q);
-      }
-      for (const pid of consider) {
-        const pc = cost[pid];
-        if (!pc) continue;
-        const P = G.portals[pid];
-        const mx = 0.5 * (sx5 + lx), my = 0.5 * (sy5 + ly), mz = 0.5 * (sz5 + lz);
-        const qx = Math.max(P.x0, Math.min(P.x1 + 1, mx));
-        const qy = Math.max(P.y0, Math.min(P.y1 + 1, my));
-        const qz = Math.max(P.z0, Math.min(P.z1 + 1, mz));
-        const leg = Math.hypot(qx - lx, qy - ly, qz - lz);
-        const legMat = segDb(D, Math.floor(qx), Math.floor(qy), Math.floor(qz), wx, wy, wz);
-
-        // An UNCONSTRICTED route is the straight line, whatever portal it nominally came
-        // through -- so it evaluates to free field at the true distance, identically from
-        // either side of a node boundary. That is what makes the field continuous by
-        // construction rather than by blending.
-        const oMix = sstep(0.70, 0.98, pc.bneck);
-        const viaPortal = pc.add + SLOPE * leg + legMat - constrictDb(pc.bneck);
-        const direct = seeded.size ? Math.min(...seeded.values()) + SLOPE * d : SLOPE * d;
-        const lvl = -(oMix * direct + (1 - oMix) * viaPortal);
-        if (lvl <= -110) continue;
-
-        // Apparent position: blended on whether the listener can SEE the source. Clear line
-        // -> the speaker; blocked -> the last aperture the sound squeezed through.
-        const seeW = sstep(0, 6, centerMat);
-        cands.push({
-          id: pid, db: lvl, len: oMix * d + (1 - oMix) * (pc.len + leg),
-          px: (1 - seeW) * sx5 + seeW * pc.cx,
-          py: (1 - seeW) * sy5 + seeW * pc.cy,
-          pz: (1 - seeW) * sz5 + seeW * pc.cz,
-        });
-      }
-    }
-
-    // Cluster before summing: several candidates are usually different faces of the SAME
-    // opening carrying the same sound, and summing those inflates an open doorway above
-    // free field. Genuinely separate openings are far apart, so distance separates them.
-    cands.sort((a, b) => b.db - a.db);
-    const airs = [];
-    let airPow = 0, airLen = Infinity;
-    for (const c of cands) {
-      let dup = false;
-      for (const k of airs)
-        if (Math.hypot(k.px - c.px, k.py - c.py, k.pz - c.pz) < CLUSTER_BLOCKS) { dup = true; break; }
-      if (dup) continue;
-      airs.push(c);
-      airPow += dbToPow(c.db);
-      if (airs.length === 1) airLen = c.len;
-    }
-    const airDb = airPow > 0 ? powToDb(airPow) : -120;
-
-    // SOLID (transmitted). A fan rather than one ray, because a barrier is a distributed
-    // radiator: behind a vault door set in a WOODEN wall you hear the wall beside you, not
-    // the door. Rays with under MIN_TRANSMIT_DB of material are discarded -- such a ray has
-    // found an OPENING, which is the air arrivals' business where it pays the aperture's
-    // constriction properly.
-    // Best-of-fan. The reduction operator here is genuinely under-specified and I stopped
-    // rather than keep guessing: `max` gives the right flanking answer (the weakest patch of
-    // barrier is what you hear) but is non-smooth, because segDb is a hard voxel raycast and
-    // the winner jumps as whole voxels enter and leave the ray set. `mean` is smooth but lets
-    // a vault door's 60 dB drag down the wood wall beside it, breaking #4. A plain energy SUM
-    // over 7 overlapping rays over-counts by ~8 dB and breaks #1. The honest fix is
-    // area-weighted radiation over the barrier surface -- each patch contributing in
-    // proportion to how much of the barrier it stands for -- which is a real piece of work,
-    // not an operator swap. `max` is kept meanwhile because it is the one that gets every
-    // spec scenario right; its cost is the residual worst-case step in the render.
-    let solidDb = -Infinity, matDb = 0;
+    // The SOURCE candidate's last leg uses the transmission fan: a barrier is a distributed
+    // radiator, so behind a vault door set in a wooden wall you hear the wall beside you.
+    let fanDb = Infinity;
     for (const [ox, oy, oz] of SOLID_FAN) {
       const px = wx + ox, py = wy + oy, pz = wz + oz;
       if (!D.inB(px, py, pz)) continue;
       const m = segDb(D, src.x, src.y, src.z, px, py, pz);
-      if (m < MIN_TRANSMIT_DB) continue;
       const dd = Math.hypot(px - src.x, py - src.y, pz - src.z);
-      const cand = -(SLOPE * dd + m);
-      if (cand > solidDb) { solidDb = cand; matDb = m; }
+      if (SLOPE * dd + m < fanDb) fanDb = SLOPE * dd + m;
     }
-    if (solidDb === -Infinity) { solidDb = -120; matDb = 0; }
+    if (!Number.isFinite(fanDb)) fanDb = 120;
+    const centerMat = segDb(D, src.x, src.y, src.z, wx, wy, wz);
 
-    // RAMP the transmitted arrival out as the line of sight clears, rather than gating it.
-    // The per-ray MIN_TRANSMIT_DB test stops a ray that found an OPENING being paid as free
-    // transmission, but on its own it also made the whole arrival vanish in a single voxel
-    // step the moment the listener's line cleared. Its dB contribution there is small -- the
-    // model's summed total traced perfectly smooth across that point -- yet the AUDIO jumped
-    // 2.8 dB, because the transmitted component is filtered quite differently from the air
-    // one and removing it changes the spectrum, not just the level. A dB total cannot see
-    // that; only the render can, which is precisely why the render is the test.
-    const solidW = sstep(0, MIN_TRANSMIT_DB, centerMat);
-    const solidPow = solidW * dbToPow(solidDb);
-    const solidEff = solidPow > 0 ? powToDb(solidPow) : -120;
+    const arrivals = [];
+    let pow = 0, bestDb = -Infinity, bestIdx = -1;
+    for (let i = 0; i < cands.length; i++) {
+      const c = cands[i];
+      const leg = Math.hypot(c.px - lx, c.py - ly, c.pz - lz);
+      let db, legMat;
+      if (c.isSrc) { legMat = centerMat; db = -(c.cost + fanDb); }
+      else {
+        legMat = segDb(D, Math.floor(c.px), Math.floor(c.py), Math.floor(c.pz), wx, wy, wz);
+        db = -(c.cost + SLOPE * leg + legMat);
+      }
+      // A candidate whose total route is barely longer than the straight line describes the
+      // SAME physical path as the direct sound, not an alternative -- which is the Fresnel
+      // criterion, and the reason an aperture sitting on the line of sight must not be added
+      // on top of the direct arrival. Ramped over 2 blocks of excess so nothing switches.
+      // Excess measured GEOMETRICALLY -- source to aperture to listener against the straight
+      // line -- not along the routed polyline. The polyline overestimates (it bends through
+      // portal centroids), which made a doorway sitting exactly on the line of sight look like
+      // a detour and get summed on top of the direct sound, pushing an open door 1.5 dB ABOVE
+      // free field. Fresnel is about the geometric path difference, so measure that.
+      const geoExcess = Math.hypot(c.px - sx5, c.py - sy5, c.pz - sz5) + leg - d;
+      const w = c.isSrc ? 1 : sstep(0, 2, geoExcess);
+      if (w <= 1e-4 || db <= -110) continue;
+      arrivals.push({ db, w, px: c.px, py: c.py, pz: c.pz, legMat, len: c.routeLen + leg, isSrc: !!c.isSrc });
+      pow += w * dbToPow(db);
+      if (db > bestDb) { bestDb = db; bestIdx = arrivals.length - 1; }
+    }
+    // contribution prune, applied after the fact so the set itself never changed
+    let kept = 0;
+    for (const a of arrivals) if (a.db >= bestDb - PRUNE_DB) kept++;
 
-    const total = powToDb(dbToPow(airDb) + solidPow);
-    return { d, airDb, solidDb: solidEff, total, airLen, matDb, entry: airs[0] || null, airs,
-             reached: airs.length > 0 };
+    const total = pow > 0 ? powToDb(pow) : -120;
+    const dom = arrivals[bestIdx] || null;
+    const airs = arrivals.filter(a => !a.isSrc && a.db >= bestDb - PRUNE_DB);
+    const solid = arrivals.find(a => a.isSrc);
+    return {
+      d, total,
+      airDb: airs.length ? powToDb(airs.reduce((s, a) => s + a.w * dbToPow(a.db), 0)) : -120,
+      solidDb: solid ? solid.db : -120,
+      matDb: centerMat, airLen: dom ? dom.len : d,
+      entry: dom, airs, arrivals, kept,
+      reached: airs.length > 0,
+    };
   };
 }
 

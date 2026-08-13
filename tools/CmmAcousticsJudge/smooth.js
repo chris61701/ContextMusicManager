@@ -27,7 +27,14 @@ const { loadDump, makeEvaluator } = require("./judge3d.js");
 const { buildGraph, makeNewEvaluator, SLOPE } = require("./portals.js");
 
 const CELL = parseInt((process.argv.find(a => a.startsWith("--cell=")) || "=4").split("=")[1], 10) || 4;
-const STEP = 0.25;    // sample spacing along a route, in blocks
+// Sample at the model's OWN resolution. The evaluator takes integer voxels, so sampling
+// finer than that and dividing by the finer spacing multiplies every per-voxel change by the
+// oversampling factor -- at 0.25 blocks it reported 16 dB/block for what is really a 4 dB
+// step between adjacent voxels. Inflating the number I am trying to drive down is not a
+// harmless error: it made a real 4 dB defect look like an impossible one.
+// (Evaluating at continuous listener positions is a separate improvement; the game's ear
+// position is a float, so the model should eventually accept one.)
+const STEP = 1.0;
 
 // Routes worth measuring, on the synthetic geometry. These mirror the render scenarios so a
 // number here can be tied to something audible there.
