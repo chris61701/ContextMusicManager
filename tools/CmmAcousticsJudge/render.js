@@ -33,6 +33,15 @@ const STEREO_WIDTH = 0.8;      // matches WorldEmitterStereoWidth
 const OLD_MUFFLE = 0.9;        // matches WorldEmitterMuffle (not carried in the dump config)
 const OLD_MUFFLE_REF = 24;     // CMM_EMIT_MUFFLE_REF
 const SLEW_MS = 40;            // parameter glide
+// ── TERM 5: PER-ARRIVAL DELAY ────────────────────────────────────────────────
+// A cave echo is the same sound arriving REPEATEDLY, separated in time. One shared reverb whose
+// only time parameter is a decay cannot produce that at any setting -- an exponential tail is a
+// wash by construction, which is exactly what the author described as "faint reverb that
+// eventually died". Every arrival already carries its route length, so it already has an arrival
+// time; this was simply never wired up. At roughly a block per metre a 60-block cave route lands
+// ~175 ms behind the direct sound, a plainly audible discrete echo.
+const SPEED_BLOCKS_PER_SEC = 343;
+const MAX_DELAY = Math.ceil(SPEED_BLOCKS_PER_SEC ? (200 / SPEED_BLOCKS_PER_SEC) * SR : 1) + 4;
 
 // ── WAV io (PCM16 only; the test corpus is mono 16-bit 48k) ───────────────────
 function readWav(file) {
@@ -94,10 +103,10 @@ function arrivalsNew(ev, em, lx, ly, lz) {
   // said -8.82 dB and the renderer produced -5.37, a 3.5 dB jump in one step. Author heard it as
   // the volume "seemingly doubling" at the end of the swing, and was right.
   for (const a of (r.airs || []))
-    out.push({ id: `air${a.id}`, db: a.db, w: a.w === undefined ? 1 : a.w, at: [a.px, a.py, a.pz], fc: airFc(a.len) });
+    out.push({ id: `air${a.id}`, db: a.db, w: a.w === undefined ? 1 : a.w, at: [a.px, a.py, a.pz], fc: airFc(a.len), len: a.len });
   if (!out.length) out.push({ id: "air", db: -120, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: airFc(r.d) });
   // SOLID — through the barrier, so it points at the speaker and is heavily dulled.
-  out.push({ id: "solid", db: r.solidDb, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: solidFc(r.matDb) });
+  out.push({ id: "solid", db: r.solidDb, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: solidFc(r.matDb), len: r.d });
   return out;
 }
 
@@ -107,7 +116,7 @@ function arrivalsOld(ev, em, cfg, lx, ly, lz) {
   let nd = (r.dEff - cfg.minDistance) / OLD_MUFFLE_REF;
   nd = Math.max(0, Math.min(1, nd));
   const bright = 1 - OLD_MUFFLE * nd;              // shipped cue: one number, saturates fast
-  return [{ id: "direct", db, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: 200 + bright * bright * 19800 }];
+  return [{ id: "direct", db, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: 200 + bright * bright * 19800, len: r.d }];
 }
 
 // ── render one path ───────────────────────────────────────────────────────────
@@ -167,7 +176,9 @@ function render({ name, states, waypoints, seconds, music, model }) {
         const dd = Math.hypot(s.at[0] - a.at[0], s.at[1] - a.at[1], s.at[2] - a.at[2]);
         if (dd < bestD) { bestD = dd; bestKey = k; }
       }
-      if (bestKey === null) { bestKey = `s${slotSeq++}`; slots.set(bestKey, { g: 0, pan: 0, c: coefFor(20000), lp: 0 }); }
+      if (bestKey === null) { bestKey = `s${slotSeq++}`;
+        slots.set(bestKey, { g: 0, pan: 0, c: coefFor(20000), lp: 0,
+                             dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0 }); }
       free.delete(bestKey);
       a.key = bestKey;
     }
@@ -175,22 +186,34 @@ function render({ name, states, waypoints, seconds, music, model }) {
     for (const k of free) {
       const s = slots.get(k);
       if (s.g < 1e-4) { slots.delete(k); continue; }
-      arr.push({ key: k, db: -120, w: 1, at: s.at, fc: 20000 });
+      arr.push({ key: k, db: -120, w: 1, at: s.at, fc: 20000, len: 0 });
     }
     for (const a of arr) {
       const s = slots.get(a.key);
       s.at = a.at;
+      if (!s.dl) { s.dl = new Float32Array(MAX_DELAY); s.dw = 0; s.dsm = 0; }
       const wAmp = Math.sqrt(a.w === undefined ? 1 : a.w);   // model weights power; gain is amplitude
       const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20) * wAmp;
       let dx = a.at[0] - (wp.x + 0.5), dy = a.at[1] - (wp.y + 0.5), dz = a.at[2] - (wp.z + 0.5);
       const dl = Math.hypot(dx, dy, dz) || 1;
       const panTarget = Math.max(-1, Math.min(1, (dx * right[0] + dy * right[1] + dz * right[2]) / dl)) * STEREO_WIDTH;
       const cTarget = coefFor(a.fc);
+      // delay in samples from this arrival's own path length, slewed so a route change glides
+      const dTarget = Math.min(MAX_DELAY - 2, Math.max(0, (a.len === undefined ? 0 : a.len) / SPEED_BLOCKS_PER_SEC * SR));
       for (let i = 0; i < n; i++) {
         s.g += (gTarget - s.g) * alpha / BLOCK * 8;
         s.pan += (panTarget - s.pan) * alpha / BLOCK * 8;
         s.c += (cTarget - s.c) * alpha / BLOCK * 8;
-        const x = music[(base + i) % music.length];
+        s.dsm += (dTarget - s.dsm) * alpha / BLOCK * 2;
+        const xin = music[(base + i) % music.length];
+        // circular delay line, linearly interpolated read
+        s.dl[s.dw] = xin;
+        const rp = s.dw - s.dsm;
+        const r0 = ((Math.floor(rp) % MAX_DELAY) + MAX_DELAY) % MAX_DELAY;
+        const r1 = (r0 + 1) % MAX_DELAY;
+        const fr = rp - Math.floor(rp);
+        const x = s.dl[r0] * (1 - fr) + s.dl[r1] * fr;
+        s.dw = (s.dw + 1) % MAX_DELAY;
         s.lp += s.c * (x - s.lp);
         const th = (s.pan + 1) * 0.78539816;
         const v = s.lp * s.g;
