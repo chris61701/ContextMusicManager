@@ -133,6 +133,7 @@ function segDb(D, x0, y0, z0, x1, y1, z1) {
   return db;
 }
 
+const sstep = (a, b, x) => { if (b <= a) return x >= b ? 1 : 0; const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const dbToPow = d => Math.pow(10, d / 10);
 const powToDb = p => p <= 1e-12 ? -120 : 10 * Math.log10(p);
 
@@ -261,8 +262,13 @@ function buildGraph(D, cell) {
     const a = Math.min(na, nb), b = Math.max(na, nb);
     const key = a * 1e7 + b;
     let p = portalMap.get(key);
-    if (!p) { p = { a, b, area: 0, sx: 0, sy: 0, sz: 0 }; portalMap.set(key, p); }
+    if (!p) { p = { a, b, area: 0, sx: 0, sy: 0, sz: 0,
+                    x0: Infinity, y0: Infinity, z0: Infinity, x1: -Infinity, y1: -Infinity, z1: -Infinity }; portalMap.set(key, p); }
     p.area++; p.sx += wx; p.sy += wy; p.sz += wz;
+    // extent, so a path can be pulled taut THROUGH the opening instead of via its centre
+    if (wx < p.x0) p.x0 = wx; if (wx > p.x1) p.x1 = wx;
+    if (wy < p.y0) p.y0 = wy; if (wy > p.y1) p.y1 = wy;
+    if (wz < p.z0) p.z0 = wz; if (wz > p.z1) p.z1 = wz;
   };
   for (let y = 0; y < D.sy; y++)
   for (let z = 0; z < D.sz; z++)
@@ -284,6 +290,7 @@ function buildGraph(D, cell) {
     const ref = Math.min(refA, refB);
     const q = { a: p.a, b: p.b, area: p.area,
                 px: p.sx / p.area, py: p.sy / p.area, pz: p.sz / p.area,
+                x0: p.x0, y0: p.y0, z0: p.z0, x1: p.x1, y1: p.y1, z1: p.z1,
                 openFrac: Math.min(1, p.area / ref) };
     const id = portals.length;
     portals.push(q);
@@ -408,9 +415,14 @@ function solveAir(D, G, src) {
         if (nodeCur.throat <= P.openFrac) { ccx = nodeCur.tpx; ccy = nodeCur.tpy; ccz = nodeCur.tpz; }
         else { ccx = P.px; ccy = P.py; ccz = P.pz; }
       }
+      // BLEND, never switch. A hard threshold here put a step in the route length exactly
+      // where a listener walks through a doorway -- visible as a 2.4 dB lurch in 50 ms on
+      // the approach render, against the shipped model's worst of 0.9. An open route is a
+      // straight line and a squeezed one follows its bent polyline; between them it eases.
       const straight = Math.hypot(P.px - srcPt.px, P.py - srcPt.py, P.pz - srcPt.pz);
-      const nLen = nBneckPre >= 0.95 ? straight : cur.len + leg;
-      const nAdd = (nBneckPre >= 0.95 ? SLOPE * straight : cur.add + SLOPE * leg) + bend;
+      const openMix = sstep(0.70, 0.98, nBneckPre);
+      const nLen = openMix * straight + (1 - openMix) * (cur.len + leg);
+      const nAdd = openMix * (SLOPE * straight) + (1 - openMix) * (cur.add + SLOPE * leg) + bend;
       // The route crossed this node to reach the portal, so it passed the node's throat
       // as well as the portal's own opening. Both feed the running bottleneck.
       const nBneck = nBneckPre;
@@ -432,10 +444,16 @@ function solveAir(D, G, src) {
 }
 
 // ── per-voxel evaluation: AIR arrival + SOLID arrival, energy-summed ───────────
+const constrictDbEv = f => Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.max(1e-4, f)));
+
 function makeNewEvaluator(D, G, src) {
   const { best } = solveAir(D, G, src);
+  const cellSize = G.cell;
   return function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
+    // Material on the LISTENER's own line of sight -- distinct from the fan's best ray,
+    // which deliberately looks for a weaker patch of barrier nearby.
+    const centerMat = segDb(D, src.x, src.y, src.z, wx, wy, wz);
 
     // AIR: min over this node's kept entry portals of (route dB + last leg), where the
     // last leg is EXACT continuous geometry from the portal point to the listener.
@@ -455,10 +473,49 @@ function makeNewEvaluator(D, G, src) {
     const airs = [];
     const nd = G.nodeOf[D.idx(wx, wy, wz)];
     if (nd >= 0 && best[nd]) {
+      // The listener's OWN node has a throat that the route has not paid for yet -- a node's
+      // constriction is charged when a route LEAVES it through a portal. So standing IN a
+      // doorway cost nothing while one step beyond it cost the entire throat, which is the
+      // 2.8 dB lurch the approach render showed at exactly the moment of walking through.
+      // Spread that charge over the aperture's own scale: at the throat itself, nothing; a
+      // cell away from it, all of it.
+      const myNode = G.nodes[nd];
+      const throatDist = Math.hypot(myNode.tpx - (wx + 0.5), myNode.tpy - (wy + 0.5), myNode.tpz - (wz + 0.5));
+      const throatW = sstep(0, cellSize, throatDist);
       const cands = [];
       for (const e of best[nd]) {
         const leg = Math.hypot(e.px - (wx + 0.5), e.py - (wy + 0.5), e.pz - (wz + 0.5));
-        const cand = -(e.db + SLOPE * leg);
+        const tightened = Math.min(e.bneck, myNode.throat);
+        const extra = throatW * (constrictDbEv(tightened) - constrictDbEv(e.bneck));
+        // An UNOBSTRUCTED route is the straight line from source to listener, so its level
+        // must be measured that way. Measuring source->portal->listener instead overstates
+        // it by however far the portal sits off that line -- and by a DIFFERENT amount for
+        // each node's chosen portal, which is exactly the 2.2 dB step the trace showed at a
+        // node boundary, plus a level that fell then rose while walking straight at the
+        // speaker. Blended on the route's bottleneck, so squeezed routes keep the honest
+        // bent-polyline measure.
+        // STRING PULL at the final opening. The route's non-distance losses are kept, but the
+        // geometry is re-measured through the point of the opening CLOSEST TO the straight
+        // line from source to listener, rather than through its centroid. Two adjacent nodes
+        // choosing different portals then converge on nearly the same taut path, which is
+        // what removes the node-boundary step -- and it is what makes "coarse topology,
+        // exact geometry" actually true rather than merely intended.
+        const P = e.portal >= 0 ? G.portals[e.portal] : null;
+        let pulledLen = e.len + leg;
+        if (P) {
+          const cx2 = Math.max(P.x0, Math.min(P.x1 + 1, 0.5 * (src.x + 0.5 + wx + 0.5)));
+          const cy2 = Math.max(P.y0, Math.min(P.y1 + 1, 0.5 * (src.y + 0.5 + wy + 0.5)));
+          const cz2 = Math.max(P.z0, Math.min(P.z1 + 1, 0.5 * (src.z + 0.5 + wz + 0.5)));
+          pulledLen = Math.hypot(cx2 - (src.x + 0.5), cy2 - (src.y + 0.5), cz2 - (src.z + 0.5))
+                    + Math.hypot(cx2 - (wx + 0.5), cy2 - (wy + 0.5), cz2 - (wz + 0.5));
+          pulledLen = Math.max(d, pulledLen);
+        }
+        const losses = e.db - SLOPE * e.len;          // bend + constriction + seed material
+        const oMix = sstep(0.70, 0.98, e.bneck);
+        const viaPortal = losses + SLOPE * pulledLen;
+        const direct = SLOPE * d + (constrictDbEv(1) - constrictDbEv(e.bneck));
+        const usedLen = oMix * d + (1 - oMix) * pulledLen;
+        const cand = -(oMix * direct + (1 - oMix) * viaPortal - extra);
         // APPARENT POSITION. Sound comes from the last aperture it squeezed through -- an
         // unconstricted route comes from the source itself. Using the entry PORTAL centroid
         // instead put the apparent source on a cell FACE, so direction moved in cell-sized
@@ -467,9 +524,17 @@ function makeNewEvaluator(D, G, src) {
         // is a fixed feature of the geometry, so the bearing to it varies smoothly as the
         // listener moves -- and it is also what the author asked for: a gap reads as a
         // localised source AT the gap.
-        const openRoute = e.bneck >= 0.95;
-        const apx = openRoute ? src.x + 0.5 : e.cx, apy = openRoute ? src.y + 0.5 : e.cy, apz = openRoute ? src.z + 0.5 : e.cz;
-        if (cand > -110) cands.push({ id: e.portal, db: cand, px: apx, py: apy, pz: apz, len: e.len + leg });
+        // Where it SEEMS to come from, blended on whether the listener can SEE the source.
+        // That is the physical discriminator: with a clear line the sound comes from the
+        // speaker, and with the line blocked it comes from the last aperture it squeezed
+        // through. Blending on the route's bottleneck instead put a hard switch right where
+        // someone walks through a doorway. Ramped over the first few dB of blockage, so
+        // stepping out from behind a wall slides the image rather than teleporting it.
+        const seeW = sstep(0, 6, centerMat);
+        const apx = (1 - seeW) * (src.x + 0.5) + seeW * e.cx;
+        const apy = (1 - seeW) * (src.y + 0.5) + seeW * e.cy;
+        const apz = (1 - seeW) * (src.z + 0.5) + seeW * e.cz;
+        if (cand > -110) cands.push({ id: e.portal, db: cand, px: apx, py: apy, pz: apz, len: usedLen });
       }
       cands.sort((a, b) => b.db - a.db);
       for (const c of cands) {
