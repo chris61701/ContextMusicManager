@@ -6,11 +6,15 @@
 // and it let corner listeners whose straight line grazes the concrete shell drag the mean
 // down. Both #1 and #2 were unreadable as a result.
 //
-// So: named probe points, and the number reported is EXCESS LOSS over free field --
-//     excess = level + SLOPE * distance
-// Free field is 0. A shut interior door is whatever the barrier itself costs, independent
-// of how far away the probe happens to be. That is exactly the unit the spec is written
-// in: "roughly half as loud" is -6 dB of excess.
+// The number reported is the level RELATIVE TO THE CONTROL PROBE -- same room, clear line of
+// sight, at its own distance. Not excess over free field: that measure was correct for a dry
+// model and became meaningless the moment a diffuse field existed, because a diffuse field is
+// distance-INDEPENDENT while excess-over-free-field adds SLOPE*distance, so a far probe read
+// +10.2 dB purely for being far. The control probe itself read +4.6 instead of 0.
+//
+// Relative-to-control is also what the spec is actually written in: "nearly as loud as line of
+// sight", "roughly half as loud", "faint" are all comparisons against what you hear with a clear
+// view in the same space -- which, in a real room, includes that room's reverberation.
 //
 // Usage:  node scenarios.run.js
 // ───────────────────────────────────────────────────────────────────────────────
@@ -26,7 +30,7 @@ const CELL = 4;
 
 // Probes, chosen to separate the cases the room average conflated.
 const PROBES = [
-  { k: "A clear",   x: 7,  y: 3, z: 20, note: "same room, clear line — the control, should be ~0" },
+  { k: "A clear",   x: 7,  y: 3, z: 20, note: "same room, clear line — THE CONTROL, 0 by definition" },
   { k: "B on-axis", x: 30, y: 3, z: 11, note: "next room, straight through the doorway" },
   { k: "B off-set", x: 30, y: 3, z: 20, note: "next room, off the doorway's sight line" },
   { k: "B far",     x: 40, y: 3, z: 20, note: "next room, far corner" },
@@ -54,16 +58,20 @@ function run(file) {
   const nEval = makeNewEvaluator(D, G, em);
   const oEval = makeEvaluator(D, em);
   const out = { tag: raw.tag, probes: {} };
+  const raw2 = {};
   for (const p of PROBES) {
     const d = Math.hypot(p.x - em.x, p.y - em.y, p.z - em.z);
-    const free = -SLOPE * d;                       // free-field reference at this distance
     const nr = nEval(p.x, p.y, p.z);
     const or = oEval(p.x, p.y, p.z);
     const oDb = or.att > 0 ? 20 * Math.log10(or.att) : -120;
-    out.probes[p.k] = {
-      d, oldExcess: oDb - free, newExcess: nr.total - free,
-      air: nr.airDb - free, sol: Math.max(-120, nr.solidDb) - free,
-    };
+    raw2[p.k] = { d, oDb, nDb: nr.total, air: nr.airDb, sol: Math.max(-120, nr.solidDb) };
+  }
+  // the control: same room, clear line. Everything is quoted against it.
+  const ctlO = raw2["A clear"].oDb, ctlN = raw2["A clear"].nDb;
+  for (const p of PROBES) {
+    const q = raw2[p.k];
+    out.probes[p.k] = { d: q.d, oldExcess: q.oDb - ctlO, newExcess: q.nDb - ctlN,
+                        air: q.air - ctlN, sol: q.sol - ctlN };
   }
   return out;
 }

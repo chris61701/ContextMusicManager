@@ -101,7 +101,9 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // SLOPE dB/block is not inverse-square, so 4*P_in/R cannot be evaluated in absolute units. This
 // offset sets where the diffuse field sits relative to the direct component, and it is the one
 // honestly empirical constant in the model.
-const DIFFUSE_CAL = 0;   // held at 0 until the field is continuous across boundaries
+const DIFFUSE_CAL = 16;  // set so the diffuse field sits ~+5 dB on the direct component at 5 blocks
+                         // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
+const DIFFUSE_BLEND = 8.0;   // blocks: centroid-distance scale for blending coupled rooms
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
 const APERTURE_MAX = 0.75;   // a node pinched below this much of its own cross-section IS an aperture
 const PRUNE_DB = 25;         // ignore an arrival this far below the strongest: <0.4% of energy
@@ -675,17 +677,54 @@ function makeNewEvaluator(D, G, src) {
     //
     // Power entering the listener's region is the power arriving at each of its boundaries, plus
     // the source itself if it is in that region. Omnidirectional by nature, so no position.
-    let diffDb = -120;
-    const myNode = nd >= 0 ? G.nodes[nd] : null;
-    if (myNode && myNode.roomR !== undefined) {
+    // COUPLED ACROSS BOUNDARIES, or it steps. A per-region constant is uniform inside a region and
+    // different across a boundary, so crossing one jumped 14.5 dB/block at the doorway. Two rooms do
+    // have different diffuse levels, but standing in a doorway you hear a BLEND of both -- the
+    // fields are coupled through the aperture, and the coupling is what makes the field continuous.
+    //
+    // Blend by proximity to each boundary, over the boundary's own scale (its radius, from its
+    // area). Deep in a room you hear that room's field; at an opening you hear both rooms'
+    // half-and-half, which is what a coupled pair of enclosures does.
+    // A NEIGHBOUR'S REVERBERATION ARRIVES THROUGH THE APERTURE, like anything else.
+    // The governing principle applies to the diffuse field too. Blending neighbouring rooms by
+    // centroid distance was continuous but unphysical: it let room A's reverberant field leak
+    // into room B without passing through the door, so 42% of what a listener in B heard was A's
+    // reverb regardless of whether the door was open -- scenario #6 jumped 12 dB between shut and
+    // 20% open and then barely moved, because the door had stopped mattering.
+    //
+    // Instead: the listener's own region contributes its local field, and each neighbour
+    // contributes an ARRIVAL positioned at the shared opening, carrying that room's field through
+    // the opening's constriction and spreading from there.
+    //
+    // This is continuous across a boundary for a reason worth stating: approaching an opening, the
+    // neighbour's arrival loses its spreading loss and tends to full strength, so the total tends
+    // to (own + neighbour). Cross over and the two swap roles, and the SUM is symmetric. No blend
+    // weight is needed and no membership decision survives.
+    const roomField = (rid) => {
+      const node = G.nodes[rid];
+      if (!node || node.roomR === undefined) return 0;
       let pIn = 0;
-      if (seeded.has(nd)) pIn += dbToPow(-minSeed);
-      for (const pid of myNode.edges) {
+      if (seeded.has(rid)) pIn += dbToPow(-minSeed);
+      for (const pid of node.edges) {
         const pc = cost[pid];
         if (!pc) continue;
         pIn += dbToPow(-(pc.add - constrictDb(pc.bneck)));
       }
-      if (pIn > 0) diffDb = powToDb(4 * pIn / Math.max(1, myNode.roomR)) + DIFFUSE_CAL;
+      return pIn > 0 ? 4 * pIn / Math.max(1, node.roomR) : 0;
+    };
+    let diffDb = -120;
+    if (nd >= 0) {
+      let pTot = roomField(nd) * dbToPow(DIFFUSE_CAL);
+      for (const pid of G.nodes[nd].edges) {
+        const P = G.portals[pid];
+        const other = P.a === nd ? P.b : P.a;
+        const pf = roomField(other);
+        if (pf <= 0) continue;
+        const leg = Math.hypot(P.px - lx, P.py - ly, P.pz - lz);
+        const thru = dbToPow(constrictDb(P.openFrac) - SLOPE * leg + DIFFUSE_CAL);
+        pTot += pf * thru;
+      }
+      if (pTot > 0) diffDb = powToDb(pTot);
     }
     if (diffDb > -110) {
       arrivals.push({ db: diffDb, w: 1, px: lx, py: ly, pz: lz, legMat: 0, len: d, isDiffuse: true });
