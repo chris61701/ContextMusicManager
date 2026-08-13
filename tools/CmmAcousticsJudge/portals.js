@@ -166,8 +166,42 @@ function buildGraph(D, cell) {
 // spec asks for).
 function solveAir(D, G, src) {
   const best = new Array(G.nodes.length);   // node → [{ portal, db, px,py,pz }]
-  const srcNode = G.nodeOf[D.idx(src.x, src.y, src.z)];
-  if (srcNode === undefined || srcNode < 0) return { best, srcNode: -1 };
+
+  // SEED FROM THE AIR AROUND THE SPEAKER, not from its own voxel. A speaker IS a solid
+  // block, so it never has an air node of its own — seeding from it made every real
+  // emitter unreachable (reach 0%; only the dumps' `virtual` probe points, which sit in
+  // air, appeared to work). Radiating into the neighbouring air is also the physically
+  // correct statement, and it handles a speaker embedded in a wall between two rooms:
+  // every distinct adjacent air pocket gets seeded, so it feeds both sides.
+  //
+  // The seed's entry POINT is the speaker itself with zero cost, so a listener sharing
+  // the pocket measures plain line-of-sight distance from the speaker (not from some
+  // neighbouring voxel), and the near field stays exact.
+  // Seed EVERY distinct air pocket within SEED_R, each paying for the material between
+  // the speaker and it. Stopping at the first pocket found was wrong in a way that would
+  // have shipped silently: a `cntStoreShelf...Speaker` sits INSIDE a shelf, so radius 1
+  // finds the enclosed void in the furniture and never reaches the store floor two
+  // blocks out — every shelf speaker would have been inaudible. Paying segLoss to each
+  // pocket keeps it honest: the void is free, the floor costs the shelf panel, and a
+  // genuinely sealed room (the bunker) still seeds nothing beyond its own air, so
+  // transmission correctly carries all of it.
+  const SEED_R = 3;
+  const srcPt = { px: src.x + 0.5, py: src.y + 0.5, pz: src.z + 0.5 };
+  const seedDb = new Map();   // node → cheapest dB to start radiating into it
+  for (let dz = -SEED_R; dz <= SEED_R; dz++)
+  for (let dy = -SEED_R; dy <= SEED_R; dy++)
+  for (let dx = -SEED_R; dx <= SEED_R; dx++) {
+    const wx = src.x + dx, wy = src.y + dy, wz = src.z + dz;
+    if (!D.inB(wx, wy, wz)) continue;
+    const nd = G.nodeOf[D.idx(wx, wy, wz)];
+    if (nd < 0) continue;
+    const dist = Math.hypot(dx, dy, dz);
+    const cost = SLOPE * dist + segLoss(D, src.x, src.y, src.z, wx, wy, wz) * DB_PER_WALL;
+    const prev = seedDb.get(nd);
+    if (prev === undefined || cost < prev) seedDb.set(nd, cost);
+  }
+  const seeded = seedDb;
+  if (seeded.size === 0) return { best, srcNode: -1, seeded: 0 };
 
   // Priority queue (binary heap) over (node, entryPoint) states.
   const heap = [];
@@ -181,9 +215,10 @@ function solveAir(D, G, src) {
         if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } }
     return top; };
 
-  const srcPt = { px: src.x + 0.5, py: src.y + 0.5, pz: src.z + 0.5 };
-  best[srcNode] = [{ portal: -1, db: 0, ...srcPt }];
-  push({ node: srcNode, db: 0, ...srcPt });
+  for (const [nd, cost] of seeded) {
+    best[nd] = [{ portal: -1, db: cost, ...srcPt }];
+    push({ node: nd, db: cost, ...srcPt });
+  }
 
   let popped = 0;
   while (heap.length) {
@@ -209,7 +244,7 @@ function solveAir(D, G, src) {
       push({ node: other, db: nd, px: P.px, py: P.py, pz: P.pz });
     }
   }
-  return { best, srcNode, popped };
+  return { best, srcNode: -2, popped, seeded: seeded.size };
 }
 
 // ── per-voxel evaluation: AIR arrival + SOLID arrival, energy-summed ───────────
