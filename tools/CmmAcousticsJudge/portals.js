@@ -103,7 +103,7 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // honestly empirical constant in the model.
 const DIFFUSE_CAL = 16;  // set so the diffuse field sits ~+5 dB on the direct component at 5 blocks
                          // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
-const WALL_FEED = 1.0;       // held at 1: see the note in roomField -- this stand-in is the wrong shape
+const WALL_AREA_SCALE = 1.0; // shared-wall area is in voxel-faces; 1.0 keeps it in those units
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
 const APERTURE_MAX = 0.75;   // a node pinched below this much of its own cross-section IS an aperture
 const PRUNE_DB = 25;         // ignore an arrival this far below the strongest: <0.4% of energy
@@ -590,21 +590,58 @@ function makeNewEvaluator(D, G, src) {
   }
 
   // wx/wy/wz are BLOCK COORDS and may be fractional.
-  // Power driven into each region THROUGH ITS SURFACE by the source: a property of the room and
-  // the source, not of the listener, so memoised once. Evaluated at the region's centroid.
-  const wallFeedCache = new Map();
-  const wallFeedOf = (rid) => {
-    if (wallFeedCache.has(rid)) return wallFeedCache.get(rid);
-    const node = G.nodes[rid];
-    let v = 0;
-    if (node) {
-      const dd = Math.hypot(node.px - sx5, node.py - sy5, node.pz - sz5);
-      const m = segDbAt(D, sx5, sy5, sz5, node.px, node.py, node.pz);
-      v = dbToPow(-(SLOPE * dd + m));
+  // ── each region's DIFFUSE FIELD, solved once ─────────────────────────────────
+  // A region's field is a property of the room and the source, not of the listener, so it is
+  // computed once rather than per sample. Two passes, because the system is coupled:
+  //
+  //   pass 1  field from the source directly (if the source is in this room) and from power
+  //           arriving at this room's OPENINGS
+  //   pass 2  add power driven through SHARED WALLS by the neighbouring rooms' pass-1 fields
+  //
+  // Pass 2 is the term that was missing. A sealed room next to a loud one does build a weak
+  // reverberant field, driven by its neighbour's field across the wall they share:
+  //
+  //     P_in(B, walls) = field(A) x tau(shared wall) x shared area
+  //
+  // Previously this was estimated from a ray from the source to the region's centroid, which put
+  // ~7 dB of pure distance into a quantity that has no distance in it -- a shut interior door read
+  // -15 dB where the author's words put it near -6. One Jacobi iteration is enough because wall
+  // transmission is a large loss, so the coupling is weak and a second pass would barely move.
+  const nRegions = G.nodes.length;
+  const fieldOf = new Float64Array(nRegions);
+  {
+    const direct = new Float64Array(nRegions);
+    for (let rid = 0; rid < nRegions; rid++) {
+      const node = G.nodes[rid];
+      if (!node || node.roomR === undefined) continue;
+      let pIn = 0;
+      if (seeded.has(rid)) pIn += dbToPow(-seeded.get(rid));
+      for (const pid of node.edges) {
+        const pc = cost[pid];
+        if (!pc) continue;
+        pIn += dbToPow(-(pc.add - constrictDb(pc.bneck)));
+      }
+      direct[rid] = pIn > 0 ? 4 * pIn / Math.max(1, node.roomR) : 0;
     }
-    wallFeedCache.set(rid, v);
-    return v;
-  };
+    for (let rid = 0; rid < nRegions; rid++) {
+      const node = G.nodes[rid];
+      if (!node || node.roomR === undefined) continue;
+      // Power INCIDENT on a surface of area S standing in a diffuse field is P*S/R, not
+      // field*S -- the standard relation carries a factor of four that cancels the one in
+      // 4P/R. Getting that wrong made the receiving room LOUDER than the source room
+      // (S4-in-wood read +2.4 dB above the control), which is a dimensional error rather
+      // than a calibration one.
+      let pWall = 0;
+      for (const w of (node.walls || [])) {
+        const src = direct[w.other];
+        if (src <= 0) continue;
+        const nodeOther = G.nodes[w.other];
+        const pOther = src * Math.max(1, nodeOther.roomR) / 4;      // back out that room's power
+        pWall += pOther * w.area / Math.max(1, nodeOther.roomR) * w.tau;
+      }
+      fieldOf[rid] = direct[rid] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0);
+    }
+  }
 
   return function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
@@ -716,35 +753,8 @@ function makeNewEvaluator(D, G, src) {
     // neighbour's arrival loses its spreading loss and tends to full strength, so the total tends
     // to (own + neighbour). Cross over and the two swap roles, and the SUM is symmetric. No blend
     // weight is needed and no membership decision survives.
-    const roomField = (rid) => {
-      const node = G.nodes[rid];
-      if (!node || node.roomR === undefined) return 0;
-      let pIn = 0;
-      if (seeded.has(rid)) pIn += dbToPow(-minSeed);
-      for (const pid of node.edges) {
-        const pc = cost[pid];
-        if (!pc) continue;
-        pIn += dbToPow(-(pc.add - constrictDb(pc.bneck)));
-      }
-      // POWER ALSO ENTERS THROUGH THE WALLS, not only through openings. A sealed room next to a
-      // loud one does build a weak reverberant field -- its whole surface is driven and radiates
-      // inward. Counting apertures alone gave a sealed room NO field at all, which is why a shut
-      // interior door read -16 dB against the author's "roughly half as loud" (~-6): the reference
-      // room had reverberation and the shut room had none, so the gap was the full difference
-      // rather than the door's transmission loss.
-      //
-      // Estimated from the transmitted arrival already computed for this listener, spread over the
-      // room's surface: the same wall that passes the direct sound passes power into the room.
-      // Approximate rather than exact -- the exact form is a coupled system over all regions --
-      // but it is present, and it scales with the barrier, which is what matters here.
-      // Evaluated at the REGION, not at the listener. Feeding this from the listener's own
-      // transmitted arrival made the "diffuse" field position-dependent, which contradicts what a
-      // diffuse field IS -- and it showed up immediately as a smoothness regression (pastdoor
-      // 2.38 -> 2.68). A room's surface drive is a property of the room and the source, so it is
-      // computed once per region from the source to the region's centroid.
-      pIn += wallFeedOf(rid) * WALL_FEED;
-      return pIn > 0 ? 4 * pIn / Math.max(1, node.roomR) : 0;
-    };
+    const roomField = (rid) => fieldOf[rid] || 0;
+
     let diffDb = -120;
     if (nd >= 0) {
       let pTot = roomField(nd) * dbToPow(DIFFUSE_CAL);

@@ -32,7 +32,7 @@
 // ───────────────────────────────────────────────────────────────────────────────
 "use strict";
 const { loadDump } = require("./judge3d.js");
-const { makeOpenTest } = require("./portals.js");
+const { makeOpenTest, segDbAt } = require("./portals.js");
 
 const OPEN_EPS = 0.02;
 // First-Fresnel-zone area in blocks^2 at typical room geometry: radius ~2.5 blocks for music
@@ -151,8 +151,12 @@ function segment(D, open, thick) {
       // critical distance of 10.7 blocks -- implying a strong diffuse field outdoors, where there
       // is no enclosure at all. With alpha ~1 the outdoor room constant goes huge and its diffuse
       // field vanishes, which is the correct behaviour and falls out rather than being special-cased.
+      // Absorption for a FURNISHED space, not a bare shell. 0.6*(1-loss) gave bare concrete
+      // alpha 0.06, which is correct for a bare concrete box and wrong for any room a player is
+      // in: real rooms have floors, furniture and clutter, and land at 0.15-0.35. An
+      // unrealistically reverberant test box makes every diffuse-field number unrepresentative.
       const alpha = oob ? 0.95
-        : Math.max(0.03, Math.min(0.8, 0.6 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
+        : Math.max(0.10, Math.min(0.85, 0.12 + 0.5 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
       R.surf++; R.absorb += alpha;
     }
     if (thick[i] < (R.minT === undefined ? Infinity : R.minT)) R.minT = thick[i];
@@ -288,6 +292,54 @@ function main() {
 if (require.main === module) main();
 module.exports = { build, thickness, segment };
 
+// ── shared WALL area between regions ──────────────────────────────────────────
+// The segmentation records where regions touch through OPENINGS. It says nothing about where they
+// touch through MATERIAL, and that is what drives a sealed room's reverberation: room B's surface
+// is driven by room A's field hitting the wall they share. Computing a sealed room's field from a
+// ray to its centroid instead put ~7 dB of pure distance into a quantity that has no distance in
+// it, which is why a shut interior door read -15 dB against the author's "roughly half as loud".
+//
+// For every open voxel, march each of the six directions through up to WALL_MAX_THICK solid voxels.
+// Emerging into a DIFFERENT region means those two regions share wall there: accumulate the face
+// area and the power transmission along that short crossing.
+const WALL_MAX_THICK = 3;
+function wallLinks(D, open, label, regionOf) {
+  const sx = D.sx, sy = D.sy, sz = D.sz, li = (x, y, z) => x + sx * (z + sz * y);
+  const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  const links = new Map();
+  for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+    const i = li(x, y, z);
+    if (open[i] <= OPEN_EPS) continue;
+    const a = regionOf(label[i]);
+    if (a === undefined) continue;
+    for (const [dx, dy, dz] of dirs) {
+      let nx = x + dx, ny = y + dy, nz = z + dz, steps = 0;
+      // must start with material, or this is an opening and the aperture path already has it
+      if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
+      if (open[li(nx, ny, nz)] > OPEN_EPS) continue;
+      while (steps < WALL_MAX_THICK) {
+        nx += dx; ny += dy; nz += dz; steps++;
+        if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) { steps = -1; break; }
+        if (open[li(nx, ny, nz)] > OPEN_EPS) break;
+      }
+      if (steps < 0 || steps >= WALL_MAX_THICK) continue;
+      const j = li(nx, ny, nz);
+      if (open[j] <= OPEN_EPS) continue;
+      const b = regionOf(label[j]);
+      if (b === undefined || b === a) continue;
+      const lossDb = segDbAt(D, D.x0 + x + 0.5, D.y0 + y + 0.5, D.z0 + z + 0.5,
+                                D.x0 + nx + 0.5, D.y0 + ny + 0.5, D.z0 + nz + 0.5);
+      const lo = Math.min(a, b), hi = Math.max(a, b), k = lo * 1e7 + hi;
+      let L = links.get(k);
+      if (!L) { L = { a: lo, b: hi, area: 0, pow: 0 }; links.set(k, L); }
+      L.area += 1;
+      L.pow += Math.pow(10, -lossDb / 10);
+    }
+  }
+  // area-weighted mean power transmission per link
+  return [...links.values()].map(L => ({ a: L.a, b: L.b, area: L.area, tau: L.pow / L.area }));
+}
+
 // ── adapter: present regions in the shape portals.js already consumes ──────────
 // Deliberately minimal, so the model can be run on either structure and compared without
 // touching the model at all. The mapping is mostly a simplification:
@@ -369,10 +421,16 @@ function asGraph(D, mergeH) {
     nodes[a].edges.push(id); nodes[b].edges.push(id);
   }
   // A boundary IS an aperture. Position at the boundary centroid, throat from its openness.
+  const walls = wallLinks(D, open, label, a => r.regionOf(a));
+  for (const w of walls) {
+    if (w.a >= nodes.length || w.b >= nodes.length) continue;
+    (nodes[w.a].walls = nodes[w.a].walls || []).push({ other: w.b, area: w.area, tau: w.tau });
+    (nodes[w.b].walls = nodes[w.b].walls || []).push({ other: w.a, area: w.area, tau: w.tau });
+  }
   const apertures = portals.map(p => ({
     nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
   }));
-  return { open, nodeOf, nodes, portals, apertures, cell: 4, thick,
+  return { open, nodeOf, nodes, portals, apertures, walls, cell: 4, thick,
            cellsWithAir: nodes.length, cellsSplit: 0, regionCount: nodes.length };
 }
 module.exports.asGraph = asGraph;
