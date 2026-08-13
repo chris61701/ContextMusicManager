@@ -25,7 +25,8 @@ const path = require("path");
 //   x: 0                 W                    SX
 //      | room A (speaker) |#| room B (listener) |
 const SX = 44, SY = 12, SZ = 24;
-const WALLX = 18;                  // the dividing wall plane (1 block thick)
+const WALLX = 18;                  // the dividing wall plane (WALLT blocks thick)
+const WALLT_DEFAULT = 1;
 const DOOR = { y0: 1, y1: 3, z0: 10, z1: 12 };   // doorway opening in that wall (2w x 3h)
 const SPK = { x: 7, y: 3, z: 11 };                // speaker in room A
 const SHELL = 1;                                  // outer shell thickness
@@ -45,7 +46,8 @@ const LOSS_SCALE = 32;   // uint8 / 32 -> up to 7.97, enough for the vault's 4.0
 // index order must match the dumps: x + sx*(z + sz*y)
 const li = (x, y, z) => x + SX * (z + SZ * y);
 
-function build({ wall, door, open }) {
+function build({ wall, door, open, thick }) {
+  const WALLT = thick || WALLT_DEFAULT;
   const n = SX * SY * SZ;
   const loss = Buffer.alloc(n);
   const flags = Buffer.alloc(n);
@@ -68,7 +70,7 @@ function build({ wall, door, open }) {
     // outer shell: seal the box so nothing flanks around the OUTSIDE of the building
     const shell = x < SHELL || x >= SX - SHELL || y < SHELL || y >= SY - SHELL || z < SHELL || z >= SZ - SHELL;
     if (shell) { put(i, MAT.concrete, 1); continue; }
-    if (x === WALLX) {
+    if (x >= WALLX && x < WALLX + WALLT) {
       const inDoor = y >= DOOR.y0 && y <= DOOR.y1 && z >= DOOR.z0 && z <= DOOR.z1;
       if (!inDoor) { put(i, MAT[wall], 1); continue; }
       // The doorway. `open` 1 = clear air, 0 = the door leaf fully shut, in between =
@@ -90,7 +92,7 @@ function build({ wall, door, open }) {
 
   return {
     version: 2,
-    poi: `synth_wall-${wall}_door-${door}_open-${open}`,
+    poi: `synth_wall-${wall}_door-${door}_open-${open}${WALLT > 1 ? "_t" + WALLT : ""}`,
     poiId: 0,
     poiBounds: { x: 0, y: 0, z: 0, sx: SX, sy: SY, sz: SZ },
     bounds: { x: 0, y: 0, z: 0, sx: SX, sy: SY, sz: SZ },
@@ -106,7 +108,7 @@ function build({ wall, door, open }) {
     // the regions the measure step reports on
     regions: {
       roomA: { x0: SHELL, x1: WALLX - 1, y0: SHELL, y1: SY - SHELL - 1, z0: SHELL, z1: SZ - SHELL - 1 },
-      roomB: { x0: WALLX + 1, x1: SX - SHELL - 1, y0: SHELL, y1: SY - SHELL - 1, z0: SHELL, z1: SZ - SHELL - 1 },
+      roomB: { x0: WALLX + WALLT, x1: SX - SHELL - 1, y0: SHELL, y1: SY - SHELL - 1, z0: SHELL, z1: SZ - SHELL - 1 },
       door: DOOR, wallX: WALLX, speaker: SPK,
     },
   };
@@ -125,6 +127,10 @@ const MATRIX = [
   // scenario #4 — THE FLANKING TEST. Same vault door, two different walls.
   { wall: "wood",     door: "vault", open: 0.0,  tag: "S4 VAULT door in WOOD wall (should NOT seal)" },
   { wall: "concrete", door: "vault", open: 0.0,  tag: "S4 VAULT door in CONCRETE wall (should seal)" },
+  // A real bunker is not one block thick. A vault assembly only reads as "nothing" when the
+  // surrounding wall is thick enough that flanking through it is also dead -- which is the
+  // whole point of principle A, and a 1-block wall cannot demonstrate it.
+  { wall: "concrete", door: "vault", open: 0.0, thick: 3, tag: "S4 VAULT in 3-thick CONCRETE (bunker)" },
 ];
 
 function main() {

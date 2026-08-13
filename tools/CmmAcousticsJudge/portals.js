@@ -42,11 +42,26 @@ const fs = require("fs");
 const { loadDump, makeEvaluator, segLoss } = require("./judge3d.js");
 
 // ── model constants (the NEW model's whole tuning surface — compare to 41 dials) ──
-const DB_PER_WALL = 14.0;   // transmission loss of one full solid wall, dB
+// ── material -> dB, SUPERLINEAR ──────────────────────────────────────────────
+// A flat mapping (dB = 14 * lossFraction) put wood at 7 dB and concrete at 12.6 -- only
+// 5.6 dB apart, so light barriers over-attenuated and heavy ones under-attenuated at the
+// same time. The spec implies a 40+ dB spread between "shut interior door, still obviously
+// music" and "sealed vault assembly, nothing". Mass law agrees: transmission loss climbs
+// steeply with density, it is not proportional to it. Calibrated so wood ~6 dB and
+// concrete ~30 dB per voxel:
+//     dB = DB_MAT * frac^MAT_POW,  clamped per voxel
+// giving cloth ~0.04, glass 1.4, wood 6.0, dirt 15, concrete 30, metal 40, vault 60.
+const DB_MAT = 40.1;        // scale: one voxel of the densest ordinary material (frac 1.0)
+const MAT_POW = 2.74;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
+const DB_VOXEL_MAX = 60.0;  // per-voxel ceiling (an airtight vault leaf)
 const SLOPE = 0.35;         // distance attenuation, dB per block (exponential curve)
 const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is acoustically open
 const KEEP_PORTALS = 4;     // entry portals retained per node (multi-route melding)
 const AIR_FLAG = 1;
+// Offsets for the transmission fan (see makeNewEvaluator): the listener itself plus
+// +/-2 blocks on each axis, so the ray set can find a weaker patch of barrier nearby.
+const SOLID_FAN = [[0,0,0],[2,0,0],[-2,0,0],[0,2,0],[0,-2,0],[0,0,2],[0,0,-2]];
+const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 
 // ── going around must COST something ──────────────────────────────────────────
 // First measurement pass charged only path LENGTH, so the air arrival won 90-100% of
@@ -85,6 +100,37 @@ const AIR_FLAG = 1;
 // turn, which is most of where that spurious 8.6 dB came from.
 const BEND_DB = 6.0;        // dB for a full reversal through a fully-pinched portal
 const MIN_APERTURE_DB = -30; // floor on the bottleneck's constriction (a pinhole is not infinite loss)
+
+// Transmission loss along the straight line, summing the SUPERLINEAR per-voxel dB.
+// Cannot reuse judge3d's segLoss: that sums loss FRACTIONS, and the curve has to be
+// applied per voxel before summing or a 2-voxel wall reads as one twice as dense.
+// Amanatides-Woo DDA, endpoints excluded, mirroring segLoss's traversal exactly.
+function segDb(D, x0, y0, z0, x1, y1, z1) {
+  const fx = x0 + 0.5, fy = y0 + 0.5, fz = z0 + 0.5;
+  const tx = x1 + 0.5, ty = y1 + 0.5, tz = z1 + 0.5;
+  let dx = tx - fx, dy = ty - fy, dz = tz - fz;
+  const dist = Math.hypot(dx, dy, dz);
+  if (dist < 0.01) return 0;
+  dx /= dist; dy /= dist; dz /= dist;
+  let x = x0, y = y0, z = z0;
+  const sX = dx > 0 ? 1 : dx < 0 ? -1 : 0, sY = dy > 0 ? 1 : dy < 0 ? -1 : 0, sZ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+  const tM = (o, d, c, s) => Math.abs(d) < 1e-6 ? Infinity : ((s > 0 ? c + 1 : c) - o) / d;
+  const tD = d => Math.abs(d) < 1e-6 ? Infinity : Math.abs(1 / d);
+  let tmx = tM(fx, dx, x, sX), tmy = tM(fy, dy, y, sY), tmz = tM(fz, dz, z, sZ);
+  const tdx = tD(dx), tdy = tD(dy), tdz = tD(dz);
+  let db = 0;
+  for (let g = 0; g < 512; g++) {
+    if (x === x1 && y === y1 && z === z1) break;
+    if (tmx <= tmy && tmx <= tmz) { x += sX; tmx += tdx; }
+    else if (tmy <= tmz) { y += sY; tmy += tdy; }
+    else { z += sZ; tmz += tdz; }
+    if (x === x1 && y === y1 && z === z1) break;
+    if (y < 0 || y >= 256) continue;
+    const f = D.lossAt(x, y, z);
+    if (f > 1e-4) db += Math.min(DB_VOXEL_MAX, DB_MAT * Math.pow(f, MAT_POW));
+  }
+  return db;
+}
 
 const dbToPow = d => Math.pow(10, d / 10);
 const powToDb = p => p <= 1e-12 ? -120 : 10 * Math.log10(p);
@@ -161,8 +207,14 @@ function buildGraph(D, cell) {
         for (let s = lo; s <= hi; s++) if (sl[s] < m) m = sl[s];
         return m;
       };
+      // Normalise against the node's OWN typical cross-section, not an absolute cell face.
+      // Referencing cell^2 made every cell touching a floor or ceiling read as constricted
+      // (a 3-block-tall room can never fill a 4x4 face), so ordinary open rooms lost ~2 dB
+      // and the control probe never reached 0. What matters acoustically is whether the
+      // space PINCHES relative to itself.
       const tRaw = Math.min(throatAxis(slX), throatAxis(slY), throatAxis(slZ));
-      const throat = Number.isFinite(tRaw) ? Math.min(1, tRaw / (cell * cell)) : 1;
+      const avgSlice = Math.max(1, count / cell);
+      const throat = Number.isFinite(tRaw) ? Math.min(1, tRaw / avgSlice) : 1;
       nodes.push({ id, n: count, cxs: ccx, cys: ccy, czs: ccz, throat,
                    // centroid in WORLD coords (used only as a fallback point)
                    px: D.x0 + sxs / count + 0.5, py: D.y0 + sys / count + 0.5, pz: D.z0 + szs / count + 0.5,
@@ -194,12 +246,14 @@ function buildGraph(D, cell) {
 
   const portals = [];
   for (const p of portalMap.values()) {
-    // openFrac = how much of a FULL cell face this portal is, so open air is exactly 1.
-    // The constriction loss itself is applied ONCE, from the route's bottleneck.
-    const full = cell * cell;
+    // openFrac relative to the LOCAL cross-section (the smaller adjoining node's average
+    // slice), for the same reason as the node throat above: a full-height opening between
+    // two cells of a low room is not a constriction, however small it is in absolute terms.
+    const refA = Math.max(1, nodes[p.a].n / cell), refB = Math.max(1, nodes[p.b].n / cell);
+    const ref = Math.min(refA, refB);
     const q = { a: p.a, b: p.b, area: p.area,
                 px: p.sx / p.area, py: p.sy / p.area, pz: p.sz / p.area,
-                openFrac: Math.min(1, p.area / full) };
+                openFrac: Math.min(1, p.area / ref) };
     const id = portals.length;
     portals.push(q);
     nodes[p.a].edges.push(id);
@@ -256,7 +310,7 @@ function solveAir(D, G, src) {
     const nd = G.nodeOf[D.idx(wx, wy, wz)];
     if (nd < 0) continue;
     const dist = Math.hypot(dx, dy, dz);
-    const cost = SLOPE * dist + segLoss(D, src.x, src.y, src.z, wx, wy, wz) * DB_PER_WALL;
+    const cost = SLOPE * dist + segDb(D, src.x, src.y, src.z, wx, wy, wz);
     const prev = seedDb.get(nd);
     if (prev === undefined || cost < prev) seedDb.set(nd, cost);
   }
@@ -306,11 +360,19 @@ function solveAir(D, G, src) {
         // scaled by how PINCHED this portal is: turning in open space is free
         bend = BEND_DB * (1 - Math.max(-1, Math.min(1, cos))) / 2 * (1 - P.openFrac);
       }
-      const nAdd = cur.add + SLOPE * leg + bend;
-      const nLen = cur.len + leg;
+      // LENGTH: summing leg-by-leg between portal CENTROIDS staircases on any route that
+      // is not axis-aligned, which showed up as the control probe reading -2.3 dB in an
+      // open room where it must read 0 -- the same Manhattan-inflation defect the shipped
+      // model has, in a new form. An UNOBSTRUCTED route is physically a straight line, so
+      // measure it as one; only once the route has actually squeezed through something
+      // does the bent polyline become the honest measure.
+      const nBneckPre = Math.min(cur.bneck, G.nodes[cur.node].throat, P.openFrac);
+      const straight = Math.hypot(P.px - srcPt.px, P.py - srcPt.py, P.pz - srcPt.pz);
+      const nLen = nBneckPre >= 0.95 ? straight : cur.len + leg;
+      const nAdd = (nBneckPre >= 0.95 ? SLOPE * straight : cur.add + SLOPE * leg) + bend;
       // The route crossed this node to reach the portal, so it passed the node's throat
       // as well as the portal's own opening. Both feed the running bottleneck.
-      const nBneck = Math.min(cur.bneck, G.nodes[cur.node].throat, P.openFrac);
+      const nBneck = nBneckPre;
       const nd = nAdd - constrictDb(nBneck);   // constriction paid ONCE, at the bottleneck
       let arr = best[other];
       if (!arr) { arr = best[other] = []; }
@@ -347,12 +409,40 @@ function makeNewEvaluator(D, G, src) {
     }
     if (airDb === -Infinity) airDb = -120;
 
-    // SOLID: straight line, distance + material transmission (dB, position-independent).
-    const matWalls = segLoss(D, src.x, src.y, src.z, wx, wy, wz);
-    const solidDb = -(SLOPE * d + matWalls * DB_PER_WALL);
+    // SOLID (transmitted) arrival. Two corrections the probe measurements forced:
+    //
+    // 1. A FAN, not one ray. A barrier is a distributed radiator: standing directly behind
+    //    a vault door set in a WOODEN wall, what you hear is the wall beside you, not the
+    //    door. A single straight ray reported -60 dB there (the door), where the spec says
+    //    it must not seal. Taking the best of a small fan of offset listener positions
+    //    finds the weakest nearby point of the barrier, which is what actually radiates.
+    //    +/-2 blocks is also about the scale over which real hearing averages.
+    // 2. NOT DOUBLE-COUNTED with the air arrival. When the straight line is clear, the
+    //    "transmitted" path IS the direct sound and the graph route is the same path, so
+    //    summing them inflated open space by 3 dB (the control probe read +2.0 where it
+    //    must read 0). Transmission is weighted in only once there is something to
+    //    transmit through, ramped over the first few dB so there is no discontinuity.
+    // Only rays that are genuinely BLOCKED count as transmission. A fan ray that finds a
+    // clear line has found an OPENING, not a partition -- and that opening is the air
+    // arrival's business, where it correctly pays the aperture's constriction. Letting such
+    // a ray through as unattenuated "transmission" bypassed that charge and made scenario
+    // #6 non-monotonic: a shut door (-5.3, through the leaf) came out LOUDER than the same
+    // door 1/3 open (-7.0, squeezing through the crack), because opening it handed the
+    // solid path a free ride.
+    let solidDb = -Infinity, matDb = 0;
+    for (const [ox, oy, oz] of SOLID_FAN) {
+      const px = wx + ox, py = wy + oy, pz = wz + oz;
+      if (!D.inB(px, py, pz)) continue;
+      const m = segDb(D, src.x, src.y, src.z, px, py, pz);
+      if (m < MIN_TRANSMIT_DB) continue;         // an opening, not a barrier
+      const dd = Math.hypot(px - src.x, py - src.y, pz - src.z);
+      const cand = -(SLOPE * dd + m);
+      if (cand > solidDb) { solidDb = cand; matDb = m; }
+    }
+    if (solidDb === -Infinity) { solidDb = -120; matDb = 0; }
 
     const total = powToDb(dbToPow(airDb) + dbToPow(solidDb));
-    return { d, airDb, solidDb, total, airLen, matWalls, entry,
+    return { d, airDb, solidDb, total, airLen, matDb, entry,
              reached: nd >= 0 && !!best[nd] };
   };
 }
@@ -461,4 +551,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest };
+module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, SLOPE };
