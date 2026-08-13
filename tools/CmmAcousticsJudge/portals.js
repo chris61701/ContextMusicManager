@@ -193,6 +193,39 @@ function segDbAt(D, fx, fy, fz, tx, ty, tz) {
   return db;
 }
 
+// Where along a ray the barrier actually IS: the midpoint of the span over which material
+// exists. Needed because the transmission integral belongs at the barrier, not at the
+// listener -- a patch of barrier radiates from its own position (see reference spec G).
+// Returns null when the line is clear.
+function barrierMid(D, fx, fy, fz, tx, ty, tz) {
+  let dx = tx - fx, dy = ty - fy, dz = tz - fz;
+  const dist = Math.hypot(dx, dy, dz);
+  if (dist < 0.01) return null;
+  dx /= dist; dy /= dist; dz /= dist;
+  let x = Math.floor(fx), y = Math.floor(fy), z = Math.floor(fz);
+  const sX = dx > 0 ? 1 : dx < 0 ? -1 : 0, sY = dy > 0 ? 1 : dy < 0 ? -1 : 0, sZ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+  const tM = (o, d, c, s) => Math.abs(d) < 1e-6 ? Infinity : ((s > 0 ? c + 1 : c) - o) / d;
+  const tD = d => Math.abs(d) < 1e-6 ? Infinity : Math.abs(1 / d);
+  let tmx = tM(fx, dx, x, sX), tmy = tM(fy, dy, y, sY), tmz = tM(fz, dz, z, sZ);
+  const tDx = tD(dx), tDy = tD(dy), tDz = tD(dz);
+  let first = -1, last = -1, tPrev = 0;
+  for (let g = 0; g < 1024; g++) {
+    const tNext = Math.min(tmx, tmy, tmz, dist);
+    if (tNext - tPrev > 1e-6 && y >= 0 && y < 256 && D.lossAt(x, y, z) > 0.05) {
+      if (first < 0) first = tPrev;
+      last = tNext;
+    }
+    if (tNext >= dist - 1e-9) break;
+    tPrev = tNext;
+    if (tmx <= tmy && tmx <= tmz) { x += sX; tmx += tDx; }
+    else if (tmy <= tmz) { y += sY; tmy += tDy; }
+    else { z += sZ; tmz += tDz; }
+  }
+  if (first < 0) return null;
+  const t = 0.5 * (first + last);
+  return { x: fx + dx * t, y: fy + dy * t, z: fz + dz * t };
+}
+
 const sstep = (a, b, x) => { if (b <= a) return x >= b ? 1 : 0; const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const dbToPow = d => Math.pow(10, d / 10);
 // One aperture's constriction loss, in dB, from how open it is relative to its local
@@ -550,15 +583,28 @@ function makeNewEvaluator(D, G, src) {
     e1x /= e1l; e1y /= e1l; e1z /= e1l;
     const e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
 
+    // THE DISC SITS AT THE BARRIER, not at the listener. Offsetting the LISTENER and asking
+    // what each ray crosses answers "what is directly between us", which is the wrong question:
+    // behind a steel column in a glass wall it charges you for the column, when what you
+    // actually hear is the glass beside it radiating into your space. Sampling patches of the
+    // barrier and letting each radiate from ITS OWN position gives the right answer -- the
+    // glass is a little further away and no more blocked, so walking past barely changes the
+    // level, which is what the author describes and what the physics says.
+    const bm = barrierMid(D, sx5, sy5, sz5, lx, ly, lz);
     let fanPow = 0;
-    for (const p of FRESNEL_PTS) {
-      const ox = (e1x * p.ca + e2x * p.sa) * p.r;
-      const oy = (e1y * p.ca + e2y * p.sa) * p.r;
-      const oz = (e1z * p.ca + e2z * p.sa) * p.r;
-      const px = lx + ox, py = ly + oy, pz = lz + oz;
-      const m = segDbAt(D, sx5, sy5, sz5, px, py, pz);
-      const dd = Math.hypot(px - sx5, py - sy5, pz - sz5);
-      fanPow += p.w * dbToPow(-(SLOPE * dd + m));
+    if (!bm) {
+      fanPow = dbToPow(-SLOPE * d);                     // clear line: free field, no barrier
+    } else {
+      for (const p of FRESNEL_PTS) {
+        const ox = (e1x * p.ca + e2x * p.sa) * p.r;
+        const oy = (e1y * p.ca + e2y * p.sa) * p.r;
+        const oz = (e1z * p.ca + e2z * p.sa) * p.r;
+        const qx = bm.x + ox, qy = bm.y + oy, qz = bm.z + oz;
+        // source -> this patch of barrier -> listener, the patch radiating from where it is
+        const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz) + segDbAt(D, qx, qy, qz, lx, ly, lz);
+        const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
+        fanPow += p.w * dbToPow(-(SLOPE * len + m));
+      }
     }
     const fanDb = fanPow > 0 ? -powToDb(fanPow) : 120;
     const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
