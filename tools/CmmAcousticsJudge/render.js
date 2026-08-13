@@ -109,7 +109,8 @@ function render({ name, states, waypoints, seconds, music, model }) {
   const L = new Float32Array(nSamp), R = new Float32Array(nSamp);
   const slots = new Map();   // stable id -> { g, pan, c, lp }; keyed so state follows an arrival
   const alpha = 1 - Math.exp(-(BLOCK / SR * 1000) / SLEW_MS);
-  const seen = new Set();
+  let slotSeq = 0;
+  const MATCH_BLOCKS = 6;   // an arrival within this distance of a slot's last position is it
 
   const lerpWp = (t) => {
     if (t <= waypoints[0].t) return waypoints[0];
@@ -144,13 +145,33 @@ function render({ name, states, waypoints, seconds, music, model }) {
     const fwd = [Math.cos(wp.yaw), 0, Math.sin(wp.yaw)];
     const right = [-fwd[2], 0, fwd[0]];
 
-    for (const a of arr) { seen.add(a.id); }
-    // Arrivals that vanished this block fade out rather than cutting.
-    for (const [id, s] of slots) if (!seen.has(id)) arr.push({ id, db: -120, at: s.at || [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: 20000 });
-    seen.clear();
+    // MATCH ARRIVALS TO SLOTS BY POSITION, not by identity. Keying on the portal id looked
+    // right but churned: the model's candidate set changes membership as the listener moves
+    // even while its SUMMED level stays smooth, so slots kept being created and destroyed and
+    // their independent slews left a transient -- a 2.8 dB step in the render at a moment the
+    // model itself traced perfectly flat. An arrival is the same arrival if it comes from
+    // roughly the same place, so match on that and the filter and pan state carry over.
+    const free = new Set(slots.keys());
     for (const a of arr) {
-      if (!slots.has(a.id)) slots.set(a.id, { g: 0, pan: 0, c: coefFor(20000), lp: 0 });
-      const s = slots.get(a.id);
+      let bestKey = null, bestD = MATCH_BLOCKS;
+      for (const k of free) {
+        const s = slots.get(k);
+        if (!s.at) continue;
+        const dd = Math.hypot(s.at[0] - a.at[0], s.at[1] - a.at[1], s.at[2] - a.at[2]);
+        if (dd < bestD) { bestD = dd; bestKey = k; }
+      }
+      if (bestKey === null) { bestKey = `s${slotSeq++}`; slots.set(bestKey, { g: 0, pan: 0, c: coefFor(20000), lp: 0 }); }
+      free.delete(bestKey);
+      a.key = bestKey;
+    }
+    // Slots nothing matched this block fade out rather than cutting.
+    for (const k of free) {
+      const s = slots.get(k);
+      if (s.g < 1e-4) { slots.delete(k); continue; }
+      arr.push({ key: k, db: -120, at: s.at, fc: 20000 });
+    }
+    for (const a of arr) {
+      const s = slots.get(a.key);
       s.at = a.at;
       const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20);
       let dx = a.at[0] - (wp.x + 0.5), dy = a.at[1] - (wp.y + 0.5), dz = a.at[2] - (wp.z + 0.5);

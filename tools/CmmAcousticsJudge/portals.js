@@ -135,6 +135,9 @@ function segDb(D, x0, y0, z0, x1, y1, z1) {
 
 const sstep = (a, b, x) => { if (b <= a) return x >= b ? 1 : 0; const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const dbToPow = d => Math.pow(10, d / 10);
+// One aperture's constriction loss, in dB, from how open it is relative to its local
+// cross-section. Applied ONCE per route, at the bottleneck.
+const constrictDb = f => Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.max(1e-4, f)));
 const powToDb = p => p <= 1e-12 ? -120 : 10 * Math.log10(p);
 
 // ── open/closed test ───────────────────────────────────────────────────────────
@@ -310,36 +313,31 @@ function buildGraph(D, cell) {
            cellsWithAir: split.size, cellsSplit: multi };
 }
 
-// ── air-route solve ────────────────────────────────────────────────────────────
-// Dijkstra from the source's node, in dB. Edge cost = distance between the portal
-// points travelled plus the portal's constriction. Keeps the best KEEP_PORTALS entry
-// points per node, so a big room reached through two doorways offers both — which is
-// what makes route switching a crossfade instead of a step (and is the melding the
-// spec asks for).
+// ── air-route solve: DIJKSTRA OVER PORTALS, not over nodes ─────────────────────
+// The previous solver stored the cheapest route per NODE and let the listener's own node
+// select an entry portal. That made node membership -- a discrete quantity -- an input to
+// the level, so two adjacent listener positions in different nodes could measure slightly
+// different paths and the difference appeared as a step (1.8 dB at a node boundary in the
+// approach render, which the author spotted in the waveform). No amount of blending fixes
+// that, because the cause is the keying, not the arithmetic.
+//
+// So the route cost is now a property of each PORTAL. Sound arrives at an opening at some
+// cost; what the listener hears is that opening acting as a virtual source, plus the last
+// leg from it. Nothing about that depends on which cell the listener is standing in.
+//
+// State is keyed by portal, carrying which node the route arrived FROM (so the next hop
+// emerges on the far side), the additive losses, the running bottleneck and where it is,
+// and the previous path point so the bend at this portal can be measured.
 function solveAir(D, G, src) {
-  const best = new Array(G.nodes.length);   // node → [{ portal, db, px,py,pz }]
-
-  // SEED FROM THE AIR AROUND THE SPEAKER, not from its own voxel. A speaker IS a solid
-  // block, so it never has an air node of its own — seeding from it made every real
-  // emitter unreachable (reach 0%; only the dumps' `virtual` probe points, which sit in
-  // air, appeared to work). Radiating into the neighbouring air is also the physically
-  // correct statement, and it handles a speaker embedded in a wall between two rooms:
-  // every distinct adjacent air pocket gets seeded, so it feeds both sides.
-  //
-  // The seed's entry POINT is the speaker itself with zero cost, so a listener sharing
-  // the pocket measures plain line-of-sight distance from the speaker (not from some
-  // neighbouring voxel), and the near field stays exact.
-  // Seed EVERY distinct air pocket within SEED_R, each paying for the material between
-  // the speaker and it. Stopping at the first pocket found was wrong in a way that would
-  // have shipped silently: a `cntStoreShelf...Speaker` sits INSIDE a shelf, so radius 1
-  // finds the enclosed void in the furniture and never reaches the store floor two
-  // blocks out — every shelf speaker would have been inaudible. Paying segLoss to each
-  // pocket keeps it honest: the void is free, the floor costs the shelf panel, and a
-  // genuinely sealed room (the bunker) still seeds nothing beyond its own air, so
-  // transmission correctly carries all of it.
-  const SEED_R = 3;
+  const NP = G.portals.length;
+  const cost = new Array(NP);       // pid -> { add, bneck, len, cx,cy,cz, from }
   const srcPt = { px: src.x + 0.5, py: src.y + 0.5, pz: src.z + 0.5 };
-  const seedDb = new Map();   // node → cheapest dB to start radiating into it
+
+  // Seed: every distinct air pocket within SEED_R, each paying for the material between
+  // the speaker and it (see the note on shelf speakers -- radius 1 finds the void inside
+  // the furniture, not the room).
+  const SEED_R = 3;
+  const seedDb = new Map();
   for (let dz = -SEED_R; dz <= SEED_R; dz++)
   for (let dy = -SEED_R; dy <= SEED_R; dy++)
   for (let dx = -SEED_R; dx <= SEED_R; dx++) {
@@ -347,243 +345,216 @@ function solveAir(D, G, src) {
     if (!D.inB(wx, wy, wz)) continue;
     const nd = G.nodeOf[D.idx(wx, wy, wz)];
     if (nd < 0) continue;
-    const dist = Math.hypot(dx, dy, dz);
-    const cost = SLOPE * dist + segDb(D, src.x, src.y, src.z, wx, wy, wz);
+    const c = SLOPE * Math.hypot(dx, dy, dz) + segDb(D, src.x, src.y, src.z, wx, wy, wz);
     const prev = seedDb.get(nd);
-    if (prev === undefined || cost < prev) seedDb.set(nd, cost);
+    if (prev === undefined || c < prev) seedDb.set(nd, c);
   }
-  const seeded = seedDb;
-  if (seeded.size === 0) return { best, srcNode: -1, seeded: 0 };
+  if (seedDb.size === 0) return { cost, seeded: seedDb, srcPt };
 
-  // Priority queue (binary heap) over (node, entryPoint) states.
   const heap = [];
-  const push = (it) => { heap.push(it); let i = heap.length - 1;
+  const push = it => { heap.push(it); let i = heap.length - 1;
     while (i > 0) { const p = (i - 1) >> 1; if (heap[p].db <= heap[i].db) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
   const pop = () => { const top = heap[0], last = heap.pop();
     if (heap.length) { heap[0] = last; let i = 0;
-      for (;;) { const l = 2*i+1, r = l+1; let m = i;
+      for (;;) { const l = 2 * i + 1, r = l + 1; let m = i;
         if (l < heap.length && heap[l].db < heap[m].db) m = l;
         if (r < heap.length && heap[r].db < heap[m].db) m = r;
         if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } }
     return top; };
 
-  // Seeds have no incoming leg, so their first hop is charged no bend (from === entry),
-  // and an unpinched bottleneck (1 = a full cell face).
-  const constrictDb = f => Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.max(1e-4, f)));
-  for (const [nd, cost] of seeded) {
-    const seed = { portal: -1, db: cost, add: cost, bneck: 1, len: 0,
-                   cx: srcPt.px, cy: srcPt.py, cz: srcPt.pz, ...srcPt };
-    best[nd] = [seed];
-    push({ node: nd, ...seed, qx: srcPt.px, qy: srcPt.py, qz: srcPt.pz });
+  const relaxInto = (pid, from, add, bneck, len, cx, cy, cz, prev) => {
+    const db = add - constrictDb(bneck);
+    const cur = cost[pid];
+    if (cur && cur.add - constrictDb(cur.bneck) <= db) return;
+    cost[pid] = { add, bneck, len, cx, cy, cz, from, prev };
+    push({ pid, from, add, bneck, len, cx, cy, cz, prev, db });
+  };
+
+  // From the source into every portal bounding a seeded pocket.
+  for (const [nd, seedCost] of seedDb) {
+    const node = G.nodes[nd];
+    for (const pid of node.edges) {
+      const P = G.portals[pid];
+      const leg = Math.hypot(P.px - srcPt.px, P.py - srcPt.py, P.pz - srcPt.pz);
+      const bneck = Math.min(1, node.throat, P.openFrac);
+      let cx = srcPt.px, cy = srcPt.py, cz = srcPt.pz;
+      if (bneck < 1 - 1e-9) {
+        if (node.throat <= P.openFrac) { cx = node.tpx; cy = node.tpy; cz = node.tpz; }
+        else { cx = P.px; cy = P.py; cz = P.pz; }
+      }
+      relaxInto(pid, nd, seedCost + SLOPE * leg, bneck, leg, cx, cy, cz, srcPt);
+    }
   }
 
   let popped = 0;
   while (heap.length) {
-    const cur = pop();
+    const s = pop();
     popped++;
-    const entries = best[cur.node];
-    // Skip if this state is no longer among the kept entries for its node.
-    if (!entries || !entries.some(e => e.db === cur.db && e.px === cur.px)) continue;
-    for (const pid of G.nodes[cur.node].edges) {
-      const P = G.portals[pid];
-      const other = P.a === cur.node ? P.b : P.a;
-      const leg = Math.hypot(P.px - cur.px, P.py - cur.py, P.pz - cur.pz);
+    const live = cost[s.pid];
+    if (!live || live.add !== s.add || live.from !== s.from) continue;   // superseded
+    const P = G.portals[s.pid];
+    const far = P.a === s.from ? P.b : P.a;
+    const F = G.nodes[far];
+    const inX = P.px - s.prev.px, inY = P.py - s.prev.py, inZ = P.pz - s.prev.pz;
+    const inLen = Math.hypot(inX, inY, inZ);
+    for (const qid of F.edges) {
+      if (qid === s.pid) continue;
+      const Q = G.portals[qid];
+      const lx = Q.px - P.px, ly = Q.py - P.py, lz = Q.pz - P.pz;
+      const leg = Math.hypot(lx, ly, lz);
       if (leg < 1e-6) continue;
-      // BEND: angle between the leg that brought us to this entry point and the leg
-      // leaving through this portal. cos=+1 straight (free), cos=0 right angle (half),
-      // cos=-1 doubled back (full). Open-air straight runs therefore pay nothing.
+      // Bend is charged AT this portal, gated by how pinched it is: turning in open space
+      // is free, because a source radiates every way at once.
       let bend = 0;
-      const ix = cur.px - cur.qx, iy = cur.py - cur.qy, iz = cur.pz - cur.qz;
-      const ilen = Math.hypot(ix, iy, iz);
-      if (ilen > 1e-6) {
-        const cos = (ix * (P.px - cur.px) + iy * (P.py - cur.py) + iz * (P.pz - cur.pz)) / (ilen * leg);
-        // scaled by how PINCHED this portal is: turning in open space is free
+      if (inLen > 1e-6) {
+        const cos = (inX * lx + inY * ly + inZ * lz) / (inLen * leg);
         bend = BEND_DB * (1 - Math.max(-1, Math.min(1, cos))) / 2 * (1 - P.openFrac);
       }
-      // LENGTH: summing leg-by-leg between portal CENTROIDS staircases on any route that
-      // is not axis-aligned, which showed up as the control probe reading -2.3 dB in an
-      // open room where it must read 0 -- the same Manhattan-inflation defect the shipped
-      // model has, in a new form. An UNOBSTRUCTED route is physically a straight line, so
-      // measure it as one; only once the route has actually squeezed through something
-      // does the bent polyline become the honest measure.
-      // Track the tightest constriction AND where it is: whichever of the node's throat or
-      // this portal is narrower, if either beats the running minimum.
-      const nodeCur = G.nodes[cur.node];
-      const nBneckPre = Math.min(cur.bneck, nodeCur.throat, P.openFrac);
-      let ccx = cur.cx, ccy = cur.cy, ccz = cur.cz;
-      if (nBneckPre < cur.bneck - 1e-9) {
-        if (nodeCur.throat <= P.openFrac) { ccx = nodeCur.tpx; ccy = nodeCur.tpy; ccz = nodeCur.tpz; }
-        else { ccx = P.px; ccy = P.py; ccz = P.pz; }
+      const nBneck = Math.min(s.bneck, F.throat, Q.openFrac);
+      let cx = s.cx, cy = s.cy, cz = s.cz;
+      if (nBneck < s.bneck - 1e-9) {
+        if (F.throat <= Q.openFrac) { cx = F.tpx; cy = F.tpy; cz = F.tpz; }
+        else { cx = Q.px; cy = Q.py; cz = Q.pz; }
       }
-      // BLEND, never switch. A hard threshold here put a step in the route length exactly
-      // where a listener walks through a doorway -- visible as a 2.4 dB lurch in 50 ms on
-      // the approach render, against the shipped model's worst of 0.9. An open route is a
-      // straight line and a squeezed one follows its bent polyline; between them it eases.
-      const straight = Math.hypot(P.px - srcPt.px, P.py - srcPt.py, P.pz - srcPt.pz);
-      const openMix = sstep(0.70, 0.98, nBneckPre);
-      const nLen = openMix * straight + (1 - openMix) * (cur.len + leg);
-      const nAdd = openMix * (SLOPE * straight) + (1 - openMix) * (cur.add + SLOPE * leg) + bend;
-      // The route crossed this node to reach the portal, so it passed the node's throat
-      // as well as the portal's own opening. Both feed the running bottleneck.
-      const nBneck = nBneckPre;
-      const nd = nAdd - constrictDb(nBneck);   // constriction paid ONCE, at the bottleneck
-      let arr = best[other];
-      if (!arr) { arr = best[other] = []; }
-      // keep the KEEP_PORTALS cheapest, one per distinct portal
-      const existing = arr.findIndex(e => e.portal === pid);
-      if (existing >= 0) { if (arr[existing].db <= nd) continue; arr.splice(existing, 1); }
-      else if (arr.length >= KEEP_PORTALS && nd >= arr[arr.length - 1].db) continue;
-      arr.push({ portal: pid, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz, cx: ccx, cy: ccy, cz: ccz });
-      arr.sort((a, b) => a.db - b.db);
-      if (arr.length > KEEP_PORTALS) arr.length = KEEP_PORTALS;
-      push({ node: other, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz,
-             cx: ccx, cy: ccy, cz: ccz, qx: cur.px, qy: cur.py, qz: cur.pz });
+      relaxInto(qid, far, s.add + SLOPE * leg + bend, nBneck, s.len + leg, cx, cy, cz,
+                { px: P.px, py: P.py, pz: P.pz });
     }
   }
-  return { best, srcNode: -2, popped, seeded: seeded.size };
+  return { cost, seeded: seedDb, srcPt, popped };
 }
 
-// ── per-voxel evaluation: AIR arrival + SOLID arrival, energy-summed ───────────
-const constrictDbEv = f => Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.max(1e-4, f)));
-
+// ── per-voxel evaluation: AIR arrivals + SOLID arrival, energy-summed ──────────
 function makeNewEvaluator(D, G, src) {
-  const { best } = solveAir(D, G, src);
-  const cellSize = G.cell;
+  const { cost, seeded, srcPt } = solveAir(D, G, src);
+  const sx5 = src.x + 0.5, sy5 = src.y + 0.5, sz5 = src.z + 0.5;
+
   return function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
-    // Material on the LISTENER's own line of sight -- distinct from the fan's best ray,
-    // which deliberately looks for a weaker patch of barrier nearby.
+    const lx = wx + 0.5, ly = wy + 0.5, lz = wz + 0.5;
+    // Material on the LISTENER's own line of sight -- distinct from the transmission fan's
+    // best ray, which deliberately hunts for a weaker patch of barrier nearby.
     const centerMat = segDb(D, src.x, src.y, src.z, wx, wy, wz);
 
-    // AIR: min over this node's kept entry portals of (route dB + last leg), where the
-    // last leg is EXACT continuous geometry from the portal point to the listener.
-    // Every KEPT entry portal is a real arrival, and they are SUMMED. Taking only the
-    // loudest made the perceived direction snap between portals as the winner changed --
-    // audible as the stereo image jumping around on a walk (L-R swinging several dB
-    // block to block in the render). Summing them is also the melding the spec asks for:
-    // two doorways into one room both stay live, and one taking over from the other is a
-    // crossfade rather than a switch. `airs` carries them for the renderer; `airDb` is
-    // their energy sum for the measurement paths.
-    // Kept entries are CLUSTERED before summing. Several of them are usually different cell
-    // faces of the SAME opening carrying the same sound, and summing those inflated an open
-    // doorway to +3 dB above free field -- the same double-count as air-vs-solid, one level
-    // down. Genuinely separate openings (two doorways into one room) are far apart, so
-    // spatial clustering separates the cases: one arrival per cluster, best of each, summed.
-    let airPow = 0, airLen = Infinity, entry = null;
-    const airs = [];
     const nd = G.nodeOf[D.idx(wx, wy, wz)];
-    if (nd >= 0 && best[nd]) {
-      // The listener's OWN node has a throat that the route has not paid for yet -- a node's
-      // constriction is charged when a route LEAVES it through a portal. So standing IN a
-      // doorway cost nothing while one step beyond it cost the entire throat, which is the
-      // 2.8 dB lurch the approach render showed at exactly the moment of walking through.
-      // Spread that charge over the aperture's own scale: at the throat itself, nothing; a
-      // cell away from it, all of it.
-      const myNode = G.nodes[nd];
-      const throatDist = Math.hypot(myNode.tpx - (wx + 0.5), myNode.tpy - (wy + 0.5), myNode.tpz - (wz + 0.5));
-      const throatW = sstep(0, cellSize, throatDist);
-      const cands = [];
-      for (const e of best[nd]) {
-        const leg = Math.hypot(e.px - (wx + 0.5), e.py - (wy + 0.5), e.pz - (wz + 0.5));
-        const tightened = Math.min(e.bneck, myNode.throat);
-        const extra = throatW * (constrictDbEv(tightened) - constrictDbEv(e.bneck));
-        // An UNOBSTRUCTED route is the straight line from source to listener, so its level
-        // must be measured that way. Measuring source->portal->listener instead overstates
-        // it by however far the portal sits off that line -- and by a DIFFERENT amount for
-        // each node's chosen portal, which is exactly the 2.2 dB step the trace showed at a
-        // node boundary, plus a level that fell then rose while walking straight at the
-        // speaker. Blended on the route's bottleneck, so squeezed routes keep the honest
-        // bent-polyline measure.
-        // STRING PULL at the final opening. The route's non-distance losses are kept, but the
-        // geometry is re-measured through the point of the opening CLOSEST TO the straight
-        // line from source to listener, rather than through its centroid. Two adjacent nodes
-        // choosing different portals then converge on nearly the same taut path, which is
-        // what removes the node-boundary step -- and it is what makes "coarse topology,
-        // exact geometry" actually true rather than merely intended.
-        const P = e.portal >= 0 ? G.portals[e.portal] : null;
-        let pulledLen = e.len + leg;
-        if (P) {
-          const cx2 = Math.max(P.x0, Math.min(P.x1 + 1, 0.5 * (src.x + 0.5 + wx + 0.5)));
-          const cy2 = Math.max(P.y0, Math.min(P.y1 + 1, 0.5 * (src.y + 0.5 + wy + 0.5)));
-          const cz2 = Math.max(P.z0, Math.min(P.z1 + 1, 0.5 * (src.z + 0.5 + wz + 0.5)));
-          pulledLen = Math.hypot(cx2 - (src.x + 0.5), cy2 - (src.y + 0.5), cz2 - (src.z + 0.5))
-                    + Math.hypot(cx2 - (wx + 0.5), cy2 - (wy + 0.5), cz2 - (wz + 0.5));
-          pulledLen = Math.max(d, pulledLen);
-        }
-        const losses = e.db - SLOPE * e.len;          // bend + constriction + seed material
-        const oMix = sstep(0.70, 0.98, e.bneck);
-        const viaPortal = losses + SLOPE * pulledLen;
-        const direct = SLOPE * d + (constrictDbEv(1) - constrictDbEv(e.bneck));
-        const usedLen = oMix * d + (1 - oMix) * pulledLen;
-        const cand = -(oMix * direct + (1 - oMix) * viaPortal - extra);
-        // APPARENT POSITION. Sound comes from the last aperture it squeezed through -- an
-        // unconstricted route comes from the source itself. Using the entry PORTAL centroid
-        // instead put the apparent source on a cell FACE, so direction moved in cell-sized
-        // jumps and the stereo image lurched as the winning portal changed (mean L-R step
-        // 3.3 dB per second on a walk, against 0.15 for the shipped model). A constriction
-        // is a fixed feature of the geometry, so the bearing to it varies smoothly as the
-        // listener moves -- and it is also what the author asked for: a gap reads as a
-        // localised source AT the gap.
-        // Where it SEEMS to come from, blended on whether the listener can SEE the source.
-        // That is the physical discriminator: with a clear line the sound comes from the
-        // speaker, and with the line blocked it comes from the last aperture it squeezed
-        // through. Blending on the route's bottleneck instead put a hard switch right where
-        // someone walks through a doorway. Ramped over the first few dB of blockage, so
-        // stepping out from behind a wall slides the image rather than teleporting it.
+    const cands = [];
+
+    // Candidate 1: the source itself, when the listener shares one of its seeded pockets.
+    // Exact free field, so the same-room case has no portal arithmetic in it at all.
+    if (nd >= 0 && seeded.has(nd)) {
+      cands.push({ id: -1, db: -(seeded.get(nd) + SLOPE * d), px: sx5, py: sy5, pz: sz5, len: d });
+    }
+
+    // Candidates 2..n: every opening bounding the space the listener is standing in, each
+    // acting as a virtual source carrying its route cost. The last leg is measured to the
+    // point of the opening nearest the straight source-listener line (a taut pull, not the
+    // centroid) and pays for any material actually on it, so a portal the listener cannot
+    // see through contributes nothing without needing a visibility test bolted on.
+    if (nd >= 0) {
+      // CANDIDATE SET IS NOT NODE-KEYED. Storing route cost per portal was necessary but not
+      // sufficient: while the listener only CONSIDERED the portals of its own node, adjacent
+      // positions still weighed different sets, and the trace showed a 1-block move changing
+      // the level by 3.0 dB where 1 block should cost 0.35. Taking the portals of the
+      // listener's node AND of every node one hop away means neighbouring positions share
+      // their dominant candidates, so what changes between them is only the far fringe --
+      // which is already quiet and gets dropped by clustering.
+      const consider = new Set(G.nodes[nd].edges);
+      for (const pid of G.nodes[nd].edges) {
+        const P0 = G.portals[pid];
+        const other = P0.a === nd ? P0.b : P0.a;
+        for (const q of G.nodes[other].edges) consider.add(q);
+      }
+      for (const pid of consider) {
+        const pc = cost[pid];
+        if (!pc) continue;
+        const P = G.portals[pid];
+        const mx = 0.5 * (sx5 + lx), my = 0.5 * (sy5 + ly), mz = 0.5 * (sz5 + lz);
+        const qx = Math.max(P.x0, Math.min(P.x1 + 1, mx));
+        const qy = Math.max(P.y0, Math.min(P.y1 + 1, my));
+        const qz = Math.max(P.z0, Math.min(P.z1 + 1, mz));
+        const leg = Math.hypot(qx - lx, qy - ly, qz - lz);
+        const legMat = segDb(D, Math.floor(qx), Math.floor(qy), Math.floor(qz), wx, wy, wz);
+
+        // An UNCONSTRICTED route is the straight line, whatever portal it nominally came
+        // through -- so it evaluates to free field at the true distance, identically from
+        // either side of a node boundary. That is what makes the field continuous by
+        // construction rather than by blending.
+        const oMix = sstep(0.70, 0.98, pc.bneck);
+        const viaPortal = pc.add + SLOPE * leg + legMat - constrictDb(pc.bneck);
+        const direct = seeded.size ? Math.min(...seeded.values()) + SLOPE * d : SLOPE * d;
+        const lvl = -(oMix * direct + (1 - oMix) * viaPortal);
+        if (lvl <= -110) continue;
+
+        // Apparent position: blended on whether the listener can SEE the source. Clear line
+        // -> the speaker; blocked -> the last aperture the sound squeezed through.
         const seeW = sstep(0, 6, centerMat);
-        const apx = (1 - seeW) * (src.x + 0.5) + seeW * e.cx;
-        const apy = (1 - seeW) * (src.y + 0.5) + seeW * e.cy;
-        const apz = (1 - seeW) * (src.z + 0.5) + seeW * e.cz;
-        if (cand > -110) cands.push({ id: e.portal, db: cand, px: apx, py: apy, pz: apz, len: usedLen });
+        cands.push({
+          id: pid, db: lvl, len: oMix * d + (1 - oMix) * (pc.len + leg),
+          px: (1 - seeW) * sx5 + seeW * pc.cx,
+          py: (1 - seeW) * sy5 + seeW * pc.cy,
+          pz: (1 - seeW) * sz5 + seeW * pc.cz,
+        });
       }
-      cands.sort((a, b) => b.db - a.db);
-      for (const c of cands) {
-        let dup = false;
-        for (const k of airs)
-          if (Math.hypot(k.px - c.px, k.py - c.py, k.pz - c.pz) < CLUSTER_BLOCKS) { dup = true; break; }
-        if (dup) continue;
-        airs.push(c);
-        airPow += dbToPow(c.db);
-        if (entry === null) { entry = c; airLen = c.len; }
-      }
+    }
+
+    // Cluster before summing: several candidates are usually different faces of the SAME
+    // opening carrying the same sound, and summing those inflates an open doorway above
+    // free field. Genuinely separate openings are far apart, so distance separates them.
+    cands.sort((a, b) => b.db - a.db);
+    const airs = [];
+    let airPow = 0, airLen = Infinity;
+    for (const c of cands) {
+      let dup = false;
+      for (const k of airs)
+        if (Math.hypot(k.px - c.px, k.py - c.py, k.pz - c.pz) < CLUSTER_BLOCKS) { dup = true; break; }
+      if (dup) continue;
+      airs.push(c);
+      airPow += dbToPow(c.db);
+      if (airs.length === 1) airLen = c.len;
     }
     const airDb = airPow > 0 ? powToDb(airPow) : -120;
 
-    // SOLID (transmitted) arrival. Two corrections the probe measurements forced:
-    //
-    // 1. A FAN, not one ray. A barrier is a distributed radiator: standing directly behind
-    //    a vault door set in a WOODEN wall, what you hear is the wall beside you, not the
-    //    door. A single straight ray reported -60 dB there (the door), where the spec says
-    //    it must not seal. Taking the best of a small fan of offset listener positions
-    //    finds the weakest nearby point of the barrier, which is what actually radiates.
-    //    +/-2 blocks is also about the scale over which real hearing averages.
-    // 2. NOT DOUBLE-COUNTED with the air arrival. When the straight line is clear, the
-    //    "transmitted" path IS the direct sound and the graph route is the same path, so
-    //    summing them inflated open space by 3 dB (the control probe read +2.0 where it
-    //    must read 0). Transmission is weighted in only once there is something to
-    //    transmit through, ramped over the first few dB so there is no discontinuity.
-    // Only rays that are genuinely BLOCKED count as transmission. A fan ray that finds a
-    // clear line has found an OPENING, not a partition -- and that opening is the air
-    // arrival's business, where it correctly pays the aperture's constriction. Letting such
-    // a ray through as unattenuated "transmission" bypassed that charge and made scenario
-    // #6 non-monotonic: a shut door (-5.3, through the leaf) came out LOUDER than the same
-    // door 1/3 open (-7.0, squeezing through the crack), because opening it handed the
-    // solid path a free ride.
+    // SOLID (transmitted). A fan rather than one ray, because a barrier is a distributed
+    // radiator: behind a vault door set in a WOODEN wall you hear the wall beside you, not
+    // the door. Rays with under MIN_TRANSMIT_DB of material are discarded -- such a ray has
+    // found an OPENING, which is the air arrivals' business where it pays the aperture's
+    // constriction properly.
+    // Best-of-fan. The reduction operator here is genuinely under-specified and I stopped
+    // rather than keep guessing: `max` gives the right flanking answer (the weakest patch of
+    // barrier is what you hear) but is non-smooth, because segDb is a hard voxel raycast and
+    // the winner jumps as whole voxels enter and leave the ray set. `mean` is smooth but lets
+    // a vault door's 60 dB drag down the wood wall beside it, breaking #4. A plain energy SUM
+    // over 7 overlapping rays over-counts by ~8 dB and breaks #1. The honest fix is
+    // area-weighted radiation over the barrier surface -- each patch contributing in
+    // proportion to how much of the barrier it stands for -- which is a real piece of work,
+    // not an operator swap. `max` is kept meanwhile because it is the one that gets every
+    // spec scenario right; its cost is the residual worst-case step in the render.
     let solidDb = -Infinity, matDb = 0;
     for (const [ox, oy, oz] of SOLID_FAN) {
       const px = wx + ox, py = wy + oy, pz = wz + oz;
       if (!D.inB(px, py, pz)) continue;
       const m = segDb(D, src.x, src.y, src.z, px, py, pz);
-      if (m < MIN_TRANSMIT_DB) continue;         // an opening, not a barrier
+      if (m < MIN_TRANSMIT_DB) continue;
       const dd = Math.hypot(px - src.x, py - src.y, pz - src.z);
       const cand = -(SLOPE * dd + m);
       if (cand > solidDb) { solidDb = cand; matDb = m; }
     }
     if (solidDb === -Infinity) { solidDb = -120; matDb = 0; }
 
-    const total = powToDb(dbToPow(airDb) + dbToPow(solidDb));
-    return { d, airDb, solidDb, total, airLen, matDb, entry, airs,
-             reached: nd >= 0 && !!best[nd] };
+    // RAMP the transmitted arrival out as the line of sight clears, rather than gating it.
+    // The per-ray MIN_TRANSMIT_DB test stops a ray that found an OPENING being paid as free
+    // transmission, but on its own it also made the whole arrival vanish in a single voxel
+    // step the moment the listener's line cleared. Its dB contribution there is small -- the
+    // model's summed total traced perfectly smooth across that point -- yet the AUDIO jumped
+    // 2.8 dB, because the transmitted component is filtered quite differently from the air
+    // one and removing it changes the spectrum, not just the level. A dB total cannot see
+    // that; only the render can, which is precisely why the render is the test.
+    const solidW = sstep(0, MIN_TRANSMIT_DB, centerMat);
+    const solidPow = solidW * dbToPow(solidDb);
+    const solidEff = solidPow > 0 ? powToDb(solidPow) : -120;
+
+    const total = powToDb(dbToPow(airDb) + solidPow);
+    return { d, airDb, solidDb: solidEff, total, airLen, matDb, entry: airs[0] || null, airs,
+             reached: airs.length > 0 };
   };
 }
 
