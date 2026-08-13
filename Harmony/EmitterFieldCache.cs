@@ -71,6 +71,20 @@ namespace CMM
         private static int _bCursorC, _bCursorIdx;
         private static bool _doorSeen;           // a swing was OBSERVED since the last invalidation
 
+        // ── Warm-up instrumentation (DebugLogging only) ───────────────────────
+        // The field path only engages when EVERY wanted speaker's field is ready, builds run ONE at
+        // a time, and a door swing invalidates all of them. So "is the good path actually running?"
+        // is really "do the builds finish faster than doors invalidate them?" — these expose that.
+        // StatWanted/StatReady are a live snapshot; the counters accumulate until the layer's 1 Hz
+        // summary drains them.
+        internal static int   StatWanted, StatReady;    // live: wanted this tick / of those, ready
+        internal static int   StatBuilds;               // builds COMPLETED since the last drain
+        internal static int   StatDoorDrops;            // whole-cache invalidations since the last drain
+        internal static float StatLastBuildMs;          // wall time of the last completed build (summed slices)
+        internal static bool  StatBuilding => _building != null;
+        internal static void  StatDrain() { StatBuilds = 0; StatDoorDrops = 0; }
+        private static float _bMsTotal;                 // accumulating slice time of the in-flight build
+
         private static int Radius() => Mathf.Clamp(CMMConfig.WorldEmitterFieldRadius, 16, 48);
 
         // ── Maintenance (each 4 Hz tick, BEFORE sampling): ensure fields exist/fresh for the
@@ -98,6 +112,14 @@ namespace CMM
                 f.LastWanted = now;
                 // Radius/wallDist config moved ⇒ the field no longer answers the live question.
                 if (f.Ready && (f.EffR != radius || f.WallDist != wallDist)) f.Ready = false;
+            }
+
+            if (CMMConfig.DebugLogging)
+            {
+                StatWanted = wanted.Count;
+                StatReady = 0;
+                for (int i = 0; i < wanted.Count; i++)
+                    if (_fields.TryGetValue(wanted[i], out Field rf) && rf.Ready) StatReady++;
             }
 
             // Evict beyond the cap: least-recently-wanted first (never the in-flight build).
@@ -155,6 +177,7 @@ namespace CMM
             int si = radius + radius * dim + radius * dim * dim;
             _bCost[si] = 0; _bWall[si] = 0; _bHead[0] = si; _bNext[si] = -1;
             _bCursorC = 0; _bCursorIdx = -2;
+            _bMsTotal = 0f;
             _building = f;
         }
 
@@ -167,7 +190,8 @@ namespace CMM
             _doorSeen = false;
             foreach (Field f in _fields.Values) f.Ready = false;
             _building = null;
-            CMMConfig.D("[CMM] FieldCache: door settled — all fields invalidated for rebuild.");
+            StatDoorDrops++;
+            CMMConfig.D($"[CMM] FieldCache: door settled — all {_fields.Count} fields invalidated for rebuild.");
         }
 
         internal static void BuildStep(World world, float budgetMs = BuildBudgetMs)
@@ -205,7 +229,11 @@ namespace CMM
                         {
                             sinceCheck = 0;
                             if ((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs >= budgetMs)
-                            { _bCursorC = c; _bCursorIdx = nxt; return; }   // resume next frame
+                            {
+                                _bCursorC = c; _bCursorIdx = nxt;
+                                _bMsTotal += (float)((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs);
+                                return;   // resume next frame
+                            }
                         }
                     }
                     idx = nxt;
@@ -224,7 +252,13 @@ namespace CMM
             f.Ready = true;
             f.BuiltAt = Time.realtimeSinceStartup;
             _building = null;
-            CMMConfig.D($"[CMM] FieldCache: built field @({f.Pos.x},{f.Pos.y},{f.Pos.z}) r={f.EffR}");
+            _bMsTotal += (float)((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs);
+            StatLastBuildMs = _bMsTotal;
+            StatBuilds++;
+            // cpuMs = CPU actually spent; the wall-clock cost is that spread over ~BuildBudgetMs
+            // slices, one per frame — which is what decides whether builds outrun door invalidations.
+            CMMConfig.D($"[CMM] FieldCache: built field @({f.Pos.x},{f.Pos.y},{f.Pos.z}) r={f.EffR} " +
+                        $"cpuMs={_bMsTotal:0.0} ready={StatReady}/{StatWanted}");
         }
 
         private static void RelaxBuild(Field f, World world, int x, int y, int z, int c, int pw, int wcs)
@@ -269,6 +303,7 @@ namespace CMM
                 float raw, sol, solGate;
                 int traceX = earX, traceY = earY, traceZ = earZ;   // descent start for the arrival trace
                 bool canTrace = false;
+                char branch = 'R';   // same tally alphabet as the legacy path (see EmitterAcoustics.StatNote)
 
                 int earIdx = FieldIdx(f, earX, earY, earZ);
                 int cEar = earIdx >= 0 ? f.Cost[earIdx] : -1;
@@ -284,15 +319,18 @@ namespace CMM
                                   out raw, out sol, out solGate, out traceX, out traceY, out traceZ))
                 {
                     canTrace = true;   // boundary blend: descend from the anchor cell
+                    branch = 'B';
                 }
                 else
                 {
                     // No air route into the field at all: direct ray (charged), genuinely sealed.
                     raw = EmitterAcoustics.SegmentLoss(ear, spk, world) * CMMConfig.WorldEmitterOcclusionWallDistance;
                     sol = raw; solGate = raw;
+                    branch = 'F';
                 }
 
                 extra[i] = EmitterAcoustics.ShapeOcclusion(raw, sol, solGate, range, out float gate);
+                EmitterAcoustics.StatNote(PtCell(pts, i), extra[i], branch);
                 if (gate < seal) seal = gate;
                 if (solGate < solid) solid = solGate;
                 float airDetour = raw - sol; if (airDetour < 0f) airDetour = 0f;

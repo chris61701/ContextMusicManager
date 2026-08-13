@@ -64,6 +64,54 @@ namespace CMM
         internal static int   AirCellCount;
         internal static int   FloodSettled;   // cells the last flood settled (perf diagnostic)
 
+        // ── Occlusion stability instrumentation (DebugLogging only) ──────────────────────────────
+        // Answers the two questions the acoustic rework hinges on: WHICH estimator is measuring each
+        // speaker (routed / boundary-blend / direct-ray — the boundary blend is the documented
+        // jittery one), and HOW MUCH the raw measurement moves between consecutive measurements of
+        // the SAME speaker. A large jitter on branch B means the symptom is the estimator, not the
+        // distance curve. Tallies accumulate until EmitterAudioLayer's 1 Hz summary drains them.
+        internal static int   StatBrR, StatBrB, StatBrF;   // per-speaker branch tallies
+        internal static int   StatSamples;                 // speakers measured
+        internal static float StatJitterSum, StatJitterMax;// |Δ raw virtual distance| vs previous measurement
+        private static readonly Dictionary<Vector3i, float> _statPrev = new Dictionary<Vector3i, float>();
+
+        // Record one speaker's freshly-measured occlusion. `branch`: R = reached by the field,
+        // B = boundary blend (the lottery), F = no route at all (direct ray). Called by BOTH the
+        // legacy flood and the field-cache path so the tallies compare like with like.
+        internal static void StatNote(Vector3i cell, float extra, char branch)
+        {
+            if (!CMMConfig.DebugLogging) return;
+            StatSamples++;
+            if (branch == 'R') StatBrR++; else if (branch == 'B') StatBrB++; else StatBrF++;
+            if (_statPrev.TryGetValue(cell, out float prev))
+            {
+                float d = extra - prev; if (d < 0f) d = -d;
+                StatJitterSum += d;
+                if (d > StatJitterMax) StatJitterMax = d;
+            }
+            if (_statPrev.Count > 64) _statPrev.Clear();   // speaker set churned — debug-only, just reset
+            _statPrev[cell] = extra;
+        }
+
+        internal static void StatReset()
+        {
+            StatBrR = StatBrB = StatBrF = StatSamples = 0;
+            StatJitterSum = StatJitterMax = 0f;
+        }
+
+        // The CURRENT distance curve, in dB, for a given effective distance — the same formula the
+        // native spatializer applies (cmm_emitter_gains). Logged so a captured trace states the
+        // AUDIBLE consequence directly, which is what any replacement curve has to reproduce.
+        internal static float CurveDb(float dEff)
+        {
+            float mn = CMMConfig.WorldEmitterMinDistance, mx = CMMConfig.WorldEmitterRange;
+            float span = mx - mn; if (span < 0.0001f) span = 0.0001f;
+            if (dEff <= mn) return 0f;
+            if (dEff >= mx) return -120f;
+            float att = Mathf.Pow((mx - dEff) / span, CMMConfig.WorldEmitterFalloff);
+            return att <= 1e-6f ? -120f : 20f * Mathf.Log10(att);
+        }
+
         // Fill extra[0..count) with each speaker's occlusion VIRTUAL DISTANCE (extra blocks added to its
         // real distance; 0 = clear line). NOT a 0..1 gain — the native spatializer adds it to the
         // Euclidean distance (dEff = d + extra) so a wall reads as "farther" (gradual), not a cut.
@@ -195,6 +243,7 @@ namespace CMM
                     }
                 }
                 extra[i] = ShapeOcclusion(rawExtra, solid, solidGate, EmitterRange(i), out float g);
+                StatNote(new Vector3i(sx, sy, sz), extra[i], branch);
                 if (g < minGate) minGate = g;
                 if (solidGate < minSolid) minSolid = solidGate;   // flood-MEASURED solid only (same basis as the gate)
 
@@ -247,8 +296,13 @@ namespace CMM
             // and the numbers jump block-to-block, the radio is outside the flood's reach → raise FloodRadius.
             if (Time.realtimeSinceStartup >= _nextOcclLog)
             {
-                _nextOcclLog = Time.realtimeSinceStartup + 0.2f;
+                // During a door swing, log EVERY tick (the layer runs at 20 Hz then): these lines ARE
+                // the door reference trace any acoustic rework has to reproduce, so the trajectory
+                // has to be dense enough to fit a curve to. Throttled normally.
+                _nextOcclLog = Time.realtimeSinceStartup + (AnyDoorAnimating ? 0f : 0.2f);
+                float dbDry = CurveDb(dbgDist), dbOcc = CurveDb(dbgDEff);
                 CMMConfig.D($"[CMM] Occl: br={dbgBranch} dist={dbgDist:0.0} extra={dbgExtra:0.0} dEff={dbgDEff:0.0}/{CMMConfig.WorldEmitterRange:0} " +
+                            $"dry={dbDry:0.0}dB occl={dbOcc:0.0}dB wall={dbOcc - dbDry:0.0}dB " +
                             $"solid={dbgSolid:0.0} sGate={dbgSolidGate:0.0} gate={dbgGate:0.00} floodR={_fEffR} floodMs={_floodMsTotal:0.0}x{_floodSlices} cells={FloodSettled}");
             }
         }
@@ -666,6 +720,8 @@ namespace CMM
         {
             public bool Opening; public float Openness; public bool Started; public int Ticks; public float Span;
             public float GapFull, GapFullOpen, GapClosed;   // per-door thresholds (globals + type overrides), resolved at registration
+            public int Type;                                // block type — names the door in the DoorTrace log
+            public float StartedAt;                         // realtime the swing was registered (trace time base)
         }
         private static readonly Dictionary<Vector3i, DoorAnim> _doors = new Dictionary<Vector3i, DoorAnim>();
         private static readonly HashSet<int> _doorTypes = new HashSet<int>();   // block types the hook has seen animate
@@ -804,7 +860,8 @@ namespace CMM
                     }
                     ResolveDoorGaps(p.Type, out float gFull, out float gFullOpen, out float gClosed);
                     _doors[p.Pos] = new DoorAnim { Opening = p.Opening, Openness = p.Opening ? 0f : 1f, Started = false, Ticks = 0,
-                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed };
+                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed,
+                                                   Type = p.Type, StartedAt = Time.realtimeSinceStartup };
                 }
                 _doorPending.Clear();
             }
@@ -874,6 +931,21 @@ namespace CMM
             // audible. Time-based so it self-scales: a big lead on a fast swing (~0.5 s clip), negligible on
             // a slow garage (0.15 s of a 6-7 s close ⇒ invisible, garage feel untouched).
             if (!da.Opening && swingLen > 0f && (1f - t) * swingLen < CloseLeadSeconds) da.Openness = 0f;
+
+            // DOOR REFERENCE TRACE: one line per frame of the swing. This is the tuned behaviour
+            // captured as data — the gap-in-metres mapping, the open/close threshold asymmetry, the
+            // per-type overrides and the close lead all land in `open`, and the matching [CMM] Occl
+            // line (unthrottled during a swing) carries the resulting dB. Any change to the acoustic
+            // model must reproduce these two series together.
+            if (CMMConfig.DebugLogging)
+            {
+                Block dbb = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
+                CMMConfig.D($"[CMM] DoorTrace {(da.Opening ? "OPEN " : "CLOSE")} {(dbb != null ? dbb.GetBlockName() : "?")} " +
+                            $"t={Time.realtimeSinceStartup - da.StartedAt:0.000}s nt={t:0.000} len={swingLen:0.00}s " +
+                            $"span={da.Span:0.##}m gap={physical * Mathf.Max(1f, da.Span):0.00}m " +
+                            $"thresh={(da.Opening ? da.GapFullOpen : da.GapFull):0.00}/{da.GapClosed:0.00} open={da.Openness:0.000} " +
+                            $"cells={_doorCellsBlended}");
+            }
             return swingNt < 1f;   // still animating until the swing clip completes
         }
 

@@ -109,6 +109,18 @@ namespace CMM
         private static bool  _forceRefresh;            // door toggled → run the next tick a frame early
         private static float _nextReverbLog;           // throttle for the reverb diagnostic (DebugLogging only)
 
+        // ── Path / stability summary (DebugLogging only) ────────────────────────────────────────
+        // One line per second answering: which occlusion path is actually rendering (the cached
+        // per-speaker fields, which are continuous by construction, or the legacy ear-anchored
+        // flood, whose boundary-blend branch is the known jitter source), WHY the field path was
+        // refused if it was, and how much the measurement is actually moving tick to tick — raw
+        // (as measured) versus published (after the rise limiter, which can mask it).
+        private static int   _statFieldTicks, _statLegacyTicks;
+        private static string _statWhy = "-";          // why the field path was refused, latest
+        private static float _statPubSum, _statPubMax;
+        private static int   _statPubN;
+        private static float _nextPathLog;
+
         // Reverb inertia: per-SLOT carry-send EMA (asymmetric — room character is EARNED by staying,
         // not granted by walking past a doorway), plus the shared local/room EMAs.
         private static readonly float[] _revWetSmooth = new float[MaxSlots];
@@ -214,6 +226,36 @@ namespace CMM
             if (Time.realtimeSinceStartup < _nextTick) return;
             _nextTick = Time.realtimeSinceStartup + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
 
+            // ── 1 Hz path/stability summary ─────────────────────────────────────────────────────
+            // path=  which occlusion path landed, in ticks over the last second (field = cached
+            //        per-speaker fields, continuous by construction; legacy = ear-anchored flood).
+            // why=   why the field path was refused on the last refusal.
+            // br=    per-speaker estimator tallies: R reached the field (stable), B boundary blend
+            //        (the documented lottery), F no route at all (straight ray).
+            // rawJit/pubJit = mean and max change in a speaker's virtual distance between
+            //        consecutive measurements, in BLOCKS, before/after the rise limiter. Big numbers
+            //        on B are the smoking gun for "volume changes when it shouldn't".
+            // fields=ready/wanted — the field path needs ALL of them; builds run one at a time.
+            if (CMMConfig.DebugLogging && Time.realtimeSinceStartup >= _nextPathLog)
+            {
+                _nextPathLog = Time.realtimeSinceStartup + 1f;
+                int n = EmitterAcoustics.StatSamples;
+                float rawAvg = n > 0 ? EmitterAcoustics.StatJitterSum / n : 0f;
+                float pubAvg = _statPubN > 0 ? _statPubSum / _statPubN : 0f;
+                CMMConfig.D($"[CMM] EmitPath: field={_statFieldTicks} legacy={_statLegacyTicks} why={_statWhy} " +
+                            $"br R={EmitterAcoustics.StatBrR} B={EmitterAcoustics.StatBrB} F={EmitterAcoustics.StatBrF} " +
+                            $"rawJit avg={rawAvg:0.0} max={EmitterAcoustics.StatJitterMax:0.0} blk " +
+                            $"pubJit avg={pubAvg:0.0} max={_statPubMax:0.0} blk " +
+                            $"fields={EmitterFieldCache.StatReady}/{EmitterFieldCache.StatWanted} " +
+                            $"building={EmitterFieldCache.StatBuilding} built={EmitterFieldCache.StatBuilds} " +
+                            $"lastBuildCpuMs={EmitterFieldCache.StatLastBuildMs:0} doorDrops={EmitterFieldCache.StatDoorDrops} " +
+                            $"floodR={CMMConfig.WorldEmitterFloodRadius} range={CMMConfig.WorldEmitterRange:0}");
+                _statFieldTicks = _statLegacyTicks = 0;
+                _statPubSum = _statPubMax = 0f; _statPubN = 0;
+                EmitterAcoustics.StatReset();
+                EmitterFieldCache.StatDrain();
+            }
+
             // Push the live spatial-curve tuning + radio master from config (hot-reloaded).
             PushTuning();
             PushEmitterMaster();
@@ -259,8 +301,13 @@ namespace CMM
                 // Falls back to the legacy ear-anchored path while fields warm up, and ALWAYS
                 // during a door swing — the tuned mid-swing acoustics live on the legacy path;
                 // fields drop + rebuild once the swing settles (see EmitterFieldCache.Maintain).
-                if (CMMConfig.WorldEmitterFieldCache && !EmitterAcoustics.AnyDoorAnimating &&
-                    TryFieldOcclusion(player, world, audibleR))
+                bool fieldOk;
+                if (!CMMConfig.WorldEmitterFieldCache) { _statWhy = "disabled"; fieldOk = false; }
+                else if (EmitterAcoustics.AnyDoorAnimating) { _statWhy = "doorswing"; fieldOk = false; }
+                else fieldOk = TryFieldOcclusion(player, world, audibleR);
+                if (fieldOk) _statFieldTicks++; else _statLegacyTicks++;
+
+                if (fieldOk)
                 {
                     // Keep a listener-anchored ROOM flood running alongside the field samples:
                     // AirRoomSize follows bends the ray probe can't see, and losing it made caves
@@ -362,10 +409,10 @@ namespace CMM
                                                   Mathf.FloorToInt(st.Pts[k * 3 + 1]),
                                                   Mathf.FloorToInt(st.Pts[k * 3 + 2])));
             }
-            if (_fieldWanted.Count == 0) return false;
+            if (_fieldWanted.Count == 0) { _statWhy = "nopoints"; return false; }
             EmitterFieldCache.Maintain(world, _fieldWanted);
             for (int i = 0; i < _fieldWanted.Count; i++)
-                if (!EmitterFieldCache.Ready(_fieldWanted[i])) return false;
+                if (!EmitterFieldCache.Ready(_fieldWanted[i])) { _statWhy = "warming"; return false; }
 
             Vector3 ear = ListenerWorldPos(player);
             for (int i = 0; i < _stations.Count; i++)
@@ -380,7 +427,7 @@ namespace CMM
                 }
                 if (!EmitterFieldCache.SampleStation(world, ear, st.Pts, st.PtCount, st.PtGain,
                                                      out float seal, out float solid, out float depth))
-                    return false;   // ready flipped under us — legacy covers this tick
+                { _statWhy = "flipped"; return false; }   // ready flipped under us — legacy covers this tick
                 st.Seal = seal; st.Solid = solid; st.Depth = depth;
                 PostProcessGains(st);
                 CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
@@ -433,6 +480,16 @@ namespace CMM
             for (int i = 0; i < count; i++)
             {
                 Vector3i key = SlotKey(pts, i);
+                // PUBLISHED jitter: what the native spatializer actually receives, i.e. after this
+                // limiter. Compared against the RAW jitter (EmitterAcoustics.StatJitter*) it says
+                // whether the limiter is absorbing the measurement noise or passing it through.
+                if (CMMConfig.DebugLogging
+                    && _publishedExtra.TryGetValue(key, out PublishedExtra prevStat) && now - prevStat.At < 2f)
+                {
+                    float dd = gains[i] - prevStat.Value; if (dd < 0f) dd = -dd;
+                    _statPubSum += dd; _statPubN++;
+                    if (dd > _statPubMax) _statPubMax = dd;
+                }
                 if (rate > 0f && !doorWindow
                     && _publishedExtra.TryGetValue(key, out PublishedExtra prev)
                     && now - prev.At < 2f && gains[i] > prev.Value)
