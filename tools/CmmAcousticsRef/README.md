@@ -111,3 +111,72 @@ matters. #5 silent instead of faint. #6 two-step, not gradual.**
 2. Diff door traces against `doors/`. Level trajectory within a couple of dB per door type.
    Outside that is a bug, not a taste question.
 3. Check the baseline table above has moved in the intended direction and that nothing regressed.
+
+---
+
+## Ground truth, round 2 (author, 2026-08-13)
+
+Gathered by asking where the shipped engine has actually sounded wrong in play, rather
+than where my synthetic geometry happens to be rough.
+
+### C. Standing still and turning — not a problem
+
+Never been an issue. Direction stability with no level change is not a defect to chase;
+treat it as regression coverage only.
+
+### D. A one-block floor is not a one-block wall
+
+> *"1 block floors need special treatment because we need to treat an enclosed space above
+> or below a player differently — blocks are used to encounter a room and a floor, and in
+> real life, walls are much thinner than interfloor space."*
+
+A voxel does double duty. Used vertically it stands for a whole floor assembly — deck,
+joists, ceiling below — which is far deeper and heavier than the wall a voxel stands for
+when used horizontally. So the same nominal material must carry MORE transmission loss
+when a ray crosses it vertically than when it crosses it horizontally. Transmission is
+anisotropic, and the anisotropy is a property of what a voxel REPRESENTS, not of physics.
+
+> *"the materials used for 1 block floors are sometimes not full blocks, but they should be
+> treated as such."*
+
+And floors are the exception to the partial-shape discount. A plate, slab or catwalk used
+as a floor is a COMPLETE barrier vertically even though it is geometrically thin, so it
+must be promoted to full-block loss rather than discounted for being partial. This
+directly contradicts the general rule (principle B, thin/holed geometry passes sound) and
+the contradiction is correct: the general rule is about geometry, this is about function.
+
+### E. More than one opening currently reads as DISORIENTING
+
+> *"More than one opening to a room has always had this disorienting effect with the
+> current engine."*
+
+This is the single-virtual-position defect, confirmed by ear. The shipped model has one
+position per station and lerps it between competing arrival directions, so with two
+doorways it points at a spot where nothing is. "Disorienting" is the right word for being
+told a sound is somewhere it cannot be. Independent confirmation that arrivals must be
+rendered SEPARATELY, each at its own position — not blended into one.
+
+### F. A cave needs ECHO, not a reverb tail
+
+> *"Long winding routes have never sounded perfect. The echo that should exist in a cave is
+> something the last engine never managed to produce. It was always this faint reverb that
+> eventually died."*
+
+The complaint is about time structure, and it identifies something the new model has so
+far omitted completely: **per-arrival DELAY.**
+
+A cave echo is the same sound arriving repeatedly, separated in time, from the surfaces
+and openings along the tunnel. The shipped model cannot produce that at any setting,
+because it has one shared reverb whose only time parameter is a decay — an exponential
+tail is "faint reverb that eventually died" by construction, however it is tuned. No
+amount of ReverbDecay/Wet/Carry makes a tail into distinct repeats.
+
+But the portal model already computes what an echo needs. Each arrival has a known route
+LENGTH, so it has a known arrival TIME: at roughly 1 block per metre and 343 m/s, a
+60-block cave route is ~175 ms behind the direct sound, which is a plainly audible
+discrete echo rather than a wash. Rendering each arrival through its own delay turns the
+existing arrival set into an echo pattern for free, and the geometry decides the pattern.
+
+Delay was simply never wired up — the renderer applies level, pan and filtering per
+arrival and ignores path length in time. That is an omission, not a limitation, and it is
+the most likely single reason caves have never sounded right.
