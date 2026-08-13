@@ -62,6 +62,7 @@ const AIR_FLAG = 1;
 // +/-2 blocks on each axis, so the ray set can find a weaker patch of barrier nearby.
 const SOLID_FAN = [[0,0,0],[2,0,0],[-2,0,0],[0,2,0],[0,-2,0],[0,0,2],[0,0,-2]];
 const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
+const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
 
 // ── going around must COST something ──────────────────────────────────────────
 // First measurement pass charged only path LENGTH, so the air arrival won 90-100% of
@@ -175,6 +176,10 @@ function buildGraph(D, cell) {
       let sp = 0, count = 0, sxs = 0, sys = 0, szs = 0;
       // Per-axis slice occupancy inside this cell, for the node's THROAT (see below).
       const slX = new Int32Array(cell), slY = new Int32Array(cell), slZ = new Int32Array(cell);
+      // positional sums per slice, so the throat has a LOCATION and not just a size
+      const pX = [new Float64Array(cell), new Float64Array(cell), new Float64Array(cell)];
+      const pY = [new Float64Array(cell), new Float64Array(cell), new Float64Array(cell)];
+      const pZ = [new Float64Array(cell), new Float64Array(cell), new Float64Array(cell)];
       stack[sp++] = seed; nodeOf[seed] = id;
       while (sp > 0) {
         const cur = stack[--sp];
@@ -182,7 +187,11 @@ function buildGraph(D, cell) {
         const rem = cur - vy * D.sx * D.sz;
         const vz = Math.floor(rem / D.sx), vx = rem - vz * D.sx;
         count++; sxs += vx; sys += vy; szs += vz;
-        slX[vx - x0]++; slY[vy - y0]++; slZ[vz - z0]++;
+        const ax = vx - x0, ay = vy - y0, az = vz - z0;
+        slX[ax]++; slY[ay]++; slZ[az]++;
+        pX[0][ax] += vx; pY[0][ax] += vy; pZ[0][ax] += vz;
+        pX[1][ay] += vx; pY[1][ay] += vy; pZ[1][ay] += vz;
+        pX[2][az] += vx; pY[2][az] += vy; pZ[2][az] += vz;
         const nb = [[vx+1,vy,vz],[vx-1,vy,vz],[vx,vy+1,vz],[vx,vy-1,vz],[vx,vy,vz+1],[vx,vy,vz-1]];
         for (const [nx, ny, nz] of nb) {
           if (nx < x0 || nx >= x1 || ny < y0 || ny >= y1 || nz < z0 || nz >= z1) continue;
@@ -212,10 +221,32 @@ function buildGraph(D, cell) {
       // (a 3-block-tall room can never fill a 4x4 face), so ordinary open rooms lost ~2 dB
       // and the control probe never reached 0. What matters acoustically is whether the
       // space PINCHES relative to itself.
-      const tRaw = Math.min(throatAxis(slX), throatAxis(slY), throatAxis(slZ));
+      const throatWhich = (sl) => {
+        let lo = -1, hi = -1;
+        for (let q = 0; q < cell; q++) if (sl[q] > 0) { if (lo < 0) lo = q; hi = q; }
+        if (lo < 0 || hi === lo) return -1;
+        let m = Infinity, mi = -1;
+        for (let q = lo; q <= hi; q++) if (sl[q] < m) { m = sl[q]; mi = q; }
+        return mi;
+      };
+      const tA = [throatAxis(slX), throatAxis(slY), throatAxis(slZ)];
+      const tRaw = Math.min(tA[0], tA[1], tA[2]);
       const avgSlice = Math.max(1, count / cell);
       const throat = Number.isFinite(tRaw) ? Math.min(1, tRaw / avgSlice) : 1;
-      nodes.push({ id, n: count, cxs: ccx, cys: ccy, czs: ccz, throat,
+      // Where the pinch IS — the centroid of the narrowest slice. This becomes the apparent
+      // source position for anything that came through it (see the arrival rule below).
+      let tpx = D.x0 + sxs / count + 0.5, tpy = D.y0 + sys / count + 0.5, tpz = D.z0 + szs / count + 0.5;
+      if (Number.isFinite(tRaw)) {
+        const axis = tA.indexOf(tRaw);
+        const sl = axis === 0 ? slX : axis === 1 ? slY : slZ;
+        const wi = throatWhich(sl);
+        if (wi >= 0 && sl[wi] > 0) {
+          tpx = D.x0 + pX[axis][wi] / sl[wi] + 0.5;
+          tpy = D.y0 + pY[axis][wi] / sl[wi] + 0.5;
+          tpz = D.z0 + pZ[axis][wi] / sl[wi] + 0.5;
+        }
+      }
+      nodes.push({ id, n: count, cxs: ccx, cys: ccy, czs: ccz, throat, tpx, tpy, tpz,
                    // centroid in WORLD coords (used only as a fallback point)
                    px: D.x0 + sxs / count + 0.5, py: D.y0 + sys / count + 0.5, pz: D.z0 + szs / count + 0.5,
                    edges: [] });
@@ -333,8 +364,10 @@ function solveAir(D, G, src) {
   // and an unpinched bottleneck (1 = a full cell face).
   const constrictDb = f => Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.max(1e-4, f)));
   for (const [nd, cost] of seeded) {
-    best[nd] = [{ portal: -1, db: cost, add: cost, bneck: 1, len: 0, ...srcPt }];
-    push({ node: nd, db: cost, add: cost, bneck: 1, len: 0, ...srcPt, qx: srcPt.px, qy: srcPt.py, qz: srcPt.pz });
+    const seed = { portal: -1, db: cost, add: cost, bneck: 1, len: 0,
+                   cx: srcPt.px, cy: srcPt.py, cz: srcPt.pz, ...srcPt };
+    best[nd] = [seed];
+    push({ node: nd, ...seed, qx: srcPt.px, qy: srcPt.py, qz: srcPt.pz });
   }
 
   let popped = 0;
@@ -366,7 +399,15 @@ function solveAir(D, G, src) {
       // model has, in a new form. An UNOBSTRUCTED route is physically a straight line, so
       // measure it as one; only once the route has actually squeezed through something
       // does the bent polyline become the honest measure.
-      const nBneckPre = Math.min(cur.bneck, G.nodes[cur.node].throat, P.openFrac);
+      // Track the tightest constriction AND where it is: whichever of the node's throat or
+      // this portal is narrower, if either beats the running minimum.
+      const nodeCur = G.nodes[cur.node];
+      const nBneckPre = Math.min(cur.bneck, nodeCur.throat, P.openFrac);
+      let ccx = cur.cx, ccy = cur.cy, ccz = cur.cz;
+      if (nBneckPre < cur.bneck - 1e-9) {
+        if (nodeCur.throat <= P.openFrac) { ccx = nodeCur.tpx; ccy = nodeCur.tpy; ccz = nodeCur.tpz; }
+        else { ccx = P.px; ccy = P.py; ccz = P.pz; }
+      }
       const straight = Math.hypot(P.px - srcPt.px, P.py - srcPt.py, P.pz - srcPt.pz);
       const nLen = nBneckPre >= 0.95 ? straight : cur.len + leg;
       const nAdd = (nBneckPre >= 0.95 ? SLOPE * straight : cur.add + SLOPE * leg) + bend;
@@ -380,11 +421,11 @@ function solveAir(D, G, src) {
       const existing = arr.findIndex(e => e.portal === pid);
       if (existing >= 0) { if (arr[existing].db <= nd) continue; arr.splice(existing, 1); }
       else if (arr.length >= KEEP_PORTALS && nd >= arr[arr.length - 1].db) continue;
-      arr.push({ portal: pid, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz });
+      arr.push({ portal: pid, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz, cx: ccx, cy: ccy, cz: ccz });
       arr.sort((a, b) => a.db - b.db);
       if (arr.length > KEEP_PORTALS) arr.length = KEEP_PORTALS;
       push({ node: other, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz,
-             qx: cur.px, qy: cur.py, qz: cur.pz });
+             cx: ccx, cy: ccy, cz: ccz, qx: cur.px, qy: cur.py, qz: cur.pz });
     }
   }
   return { best, srcNode: -2, popped, seeded: seeded.size };
@@ -398,16 +439,50 @@ function makeNewEvaluator(D, G, src) {
 
     // AIR: min over this node's kept entry portals of (route dB + last leg), where the
     // last leg is EXACT continuous geometry from the portal point to the listener.
-    let airDb = -Infinity, airLen = Infinity, entry = null;
+    // Every KEPT entry portal is a real arrival, and they are SUMMED. Taking only the
+    // loudest made the perceived direction snap between portals as the winner changed --
+    // audible as the stereo image jumping around on a walk (L-R swinging several dB
+    // block to block in the render). Summing them is also the melding the spec asks for:
+    // two doorways into one room both stay live, and one taking over from the other is a
+    // crossfade rather than a switch. `airs` carries them for the renderer; `airDb` is
+    // their energy sum for the measurement paths.
+    // Kept entries are CLUSTERED before summing. Several of them are usually different cell
+    // faces of the SAME opening carrying the same sound, and summing those inflated an open
+    // doorway to +3 dB above free field -- the same double-count as air-vs-solid, one level
+    // down. Genuinely separate openings (two doorways into one room) are far apart, so
+    // spatial clustering separates the cases: one arrival per cluster, best of each, summed.
+    let airPow = 0, airLen = Infinity, entry = null;
+    const airs = [];
     const nd = G.nodeOf[D.idx(wx, wy, wz)];
     if (nd >= 0 && best[nd]) {
+      const cands = [];
       for (const e of best[nd]) {
         const leg = Math.hypot(e.px - (wx + 0.5), e.py - (wy + 0.5), e.pz - (wz + 0.5));
         const cand = -(e.db + SLOPE * leg);
-        if (cand > airDb) { airDb = cand; airLen = e.len + leg; entry = e; }
+        // APPARENT POSITION. Sound comes from the last aperture it squeezed through -- an
+        // unconstricted route comes from the source itself. Using the entry PORTAL centroid
+        // instead put the apparent source on a cell FACE, so direction moved in cell-sized
+        // jumps and the stereo image lurched as the winning portal changed (mean L-R step
+        // 3.3 dB per second on a walk, against 0.15 for the shipped model). A constriction
+        // is a fixed feature of the geometry, so the bearing to it varies smoothly as the
+        // listener moves -- and it is also what the author asked for: a gap reads as a
+        // localised source AT the gap.
+        const openRoute = e.bneck >= 0.95;
+        const apx = openRoute ? src.x + 0.5 : e.cx, apy = openRoute ? src.y + 0.5 : e.cy, apz = openRoute ? src.z + 0.5 : e.cz;
+        if (cand > -110) cands.push({ id: e.portal, db: cand, px: apx, py: apy, pz: apz, len: e.len + leg });
+      }
+      cands.sort((a, b) => b.db - a.db);
+      for (const c of cands) {
+        let dup = false;
+        for (const k of airs)
+          if (Math.hypot(k.px - c.px, k.py - c.py, k.pz - c.pz) < CLUSTER_BLOCKS) { dup = true; break; }
+        if (dup) continue;
+        airs.push(c);
+        airPow += dbToPow(c.db);
+        if (entry === null) { entry = c; airLen = c.len; }
       }
     }
-    if (airDb === -Infinity) airDb = -120;
+    const airDb = airPow > 0 ? powToDb(airPow) : -120;
 
     // SOLID (transmitted) arrival. Two corrections the probe measurements forced:
     //
@@ -442,7 +517,7 @@ function makeNewEvaluator(D, G, src) {
     if (solidDb === -Infinity) { solidDb = -120; matDb = 0; }
 
     const total = powToDb(dbToPow(airDb) + dbToPow(solidDb));
-    return { d, airDb, solidDb, total, airLen, matDb, entry,
+    return { d, airDb, solidDb, total, airLen, matDb, entry, airs,
              reached: nd >= 0 && !!best[nd] };
   };
 }
