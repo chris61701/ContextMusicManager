@@ -35,6 +35,7 @@ const { loadDump } = require("./judge3d.js");
 const { makeOpenTest } = require("./portals.js");
 
 const OPEN_EPS = 0.02;
+const SEED_MIN = 1.6;   // a room's core must be at least this open; below it, join rather than seed
 
 // ── 1. thickness: chamfer distance from every open voxel to the nearest closed one ──
 // Two sweeps of a 3x3x3 chamfer give a good enough Euclidean approximation and are O(n).
@@ -89,17 +90,29 @@ function segment(D, open, thick) {
   for (const i of order) {
     const y = Math.floor(i / (sx * sz)), rem = i - y * sx * sz;
     const z = Math.floor(rem / sx), x = rem - z * sx;
-    // labels already assigned among 6-neighbours
-    let seen = -1, conflict = false;
+    // Join the THICKEST labelled neighbour, not the first one found. A voxel on the skin of a
+    // room belongs to that room, and "first in the 6-neighbour scan order" is arbitrary.
+    let seen = -1, seenT = -1;
     for (const [dx, dy, dz] of nb6) {
       const nx = x + dx, ny = y + dy, nz = z + dz;
       if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
-      const l = label[li(nx, ny, nz)];
+      const j = li(nx, ny, nz);
+      const l = label[j];
       if (l < 0) continue;
-      if (seen < 0) seen = l; else if (l !== seen) conflict = true;
+      if (thick[j] > seenT) { seenT = thick[j]; seen = l; }
     }
-    if (seen < 0) {
-      // no labelled neighbour: this is a local maximum, so a new room centre
+    if (seen < 0 && thick[i] >= SEED_MIN) {
+      // A genuine local maximum in reasonably open air: a room centre.
+      const id = regions.length;
+      regions.push({ id, n: 0, sx: 0, sy: 0, sz: 0, core: thick[i], edges: new Map() });
+      label[i] = id;
+    } else if (seen < 0) {
+      // Thin and isolated -- a crack with no wider space attached. Still a region, but it must
+      // not become a SEED, because the thinnest layer of air forms a connected SHELL hugging
+      // every wall surface in the map, and as one region that shell bridges everything: its
+      // persistence against any neighbour is zero, so it glued the whole POI into one space.
+      // A wall-hugging skin is not a room. Below SEED_MIN, voxels join a room instead of
+      // founding one.
       const id = regions.length;
       regions.push({ id, n: 0, sx: 0, sy: 0, sz: 0, core: thick[i], edges: new Map() });
       label[i] = id;
@@ -150,7 +163,7 @@ function contacts(D, open, label, regions, thick) {
   }));
 }
 
-function build(D, mergeRatio = 0.6) {
+function build(D, mergeH = 0.62) {
   const open = makeOpenTest(D);
   const t0 = Date.now();
   const thick = thickness(D, open);
@@ -162,18 +175,45 @@ function build(D, mergeRatio = 0.6) {
   let ports = contacts(D, open, label, regions, thick);
   const tPort = Date.now() - t2;
 
-  // ── 4. merge regions whose shared boundary is not really a pinch ───────────────
-  // If the boundary is nearly as thick as the thinner region's core, these are one space that
-  // happened to have two local maxima -- an artifact of the watershed, not a doorway.
+  // ── 4. merge by PERSISTENCE, shallowest basin first ───────────────────────────
+  // The pairwise ratio test failed on real geometry for a reason worth recording: it ignores
+  // TRANSITIVITY. 1456 of 1771 boundaries passed it (correctly -- the thickness field is
+  // saturated flat at 18 blocks across the open sky around a POI, so the watershed splits a
+  // plateau arbitrarily and those splits should merge), but that many union-find edges connect
+  // all 381 regions into one component, and the whole house collapsed. The "keep" decisions were
+  // irrelevant because other paths joined the same regions anyway.
+  //
+  // Persistence is the standard, well-behaved criterion (the h-minima transform): how DEEP is the
+  // basin separating two regions -- min(coreA, coreB) minus the boundary's thickness. A shallow
+  // basin is not a room, it is a bump in the same room. Absolute, in blocks, so it means
+  // something physical: "a space whose separation from its neighbour is under H blocks of pinch
+  // is not a separate space."
+  //
+  // And process SHALLOWEST FIRST while carrying the merged region's core as the MAX of the two.
+  // That is what stops chaining: as a region absorbs its neighbours it gets deeper, so the bar for
+  // absorbing the next one rises, and a genuine doorway is never crossed by accident.
   const parent = regions.map(r => r.id);
+  const coreOf = regions.map(r => r.core);
   const find = a => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
   let merged = 0;
-  ports.sort((p, q) => q.thick - p.thick);
-  for (const p of ports) {
+  // widest-relative-to-core first, so obvious non-boundaries go early and a region's core has
+  // grown by the time a genuine doorway is considered
+  const byPersistence = ports.slice().sort((p, q) =>
+    (q.thick / Math.max(0.01, Math.min(coreOf[q.a], coreOf[q.b]))) -
+    (p.thick / Math.max(0.01, Math.min(coreOf[p.a], coreOf[p.b]))));
+  for (const p of byPersistence) {
     const ra = find(p.a), rb = find(p.b);
     if (ra === rb) continue;
-    const core = Math.min(regions[ra].core, regions[rb].core);
-    if (p.thick >= mergeRatio * core) { parent[rb] = ra; merged++; }
+    // RELATIVE, not absolute. An absolute depth cannot serve rooms of wildly different size:
+    // 1.5 blocks of pinch is nothing next to the 18-block-deep open sky around a POI, and
+    // everything next to a 2-block closet. Small rooms kept dissolving into the outdoor volume
+    // because their own core was barely deeper than their doorway. What matters is the RATIO --
+    // how much of its own openness a space loses at its boundary.
+    const core = Math.min(coreOf[ra], coreOf[rb]);
+    if (p.thick < mergeH * core) continue;               // a real pinch: keep them apart
+    parent[rb] = ra;
+    coreOf[ra] = Math.max(coreOf[ra], coreOf[rb]);       // deeper now, so harder to absorb the next
+    merged++;
   }
   const remap = new Map();
   for (const r of regions) { const root = find(r.id); if (!remap.has(root)) remap.set(root, remap.size); }
@@ -194,7 +234,7 @@ function build(D, mergeRatio = 0.6) {
 
 function main() {
   const file = process.argv.find(a => !a.startsWith("--") && a.endsWith(".json"));
-  const mr = parseFloat((process.argv.find(a => a.startsWith("--merge=")) || "=0.6").split("=")[1]) || 0.6;
+  const mr = parseFloat((process.argv.find(a => a.startsWith("--merge=")) || "=0.62").split("=")[1]) || 0.62;
   if (!file) { console.error("usage: node regions.js <dump.json> [--merge=0.6]"); process.exit(1); }
   const D = loadDump(file);
   const r = build(D, mr);
