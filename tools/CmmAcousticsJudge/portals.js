@@ -60,7 +60,40 @@ const KEEP_PORTALS = 4;     // entry portals retained per node (multi-route meld
 const AIR_FLAG = 1;
 // Offsets for the transmission fan (see makeNewEvaluator): the listener itself plus
 // +/-2 blocks on each axis, so the ray set can find a weaker patch of barrier nearby.
-const SOLID_FAN = [[0,0,0],[2,0,0],[-2,0,0],[0,2,0],[0,-2,0],[0,0,2],[0,0,-2]];
+// ── transmission sampling: a FRESNEL-ZONE DISC, area-weighted ─────────────────
+// A 7-ray axis cross reduced by max/mean/sum was the wrong instrument, confirmed by
+// exhaustion: every reduction traded scenario correctness against smoothness, because a
+// winner-takes-all operator steps when the winning ray crosses a feature edge, while a
+// count-normalised average divides by the number of samples and so misreports a barrier
+// whose patches differ (a vault door beside a wood wall came out 8 dB too quiet).
+//
+// What transmission through a distributed barrier actually is: an integral over the barrier
+// of what each patch re-radiates. So sample a DISC perpendicular to the source-listener
+// line, weight each sample by its AREA SHARE, and energy-sum. Then:
+//   - it is smooth, because the disc moves continuously with the listener and each sample's
+//     material now varies continuously too (segDb became a line integral);
+//   - the weakest patch dominates without any winner-takes-all step, because an energy sum
+//     is dominated by its largest term -- which is what flanking needs;
+//   - the normalisation is by AREA, not by sample count, so adding samples refines the
+//     estimate instead of shifting it.
+//
+// The radius is the first Fresnel zone's scale: sqrt(lambda*d)/2 is about 2 blocks at 500 Hz
+// over 23 m and about 4 at 100 Hz, so a few blocks is the right order -- the old cross was
+// roughly the right SIZE and wrong in every other respect.
+const FRESNEL_R = 3.0;
+// Rings as [radius fraction, sample count]; annulus boundaries at 0.25/0.75/1.0 of R give
+// the area shares below, summing to 1.
+const FRESNEL_RINGS = [[0.0, 1, 0.0625], [0.5, 6, 0.5], [1.0, 8, 0.4375]];
+const FRESNEL_PTS = (() => {
+  const out = [];
+  for (const [rf, n, share] of FRESNEL_RINGS) {
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + (rf * 1.7);   // stagger rings so samples do not line up
+      out.push({ r: rf * FRESNEL_R, ca: Math.cos(a), sa: Math.sin(a), w: share / n });
+    }
+  }
+  return out;
+})();
 const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
 const APERTURE_MAX = 0.75;   // a node pinched below this much of its own cross-section IS an aperture
@@ -506,14 +539,28 @@ function makeNewEvaluator(D, G, src) {
 
     // The SOURCE candidate's last leg uses the transmission fan: a barrier is a distributed
     // radiator, so behind a vault door set in a wooden wall you hear the wall beside you.
-    let fanDb = Infinity;
-    for (const [ox, oy, oz] of SOLID_FAN) {
+    // Two orthonormal vectors perpendicular to the source-listener line, for the disc.
+    let ux = lx - sx5, uy = ly - sy5, uz = lz - sz5;
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    let ax = 0, ay = 1, az = 0;
+    if (Math.abs(uy) > 0.9) { ax = 1; ay = 0; az = 0; }
+    let e1x = uy * az - uz * ay, e1y = uz * ax - ux * az, e1z = ux * ay - uy * ax;
+    const e1l = Math.hypot(e1x, e1y, e1z) || 1;
+    e1x /= e1l; e1y /= e1l; e1z /= e1l;
+    const e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
+
+    let fanPow = 0;
+    for (const p of FRESNEL_PTS) {
+      const ox = (e1x * p.ca + e2x * p.sa) * p.r;
+      const oy = (e1y * p.ca + e2y * p.sa) * p.r;
+      const oz = (e1z * p.ca + e2z * p.sa) * p.r;
       const px = lx + ox, py = ly + oy, pz = lz + oz;
       const m = segDbAt(D, sx5, sy5, sz5, px, py, pz);
       const dd = Math.hypot(px - sx5, py - sy5, pz - sz5);
-      if (SLOPE * dd + m < fanDb) fanDb = SLOPE * dd + m;
+      fanPow += p.w * dbToPow(-(SLOPE * dd + m));
     }
-    if (!Number.isFinite(fanDb)) fanDb = 120;
+    const fanDb = fanPow > 0 ? -powToDb(fanPow) : 120;
     const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
 
     const arrivals = [];
@@ -537,6 +584,10 @@ function makeNewEvaluator(D, G, src) {
       // a detour and get summed on top of the direct sound, pushing an open door 1.5 dB ABOVE
       // free field. Fresnel is about the geometric path difference, so measure that.
       const geoExcess = Math.hypot(c.px - sx5, c.py - sy5, c.pz - sz5) + leg - d;
+      // Tried additionally gating this on whether the listener can SEE the source (an aperture
+      // being a way around a blocked path, so irrelevant with a clear line). Well motivated and
+      // empirically wrong: centerMat transitions at the same wall plane, so both terms then
+      // jumped together and the doorway crossing went from 8.4 to 10.3 dB/block. Left out.
       const w = c.isSrc ? 1 : sstep(0, 2, geoExcess);
       if (w <= 1e-4 || db <= -110) continue;
       arrivals.push({ db, w, px: c.px, py: c.py, pz: c.pz, legMat, len: c.routeLen + leg, isSrc: !!c.isSrc });
