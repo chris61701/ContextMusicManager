@@ -67,8 +67,24 @@ const AIR_FLAG = 1;
 //     between the incoming and outgoing legs. Straight through is free; a right angle
 //     costs half of BEND_DB; a doubling-back costs all of it. This is what makes three
 //     corners meaningfully quieter than a path 1.4x longer.
-const BEND_DB = 6.0;        // dB for a full route reversal; a 90 degree turn costs half
-const MIN_APERTURE_DB = -24; // floor on one portal's constriction (a pinhole is not infinite loss)
+// CONSTRICTION IS A BOTTLENECK, NOT A TOLL. Charging it at every cell boundary the route
+// crossed was wrong twice over: an open route accumulated a fee per boundary (a wide-open
+// doorway cost 8.6 dB where the spec wants near line-of-sight), while a genuine pinch got
+// DILUTED among its neighbours (a 2-voxel crack measured -8.8 against -8.6 for a fully
+// open door -- indistinguishable, where the spec wants gradual). Power through a chain of
+// openings is limited by the NARROWEST one; a corridor of constant width does not keep
+// charging. So the route carries a running MINIMUM aperture and pays for that once.
+//
+// Dijkstra stays valid on the total: the additive part only grows, and the bottleneck can
+// only tighten, so total cost is non-decreasing along any route.
+//
+// BEND is charged only where sound must actually DIFFRACT -- scaled by how constricted the
+// portal is. In open space changing direction is free (a source radiates every way at
+// once); it costs only when squeezing past an edge. Without that scaling, portal centroids
+// in open air form a staircase on any diagonal route and every step billed a 90-degree
+// turn, which is most of where that spurious 8.6 dB came from.
+const BEND_DB = 6.0;        // dB for a full reversal through a fully-pinched portal
+const MIN_APERTURE_DB = -30; // floor on the bottleneck's constriction (a pinhole is not infinite loss)
 
 const dbToPow = d => Math.pow(10, d / 10);
 const powToDb = p => p <= 1e-12 ? -120 : 10 * Math.log10(p);
@@ -111,6 +127,8 @@ function buildGraph(D, cell) {
       // New pocket: flood it, staying inside this cell.
       const id = nodes.length;
       let sp = 0, count = 0, sxs = 0, sys = 0, szs = 0;
+      // Per-axis slice occupancy inside this cell, for the node's THROAT (see below).
+      const slX = new Int32Array(cell), slY = new Int32Array(cell), slZ = new Int32Array(cell);
       stack[sp++] = seed; nodeOf[seed] = id;
       while (sp > 0) {
         const cur = stack[--sp];
@@ -118,6 +136,7 @@ function buildGraph(D, cell) {
         const rem = cur - vy * D.sx * D.sz;
         const vz = Math.floor(rem / D.sx), vx = rem - vz * D.sx;
         count++; sxs += vx; sys += vy; szs += vz;
+        slX[vx - x0]++; slY[vy - y0]++; slZ[vz - z0]++;
         const nb = [[vx+1,vy,vz],[vx-1,vy,vz],[vx,vy+1,vz],[vx,vy-1,vz],[vx,vy,vz+1],[vx,vy,vz-1]];
         for (const [nx, ny, nz] of nb) {
           if (nx < x0 || nx >= x1 || ny < y0 || ny >= y1 || nz < z0 || nz >= z1) continue;
@@ -126,7 +145,25 @@ function buildGraph(D, cell) {
           nodeOf[nid] = id; stack[sp++] = nid;
         }
       }
-      nodes.push({ id, n: count, cxs: ccx, cys: ccy, czs: ccz,
+      // THROAT — the node's own narrowest cross-section, as a fraction of a full cell
+      // face. A doorway set in a wall that happens to sit INSIDE a cell is invisible to
+      // cell-boundary portals: room A's air, the door voxels and room B's air all flood
+      // into ONE node, so the model read a 3-voxel gap as freely open (S6 came out a
+      // two-step function -- shut, then identical for 1/3, 2/3 and fully open). Pocket
+      // splitting stops DISCONNECTED regions merging; it does nothing about NARROWLY
+      // connected ones. Measuring the min slice occupancy along each spanned axis
+      // recovers the aperture wherever it happens to fall, and open air reads 1.0.
+      const throatAxis = (sl) => {
+        let lo = -1, hi = -1;
+        for (let s = 0; s < cell; s++) if (sl[s] > 0) { if (lo < 0) lo = s; hi = s; }
+        if (lo < 0 || hi === lo) return Infinity;   // spans one slice: not a throat
+        let m = Infinity;
+        for (let s = lo; s <= hi; s++) if (sl[s] < m) m = sl[s];
+        return m;
+      };
+      const tRaw = Math.min(throatAxis(slX), throatAxis(slY), throatAxis(slZ));
+      const throat = Number.isFinite(tRaw) ? Math.min(1, tRaw / (cell * cell)) : 1;
+      nodes.push({ id, n: count, cxs: ccx, cys: ccy, czs: ccz, throat,
                    // centroid in WORLD coords (used only as a fallback point)
                    px: D.x0 + sxs / count + 0.5, py: D.y0 + sys / count + 0.5, pz: D.z0 + szs / count + 0.5,
                    edges: [] });
@@ -157,11 +194,12 @@ function buildGraph(D, cell) {
 
   const portals = [];
   for (const p of portalMap.values()) {
-    // Constriction referenced to a FULL cell face, so open air is exactly 0 dB.
+    // openFrac = how much of a FULL cell face this portal is, so open air is exactly 1.
+    // The constriction loss itself is applied ONCE, from the route's bottleneck.
     const full = cell * cell;
     const q = { a: p.a, b: p.b, area: p.area,
                 px: p.sx / p.area, py: p.sy / p.area, pz: p.sz / p.area,
-                db: Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.min(1, p.area / full))) };
+                openFrac: Math.min(1, p.area / full) };
     const id = portals.length;
     portals.push(q);
     nodes[p.a].edges.push(id);
@@ -237,10 +275,12 @@ function solveAir(D, G, src) {
         if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } }
     return top; };
 
-  // Seeds have no incoming leg, so their first hop is charged no bend (from === entry).
+  // Seeds have no incoming leg, so their first hop is charged no bend (from === entry),
+  // and an unpinched bottleneck (1 = a full cell face).
+  const constrictDb = f => Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.max(1e-4, f)));
   for (const [nd, cost] of seeded) {
-    best[nd] = [{ portal: -1, db: cost, ...srcPt }];
-    push({ node: nd, db: cost, ...srcPt, qx: srcPt.px, qy: srcPt.py, qz: srcPt.pz });
+    best[nd] = [{ portal: -1, db: cost, add: cost, bneck: 1, len: 0, ...srcPt }];
+    push({ node: nd, db: cost, add: cost, bneck: 1, len: 0, ...srcPt, qx: srcPt.px, qy: srcPt.py, qz: srcPt.pz });
   }
 
   let popped = 0;
@@ -263,19 +303,25 @@ function solveAir(D, G, src) {
       const ilen = Math.hypot(ix, iy, iz);
       if (ilen > 1e-6) {
         const cos = (ix * (P.px - cur.px) + iy * (P.py - cur.py) + iz * (P.pz - cur.pz)) / (ilen * leg);
-        bend = BEND_DB * (1 - Math.max(-1, Math.min(1, cos))) / 2;
+        // scaled by how PINCHED this portal is: turning in open space is free
+        bend = BEND_DB * (1 - Math.max(-1, Math.min(1, cos))) / 2 * (1 - P.openFrac);
       }
-      const nd = cur.db + SLOPE * leg - P.db + bend;   // P.db is negative (a loss)
+      const nAdd = cur.add + SLOPE * leg + bend;
+      const nLen = cur.len + leg;
+      // The route crossed this node to reach the portal, so it passed the node's throat
+      // as well as the portal's own opening. Both feed the running bottleneck.
+      const nBneck = Math.min(cur.bneck, G.nodes[cur.node].throat, P.openFrac);
+      const nd = nAdd - constrictDb(nBneck);   // constriction paid ONCE, at the bottleneck
       let arr = best[other];
       if (!arr) { arr = best[other] = []; }
       // keep the KEEP_PORTALS cheapest, one per distinct portal
       const existing = arr.findIndex(e => e.portal === pid);
       if (existing >= 0) { if (arr[existing].db <= nd) continue; arr.splice(existing, 1); }
       else if (arr.length >= KEEP_PORTALS && nd >= arr[arr.length - 1].db) continue;
-      arr.push({ portal: pid, db: nd, px: P.px, py: P.py, pz: P.pz });
+      arr.push({ portal: pid, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz });
       arr.sort((a, b) => a.db - b.db);
       if (arr.length > KEEP_PORTALS) arr.length = KEEP_PORTALS;
-      push({ node: other, db: nd, px: P.px, py: P.py, pz: P.pz,
+      push({ node: other, db: nd, add: nAdd, bneck: nBneck, len: nLen, px: P.px, py: P.py, pz: P.pz,
              qx: cur.px, qy: cur.py, qz: cur.pz });
     }
   }
@@ -296,7 +342,7 @@ function makeNewEvaluator(D, G, src) {
       for (const e of best[nd]) {
         const leg = Math.hypot(e.px - (wx + 0.5), e.py - (wy + 0.5), e.pz - (wz + 0.5));
         const cand = -(e.db + SLOPE * leg);
-        if (cand > airDb) { airDb = cand; airLen = (e.db / SLOPE) + leg; entry = e; }
+        if (cand > airDb) { airDb = cand; airLen = e.len + leg; entry = e; }
       }
     }
     if (airDb === -Infinity) airDb = -120;

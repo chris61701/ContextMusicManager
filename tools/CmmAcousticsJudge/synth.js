@@ -75,7 +75,7 @@ function build({ wall, door, open }) {
       // partially swung, modelled as the aperture it is: the top of the opening clears
       // first (the leaf occupies the lower part), so openness maps to open ROWS.
       const rows = DOOR.y1 - DOOR.y0 + 1;
-      const clearFrom = DOOR.y1 - Math.floor(open * rows) + 1;
+      const clearFrom = DOOR.y1 - Math.round(open * rows) + 1;   // round: floor(0.33*3)=0 made "1/3 open" fully shut
       const isClear = open >= 0.999 || y >= clearFrom;
       put(i, isClear ? MAT.air : MAT[door], 2);
       continue;
