@@ -117,7 +117,8 @@ function main() {
   }
 
   console.log(`\n── scenario #6, gradual (B on-axis excess) ──`);
-  const order = ["S1 door SHUT, wood wall", "S6 door 1/3 open", "S6 door 2/3 open", "S2 door OPEN, wood wall"];
+  const order = ["S1 door SHUT, wood wall", "S6 door 20% open", "S6 door 40% open",
+                 "S6 door 60% open", "S6 door 80% open", "S2 door OPEN, wood wall"];
   for (const tag of order) {
     const r = rows.find(x => x.tag === tag); if (!r) continue;
     const q = r.probes["B on-axis"];

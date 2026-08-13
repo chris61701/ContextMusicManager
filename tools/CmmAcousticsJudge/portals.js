@@ -55,7 +55,9 @@ const DB_MAT = 40.1;        // scale: one voxel of the densest ordinary material
 const MAT_POW = 2.74;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
 const DB_VOXEL_MAX = 60.0;  // per-voxel ceiling (an airtight vault leaf)
 const SLOPE = 0.35;         // distance attenuation, dB per block (exponential curve)
-const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is acoustically open
+const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is FULLY open
+const OPEN_FULL = 0.5;      // ...and at/above which it is fully closed; between, a fraction
+const OPEN_EPS  = 0.02;     // openness below this does not connect at all
 const KEEP_PORTALS = 4;     // entry portals retained per node (multi-route melding)
 const AIR_FLAG = 1;
 // Offsets for the transmission fan (see makeNewEvaluator): the listener itself plus
@@ -237,10 +239,22 @@ const powToDb = p => p <= 1e-12 ? -120 : 10 * Math.log10(p);
 // Game truth first (the air flag), then acoustically-open non-air: see-through
 // railings/ladders/broken windows already carry ~0 loss from CellLoss, so a low loss
 // value is the dump's way of saying "sound passes freely here".
+// OPENNESS IS A FRACTION, not a flag. A boolean test made the graph's topology binary in a
+// quantity that is continuous: an 80%-open wood door still carries loss 0.1, over any sane
+// threshold, so the air path did not exist AT ALL until the leaf was fully open and then
+// snapped in -- a 5.5 dB jump at the end of every swing, and the one thing scenario #6 exists
+// to forbid. Principle B says aperture is continuous; this is where that has to be expressed.
+//
+// So each voxel gets a 0..1 openness, and APERTURE AREA IS THE INTEGRAL OF IT. A door at 80%
+// open contributes 0.8 of a voxel's worth of opening; a nearly-shut one contributes a sliver,
+// which constriction then charges heavily -- correct, and continuous, rather than absent.
 function makeOpenTest(D) {
-  const open = new Uint8Array(D.n);
-  for (let i = 0; i < D.n; i++)
-    open[i] = ((D.flags[i] & AIR_FLAG) !== 0 || D.loss[i] <= OPEN_LOSS) ? 1 : 0;
+  const open = new Float32Array(D.n);
+  for (let i = 0; i < D.n; i++) {
+    if ((D.flags[i] & AIR_FLAG) !== 0) { open[i] = 1; continue; }
+    const l = D.loss[i];
+    open[i] = l >= OPEN_FULL ? 0 : (l <= OPEN_LOSS ? 1 : 1 - (l - OPEN_LOSS) / (OPEN_FULL - OPEN_LOSS));
+  }
   return open;
 }
 
@@ -267,7 +281,7 @@ function buildGraph(D, cell) {
     for (let y = y0; y < y1; y++)
     for (let x = x0; x < x1; x++) {
       const seed = li(x, y, z);
-      if (!open[seed] || nodeOf[seed] !== -1) continue;
+      if (open[seed] <= OPEN_EPS || nodeOf[seed] !== -1) continue;
       // New pocket: flood it, staying inside this cell.
       const id = nodes.length;
       let sp = 0, count = 0, sxs = 0, sys = 0, szs = 0;
@@ -283,17 +297,18 @@ function buildGraph(D, cell) {
         const vy = Math.floor(cur / (D.sx * D.sz));
         const rem = cur - vy * D.sx * D.sz;
         const vz = Math.floor(rem / D.sx), vx = rem - vz * D.sx;
-        count++; sxs += vx; sys += vy; szs += vz;
+        const of = open[cur];
+        count += of; sxs += vx * of; sys += vy * of; szs += vz * of;
         const ax = vx - x0, ay = vy - y0, az = vz - z0;
-        slX[ax]++; slY[ay]++; slZ[az]++;
-        pX[0][ax] += vx; pY[0][ax] += vy; pZ[0][ax] += vz;
-        pX[1][ay] += vx; pY[1][ay] += vy; pZ[1][ay] += vz;
-        pX[2][az] += vx; pY[2][az] += vy; pZ[2][az] += vz;
+        slX[ax] += of; slY[ay] += of; slZ[az] += of;
+        pX[0][ax] += vx * of; pY[0][ax] += vy * of; pZ[0][ax] += vz * of;
+        pX[1][ay] += vx * of; pY[1][ay] += vy * of; pZ[1][ay] += vz * of;
+        pX[2][az] += vx * of; pY[2][az] += vy * of; pZ[2][az] += vz * of;
         const nb = [[vx+1,vy,vz],[vx-1,vy,vz],[vx,vy+1,vz],[vx,vy-1,vz],[vx,vy,vz+1],[vx,vy,vz-1]];
         for (const [nx, ny, nz] of nb) {
           if (nx < x0 || nx >= x1 || ny < y0 || ny >= y1 || nz < z0 || nz >= z1) continue;
           const nid = li(nx, ny, nz);
-          if (!open[nid] || nodeOf[nid] !== -1) continue;
+          if (open[nid] <= OPEN_EPS || nodeOf[nid] !== -1) continue;
           nodeOf[nid] = id; stack[sp++] = nid;
         }
       }
@@ -320,7 +335,7 @@ function buildGraph(D, cell) {
       // space PINCHES relative to itself.
       const throatWhich = (sl) => {
         let lo = -1, hi = -1;
-        for (let q = 0; q < cell; q++) if (sl[q] > 0) { if (lo < 0) lo = q; hi = q; }
+        for (let q = 0; q < cell; q++) if (sl[q] > 1e-6) { if (lo < 0) lo = q; hi = q; }
         if (lo < 0 || hi === lo) return -1;
         let m = Infinity, mi = -1;
         for (let q = lo; q <= hi; q++) if (sl[q] < m) { m = sl[q]; mi = q; }
@@ -337,7 +352,7 @@ function buildGraph(D, cell) {
         const axis = tA.indexOf(tRaw);
         const sl = axis === 0 ? slX : axis === 1 ? slY : slZ;
         const wi = throatWhich(sl);
-        if (wi >= 0 && sl[wi] > 0) {
+        if (wi >= 0 && sl[wi] > 1e-6) {
           tpx = D.x0 + pX[axis][wi] / sl[wi] + 0.5;
           tpy = D.y0 + pY[axis][wi] / sl[wi] + 0.5;
           tpz = D.z0 + pZ[axis][wi] / sl[wi] + 0.5;
@@ -354,13 +369,13 @@ function buildGraph(D, cell) {
   // neighbour is open and in a DIFFERENT node, that voxel face is aperture between them.
   // Accumulate area and a face centroid so the route has a real point to measure to.
   const portalMap = new Map();   // "a,b" → { a, b, area, sx, sy, sz }
-  const addFace = (na, nb, wx, wy, wz) => {
+  const addFace = (na, nb, wx, wy, wz, aw) => {
     const a = Math.min(na, nb), b = Math.max(na, nb);
     const key = a * 1e7 + b;
     let p = portalMap.get(key);
     if (!p) { p = { a, b, area: 0, sx: 0, sy: 0, sz: 0,
                     x0: Infinity, y0: Infinity, z0: Infinity, x1: -Infinity, y1: -Infinity, z1: -Infinity }; portalMap.set(key, p); }
-    p.area++; p.sx += wx; p.sy += wy; p.sz += wz;
+    p.area += aw; p.sx += wx * aw; p.sy += wy * aw; p.sz += wz * aw;
     // extent, so a path can be pulled taut THROUGH the opening instead of via its centre
     if (wx < p.x0) p.x0 = wx; if (wx > p.x1) p.x1 = wx;
     if (wy < p.y0) p.y0 = wy; if (wy > p.y1) p.y1 = wy;
@@ -370,11 +385,13 @@ function buildGraph(D, cell) {
   for (let z = 0; z < D.sz; z++)
   for (let x = 0; x < D.sx; x++) {
     const i = li(x, y, z);
-    if (!open[i]) continue;
+    if (open[i] <= OPEN_EPS) continue;
     const a = nodeOf[i];
-    if (x + 1 < D.sx) { const j = li(x+1,y,z); if (open[j] && nodeOf[j] !== a) addFace(a, nodeOf[j], D.x0+x+1, D.y0+y+0.5, D.z0+z+0.5); }
-    if (y + 1 < D.sy) { const j = li(x,y+1,z); if (open[j] && nodeOf[j] !== a) addFace(a, nodeOf[j], D.x0+x+0.5, D.y0+y+1, D.z0+z+0.5); }
-    if (z + 1 < D.sz) { const j = li(x,y,z+1); if (open[j] && nodeOf[j] !== a) addFace(a, nodeOf[j], D.x0+x+0.5, D.y0+y+0.5, D.z0+z+1); }
+    // A face passes the SMALLER of the two voxels' openness -- a chain is no more open than
+    // its tightest link.
+    if (x + 1 < D.sx) { const j = li(x+1,y,z); if (open[j] > OPEN_EPS && nodeOf[j] !== a) addFace(a, nodeOf[j], D.x0+x+1, D.y0+y+0.5, D.z0+z+0.5, Math.min(open[i], open[j])); }
+    if (y + 1 < D.sy) { const j = li(x,y+1,z); if (open[j] > OPEN_EPS && nodeOf[j] !== a) addFace(a, nodeOf[j], D.x0+x+0.5, D.y0+y+1, D.z0+z+0.5, Math.min(open[i], open[j])); }
+    if (z + 1 < D.sz) { const j = li(x,y,z+1); if (open[j] > OPEN_EPS && nodeOf[j] !== a) addFace(a, nodeOf[j], D.x0+x+0.5, D.y0+y+0.5, D.z0+z+1, Math.min(open[i], open[j])); }
   }
 
   const portals = [];
@@ -667,7 +684,7 @@ function measure(D, G, evalFn, label, range) {
   for (let z = 0; z < D.sz; z++)
   for (let x = 0; x < D.sx; x++) {
     const i = x + D.sx * (z + D.sz * y);
-    if (!G.open[i]) continue;
+    if (G.open[i] <= OPEN_EPS) continue;
     const wx = D.x0 + x, wy = D.y0 + y, wz = D.z0 + z;
     const r = evalFn(wx, wy, wz);
     if (r.d > range) continue;

@@ -73,13 +73,17 @@ function build({ wall, door, open, thick }) {
     if (x >= WALLX && x < WALLX + WALLT) {
       const inDoor = y >= DOOR.y0 && y <= DOOR.y1 && z >= DOOR.z0 && z <= DOOR.z1;
       if (!inDoor) { put(i, MAT[wall], 1); continue; }
-      // The doorway. `open` 1 = clear air, 0 = the door leaf fully shut, in between =
-      // partially swung, modelled as the aperture it is: the top of the opening clears
-      // first (the leaf occupies the lower part), so openness maps to open ROWS.
-      const rows = DOOR.y1 - DOOR.y0 + 1;
-      const clearFrom = DOOR.y1 - Math.round(open * rows) + 1;   // round: floor(0.33*3)=0 made "1/3 open" fully shut
-      const isClear = open >= 0.999 || y >= clearFrom;
-      put(i, isClear ? MAT.air : MAT[door], 2);
+      // The doorway, mid-swing. Clearing whole voxel ROWS was wrong and it broke the one
+      // scenario this geometry exists to test: a 3-row door can only be 0/33/66/100% open, so
+      // the swing rendered as four discrete jumps (an 8.45 dB step at the first of them) and
+      // scenario #6 could not be judged at all.
+      //
+      // The game does not do that. CellLoss's door branch is shutLoss * (1 - openness): a
+      // mid-swing door's voxels carry PARTIAL loss that varies continuously with the leaf
+      // angle, so the real door is continuous even though its geometry is not. Modelling the
+      // leaf as a hole that appears one row at a time is exactly what principle B says a door
+      // is not. Match the game: scale the loss, do not clear rows.
+      put(i, MAT[door] * (1 - Math.max(0, Math.min(1, open))), 2);
       continue;
     }
     put(i, MAT.air, 0);
@@ -119,9 +123,12 @@ const MATRIX = [
   { wall: "wood",     door: "air",   open: 1.0,  tag: "S2 door OPEN, wood wall" },
   // scenario #1 — interior door shut: clearly quieter but obviously still music (~ -6 dB)
   { wall: "wood",     door: "wood",  open: 0.0,  tag: "S1 door SHUT, wood wall" },
-  // scenario #6 — mid-swing, should be gradual
-  { wall: "wood",     door: "wood",  open: 0.33, tag: "S6 door 1/3 open" },
-  { wall: "wood",     door: "wood",  open: 0.66, tag: "S6 door 2/3 open" },
+  // scenario #6 — mid-swing, should be gradual. Now that openness scales the leaf's loss
+  // instead of clearing rows, the swing can be sampled as finely as we like.
+  { wall: "wood",     door: "wood",  open: 0.2,  tag: "S6 door 20% open" },
+  { wall: "wood",     door: "wood",  open: 0.4,  tag: "S6 door 40% open" },
+  { wall: "wood",     door: "wood",  open: 0.6,  tag: "S6 door 60% open" },
+  { wall: "wood",     door: "wood",  open: 0.8,  tag: "S6 door 80% open" },
   // scenario #3 — heavy wall, doors shut: faint, material dependent
   { wall: "concrete", door: "wood",  open: 0.0,  tag: "S3 door SHUT, concrete wall" },
   // scenario #4 — THE FLANKING TEST. Same vault door, two different walls.

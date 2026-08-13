@@ -221,8 +221,10 @@ function main() {
 
   const OPEN = "synth_wall-wood_door-air_open-1.json";
   const SHUT = "synth_wall-wood_door-wood_open-0.json";
-  const T33  = "synth_wall-wood_door-wood_open-0.33.json";
-  const T66  = "synth_wall-wood_door-wood_open-0.66.json";
+  const T20  = "synth_wall-wood_door-wood_open-0.2.json";
+  const T40  = "synth_wall-wood_door-wood_open-0.4.json";
+  const T60  = "synth_wall-wood_door-wood_open-0.6.json";
+  const T80  = "synth_wall-wood_door-wood_open-0.8.json";
 
   const SCENARIOS = [
     {
@@ -251,8 +253,8 @@ function main() {
       name: "swing",
       note: "stand still in room B on-axis; the door opens then shuts (gradual cue)",
       seconds: 18,
-      states: () => [ st(SHUT, 0), st(T33, 3), st(T66, 4.5), st(OPEN, 6),
-                      st(T66, 12), st(T33, 13.5), st(SHUT, 15) ],
+      states: () => [ st(SHUT, 0), st(T20, 3.0), st(T40, 3.6), st(T60, 4.2), st(T80, 4.8), st(OPEN, 5.4),
+                      st(T80, 12.0), st(T60, 12.6), st(T40, 13.2), st(T20, 13.8), st(SHUT, 14.4) ],
       waypoints: [ { t: 0, x: 26, y: 3, z: 11, yaw: Math.PI },
                    { t: 18, x: 26, y: 3, z: 11, yaw: Math.PI } ],
     },
