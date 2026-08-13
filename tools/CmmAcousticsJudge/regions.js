@@ -239,8 +239,11 @@ function build(D, mergeH = 0.62) {
   }
   return { thick, label, regions, rawRegions: regions.length, kept, ports: finalPorts,
            timing: { tThick, tSeg, tPort }, merged,
-           // the merge's union-find, so callers can map a raw label to its surviving region
-           rootOf: a => find(a) };
+           // Map a RAW watershed label to its final, remapped region id. Callers must use this
+           // rather than find() alone: ports carry remapped ids, and mixing the two id spaces
+           // left room A with no edges at all -- disconnected from the graph, so no aperture
+           // route existed and only the transmission path survived.
+           regionOf: a => remap.get(find(a)) };
 }
 
 function main() {
@@ -282,8 +285,6 @@ function asGraph(D, mergeH) {
   const open = makeOpenTest(D);
 
   // regions surviving the merge, renumbered, with weighted centroids
-  const idOf = new Map();
-  for (const p of r.ports) { if (!idOf.has(p.a)) idOf.set(p.a, idOf.size); if (!idOf.has(p.b)) idOf.set(p.b, idOf.size); }
   const nodeOf = new Int32Array(D.n).fill(-1);
   const acc = new Map();
   const sx = D.sx, sy = D.sy, sz = D.sz, li = (x, y, z) => x + sx * (z + sz * y);
@@ -292,16 +293,15 @@ function asGraph(D, mergeH) {
   for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
     const i = li(x, y, z);
     if (open[i] <= OPEN_EPS) continue;
-    const root = r.rootOf ? r.rootOf(label[i]) : label[i];
-    let id = idOf.get(root);
-    if (id === undefined) { id = idOf.size; idOf.set(root, id); }
+    const id = r.regionOf(label[i]);
+    if (id === undefined) continue;
     nodeOf[i] = id;
     let a = acc.get(id);
     if (!a) { a = { n: 0, sx: 0, sy: 0, sz: 0 }; acc.set(id, a); }
     a.n++; a.sx += x; a.sy += y; a.sz += z;
   }
   const nodes = [];
-  for (let id = 0; id < idOf.size; id++) {
+  for (let id = 0; id < r.kept; id++) {
     const a = acc.get(id) || { n: 1, sx: 0, sy: 0, sz: 0 };
     nodes.push({
       id, n: a.n, throat: 1,
@@ -312,8 +312,8 @@ function asGraph(D, mergeH) {
   }
   const portals = [];
   for (const p of r.ports) {
-    const a = idOf.get(p.a), b = idOf.get(p.b);
-    if (a === undefined || b === undefined || a === b) continue;
+    const a = p.a, b = p.b;                     // already final ids
+    if (a === b || a >= r.kept || b >= r.kept) continue;
     const ref = Math.max(1, Math.pow(Math.min(nodes[a].n, nodes[b].n), 2 / 3));
     const id = portals.length;
     portals.push({
