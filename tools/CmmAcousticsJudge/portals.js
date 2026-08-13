@@ -108,7 +108,18 @@ const MIN_APERTURE_DB = -30; // floor on the bottleneck's constriction (a pinhol
 // Cannot reuse judge3d's segLoss: that sums loss FRACTIONS, and the curve has to be
 // applied per voxel before summing or a 2-voxel wall reads as one twice as dense.
 // Amanatides-Woo DDA, endpoints excluded, mirroring segLoss's traversal exactly.
+// Voxel-index convenience wrapper. The real work takes float WORLD positions, because the
+// game's ear position is a float and snapping it to a voxel centre puts a staircase in the
+// output at one step per block that no field smoothness can remove. It is also a correctness
+// fix, not just a resolution one: the DDA below starts at floor() of its origin, and passing
+// a fractional coordinate to the old signature left `x` non-integral, so lossAt() indexed the
+// voxel array fractionally, read undefined, and silently reported ZERO material. Sub-block
+// sampling was measuring nothing.
 function segDb(D, x0, y0, z0, x1, y1, z1) {
+  return segDbAt(D, x0 + 0.5, y0 + 0.5, z0 + 0.5, x1 + 0.5, y1 + 0.5, z1 + 0.5);
+}
+
+function segDbAt(D, fx, fy, fz, tx, ty, tz) {
   // A LINE INTEGRAL, not a voxel count. Counting whole voxels made the result flip by a
   // material's full value as the ray angle changed: a ONE-voxel-thick wall clips one or two
   // of its voxels depending on the angle, so a diagonal crossing read 12 dB where a
@@ -120,13 +131,13 @@ function segDb(D, x0, y0, z0, x1, y1, z1) {
   // Weighting each voxel by the length of the ray actually inside it is both smooth and more
   // correct: a diagonal path through a wall IS slightly longer than a perpendicular one, and
   // it varies continuously with angle instead of stepping.
-  const fx = x0 + 0.5, fy = y0 + 0.5, fz = z0 + 0.5;
-  const tx = x1 + 0.5, ty = y1 + 0.5, tz = z1 + 0.5;
   let dx = tx - fx, dy = ty - fy, dz = tz - fz;
   const dist = Math.hypot(dx, dy, dz);
   if (dist < 0.01) return 0;
   dx /= dist; dy /= dist; dz /= dist;
-  let x = x0, y = y0, z = z0;
+  let x = Math.floor(fx), y = Math.floor(fy), z = Math.floor(fz);
+  const x0 = x, y0 = y, z0 = z;
+  const x1 = Math.floor(tx), y1 = Math.floor(ty), z1 = Math.floor(tz);
   const sX = dx > 0 ? 1 : dx < 0 ? -1 : 0, sY = dy > 0 ? 1 : dy < 0 ? -1 : 0, sZ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
   const tM = (o, d, c, s) => Math.abs(d) < 1e-6 ? Infinity : ((s > 0 ? c + 1 : c) - o) / d;
   const tD = d => Math.abs(d) < 1e-6 ? Infinity : Math.abs(1 / d);
@@ -488,6 +499,7 @@ function makeNewEvaluator(D, G, src) {
                  routeLen: bestLen, throat: A.throat });
   }
 
+  // wx/wy/wz are BLOCK COORDS and may be fractional.
   return function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
     const lx = wx + 0.5, ly = wy + 0.5, lz = wz + 0.5;
@@ -496,14 +508,13 @@ function makeNewEvaluator(D, G, src) {
     // radiator, so behind a vault door set in a wooden wall you hear the wall beside you.
     let fanDb = Infinity;
     for (const [ox, oy, oz] of SOLID_FAN) {
-      const px = wx + ox, py = wy + oy, pz = wz + oz;
-      if (!D.inB(px, py, pz)) continue;
-      const m = segDb(D, src.x, src.y, src.z, px, py, pz);
-      const dd = Math.hypot(px - src.x, py - src.y, pz - src.z);
+      const px = lx + ox, py = ly + oy, pz = lz + oz;
+      const m = segDbAt(D, sx5, sy5, sz5, px, py, pz);
+      const dd = Math.hypot(px - sx5, py - sy5, pz - sz5);
       if (SLOPE * dd + m < fanDb) fanDb = SLOPE * dd + m;
     }
     if (!Number.isFinite(fanDb)) fanDb = 120;
-    const centerMat = segDb(D, src.x, src.y, src.z, wx, wy, wz);
+    const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
 
     const arrivals = [];
     let pow = 0, bestDb = -Infinity, bestIdx = -1;
@@ -513,7 +524,7 @@ function makeNewEvaluator(D, G, src) {
       let db, legMat;
       if (c.isSrc) { legMat = centerMat; db = -(c.cost + fanDb); }
       else {
-        legMat = segDb(D, Math.floor(c.px), Math.floor(c.py), Math.floor(c.pz), wx, wy, wz);
+        legMat = segDbAt(D, c.px, c.py, c.pz, lx, ly, lz);
         db = -(c.cost + SLOPE * leg + legMat);
       }
       // A candidate whose total route is barely longer than the straight line describes the
@@ -655,4 +666,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, SLOPE };
+module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, segDbAt, SLOPE };

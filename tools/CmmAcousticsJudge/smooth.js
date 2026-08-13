@@ -34,7 +34,7 @@ const CELL = parseInt((process.argv.find(a => a.startsWith("--cell=")) || "=4").
 // harmless error: it made a real 4 dB defect look like an impossible one.
 // (Evaluating at continuous listener positions is a separate improvement; the game's ear
 // position is a float, so the model should eventually accept one.)
-const STEP = 1.0;
+const STEP = 0.25;   // the model takes float positions now, so sub-block sampling is honest
 
 // Routes worth measuring, on the synthetic geometry. These mirror the render scenarios so a
 // number here can be tied to something audible there.
@@ -73,7 +73,7 @@ function measureRoute(r) {
   const pts = samples(r);
   const out = {};
   for (const [name, fn] of [["old", p => { const q = oEval(Math.round(p[0]), Math.round(p[1]), Math.round(p[2])); return q.att > 0 ? 20 * Math.log10(q.att) : -120; }],
-                            ["new", p => nEval(Math.round(p[0]), Math.round(p[1]), Math.round(p[2])).total]]) {
+                            ["new", p => nEval(p[0], p[1], p[2]).total]]) {
     const lv = pts.map(fn);
     let worst = 0, worstAt = 0, sum = 0, n = 0, over1 = 0, over3 = 0;
     for (let i = 1; i < lv.length; i++) {
