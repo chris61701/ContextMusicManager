@@ -44,10 +44,31 @@ const { loadDump, makeEvaluator, segLoss } = require("./judge3d.js");
 // ── model constants (the NEW model's whole tuning surface — compare to 41 dials) ──
 const DB_PER_WALL = 14.0;   // transmission loss of one full solid wall, dB
 const SLOPE = 0.35;         // distance attenuation, dB per block (exponential curve)
-const APERTURE_REF = 4.0;   // voxel-faces counted as an "unconstricted" opening (a 2x2 doorway)
 const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is acoustically open
 const KEEP_PORTALS = 4;     // entry portals retained per node (multi-route melding)
 const AIR_FLAG = 1;
+
+// ── going around must COST something ──────────────────────────────────────────
+// First measurement pass charged only path LENGTH, so the air arrival won 90-100% of
+// walled buckets with a detour of merely 1.15-1.4x and sat 20-30 dB above the solid
+// arrival. Material became nearly irrelevant and levels came out 3-4x too weak against
+// the spec. The missing physics is the author's own words: "sound should bounce off and
+// be absorbed by objects" -- energy is lost diffracting round an obstruction, not just
+// travelling.
+//
+// Two terms, and CRUCIALLY neither may charge for open air. A straight path through
+// unobstructed space must cost distance and nothing else, or a 40-block open-air route
+// would accrue ~10 spurious cell-crossing penalties.
+//
+//   CONSTRICTION — a portal narrower than a full cell face radiates less power through.
+//     Referenced to the FULL face (cell^2 voxel-faces), so open air is exactly 0 dB and
+//     a doorway or a crack bites in proportion to how tight it is.
+//   BEND — charged only when the route CHANGES DIRECTION at a portal, from the angle
+//     between the incoming and outgoing legs. Straight through is free; a right angle
+//     costs half of BEND_DB; a doubling-back costs all of it. This is what makes three
+//     corners meaningfully quieter than a path 1.4x longer.
+const BEND_DB = 6.0;        // dB for a full route reversal; a 90 degree turn costs half
+const MIN_APERTURE_DB = -24; // floor on one portal's constriction (a pinhole is not infinite loss)
 
 const dbToPow = d => Math.pow(10, d / 10);
 const powToDb = p => p <= 1e-12 ? -120 : 10 * Math.log10(p);
@@ -136,10 +157,11 @@ function buildGraph(D, cell) {
 
   const portals = [];
   for (const p of portalMap.values()) {
+    // Constriction referenced to a FULL cell face, so open air is exactly 0 dB.
+    const full = cell * cell;
     const q = { a: p.a, b: p.b, area: p.area,
                 px: p.sx / p.area, py: p.sy / p.area, pz: p.sz / p.area,
-                // constriction: a squeeze radiates less power than a full doorway
-                db: 10 * Math.log10(Math.min(1, p.area / APERTURE_REF)) };
+                db: Math.max(MIN_APERTURE_DB, 10 * Math.log10(Math.min(1, p.area / full))) };
     const id = portals.length;
     portals.push(q);
     nodes[p.a].edges.push(id);
@@ -215,9 +237,10 @@ function solveAir(D, G, src) {
         if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } }
     return top; };
 
+  // Seeds have no incoming leg, so their first hop is charged no bend (from === entry).
   for (const [nd, cost] of seeded) {
     best[nd] = [{ portal: -1, db: cost, ...srcPt }];
-    push({ node: nd, db: cost, ...srcPt });
+    push({ node: nd, db: cost, ...srcPt, qx: srcPt.px, qy: srcPt.py, qz: srcPt.pz });
   }
 
   let popped = 0;
@@ -231,7 +254,18 @@ function solveAir(D, G, src) {
       const P = G.portals[pid];
       const other = P.a === cur.node ? P.b : P.a;
       const leg = Math.hypot(P.px - cur.px, P.py - cur.py, P.pz - cur.pz);
-      const nd = cur.db + SLOPE * leg - P.db;   // P.db is negative (a loss)
+      if (leg < 1e-6) continue;
+      // BEND: angle between the leg that brought us to this entry point and the leg
+      // leaving through this portal. cos=+1 straight (free), cos=0 right angle (half),
+      // cos=-1 doubled back (full). Open-air straight runs therefore pay nothing.
+      let bend = 0;
+      const ix = cur.px - cur.qx, iy = cur.py - cur.qy, iz = cur.pz - cur.qz;
+      const ilen = Math.hypot(ix, iy, iz);
+      if (ilen > 1e-6) {
+        const cos = (ix * (P.px - cur.px) + iy * (P.py - cur.py) + iz * (P.pz - cur.pz)) / (ilen * leg);
+        bend = BEND_DB * (1 - Math.max(-1, Math.min(1, cos))) / 2;
+      }
+      const nd = cur.db + SLOPE * leg - P.db + bend;   // P.db is negative (a loss)
       let arr = best[other];
       if (!arr) { arr = best[other] = []; }
       // keep the KEEP_PORTALS cheapest, one per distinct portal
@@ -241,7 +275,8 @@ function solveAir(D, G, src) {
       arr.push({ portal: pid, db: nd, px: P.px, py: P.py, pz: P.pz });
       arr.sort((a, b) => a.db - b.db);
       if (arr.length > KEEP_PORTALS) arr.length = KEEP_PORTALS;
-      push({ node: other, db: nd, px: P.px, py: P.py, pz: P.pz });
+      push({ node: other, db: nd, px: P.px, py: P.py, pz: P.pz,
+             qx: cur.px, qy: cur.py, qz: cur.pz });
     }
   }
   return { best, srcNode: -2, popped, seeded: seeded.size };
