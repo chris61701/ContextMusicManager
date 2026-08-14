@@ -728,13 +728,32 @@ function makeNewEvaluator(D, G, src) {
       }
       if (pIn > 0) direct[rm] += pIn;
     }
+    // ── ENERGY CONSERVATION ──────────────────────────────────────────────────
+    // The loop above walks every NODE of a room and, per node, sums over ALL its portals -- so the
+    // same sound is counted once per opening per node. A room of ten nodes with four portals each
+    // collects forty helpings of the source. Working back from the bunker's field: room 3 implied
+    // +11.6 dB of power entering it, i.e. more power than the speaker emits, which is how its
+    // reverberation ended up 54 dB louder than the air route that feeds it and audible through
+    // 877 dB of rock.
+    //
+    // A room cannot receive more power than the source radiates. Levels here are relative to the
+    // source, so that bound is simply unity. Crude next to summing incident power per opening
+    // (intensity x area / 4, which is what the portal areas are for) but this is a hard physical
+    // ceiling rather than a fitted constant, and it cannot be wrong in the direction that matters.
+    for (let rm = 0; rm < nRooms; rm++) if (direct[rm] > 1) direct[rm] = 1;
+    // How much of a reverberant field each room can sustain at all. Kept so it can be applied to
+    // the FINAL field: gating only `direct` left the wall-coupling pass free to give the outdoors a
+    // field anyway, and that is precisely where it does the most damage, because the outdoor region
+    // is one 777,541-voxel blob spanning sky and solid rock alike. Measured as a dead flat -40.0 dB
+    // at every offending voxel: room 0's -56 dB of wall trickle plus the +16 dB calibration.
+    const canReverb = new Float64Array(nRooms);
     for (let rm = 0; rm < nRooms; rm++) {
       const R = RM[rm];
       // mean free path 4V/S, in blocks; V is the voxel count, S the counted face area
       const mfp = 4 * Math.max(1, R.n) / Math.max(1, R.surf);
-      const valid = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp)
-                  * (1 - sstep(SKY_FULL, SKY_NONE, R.skyFrac === undefined ? 0 : R.skyFrac));
-      direct[rm] = direct[rm] > 0 ? valid * 4 * direct[rm] / Math.max(1, R.roomR) : 0;
+      canReverb[rm] = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp)
+                    * (1 - sstep(SKY_FULL, SKY_NONE, R.skyFrac === undefined ? 0 : R.skyFrac));
+      direct[rm] = direct[rm] > 0 ? canReverb[rm] * 4 * direct[rm] / Math.max(1, R.roomR) : 0;
     }
     // pass 2: power driven through SHARED WALLS by the neighbouring rooms. Power INCIDENT on a
     // surface of area S in a diffuse field is P*S/R, not field*S -- the standard relation carries a
@@ -751,7 +770,7 @@ function makeNewEvaluator(D, G, src) {
         const pOther = src * Math.max(1, other.roomR) / 4;
         pWall += pOther * w.area / Math.max(1, other.roomR) * w.tau;
       }
-      fieldOf[rm] = direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0);
+      fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0));
     }
     if (process.env.CMM_DIFFDBG === "1") {
       const dbg = [];

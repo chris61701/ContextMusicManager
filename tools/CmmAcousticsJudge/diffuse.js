@@ -39,7 +39,17 @@ const Rg = require("./regions.js");
 const P = require("./portals.js");
 const { checkDump } = require("./dumpcheck.js");
 
-const REVERB_MAX_OVER = 25;   // dB the field may sit above the dry path before it is absurd
+// Derived rather than picked. The reverberant field legitimately exceeds the direct sound past the
+// critical distance, by 10*log10(16*pi*r^2/R). For the smallest genuinely live room in these
+// captures (bunker room 1, R = 203) at the far end of a plausible audible range (~50 blocks) that
+// is 10*log10(16*pi*2500/203) = +28 dB. So a tail in the high twenties is theory-consistent and not
+// a defect; 35 leaves headroom above the largest such case without admitting absurdity.
+//
+// PROVISIONAL. A tighter bound is only meaningful once the distance law is settled: the model
+// attenuates exponentially at 0.35 dB/block while 16*pi*r^2/R assumes inverse-square, and at 12
+// blocks those differ by 17 dB, so a per-voxel comparison against theory would flag the mismatch
+// rather than the model. Fixing that is the open architectural question.
+const REVERB_MAX_OVER = 35;
 const REACH_FLOOR = -90;      // dB: below this the dry path is inaudible, so reverb must be too
 const STRIDE = 2;
 // AUDIBILITY FLOOR. This gate claims to test "audible reverb where sound cannot reach", and it must
