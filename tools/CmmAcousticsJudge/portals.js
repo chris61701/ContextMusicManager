@@ -1105,6 +1105,25 @@ function makeNewEvaluator(D, G, src) {
         // listener's own room, whose field they already receive directly as the uniform term, and which
         // would otherwise be counted twice. That exclusion is on which FIELD is taken, never on whether
         // the aperture contributes, so the candidate set stays fixed and nothing can step in or out.
+        //
+        // THE EXCLUSION STAYS, and the residual step needs a fix elsewhere. Dropping it to buy
+        // continuity was measured and is clearly worse: store passivity 0.1% -> 4.6% (failing), bunker
+        // smoothness 2.24 -> 2.96, cave 1.65 -> 3.22. Counting a room's own field twice breaks the
+        // passivity bound, which is exactly what that bound exists to catch.
+        //
+        // So the residual boundary step is inherent to sampling only your OWN room's openings, and it is
+        // worth stating precisely. At a boundary between rooms A and B the SHARED aperture bridges
+        // perfectly -- A's side reads fieldA + fieldB, B's side reads fieldB + fieldA, identical. What
+        // does not bridge is the others: A's opening onto C gives fieldC on A's side and nothing on B's,
+        // while B's onto D gives fieldD on B's side and nothing on A's. Different sets, contributions
+        // that cannot match, hence a step. 98 of the store's 111 remaining over-limit pairs are this.
+        //
+        // THE FIX IS NOT IN THIS LOOP. Those second-order contributions belong in the ROOM FIELDS: if
+        // fieldB already included the energy reaching B from C by way of A, a listener would need only
+        // their own room's field plus a near-field term for their own openings, and nothing would be
+        // left to differ across a boundary. Pass 2 already does one Jacobi iteration of WALL coupling;
+        // the same treatment for APERTURE coupling, solved to convergence over 13-55 rooms, is a small
+        // linear system and it removes the entire class rather than trading one symptom for another.
         let pf = 0;
         if (A.roomA !== undefined && A.roomA >= 0 && A.roomA !== myRoom) pf += fieldOf[A.roomA] || 0;
         if (A.roomB !== undefined && A.roomB >= 0 && A.roomB !== myRoom) pf += fieldOf[A.roomB] || 0;
