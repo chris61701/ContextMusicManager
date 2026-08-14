@@ -618,7 +618,29 @@ function main() {
   // Steady pink-ish noise has no dynamics of its own, so every dB the envelope shows is the model.
   // Use --noise to read the field and music to judge how it sounds.
   let mono, rate = SR, srcName;
-  if (args.includes("--noise")) {
+  if (args.includes("--clicks")) {
+    // ── A TRANSIENT PROBE, because a pad tells you nothing ───────────────────────
+    // The author: "with these general tones, I don't even know what I'm listening for sometimes."
+    // Correct, and it is a flaw in the test rather than in the listening. An ambient pad is the worst
+    // possible signal for judging position or timing -- no transients to localise, no onset to time,
+    // and reverb already in the recording. Hearing localises from ONSETS, so a click train turns the
+    // spatial image into a series of discrete snapshots: each click is one unambiguous "the sound is
+    // HERE", and a jump, a smear or a doubling becomes obvious instead of subtle.
+    //
+    // Four per second, short and bright, with a little decay so it is not fatiguing.
+    mono = new Float32Array(SR * 30);
+    const period = Math.floor(SR / 4);
+    for (let k = 0; k * period < mono.length; k++) {
+      const at = k * period;
+      let ph = 0;
+      for (let i = 0; i < 900 && at + i < mono.length; i++) {
+        const env = Math.exp(-i / 220);
+        ph += 2 * Math.PI * (1400 - 900 * (i / 900)) / SR;   // brief downward chirp = crisp onset
+        mono[at + i] = Math.sin(ph) * env * 0.6;
+      }
+    }
+    srcName = "click train, 4/s (each click is one snapshot of where the sound is)";
+  } else if (args.includes("--noise")) {
     mono = new Float32Array(SR * 30);
     let b0 = 0, b1 = 0, b2 = 0, seed = 12345;
     const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x40000000 - 1; };
