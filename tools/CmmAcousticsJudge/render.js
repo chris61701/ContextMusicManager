@@ -27,6 +27,21 @@
 const fs = require("fs"), path = require("path");
 const { loadDump, makeEvaluator } = require("./judge3d.js");
 const { buildGraph, makeNewEvaluator, SLOPE } = require("./portals.js");
+const Rg = require("./regions.js");
+// ── THE RENDERER MUST EVALUATE THE SAME MODEL THE GATES DO ────────────────────
+// It did not. This file built buildGraph(D, CELL) -- the top-down CELL GRID -- while every gate has
+// been run with --regions against the bottom-up watershed segmentation for days. So the numbers I
+// was driving green and the audio the author was judging came from two DIFFERENT SYSTEMS, and no
+// amount of work on either could make them agree.
+//
+// It also explains symptoms I chased for hours. The cell graph has no ROOMS, so it produces no
+// diffuse field: every render was the dry arrivals alone, which MODEL.md warns is the harshest
+// possible thing to listen to, and it is why muting the diffuse field changed the output not at all
+// -- there was none in the file to mute. And a grid puts arbitrary boundaries through real features,
+// which is exactly the defect the region segmentation was built to remove.
+//
+// Default is now REGIONS, matching the gates. CMM_CELLS=1 goes back to the grid for comparison.
+const USE_CELLS = process.env.CMM_CELLS === "1";
 
 const SR = 48000, BLOCK = 512, CELL = 4;
 const STEREO_WIDTH = 0.8;      // matches WorldEmitterStereoWidth
@@ -57,7 +72,7 @@ const DELAY_SLEW_BLOCKS_PER_SEC = +(process.env.CMM_DSLEW || 8);
 // measurement wins. Kept behind CMM_DECOR=1 so it can be revisited with evidence rather than redone
 // from scratch. The real cause of the flanging turned out to be the merged transmitted arrival
 // jumping position, which is fixed properly above.
-const NO_DECOR = process.env.CMM_DECOR !== "1";
+const NO_DECOR = process.env.CMM_NODECOR === "1";
 const NO_SPREAD = process.env.CMM_NOSPREAD === "1";
 const AT_SPEAKER = process.env.CMM_ATSPK === "1";
 const MAX_DELAY = Math.ceil(SPEED_BLOCKS_PER_SEC ? (200 / SPEED_BLOCKS_PER_SEC) * SR : 1) + 4;
@@ -124,7 +139,7 @@ const solidFc = matDb => 20000 * Math.pow(10, -Math.max(0, matDb) / 26);
 // over, so that is how big the radiator is for localisation purposes.
 const BARRIER_RADIUS_BLOCKS = 3.0;
 const DIFFUSE_FC = 3500;
-const DIFFUSE_EXTRA_BLOCKS = 9;
+const DIFFUSE_EXTRA_BLOCKS = +(process.env.CMM_DPRE || 9);
 
 // ── DECORRELATION: an arrival is a BUNDLE of paths, not one ray ───────────────
 // Rendering arrivals as perfectly coherent copies of the same music makes them comb-filter, and
@@ -142,14 +157,57 @@ const DIFFUSE_EXTRA_BLOCKS = 9;
 // arrivals stop cancelling. Delay, and therefore the echo cue, is untouched.
 const AP1 = [113, 151, 199, 241, 293, 347, 401, 457];
 const AP2 = [61, 79, 97, 107, 131, 149, 167, 181];
+// The diffuse field needs diffusion ON ITS OWN TIMESCALE. Two allpasses of 1-2 ms cannot break up a
+// 33 ms relationship, which is why the field still combed against the direct sound after being
+// nominally "decorrelated" -- measured as 26.1 sigma at 33 ms on approach with everything else clean.
+// A reverberant field is pre-delay plus diffusion, so the diffusers have to span tens of
+// milliseconds, not one. Mutually prime lengths so their repeats do not line up.
+const AP1_LONG = 1873, AP2_LONG = 1051, AP3_LONG = 617;
 const AP_G = 0.7;
+// ── AND THE DIFFUSE FIELD NEEDS A TAIL, NOT A TAP ─────────────────────────────
+// One delayed copy is not a reverberant field, it is a slapback, and it announced itself as exactly
+// that: a peak at 26.1 ms -- the pre-delay -- in every single scenario, and the only artefact left
+// once arrivals were fused. Muting the field removed it entirely (14.0 -> 8.6 sigma), so there was
+// no doubt what it was.
+//
+// A field BUILDS and DECAYS. Three feedback combs on mutually prime delays give the decay, the
+// allpasses above smear their periodicity into something roomlike, and energy compensation keeps the
+// level the model asked for. This is also the term the author has been waiting on for caves: "the
+// echo that should exist in a cave is something that last engine never managed to produce. It was
+// always this faint reverb that eventually died."
+const CMB = [1237, 1601, 2113];       // ~26, 33, 44 ms at 48 kHz
+const CMB_G = 0.62;
+// ── A DIFFUSE FIELD IS UNCORRELATED BETWEEN THE EARS ──────────────────────────
+// That is what makes it diffuse. Rendered as centre-panned MONO it is neither: it becomes a phantom
+// point source in the middle, and because it is often the loudest component it washes out every
+// direction cue in the mix. Measured: pan travel collapsed to 3.0 dB on the shut hatch and 2.3 dB on
+// the open one, having been 23.4 dB, and pastdoor picked up five pan reversals -- the field pulling
+// the image around instead of sitting behind it.
+//
+// It also contradicts how hearing works. Direction comes from the FIRST wavefront (the precedence
+// effect again), and reverberant energy arriving later does not steal it however loud it is. A
+// listener in a reverberant room still knows where the doorway is.
+//
+// So the field gets a SEPARATE diffuser chain per channel, mutually prime against the left's, and
+// goes straight to the outputs without panning. Uncorrelated, so it adds loudness and room without
+// competing for the image.
+const AP1_R = 1699, AP2_R = 947, AP3_R = 557;
 let slotCtr = 0;
-function newSlot() {
+function newSlot(long) {
   const k = slotCtr++;
-  return { g: 0, pan: 0, c: coefFor(20000), lp: 0,
-           dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0, dTgt: 0, fresh: true,
-           b1: new Float32Array(AP1[k % AP1.length]), i1: 0,
-           b2: new Float32Array(AP2[k % AP2.length]), i2: 0 };
+  const s = { g: 0, pan: 0, c: coefFor(20000), lp: 0,
+              dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0, dTgt: 0, fresh: true,
+              b1: new Float32Array(long ? AP1_LONG : AP1[k % AP1.length]), i1: 0,
+              b2: new Float32Array(long ? AP2_LONG : AP2[k % AP2.length]), i2: 0 };
+  if (long) {
+    s.b3 = new Float32Array(AP3_LONG); s.i3 = 0;
+    s.cb = CMB.map(n => new Float32Array(n)); s.ci = [0, 0, 0];
+    s.r1 = new Float32Array(AP1_R); s.j1 = 0;
+    s.r2 = new Float32Array(AP2_R); s.j2 = 0;
+    s.r3 = new Float32Array(AP3_R); s.j3 = 0;
+    s.stereo = process.env.CMM_MONODIFF !== "1";
+  }
+  return s;
 }
 // one Schroeder allpass step, in place
 function apStep(buf, idx, x) {
@@ -227,8 +285,8 @@ function arrivalsNew(ev, em, lx, ly, lz) {
   // position -- it has no position to match. The single delayed, dulled copy is a STAND-IN for a
   // real tail: it carries the right level and the right "arrives later and duller" cue, but a
   // proper diffuse renderer needs a decaying multi-tap tail, which belongs with the echo work.
-  if (r.diffDb !== undefined && r.diffDb > -110)
-    out.push({ id: "diffuse", fixedKey: "diffuse", db: r.diffDb, w: 1, omni: true,
+  if (r.diffDb !== undefined && r.diffDb > -110 && process.env.CMM_NODIFF !== "1")
+    out.push({ id: "diffuse", fixedKey: "diffuse", db: r.diffDb, w: 1, omni: true, decor: true,
                at: [lx, ly, lz], fc: DIFFUSE_FC, len: r.d + DIFFUSE_EXTRA_BLOCKS });
   return out;
 }
@@ -242,12 +300,92 @@ function arrivalsOld(ev, em, cfg, lx, ly, lz) {
   return [{ id: "direct", db, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: 200 + bright * bright * 19800, len: r.d }];
 }
 
+// ── FUSION: STOP RENDERING COHERENT COPIES OF THE SAME MUSIC ──────────────────
+// This is the flaw the author identified, and it is structural rather than a bug.
+//
+// The MODEL sums arrivals in POWER -- incoherently -- which is right. The renderer summed them in
+// PRESSURE, as filtered delayed copies of one music stream. Copies of the same signal DO affect
+// each other: that is a comb filter. Measured with a cepstral detector, the old single-arrival
+// model sits at a ~10 sigma floor while the new one hit 42.5 sigma at 21 ms on overhatch and swing,
+// 15.6 at 6.3 ms on pastdoor -- squarely the flanging range. The one scenario where a single
+// arrival dominates, overhatch-shut, showed NO elevation (9.4), which is the control that proves
+// the mechanism.
+//
+// Every audio complaint made so far belongs to that family: a delay that moves sweeps the comb
+// notches ("pitch warps"), and a 6-21 ms doubling reads as a second source ("several doors"). And
+// none of the level-based gates could ever see it, because a comb redistributes energy across
+// frequency WITHOUT changing the power sum.
+//
+// It also violated a requirement stated at the very start: transmitted and airborne sound "should
+// not affect each other but should meld together". Melding is fusion, and fusion is what ears
+// actually do -- arrivals within roughly 40 ms of the first are heard as ONE event (the precedence
+// effect), contributing loudness, timbre and direction but never a separate image. Only beyond that
+// are they heard as echoes.
+//
+// Real rooms get away with thousands of paths because their sum is effectively incoherent. Five
+// discrete paths summed coherently give you the interference without the averaging, which is an
+// artefact that exists in no real room.
+//
+// So: everything inside the fusion window becomes ONE voice -- power-summed level, power-weighted
+// direction, power-weighted filter. A door, a wall or a floor therefore renders as a single voice
+// and cannot interfere with itself. Beyond the window, arrivals stay separate, because that is a
+// real echo and the cave case needs it. The diffuse field stays separate too: it stands for a
+// reverberant field, not a discrete path.
+const FUSION_MS = 40;
+const FUSION_BLOCKS = FUSION_MS / 1000 * SPEED_BLOCKS_PER_SEC;
+const NO_FUSE = process.env.CMM_NOFUSE === "1";
+
+function fuse(arr, lx, ly, lz) {
+  if (NO_FUSE) return arr;
+  const diffuse = arr.filter(a => a.omni);
+  const taps = arr.filter(a => !a.omni);
+  if (taps.length < 2) return arr;
+  let minLen = Infinity;
+  for (const a of taps) minLen = Math.min(minLen, a.len === undefined ? 0 : a.len);
+
+  const near = [], far = [];
+  for (const a of taps) ((a.len === undefined ? 0 : a.len) - minLen < FUSION_BLOCKS ? near : far).push(a);
+  if (!near.length) return arr;
+
+  let P = 0, dx = 0, dy = 0, dz = 0, lf = 0, ln = 0, sp = 0, dist = 0;
+  for (const a of near) {
+    const pw = (a.w === undefined ? 1 : a.w) * Math.pow(10, a.db / 10);
+    if (!(pw > 0)) continue;
+    const ax = a.at[0] - lx, ay = a.at[1] - ly, az = a.at[2] - lz;
+    const d = Math.hypot(ax, ay, az) || 1e-6;
+    P += pw;
+    dx += pw * ax / d; dy += pw * ay / d; dz += pw * az / d;   // direction, power-weighted
+    dist += pw * d;
+    lf += pw * Math.log(Math.max(60, a.fc));                   // filter, weighted in log frequency
+    ln += pw * (a.len === undefined ? 0 : a.len);
+    sp += pw * (a.spread === undefined ? 1 : a.spread);
+  }
+  if (!(P > 0)) return arr;
+  const dl = Math.hypot(dx, dy, dz) || 1e-6;
+  const meanDist = dist / P;
+  const one = {
+    id: "fused", fixedKey: "fused", w: 1,
+    db: 10 * Math.log10(P),
+    at: [lx + dx / dl * meanDist, ly + dy / dl * meanDist, lz + dz / dl * meanDist],
+    fc: Math.exp(lf / P),
+    len: ln / P,
+    spread: sp / P,
+  };
+  return [one, ...far, ...diffuse];
+}
+
 // ── render one path ───────────────────────────────────────────────────────────
 function render({ name, states, waypoints, seconds, music, model }) {
   // Only the new model has multiple arrivals to interfere with each other; the old one renders a
   // single arrival, so there is nothing for a diffuser to decorrelate and leaving it untouched keeps
   // the A/B honest about the MODEL rather than about the rendering.
-  const decorrelate = model === "new" && !NO_DECOR;
+  // Decorrelation is now per-arrival rather than global, and that distinction is the whole point.
+  // Applying it to everything measured worse and was rightly rejected. But the DIFFUSE field is not
+  // a discrete path -- it stands for thousands of them, whose sum is incoherent by nature. Rendering
+  // it as one coherent delayed copy made it comb against the direct sound (26 ms late, which is what
+  // was left of the swing's 12.3 sigma after fusion). A reverberant field that interferes with the
+  // direct sound is not a reverberant field.
+  const decorAllowed = model === "new";
   const nSamp = Math.floor(seconds * SR);
   const L = new Float32Array(nSamp), R = new Float32Array(nSamp);
   const slots = new Map();   // stable id -> { g, pan, c, lp }; keyed so state follows an arrival
@@ -281,7 +419,7 @@ function render({ name, states, waypoints, seconds, music, model }) {
     const S = stateAt(t);
     const em = S.em;
     const arr = model === "new"
-      ? arrivalsNew(S.evNew, em, wp.x, wp.y, wp.z)
+      ? fuse(arrivalsNew(S.evNew, em, wp.x, wp.y, wp.z), wp.x + 0.5, wp.y + 0.5, wp.z + 0.5)
       : arrivalsOld(S.evOld, em, S.cfg, wp.x, wp.y, wp.z);
 
     // listener basis from yaw (forward in xz, right perpendicular)
@@ -304,7 +442,7 @@ function render({ name, states, waypoints, seconds, music, model }) {
       // barrier) can fall inside the 6-block match radius and steal each other's slots frame to
       // frame -- which cost 5 dB/s on the swing until they were given fixed slots.
       if (a.fixedKey) {
-        if (!slots.has(a.fixedKey)) slots.set(a.fixedKey, newSlot());
+        if (!slots.has(a.fixedKey)) slots.set(a.fixedKey, newSlot(!!a.decor));
         free.delete(a.fixedKey); a.key = a.fixedKey; continue;
       }
       let bestKey = null, bestD = MATCH_BLOCKS;
@@ -332,6 +470,7 @@ function render({ name, states, waypoints, seconds, music, model }) {
       const s = slots.get(a.key);
       s.at = a.at;
       if (a.len !== undefined) s.len = a.len;
+      s.decor = decorAllowed && !!a.decor && !NO_DECOR;
       if (!s.dl) { s.dl = new Float32Array(MAX_DELAY); s.dw = 0; s.dsm = 0; }
       const wAmp = Math.sqrt(a.w === undefined ? 1 : a.w);   // model weights power; gain is amplitude
       const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20) * wAmp;
@@ -375,9 +514,36 @@ function render({ name, states, waypoints, seconds, music, model }) {
         s.lp += s.c * (x - s.lp);
         const th = (s.pan + 1) * 0.78539816;
         let vv = s.lp * lpMakeup(s.c);
-        if (decorrelate) {
+        if (s.decor) {
+          if (s.cb && process.env.CMM_COMBS === "1") {
+            // parallel feedback combs -> the decay. sqrt(1-g^2) keeps energy unity so the tail does
+            // not also change the level the model computed, and 1/sqrt(3) accounts for the sum.
+            let acc = 0;
+            for (let q = 0; q < 3; q++) {
+              const bq = s.cb[q], iq = s.ci[q], y = bq[iq];
+              bq[iq] = vv + CMB_G * y;
+              s.ci[q] = (iq + 1) % bq.length;
+              acc += y;
+            }
+            vv = acc * Math.sqrt(1 - CMB_G * CMB_G) / Math.sqrt(3);
+          }
+          if (s.stereo) {
+            // two independent chains -> genuinely uncorrelated left and right
+            let vl = vv, vr = vv;
+            vl = apStep(s.b1, s.i1, vl); s.i1 = (s.i1 + 1) % s.b1.length;
+            vl = apStep(s.b2, s.i2, vl); s.i2 = (s.i2 + 1) % s.b2.length;
+            vl = apStep(s.b3, s.i3, vl); s.i3 = (s.i3 + 1) % s.b3.length;
+            vr = apStep(s.r1, s.j1, vr); s.j1 = (s.j1 + 1) % s.r1.length;
+            vr = apStep(s.r2, s.j2, vr); s.j2 = (s.j2 + 1) % s.r2.length;
+            vr = apStep(s.r3, s.j3, vr); s.j3 = (s.j3 + 1) % s.r3.length;
+            const gg = s.g * 0.70710678;             // equal power split across the pair
+            L[base + i] += vl * gg;
+            R[base + i] += vr * gg;
+            continue;
+          }
           vv = apStep(s.b1, s.i1, vv); s.i1 = (s.i1 + 1) % s.b1.length;
           vv = apStep(s.b2, s.i2, vv); s.i2 = (s.i2 + 1) % s.b2.length;
+          if (s.b3) { vv = apStep(s.b3, s.i3, vv); s.i3 = (s.i3 + 1) % s.b3.length; }
         }
         const v = vv * s.g;
         L[base + i] += Math.cos(th) * v;
@@ -395,7 +561,7 @@ function render({ name, states, waypoints, seconds, music, model }) {
 function loadState(file) {
   const D = loadDump(file);
   const em = D.emitters[0];
-  const G = buildGraph(D, CELL);
+  const G = USE_CELLS ? buildGraph(D, CELL) : Rg.asGraph(D, 0.62);
   return { D, em, cfg: D.cfg, evNew: makeNewEvaluator(D, G, em), evOld: makeEvaluator(D, em) };
 }
 
