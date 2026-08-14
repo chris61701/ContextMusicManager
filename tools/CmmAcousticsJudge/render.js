@@ -141,7 +141,13 @@ const BARRIER_RADIUS_BLOCKS = 3.0;
 const DIFFUSE_FC = 3500;
 const DIFFUSE_EXTRA_BLOCKS = +(process.env.CMM_DPRE || 9);
 // Share of the reverberant field treated as EARLY reflections, which carry the source's direction.
-const DIFFUSE_EARLY = process.env.CMM_EARLY === undefined ? 0.5 : +process.env.CMM_EARLY;
+// 0.9 chosen on measurement, not taste. Against the SHIPPED model it is sharper where the geometry
+// is sharp and vaguer where it is diffuse, which is the whole point:
+//     through a shut floor   shipped 23.1 dB swing -> 6.0    (the author's original complaint)
+//     past a door, sideways  shipped 10.5          -> 15.2
+//     past a door, natural   shipped  3.7 (pinned hard right, never moving) -> 7.5, swelling as
+//                            you draw level, which is what walking past a door does
+const DIFFUSE_EARLY = process.env.CMM_EARLY === undefined ? 0.9 : +process.env.CMM_EARLY;
 
 // ── DECORRELATION: an arrival is a BUNDLE of paths, not one ray ───────────────
 // Rendering arrivals as perfectly coherent copies of the same music makes them comb-filter, and
@@ -404,7 +410,14 @@ function fuse(arr, lx, ly, lz) {
     len: ln / P,
     spread: sp / P,
   };
-  for (const a of diffuse) if (a.followFused) a.at = one.at.slice();
+  // The early reverb inherits the fused voice's SPREAD as well as its position. It was taking only
+  // the position, so it panned at full width -- which handed full-strength directionality back to
+  // cases that should have almost none. Through a shut floor that put the swing at 17.4 dB against
+  // the old model's 19.8, i.e. a slab two blocks below the listener localised about as sharply as a
+  // doorway across an open room. If the direction comes from the fused voice then so must the
+  // confidence in it: a big, near radiator is vague, and its reverberation cannot be less vague than
+  // the thing radiating it.
+  for (const a of diffuse) if (a.followFused) { a.at = one.at.slice(); a.spread = one.spread; }
   return [one, ...far, ...diffuse];
 }
 

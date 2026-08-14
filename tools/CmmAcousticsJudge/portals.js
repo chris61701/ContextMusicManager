@@ -782,7 +782,18 @@ function makeNewEvaluator(D, G, src) {
         const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
         const pw = p.w * dbToPow(-(SLOPE * len + m));
         fanPow += pw;
-        fanOpenPow += openAtF(qx, qy, qz) * pw;         // this patch's share that passed through air
+        // "Came through air" is a property of the PATH, not of where the sample point happens to sit.
+        // This asked openAtF(patch) -- is the point itself in air -- which is a different question and
+        // the wrong one: a patch sitting in air on the FAR SIDE of a barrier still had to cross that
+        // barrier to be reached. Through a shut wooden floor it reported 82% of the energy as having
+        // come through air, so the renderer placed that 82% at the speaker and panned it at full
+        // strength, and a slab two blocks underfoot localised about as sharply as a doorway across an
+        // open room. The author heard it twice and was right twice.
+        //
+        // The honest test is how much material the two legs actually crossed. Under MIN_TRANSMIT_DB
+        // the path is an opening; above it, a partition. That constant already exists for exactly
+        // this distinction, and ramping over it keeps the split continuous.
+        fanOpenPow += (1 - sstep(0, 2 * MIN_TRANSMIT_DB, m)) * pw;
       }
       // If the disc found no barrier at all, the run it located is not a surface the listener is
       // behind -- fall back to the straight-line estimate rather than reporting silence.
