@@ -1,6 +1,9 @@
 // ───────────────────────────────────────────────────────────────────────────────
 // REAL GEOMETRY — the same smoothness question, asked of game-truth captures
 // ───────────────────────────────────────────────────────────────────────────────
+// Reports the SUMMED field over every speaker in the capture -- see measure() for why a
+// single-emitter number is an artefact rather than a measurement.
+//
 // smooth.js measures four hand-drawn routes on synthetic two-room geometry. That is the right
 // place to develop a term, because the geometry is known and a number can be traced to a cause.
 // It is the wrong place to be confident, because real POIs contain shapes nobody thought to
@@ -31,11 +34,25 @@ const { checkDump } = require("./dumpcheck.js");
 const SLABS = parseInt((process.argv.find(a => a.startsWith("--slabs=")) || "=1").split("=")[1], 10) || 1;
 const OPEN_MIN = 0.9;   // only measure where a listener could actually stand
 
+// THE SUM OVER EVERY EMITTER, because that is the only thing anyone hears. Measuring one speaker
+// in isolation measures a quantity the game never outputs, and it overstates roughness badly: the
+// store capture has EIGHT speakers, and its worst gradient is 6.29 dB/block for speaker 0 alone
+// against 3.88 for the sum, with the share of samples over the step limit falling 0.98% -> 0.04%,
+// a factor of twenty-five. Chasing the single-emitter number would have been chasing an artefact
+// of the harness -- method rule 4, on a harness I wrote myself two commits ago.
+//
+// Speakers far apart barely benefit (the bunker's four move 5.52 -> 5.27), so this does not hide
+// real defects; it removes a fictional one.
 function measure(file) {
   const D = loadDump(file);
   const em = D.emitters[0];
   const G = Rg.asGraph(D, 0.62);
-  const ev = P.makeNewEvaluator(D, G, em);
+  const evs = D.emitters.map(e => P.makeNewEvaluator(D, G, e));
+  const ev = (x, y, z) => {
+    let pw = 0;
+    for (const e of evs) { const t = e(x, y, z).total; if (isFinite(t)) pw += Math.pow(10, t / 10); }
+    return { total: pw > 0 ? 10 * Math.log10(pw) : -Infinity };
+  };
 
   let n = 0, sum = 0, worst = 0, wat = null, over1 = 0, over3 = 0;
   for (let s = 0; s < SLABS; s++) {
@@ -57,7 +74,7 @@ function measure(file) {
         }
       }
   }
-  return { rooms: G.rooms.length, apertures: G.apertures.length, n, worst, wat,
+  return { rooms: G.rooms.length, apertures: G.apertures.length, emitters: D.emitters.length, n, worst, wat,
            mean: sum / (n || 1), over1: 100 * over1 / (n || 1), over3: 100 * over3 / (n || 1) };
 }
 
@@ -67,7 +84,7 @@ function main() {
   const files = fs.readdirSync(dir).filter(f => f.endsWith(".json")).map(f => path.join(dir, f));
   console.log(`\nREAL-GEOMETRY GRADIENT, dB per block, over every standable voxel of ${SLABS} slab(s).`);
   console.log(`Past ~3 dB/block reads as a step rather than a slope.\n`);
-  console.log(`${"dump".padEnd(26)}${"worst".padStart(7)}${"mean".padStart(7)}${">1".padStart(8)}${">3".padStart(8)}   rooms/aper  worst at`);
+  console.log(`${"dump".padEnd(26)}${"worst".padStart(7)}${"mean".padStart(7)}${">1".padStart(8)}${">3".padStart(8)}   spk rooms/aper  worst at`);
   console.log("-".repeat(88));
   let skipped = 0;
   for (const f of files) {
@@ -77,7 +94,7 @@ function main() {
     const m = measure(f);
     console.log(`${name.padEnd(26)}${m.worst.toFixed(2).padStart(7)}${m.mean.toFixed(2).padStart(7)}`
       + `${m.over1.toFixed(1).padStart(7)}%${m.over3.toFixed(2).padStart(7)}%   `
-      + `${(m.rooms + "/" + m.apertures).padEnd(11)} (${(m.wat || []).join(",")})`);
+      + `${String(m.emitters).padStart(3)} ${(m.rooms + "/" + m.apertures).padEnd(11)} (${(m.wat || []).join(",")})`);
   }
   if (skipped) console.log(`\n${skipped} capture(s) skipped as invalid — recapture with the POI loaded.`);
   console.log();

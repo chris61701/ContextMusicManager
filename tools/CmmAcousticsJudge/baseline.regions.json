@@ -108,21 +108,21 @@
  "real": [
   {
    "dump": "bunker_00.100",
-   "worst": 5.52,
-   "mean": 0.2,
+   "worst": 5.27,
+   "mean": 0.17,
    "over3": 0.37
   },
   {
    "dump": "cave_09.7",
-   "worst": 0.6,
-   "mean": 0.15,
+   "worst": 0.48,
+   "mean": 0.12,
    "over3": 0
   },
   {
    "dump": "store_electronics_02.755",
-   "worst": 6.29,
-   "mean": 0.33,
-   "over3": 0.98
+   "worst": 3.88,
+   "mean": 0.17,
+   "over3": 0.04
   }
  ]
 }
