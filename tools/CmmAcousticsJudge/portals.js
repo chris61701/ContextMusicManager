@@ -83,6 +83,7 @@ const AIR_FLAG = 1;
 // The radius is the first Fresnel zone's scale: sqrt(lambda*d)/2 is about 2 blocks at 500 Hz
 // over 23 m and about 4 at 100 Hz, so a few blocks is the right order -- the old cross was
 // roughly the right SIZE and wrong in every other respect.
+const DIFF_VOX = process.env.CMM_DIFFVOX ? process.env.CMM_DIFFVOX.split(',').map(Number) : null;
 const CAND_DBG = process.env.CMM_CANDDBG ? process.env.CMM_CANDDBG.split(',').map(Number) : null;
 const FRESNEL_R = 3.0;
 // Rings as [radius fraction, sample count]; annulus boundaries at 0.25/0.75/1.0 of R give
@@ -1164,8 +1165,23 @@ function makeNewEvaluator(D, G, src) {
         const legMat = process.env.CMM_NOLEGMAT === '1' ? 0 : legDb(D, A.px, A.py, A.pz, lx, ly, lz);
         const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg - legMat);
         pTot += pf * thru;
+        if (DIFF_VOX && Math.abs(lx - DIFF_VOX[0] - 0.5) < 0.01
+                     && Math.abs(ly - DIFF_VOX[1] - 0.5) < 0.01
+                     && Math.abs(lz - DIFF_VOX[2] - 0.5) < 0.01 && pf * thru > 0)
+          console.error(`    aper rooms ${A.roomA}/${A.roomB}`.padEnd(22)
+            + ` field=${powToDb(pf).toFixed(1)}`.padEnd(14)
+            + ` leg=${leg.toFixed(1)}`.padEnd(10)
+            + ` legMat=${legMat.toFixed(1)}`.padEnd(14)
+            + ` constrict=${constrictDb(A.throat).toFixed(1)}`.padEnd(16)
+            + ` -> ${powToDb(pf * thru).toFixed(1)} dB`);
       }
       if (pTot > 0) diffDb = powToDb(pTot);
+      if (DIFF_VOX && Math.abs(lx - DIFF_VOX[0] - 0.5) < 0.01
+                   && Math.abs(ly - DIFF_VOX[1] - 0.5) < 0.01
+                   && Math.abs(lz - DIFF_VOX[2] - 0.5) < 0.01)
+        console.error(`    own room ${roomOf(nd)} field term = `
+          + `${roomField(nd) > 0 ? powToDb(roomField(nd) * mixFade).toFixed(1) : "-inf"} dB`
+          + `   TOTAL diffuse = ${diffDb.toFixed(1)} dB`);
     }
     if (diffDb > -110) {
       arrivals.push({ db: diffDb, w: 1, px: lx, py: ly, pz: lz, legMat: 0, len: d, isDiffuse: true });

@@ -122,13 +122,25 @@ function survey(file, label) {
         // apertures can join the same pair of rooms, so a per-room count under-states the legitimate
         // energy sum and flags honest arithmetic as amplification -- it put the store at 1.9% the
         // moment openings began absorbing and the fields got closer together.
+        // THE BOUND MUST USE THE SAME SET THE MODEL SUMS OVER. It was restricted to apertures touching
+        // the listener's own room, which is a reference set of TWO where the model sums over dozens --
+        // the membership gate was deliberately removed from the model so that topology could not decide
+        // WHETHER reverberation arrives, only how much. Instrumenting the model's own accumulation
+        // settled it: a listener in room 7 draws on openings belonging to rooms 0/4, 0/6, 0/8, 8/9 and
+        // 9/10, none of which border room 7, and it is right to do so -- those openings radiate and the
+        // listener can see them, with legMat charging whatever lies between.
+        //
+        // So the bound sums over every aperture, taking each one's radiating field the way the model
+        // does: both rooms behind it, excluding the listener's own.
         let best = ev.fieldDb[myRoom], n = best > -900 ? 1 : 0;
         for (const A of G.apertures) {
-          if (A.roomA !== myRoom && A.roomB !== myRoom) continue;
-          const other = A.roomA === myRoom ? A.roomB : A.roomA;
-          const f = ev.fieldDb[other];
-          if (f === undefined || f <= -900) continue;
-          n++;                                  // one per APERTURE, matching how the model sums
+          let pf = 0;
+          if (A.roomA >= 0 && A.roomA !== myRoom) pf += Math.pow(10, (ev.fieldDb[A.roomA] || -999) / 10);
+          if (A.roomB >= 0 && A.roomB !== myRoom) pf += Math.pow(10, (ev.fieldDb[A.roomB] || -999) / 10);
+          if (pf <= 0) continue;
+          const f = 10 * Math.log10(pf);
+          if (f <= -900) continue;
+          n++;
           if (f > best) best = f;
         }
         if (best > -900) {

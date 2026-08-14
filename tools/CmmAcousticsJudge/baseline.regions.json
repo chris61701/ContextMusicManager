@@ -4,7 +4,7 @@
    "name": "S2 door OPEN, wood wall",
    "pass": true,
    "probe": "B on-axis",
-   "value": -3.1
+   "value": -3.2
   },
   {
    "name": "S1 door SHUT, wood wall",
@@ -52,22 +52,22 @@
    "name": "D floor OPEN hatch, wood floor",
    "pass": true,
    "probe": "B on-axis",
-   "value": -2.8
+   "value": -2.9
   }
  ],
  "smooth": [
   {
    "route": "approach",
    "model": "new",
-   "worst": 1.42,
-   "mean": 0.19,
+   "worst": 1.63,
+   "mean": 0.2,
    "over1": 1.6,
    "over3": 0
   },
   {
    "route": "pastdoor",
    "model": "new",
-   "worst": 0.69,
+   "worst": 0.73,
    "mean": 0.18,
    "over1": 0,
    "over3": 0
@@ -75,8 +75,8 @@
   {
    "route": "throughdoor",
    "model": "new",
-   "worst": 1.42,
-   "mean": 0.22,
+   "worst": 1.63,
+   "mean": 0.23,
    "over1": 3.1,
    "over3": 0
   },
@@ -91,7 +91,7 @@
   {
    "route": "pasthatch",
    "model": "new",
-   "worst": 2.39,
+   "worst": 2.4,
    "mean": 0.55,
    "over1": 20.6,
    "over3": 0
@@ -108,21 +108,21 @@
  "real": [
   {
    "dump": "bunker_00.100",
-   "worst": 2.24,
-   "mean": 0.17,
+   "worst": 2.57,
+   "mean": 0.22,
    "over3": 0
   },
   {
    "dump": "cave_09.7",
-   "worst": 1.59,
-   "mean": 0.29,
+   "worst": 1.31,
+   "mean": 0.25,
    "over3": 0
   },
   {
    "dump": "store_electronics_02.755",
-   "worst": 10.08,
-   "mean": 0.4,
-   "over3": 3.64
+   "worst": 4.58,
+   "mean": 0.26,
+   "over3": 0.16
   }
  ]
 }
