@@ -607,39 +607,52 @@ function makeNewEvaluator(D, G, src) {
   // ~7 dB of pure distance into a quantity that has no distance in it -- a shut interior door read
   // -15 dB where the author's words put it near -6. One Jacobi iteration is enough because wall
   // transmission is a large loss, so the coupling is weak and a second pass would barely move.
-  const nRegions = G.nodes.length;
-  const fieldOf = new Float64Array(nRegions);
-  {
-    const direct = new Float64Array(nRegions);
-    for (let rid = 0; rid < nRegions; rid++) {
-      const node = G.nodes[rid];
-      if (!node || node.roomR === undefined) continue;
+  // Solved per ROOM (the acoustic enclosure), never per routing segment. A room has ONE diffuse
+  // field however the pathfinder subdivides it -- giving each corridor segment its own stepped the
+  // level whenever a listener crossed a cut inside a single room (approach hit 11.3 dB/block).
+  //   ROOM    = merged region: one enclosure, one field, one room constant
+  //   SEGMENT = routing node, so a bend is not treated as line of sight
+  const RM = G.rooms || null;
+  const nRooms = RM ? RM.length : 0;
+  const roomOf = (rid) => (rid >= 0 && G.nodes[rid] && G.nodes[rid].room !== undefined)
+    ? G.nodes[rid].room : -1;
+  const fieldOf = new Float64Array(Math.max(1, nRooms));
+  if (RM) {
+    // pass 1: the source, plus power arriving at this room's real OPENINGS
+    const direct = new Float64Array(nRooms);
+    for (let rid = 0; rid < G.nodes.length; rid++) {
+      const rm = roomOf(rid);
+      if (rm < 0) continue;
       let pIn = 0;
       if (seeded.has(rid)) pIn += dbToPow(-seeded.get(rid));
-      for (const pid of node.edges) {
+      for (const pid of G.nodes[rid].edges) {
         const pc = cost[pid];
         if (!pc) continue;
+        const P = G.portals[pid];
+        const other = P.a === rid ? P.b : P.a;
+        if (roomOf(other) === rm) continue;      // a routing cut inside the room is not an inlet
         pIn += dbToPow(-(pc.add - constrictDb(pc.bneck)));
       }
-      direct[rid] = pIn > 0 ? 4 * pIn / Math.max(1, node.roomR) : 0;
+      if (pIn > 0) direct[rm] += pIn;
     }
-    for (let rid = 0; rid < nRegions; rid++) {
-      const node = G.nodes[rid];
-      if (!node || node.roomR === undefined) continue;
-      // Power INCIDENT on a surface of area S standing in a diffuse field is P*S/R, not
-      // field*S -- the standard relation carries a factor of four that cancels the one in
-      // 4P/R. Getting that wrong made the receiving room LOUDER than the source room
-      // (S4-in-wood read +2.4 dB above the control), which is a dimensional error rather
-      // than a calibration one.
+    for (let rm = 0; rm < nRooms; rm++)
+      direct[rm] = direct[rm] > 0 ? 4 * direct[rm] / Math.max(1, RM[rm].roomR) : 0;
+    // pass 2: power driven through SHARED WALLS by the neighbouring rooms. Power INCIDENT on a
+    // surface of area S in a diffuse field is P*S/R, not field*S -- the standard relation carries a
+    // factor of four cancelling the one in 4P/R, and getting that wrong made the receiving room
+    // LOUDER than the source room. One Jacobi iteration suffices: wall transmission is a large
+    // loss, so the coupling is weak.
+    for (let rm = 0; rm < nRooms; rm++) {
+      const node = RM[rm];
       let pWall = 0;
       for (const w of (node.walls || [])) {
         const src = direct[w.other];
         if (src <= 0) continue;
-        const nodeOther = G.nodes[w.other];
-        const pOther = src * Math.max(1, nodeOther.roomR) / 4;      // back out that room's power
-        pWall += pOther * w.area / Math.max(1, nodeOther.roomR) * w.tau;
+        const other = RM[w.other];
+        const pOther = src * Math.max(1, other.roomR) / 4;
+        pWall += pOther * w.area / Math.max(1, other.roomR) * w.tau;
       }
-      fieldOf[rid] = direct[rid] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0);
+      fieldOf[rm] = direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0);
     }
   }
 
@@ -753,18 +766,25 @@ function makeNewEvaluator(D, G, src) {
     // neighbour's arrival loses its spreading loss and tends to full strength, so the total tends
     // to (own + neighbour). Cross over and the two swap roles, and the SUM is symmetric. No blend
     // weight is needed and no membership decision survives.
-    const roomField = (rid) => fieldOf[rid] || 0;
+    const roomField = (rid) => { const rm = roomOf(rid); return rm >= 0 ? (fieldOf[rm] || 0) : 0; };
 
     let diffDb = -120;
     if (nd >= 0) {
       let pTot = roomField(nd) * dbToPow(DIFFUSE_CAL);
-      for (const pid of G.nodes[nd].edges) {
-        const P = G.portals[pid];
-        const other = P.a === nd ? P.b : P.a;
-        const pf = roomField(other);
+      // Enumerated over the FIXED SET OF APERTURES, not over the listener's segment's edges.
+      // Gating on segment adjacency was gating on bookkeeping: standing one corridor segment deeper
+      // into a room you received nothing from the room next door, even a few blocks from its open
+      // doorway, so the level jumped 4.1 dB the moment you stepped into the segment that happened
+      // to touch it. Distance and constriction already decide how much arrives -- topology must
+      // not also decide WHETHER it arrives. Same rule as the air arrivals.
+      const myRoom = roomOf(nd);
+      for (const A of G.apertures) {
+        const other = A.roomA === myRoom ? A.roomB : A.roomA === undefined ? -1 : A.roomA;
+        if (A.roomA !== myRoom && A.roomB !== myRoom) continue;   // not an opening of this room
+        const pf = fieldOf[other] || 0;
         if (pf <= 0) continue;
-        const leg = Math.hypot(P.px - lx, P.py - ly, P.pz - lz);
-        const thru = dbToPow(constrictDb(P.openFrac) - SLOPE * leg + DIFFUSE_CAL);
+        const leg = Math.hypot(A.px - lx, A.py - ly, A.pz - lz);
+        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg + DIFFUSE_CAL);
         pTot += pf * thru;
       }
       if (pTot > 0) diffDb = powToDb(pTot);

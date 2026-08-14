@@ -38,6 +38,8 @@ const OPEN_EPS = 0.02;
 // First-Fresnel-zone area in blocks^2 at typical room geometry: radius ~2.5 blocks for music
 // wavelengths over ~10 block path legs. The coherent extent of the wavefront an opening samples.
 const FRESNEL_AREA = 20.0;
+const SEG_MIN_STEP = 6;      // blocks: shortest a corridor segment may be
+const SEG_STEP_MULT = 2.5;   // segment length as a multiple of the space's own thickness
 const THICK_CAP = 6.0;  // clearance beyond this is just "open"; do not subdivide it
 const SEED_MIN = 1.6;   // a room's core must be at least this open; below it, join rather than seed
 
@@ -250,6 +252,55 @@ function build(D, mergeH = 0.62) {
     coreOf[ra] = Math.max(coreOf[ra], coreOf[rb]);       // deeper now, so harder to absorb the next
     merged++;
   }
+  // ── 5. SPLIT ELONGATED REGIONS ────────────────────────────────────────────────
+  // A tunnel has no pinch, so the merge criterion correctly keeps it whole -- and that is wrong
+  // acoustically, because the model assumes LINE OF SIGHT within a region and you cannot see round
+  // a bend. Measured on the real cave dump: the whole tunnel system came out as one 382k-voxel
+  // region and the longest air route the model found was exactly the straight-line distance, ratio
+  // 1.00 everywhere. No tunnel routing happened at all, which is why caves could never work.
+  //
+  // So a region that is much longer than it is thick is cut into segments along its long axis, at
+  // intervals of a few times its thickness. The cuts become ordinary boundaries with the local
+  // cross-section as their area -- which is what corridor subdivision does in any portal system.
+  const segOf = new Int32Array(D.n).fill(-1);
+  let segCount = 0;
+  {
+    const acc = new Map();
+    for (let i = 0; i < D.n; i++) {
+      if (open[i] <= OPEN_EPS) continue;
+      const root = find(label[i]);
+      let a = acc.get(root);
+      if (!a) { a = { n: 0, x0: 1e9, y0: 1e9, z0: 1e9, x1: -1e9, y1: -1e9, z1: -1e9, tsum: 0 }; acc.set(root, a); }
+      const y = Math.floor(i / (D.sx * D.sz)), rem = i - y * D.sx * D.sz;
+      const z = Math.floor(rem / D.sx), x = rem - z * D.sx;
+      a.n++; a.tsum += thick[i];
+      if (x < a.x0) a.x0 = x; if (x > a.x1) a.x1 = x;
+      if (y < a.y0) a.y0 = y; if (y > a.y1) a.y1 = y;
+      if (z < a.z0) a.z0 = z; if (z > a.z1) a.z1 = z;
+    }
+    const plan = new Map();
+    for (const [root, a] of acc) {
+      const ex = [a.x1 - a.x0 + 1, a.y1 - a.y0 + 1, a.z1 - a.z0 + 1];
+      const axis = ex.indexOf(Math.max(...ex));
+      const meanT = Math.max(1, a.tsum / a.n);
+      const step = Math.max(SEG_MIN_STEP, meanT * SEG_STEP_MULT);
+      if (ex[axis] / step < 2) continue;                    // compact enough: leave it whole
+      plan.set(root, { axis, step, lo: [a.x0, a.y0, a.z0][axis] });
+    }
+    for (let i = 0; i < D.n; i++) {
+      if (open[i] <= OPEN_EPS) continue;
+      const root = find(label[i]);
+      const p = plan.get(root);
+      if (!p) { segOf[i] = 0; continue; }
+      const y = Math.floor(i / (D.sx * D.sz)), rem = i - y * D.sx * D.sz;
+      const z = Math.floor(rem / D.sx), x = rem - z * D.sx;
+      const c = [x, y, z][p.axis];
+      segOf[i] = Math.floor((c - p.lo) / p.step);
+    }
+    for (let i = 0; i < D.n; i++) if (segOf[i] > segCount) segCount = segOf[i];
+    segCount++;
+  }
+
   const remap = new Map();
   for (const r of regions) { const root = find(r.id); if (!remap.has(root)) remap.set(root, remap.size); }
   const kept = remap.size;
@@ -269,7 +320,9 @@ function build(D, mergeH = 0.62) {
            // rather than find() alone: ports carry remapped ids, and mixing the two id spaces
            // left room A with no edges at all -- disconnected from the graph, so no aperture
            // route existed and only the transmission path survived.
-           regionOf: a => remap.get(find(a)) };
+           regionOf: a => remap.get(find(a)), segOf, segCount,
+           // final id combines the merged region and its corridor segment
+           finalOf: (rawLabel, i) => remap.get(find(rawLabel)) * segCount + (segOf[i] < 0 ? 0 : segOf[i]) };
 }
 
 function main() {
@@ -304,6 +357,7 @@ module.exports = { build, thickness, segment };
 // area and the power transmission along that short crossing.
 const WALL_MAX_THICK = 3;
 function wallLinks(D, open, label, regionOf) {
+  // `label` here is the FINAL region id per voxel and regionOf is the identity.
   const sx = D.sx, sy = D.sy, sz = D.sz, li = (x, y, z) => x + sx * (z + sz * y);
   const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
   const links = new Map();
@@ -311,7 +365,7 @@ function wallLinks(D, open, label, regionOf) {
     const i = li(x, y, z);
     if (open[i] <= OPEN_EPS) continue;
     const a = regionOf(label[i]);
-    if (a === undefined) continue;
+    if (a === undefined || a < 0) continue;
     for (const [dx, dy, dz] of dirs) {
       let nx = x + dx, ny = y + dy, nz = z + dz, steps = 0;
       // must start with material, or this is an opening and the aperture path already has it
@@ -326,7 +380,7 @@ function wallLinks(D, open, label, regionOf) {
       const j = li(nx, ny, nz);
       if (open[j] <= OPEN_EPS) continue;
       const b = regionOf(label[j]);
-      if (b === undefined || b === a) continue;
+      if (b === undefined || b < 0 || b === a) continue;
       const lossDb = segDbAt(D, D.x0 + x + 0.5, D.y0 + y + 0.5, D.z0 + z + 0.5,
                                 D.x0 + nx + 0.5, D.y0 + ny + 0.5, D.z0 + nz + 0.5);
       const lo = Math.min(a, b), hi = Math.max(a, b), k = lo * 1e7 + hi;
@@ -357,80 +411,144 @@ function asGraph(D, mergeH) {
   const r = build(D, mergeH);
   const { label, thick } = r;
   const open = makeOpenTest(D);
-
-  // regions surviving the merge, renumbered, with weighted centroids
-  const nodeOf = new Int32Array(D.n).fill(-1);
-  const acc = new Map();
   const sx = D.sx, sy = D.sy, sz = D.sz, li = (x, y, z) => x + sx * (z + sz * y);
-  // r.label holds RAW labels; map them through the merge by re-deriving from ports is unsafe, so
-  // rebuild from the label field using the same union the build performed (exposed as r.rootOf).
+
+  // Final region id per voxel: the merged region combined with its corridor segment. Rebuilt from
+  // scratch rather than patched onto build()'s ports, because the segment cuts create boundaries
+  // that pass never saw.
+  // TWO LEVELS OF STRUCTURE, and conflating them broke the gate immediately.
+  //   ROOM    = the merged region. One acoustic enclosure, ONE diffuse field.
+  //   SEGMENT = a corridor slice of a room. A routing node, so a bend is not line of sight.
+  // Cutting a room into segments for routing also gave each segment its own diffuse field, and a
+  // segment has less surface than its room and so a different room constant -- crossing a cut
+  // INSIDE one room stepped the level (approach went to 11.3 dB/block). A room's reverberation
+  // does not care how the pathfinder subdivides it.
+  const rawOf = new Int32Array(D.n).fill(-1);
+  const roomOfVox = new Int32Array(D.n).fill(-1);
+  const seen = new Map(), roomSeen = new Map();
+  for (let i = 0; i < D.n; i++) {
+    if (open[i] <= OPEN_EPS) continue;
+    const f = r.finalOf(label[i], i);
+    if (f === undefined || Number.isNaN(f)) continue;
+    let id = seen.get(f);
+    if (id === undefined) { id = seen.size; seen.set(f, id); }
+    rawOf[i] = id;
+    const rm = r.regionOf(label[i]);
+    let rid = roomSeen.get(rm);
+    if (rid === undefined) { rid = roomSeen.size; roomSeen.set(rm, rid); }
+    roomOfVox[i] = rid;
+  }
+  const nodeOf = rawOf;
+  const N = seen.size;
+
+  // per-region volume, centroid, enclosure surface and absorption
+  const st = Array.from({ length: N }, () => ({ n: 0, sx: 0, sy: 0, sz: 0, surf: 0, absorb: 0 }));
+  const nb6 = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
   for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
     const i = li(x, y, z);
-    if (open[i] <= OPEN_EPS) continue;
-    const id = r.regionOf(label[i]);
-    if (id === undefined) continue;
-    nodeOf[i] = id;
-    let a = acc.get(id);
-    if (!a) { a = { n: 0, sx: 0, sy: 0, sz: 0, surf: 0, absorb: 0 }; acc.set(id, a); }
+    const id = nodeOf[i];
+    if (id < 0) continue;
+    const a = st[id];
     a.n++; a.sx += x; a.sy += y; a.sz += z;
+    for (const [dx, dy, dz] of nb6) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      const oob = nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz;
+      if (!oob && open[li(nx, ny, nz)] > OPEN_EPS) continue;     // opening or same air, not surface
+      const alpha = oob ? 0.95
+        : Math.max(0.10, Math.min(0.85, 0.12 + 0.5 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
+      a.surf++; a.absorb += alpha;
+    }
   }
-  // surface/absorption must be summed over the RAW regions that merged into each final one
-  for (const reg of r.regions) {
-    const id = r.regionOf(reg.id);
-    if (id === undefined) continue;
-    const a = acc.get(id);
-    if (!a) continue;
-    a.surf += reg.surf || 0; a.absorb += reg.absorb || 0;
+  const nRooms = roomSeen.size;
+  const rst = Array.from({ length: nRooms }, () => ({ n: 0, surf: 0, absorb: 0 }));
+  const nodeRoom = new Int32Array(N).fill(0);
+  for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+    const i = li(x, y, z); const id = nodeOf[i];
+    if (id < 0) continue;
+    const rid = roomOfVox[i];
+    nodeRoom[id] = rid;
+    const a = rst[rid];
+    a.n++;
+    for (const [dx, dy, dz] of nb6) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      const oob = nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz;
+      if (!oob && open[li(nx, ny, nz)] > OPEN_EPS) continue;
+      const alpha = oob ? 0.95
+        : Math.max(0.10, Math.min(0.85, 0.12 + 0.5 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
+      a.surf++; a.absorb += alpha;
+    }
   }
-  const nodes = [];
-  for (let id = 0; id < r.kept; id++) {
-    const a = acc.get(id) || { n: 1, sx: 0, sy: 0, sz: 0, surf: 6, absorb: 0.6 };
-    nodes.push({
-      id, n: a.n, throat: 1,
-      px: D.x0 + a.sx / a.n + 0.5, py: D.y0 + a.sy / a.n + 0.5, pz: D.z0 + a.sz / a.n + 0.5,
-      tpx: D.x0 + a.sx / a.n + 0.5, tpy: D.y0 + a.sy / a.n + 0.5, tpz: D.z0 + a.sz / a.n + 0.5,
-      // room constant R = S*alpha/(1-alpha); the diffuse field is 4*P_in/R
-      surf: Math.max(1, a.surf), alpha: a.surf > 0 ? a.absorb / a.surf : 0.5,
-      get roomR() { const al = Math.max(0.02, Math.min(0.95, this.alpha)); return this.surf * al / (1 - al); },
-      edges: [],
-    });
+  const rooms = rst.map((a, id) => ({
+    id, n: Math.max(1, a.n),
+    surf: Math.max(1, a.surf), alpha: a.surf > 0 ? a.absorb / a.surf : 0.5,
+    get roomR() { const al = Math.max(0.02, Math.min(0.95, this.alpha)); return this.surf * al / (1 - al); },
+    walls: [],
+  }));
+
+  const nodes = st.map((a, id) => ({
+    id, n: Math.max(1, a.n), throat: 1,
+    px: D.x0 + a.sx / Math.max(1, a.n) + 0.5,
+    py: D.y0 + a.sy / Math.max(1, a.n) + 0.5,
+    pz: D.z0 + a.sz / Math.max(1, a.n) + 0.5,
+    tpx: D.x0 + a.sx / Math.max(1, a.n) + 0.5,
+    tpy: D.y0 + a.sy / Math.max(1, a.n) + 0.5,
+    tpz: D.z0 + a.sz / Math.max(1, a.n) + 0.5,
+    room: nodeRoom[id],
+    edges: [],
+  }));
+
+  // boundaries between final regions, from real voxel faces
+  const pm = new Map();
+  const addFace = (a, b, wx, wy, wz, aw) => {
+    const lo = Math.min(a, b), hi = Math.max(a, b), k = lo * 1e7 + hi;
+    let p = pm.get(k);
+    if (!p) { p = { a: lo, b: hi, area: 0, sx: 0, sy: 0, sz: 0 }; pm.set(k, p); }
+    p.area += aw; p.sx += wx * aw; p.sy += wy * aw; p.sz += wz * aw;
+  };
+  for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+    const i = li(x, y, z); const a = nodeOf[i];
+    if (a < 0) continue;
+    const chk = (nx, ny, nz, cx, cy, cz) => {
+      if (nx >= sx || ny >= sy || nz >= sz) return;
+      const j = li(nx, ny, nz); const b = nodeOf[j];
+      if (b < 0 || b === a) return;
+      addFace(a, b, D.x0 + cx, D.y0 + cy, D.z0 + cz, Math.min(open[i], open[j]));
+    };
+    chk(x + 1, y, z, x + 1, y + 0.5, z + 0.5);
+    chk(x, y + 1, z, x + 0.5, y + 1, z + 0.5);
+    chk(x, y, z + 1, x + 0.5, y + 0.5, z + 1);
   }
   const portals = [];
-  for (const p of r.ports) {
-    const a = p.a, b = p.b;                     // already final ids
-    if (a === b || a >= r.kept || b >= r.kept) continue;
-    // CONSTRICTION IS RELATIVE TO THE FRESNEL ZONE, not to a room or a cell.
-    // State the quantity (MODEL.md rule 1): openFrac is the share of the arriving WAVEFRONT that
-    // the opening actually passes. The wavefront's coherent extent is the first Fresnel zone --
-    // radius sqrt(lambda*d1*d2/(d1+d2)), which for music wavelengths over room distances is a
-    // couple of metres, so an area of order 10-50 blocks^2. An opening larger than that is
-    // effectively unconstricted; smaller, and it passes its share.
-    //
-    // Referencing a ROOM's cross-section was wrong by scale: it made a doorway in a large room
-    // read as -11.3 dB, suppressing the aperture arrival so the transmission path carried the
-    // sound and its roughness showed (the pastdoor regression). Referencing a CELL slice, as the
-    // grid did, happened to give about the right answer for an accidental reason -- a cell slice
-    // is coincidentally near Fresnel scale at cell=4. This is the same number for a stated reason.
+  for (const p of pm.values()) {
     const id = portals.length;
     portals.push({
-      a, b, area: p.area, openFrac: Math.min(1, p.area / FRESNEL_AREA),
-      px: p.px, py: p.py, pz: p.pz,
-      x0: Math.floor(p.px) - 1, y0: Math.floor(p.py) - 1, z0: Math.floor(p.pz) - 1,
-      x1: Math.floor(p.px), y1: Math.floor(p.py), z1: Math.floor(p.pz),
+      a: p.a, b: p.b, area: p.area, openFrac: Math.min(1, p.area / FRESNEL_AREA),
+      px: p.sx / p.area, py: p.sy / p.area, pz: p.sz / p.area,
+      x0: Math.floor(p.sx / p.area) - 1, y0: Math.floor(p.sy / p.area) - 1, z0: Math.floor(p.sz / p.area) - 1,
+      x1: Math.floor(p.sx / p.area), y1: Math.floor(p.sy / p.area), z1: Math.floor(p.sz / p.area),
     });
-    nodes[a].edges.push(id); nodes[b].edges.push(id);
+    nodes[p.a].edges.push(id); nodes[p.b].edges.push(id);
   }
-  // A boundary IS an aperture. Position at the boundary centroid, throat from its openness.
-  const walls = wallLinks(D, open, label, a => r.regionOf(a));
+  // Wall links drive a ROOM's reverberation, so they are room-to-room.
+  const walls = wallLinks(D, open, roomOfVox, a => a);
   for (const w of walls) {
-    if (w.a >= nodes.length || w.b >= nodes.length) continue;
-    (nodes[w.a].walls = nodes[w.a].walls || []).push({ other: w.b, area: w.area, tau: w.tau });
-    (nodes[w.b].walls = nodes[w.b].walls || []).push({ other: w.a, area: w.area, tau: w.tau });
+    if (w.a >= nRooms || w.b >= nRooms) continue;
+    rooms[w.a].walls.push({ other: w.b, area: w.area, tau: w.tau });
+    rooms[w.b].walls.push({ other: w.a, area: w.area, tau: w.tau });
   }
-  const apertures = portals.map(p => ({
-    nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
-  }));
-  return { open, nodeOf, nodes, portals, apertures, walls, cell: 4, thick,
-           cellsWithAir: nodes.length, cellsSplit: 0, regionCount: nodes.length };
+  // Only a boundary between DIFFERENT ROOMS is an aperture. A corridor cut inside one room exists
+  // purely so the pathfinder does not treat a bend as line of sight -- it is not a constriction and
+  // it does not radiate. Treating every portal as an aperture put phantom radiators at every cut,
+  // which stepped the level as a listener crossed one (approach 8.5 dB/block).
+  const apertures = portals
+    .filter(p => nodes[p.a].room !== nodes[p.b].room)
+    .map(p => ({ nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
+                 // both rooms, so a listener anywhere can take a neighbour's reverberation through
+                 // this opening without needing to be in a segment that happens to touch it
+                 roomA: nodes[p.a].room, roomB: nodes[p.b].room }));
+  // A cut is also not a constriction for routing purposes: it passes everything.
+  for (const p of portals) if (nodes[p.a].room === nodes[p.b].room) p.openFrac = 1;
+  return { open, nodeOf, nodes, rooms, portals, apertures, walls, cell: 4, thick,
+           cellsWithAir: N, cellsSplit: 0, regionCount: N, roomCount: nRooms };
 }
 module.exports.asGraph = asGraph;
