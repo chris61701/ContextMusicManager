@@ -171,10 +171,14 @@ const MATRIX = [
   { wall: "wood",     door: "wood",  open: 0.0,  tag: "S1 door SHUT, wood wall" },
   // scenario #6 — mid-swing, should be gradual. Now that openness scales the leaf's loss
   // instead of clearing rows, the swing can be sampled as finely as we like.
-  { wall: "wood",     door: "wood",  open: 0.2,  tag: "S6 door 20% open" },
-  { wall: "wood",     door: "wood",  open: 0.4,  tag: "S6 door 40% open" },
-  { wall: "wood",     door: "wood",  open: 0.6,  tag: "S6 door 60% open" },
-  { wall: "wood",     door: "wood",  open: 0.8,  tag: "S6 door 80% open" },
+  // 5% increments. Four states was not a swing, it was five jumps: the geometry only existed at
+  // 0/20/40/60/80/100% open, so the render stepped the field five times and the author heard it as
+  // "that weird glitch". The door's timing is the carefully tuned part of the shipped system, so the
+  // swing has to be sampled finely enough that the animation, not the dump spacing, sets the shape.
+  ...Array.from({ length: 19 }, (_, i) => {
+    const o = (i + 1) * 0.05;
+    return { wall: "wood", door: "wood", open: +o.toFixed(2), tag: `S6 door ${Math.round(o * 100)}% open` };
+  }),
   // scenario #3 — heavy wall, doors shut: faint, material dependent
   { wall: "concrete", door: "wood",  open: 0.0,  tag: "S3 door SHUT, concrete wall" },
   // ... and the same shell with a CONCRETE door, which is the only version that can actually

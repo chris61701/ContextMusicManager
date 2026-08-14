@@ -41,6 +41,25 @@ const SLEW_MS = 40;            // parameter glide
 // time; this was simply never wired up. At roughly a block per metre a 60-block cave route lands
 // ~175 ms behind the direct sound, a plainly audible discrete echo.
 const SPEED_BLOCKS_PER_SEC = 343;
+// How fast a delay may move. A sprinting player changes a path length by a few blocks per second;
+// anything faster is the candidate set rearranging rather than motion, and a delay line whose read
+// pointer moves is a PITCH SHIFT, so an unbounded jump is heard as a bend. Generous enough for a
+// vehicle, tight enough that a route swap glides instead of warping.
+const DELAY_SLEW_BLOCKS_PER_SEC = +(process.env.CMM_DSLEW || 8);
+// Switches so each renderer change can be isolated instead of argued about:
+//   CMM_NODECOR=1   no per-slot diffusers (arrivals sum coherently, as before)
+//   CMM_NOSPREAD=1  no area-source pan softening (transmitted sound localises as a point)
+//   CMM_ATSPK=1     put transmitted sound back at the SPEAKER instead of at the barrier
+//   CMM_DSLEW=n     delay slew limit in blocks/s (large = effectively unlimited)
+// Measured WORSE and therefore off by default: approach went 3.0 -> 7.9 dB/s with the diffusers in.
+// The reasoning behind them still looks sound (an arrival stands for a bundle of paths, which add
+// incoherently, which is why the model sums power) but the measurement disagrees, and the
+// measurement wins. Kept behind CMM_DECOR=1 so it can be revisited with evidence rather than redone
+// from scratch. The real cause of the flanging turned out to be the merged transmitted arrival
+// jumping position, which is fixed properly above.
+const NO_DECOR = process.env.CMM_DECOR !== "1";
+const NO_SPREAD = process.env.CMM_NOSPREAD === "1";
+const AT_SPEAKER = process.env.CMM_ATSPK === "1";
 const MAX_DELAY = Math.ceil(SPEED_BLOCKS_PER_SEC ? (200 / SPEED_BLOCKS_PER_SEC) * SR : 1) + 4;
 
 // ── WAV io (PCM16 only; the test corpus is mono 16-bit 48k) ───────────────────
@@ -82,6 +101,17 @@ function writeWav(file, L, R) {
 
 // ── one-pole lowpass coefficient from a cutoff in Hz ─────────────────────────
 const coefFor = fc => 1 - Math.exp(-2 * Math.PI * Math.max(60, Math.min(20000, fc)) / SR);
+// ── AND THE FILTER MUST NOT ALSO BE A FADER ───────────────────────────────────
+// A one-pole lowpass throws away energy: its power gain on a flat spectrum is c/(2-c), which at
+// fc = 200 Hz is -19 dB. But the model's level ALREADY contains the barrier's attenuation -- that
+// is what solidDb is. So filtering on top of it charged for the wall twice, and transmitted sound
+// has been rendering up to 19 dB too quiet, with the error varying as the cutoff moved. MODEL.md's
+// line is "a wall is a filter, not a fader"; without this it was a filter AND a fader.
+//
+// Compensating restores unity power so the filter only SHAPES. The white-noise expression is used
+// rather than a per-source-spectrum one because the correction only has to be smooth and close --
+// what matters is that heavy filtering stops silently costing level.
+const lpMakeup = c => Math.sqrt((2 - c) / Math.max(1e-6, c));
 // Air travels through air: only distance dulls it, and gently.
 const airFc = len => 20000 * Math.exp(-Math.max(0, len) / 140);
 // Transmission is inherently lowpass -- highs do not survive mass. This is the cue that
@@ -90,8 +120,44 @@ const solidFc = matDb => 20000 * Math.pow(10, -Math.max(0, matDb) / 26);
 // The diffuse field has been absorbed off many surfaces before it reaches anyone, so it is dull,
 // and it has travelled further than the direct sound by construction. Both are stand-in constants
 // until the multi-tap tail exists.
+// The transmitting patch of a barrier is about the size of the Fresnel disc the model integrates
+// over, so that is how big the radiator is for localisation purposes.
+const BARRIER_RADIUS_BLOCKS = 3.0;
 const DIFFUSE_FC = 3500;
 const DIFFUSE_EXTRA_BLOCKS = 9;
+
+// ── DECORRELATION: an arrival is a BUNDLE of paths, not one ray ───────────────
+// Rendering arrivals as perfectly coherent copies of the same music makes them comb-filter, and
+// with only three to five of them the comb is coarse and sweeps as the listener moves. The author
+// heard it exactly: "pastdoor sounds fine if it is me passing several doors one after the other."
+// One doorway, several apparent doorways -- that is a sweeping notch, not geometry.
+//
+// It is also inconsistent with the model, which sums arrivals in POWER. A power sum is the
+// incoherent average, and incoherent is the physically right answer here: each modelled arrival
+// stands for a whole family of real paths that scattered off different surfaces, and those add
+// with random relative phase. Two coherent rays cancel; two bundles do not.
+//
+// So each slot gets its own pair of Schroeder allpasses. They are magnitude-preserving -- no level
+// is changed, and no gate number moves -- but they scramble phase differently per slot, so the
+// arrivals stop cancelling. Delay, and therefore the echo cue, is untouched.
+const AP1 = [113, 151, 199, 241, 293, 347, 401, 457];
+const AP2 = [61, 79, 97, 107, 131, 149, 167, 181];
+const AP_G = 0.7;
+let slotCtr = 0;
+function newSlot() {
+  const k = slotCtr++;
+  return { g: 0, pan: 0, c: coefFor(20000), lp: 0,
+           dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0, dTgt: 0, fresh: true,
+           b1: new Float32Array(AP1[k % AP1.length]), i1: 0,
+           b2: new Float32Array(AP2[k % AP2.length]), i2: 0 };
+}
+// one Schroeder allpass step, in place
+function apStep(buf, idx, x) {
+  const bv = buf[idx];
+  const v = x + AP_G * bv;
+  buf[idx] = v;
+  return bv - AP_G * v;
+}
 
 // ── arrival extraction ────────────────────────────────────────────────────────
 function arrivalsNew(ev, em, lx, ly, lz) {
@@ -116,8 +182,39 @@ function arrivalsNew(ev, em, lx, ly, lz) {
   for (const a of (r.airs || []))
     out.push({ id: `air${a.id}`, db: a.db, w: a.w === undefined ? 1 : a.w, at: [a.px, a.py, a.pz], fc: airFc(a.len), len: a.len });
   if (!out.length) out.push({ id: "air", db: -120, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: airFc(r.d) });
-  // SOLID — through the barrier, so it points at the speaker and is heavily dulled.
-  out.push({ id: "solid", db: r.solidDb, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: solidFc(r.matDb), len: r.d });
+  // ── THE TRANSMITTED PATH, SPLIT WHERE IT PHYSICALLY SPLITS ───────────────────
+  // The model reports how much of this path came through AIR (openFrac) versus through MATERIAL.
+  // Those are different sounds from different places and they must be rendered as such:
+  //
+  //   DIRECT   the clear share -- comes from the SPEAKER, dulled only by distance.
+  //   BARRIER  the blocked share -- comes from THE BARRIER ITSELF, dulled hard by mass. This is
+  //            the governing principle of the whole model: whatever transmits becomes a source at
+  //            its own location. Rendering it at the speaker was flatly wrong, and through a floor
+  //            it was audibly wrong -- a point source sweeping left to right underfoot where a
+  //            whole ceiling should have been radiating down with barely any direction to it.
+  //
+  // Merged into one arrival, the renderer had to choose one position and one filter for both, so
+  // when a sight line cleared the image JUMPED from barrier to speaker and the tone swung dull to
+  // bright. One doorway then sounded like "several doors one after the other". openFrac is
+  // continuous, so this crossfade is too: fully clear silences the barrier component, fully blocked
+  // silences the direct one, and nothing switches at any point in between.
+  //
+  // A barrier is also an AREA radiator about the size of the Fresnel disc, so it cannot be
+  // localised sharply from close up -- its angular size swamps the direction cue. `spread` pulls its
+  // pan toward centre as it gets near: one block away essentially omnidirectional, thirty blocks
+  // away nearly a point.
+  const of = r.openFrac === undefined ? 1 : r.openFrac;
+  if (of > 1e-4)
+    out.push({ id: "direct", fixedKey: "direct", db: r.solidDb + 10 * Math.log10(of), w: 1,
+               at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: airFc(r.d), len: r.d });
+  if (of < 1 - 1e-4) {
+    const bm = AT_SPEAKER ? null : r.bm;
+    const sAt = bm ? [bm.x, bm.y, bm.z] : [em.x + 0.5, em.y + 0.5, em.z + 0.5];
+    const bDist = Math.hypot(sAt[0] - lx, sAt[1] - ly, sAt[2] - lz);
+    out.push({ id: "barrier", fixedKey: "barrier", db: r.solidDb + 10 * Math.log10(1 - of), w: 1, at: sAt,
+               fc: solidFc(r.matDb), len: r.d,
+               spread: NO_SPREAD ? 1 : bDist / (bDist + 2 * BARRIER_RADIUS_BLOCKS) });
+  }
   // ── THE DIFFUSE FIELD, which was not being rendered at all ───────────────────
   // airs excludes isSrc AND isDiffuse, and only the isSrc stand-in above was being added back. So
   // every render so far has been the DRY arrivals with nothing underneath them -- which MODEL.md
@@ -147,6 +244,10 @@ function arrivalsOld(ev, em, cfg, lx, ly, lz) {
 
 // ── render one path ───────────────────────────────────────────────────────────
 function render({ name, states, waypoints, seconds, music, model }) {
+  // Only the new model has multiple arrivals to interfere with each other; the old one renders a
+  // single arrival, so there is nothing for a diffuser to decorrelate and leaving it untouched keeps
+  // the A/B honest about the MODEL rather than about the rendering.
+  const decorrelate = model === "new" && !NO_DECOR;
   const nSamp = Math.floor(seconds * SR);
   const L = new Float32Array(nSamp), R = new Float32Array(nSamp);
   const slots = new Map();   // stable id -> { g, pan, c, lp }; keyed so state follows an arrival
@@ -195,11 +296,15 @@ function render({ name, states, waypoints, seconds, music, model }) {
     // roughly the same place, so match on that and the filter and pan state carry over.
     const free = new Set(slots.keys());
     for (const a of arr) {
-      // An arrival with no position cannot be matched by position. The diffuse field is the case:
-      // it is omnidirectional, so it keeps one permanent slot instead of competing for the nearest.
+      // Position matching exists because the APERTURE set churns -- candidates come and go as the
+      // listener moves even while the summed level stays smooth, so keying on identity created and
+      // destroyed slots and left transients. That reasoning does not apply to arrivals whose
+      // identity is permanent: direct, barrier and diffuse are always the same three roles. Worse,
+      // position matching actively broke them, because direct (at the speaker) and barrier (at the
+      // barrier) can fall inside the 6-block match radius and steal each other's slots frame to
+      // frame -- which cost 5 dB/s on the swing until they were given fixed slots.
       if (a.fixedKey) {
-        if (!slots.has(a.fixedKey)) slots.set(a.fixedKey, { g: 0, pan: 0, c: coefFor(20000), lp: 0,
-                                                            dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0 });
+        if (!slots.has(a.fixedKey)) slots.set(a.fixedKey, newSlot());
         free.delete(a.fixedKey); a.key = a.fixedKey; continue;
       }
       let bestKey = null, bestD = MATCH_BLOCKS;
@@ -210,8 +315,7 @@ function render({ name, states, waypoints, seconds, music, model }) {
         if (dd < bestD) { bestD = dd; bestKey = k; }
       }
       if (bestKey === null) { bestKey = `s${slotSeq++}`;
-        slots.set(bestKey, { g: 0, pan: 0, c: coefFor(20000), lp: 0,
-                             dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0 }); }
+        slots.set(bestKey, newSlot()); }
       free.delete(bestKey);
       a.key = bestKey;
     }
@@ -219,26 +323,46 @@ function render({ name, states, waypoints, seconds, music, model }) {
     for (const k of free) {
       const s = slots.get(k);
       if (s.g < 1e-4) { slots.delete(k); continue; }
-      arr.push({ key: k, db: -120, w: 1, at: s.at, fc: 20000, len: 0 });
+      // Keep the slot's own length while it fades. Handing it len 0 drove its delay target to zero,
+      // and a delay line whose read pointer travels is a pitch shift -- so every disappearing
+      // arrival bent in pitch on its way out.
+      arr.push({ key: k, db: -120, w: 1, at: s.at, fc: 20000, len: s.len === undefined ? 0 : s.len });
     }
     for (const a of arr) {
       const s = slots.get(a.key);
       s.at = a.at;
+      if (a.len !== undefined) s.len = a.len;
       if (!s.dl) { s.dl = new Float32Array(MAX_DELAY); s.dw = 0; s.dsm = 0; }
       const wAmp = Math.sqrt(a.w === undefined ? 1 : a.w);   // model weights power; gain is amplitude
       const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20) * wAmp;
       let dx = a.at[0] - (wp.x + 0.5), dy = a.at[1] - (wp.y + 0.5), dz = a.at[2] - (wp.z + 0.5);
       const dl = Math.hypot(dx, dy, dz) || 1;
       const panTarget = a.omni ? 0
-        : Math.max(-1, Math.min(1, (dx * right[0] + dy * right[1] + dz * right[2]) / dl)) * STEREO_WIDTH;
+        : Math.max(-1, Math.min(1, (dx * right[0] + dy * right[1] + dz * right[2]) / dl))
+          * STEREO_WIDTH * (a.spread === undefined ? 1 : a.spread);
       const cTarget = coefFor(a.fc);
       // delay in samples from this arrival's own path length, slewed so a route change glides
       const dTarget = Math.min(MAX_DELAY - 2, Math.max(0, (a.len === undefined ? 0 : a.len) / SPEED_BLOCKS_PER_SEC * SR));
+      // A FRESH SLOT STARTS AT ITS TRUE DELAY. Gliding a delay line's read pointer is a pitch
+      // shift, so slewing from 0 up to the real delay made every newly appearing arrival warp in
+      // pitch -- which is exactly what the author heard walking over an OPEN hatch, where the
+      // aperture arrival comes into existence mid-walk. A brand new arrival has no history to glide
+      // from, so it should simply begin where it belongs.
+      if (s.fresh) { s.dsm = dTarget; s.fresh = false; }
+      // And bound how fast an established delay may move. The listener walks ~1.5 blocks/s, so a
+      // physical path length cannot change faster than a few blocks per second; anything quicker is
+      // the candidate set rearranging, not motion, and it is heard as a pitch bend rather than as
+      // Doppler. Clamped per block.
+      {
+        const maxStep = DELAY_SLEW_BLOCKS_PER_SEC / SPEED_BLOCKS_PER_SEC * SR * (n / SR);
+        const dd = dTarget - s.dsm;
+        if (Math.abs(dd) > maxStep) s.dTgt = s.dsm + Math.sign(dd) * maxStep; else s.dTgt = dTarget;
+      }
       for (let i = 0; i < n; i++) {
         s.g += (gTarget - s.g) * alpha / BLOCK * 8;
         s.pan += (panTarget - s.pan) * alpha / BLOCK * 8;
         s.c += (cTarget - s.c) * alpha / BLOCK * 8;
-        s.dsm += (dTarget - s.dsm) * alpha / BLOCK * 2;
+        s.dsm += (s.dTgt - s.dsm) * alpha / BLOCK * 2;
         const xin = music[(base + i) % music.length];
         // circular delay line, linearly interpolated read
         s.dl[s.dw] = xin;
@@ -250,7 +374,12 @@ function render({ name, states, waypoints, seconds, music, model }) {
         s.dw = (s.dw + 1) % MAX_DELAY;
         s.lp += s.c * (x - s.lp);
         const th = (s.pan + 1) * 0.78539816;
-        const v = s.lp * s.g;
+        let vv = s.lp * lpMakeup(s.c);
+        if (decorrelate) {
+          vv = apStep(s.b1, s.i1, vv); s.i1 = (s.i1 + 1) % s.b1.length;
+          vv = apStep(s.b2, s.i2, vv); s.i2 = (s.i2 + 1) % s.b2.length;
+        }
+        const v = vv * s.g;
         L[base + i] += Math.cos(th) * v;
         R[base + i] += Math.sin(th) * v;
       }
@@ -349,10 +478,10 @@ function main() {
 
   const OPEN = "synth_wall-wood_door-air_open-1.json";
   const SHUT = "synth_wall-wood_door-wood_open-0.json";
-  const T20  = "synth_wall-wood_door-wood_open-0.2.json";
-  const T40  = "synth_wall-wood_door-wood_open-0.4.json";
-  const T60  = "synth_wall-wood_door-wood_open-0.6.json";
-  const T80  = "synth_wall-wood_door-wood_open-0.8.json";
+  // Every 5% state the synth generates, so the swing is driven by the animation rather than by how
+  // coarsely the geometry happened to be sampled.
+  const SWING = n => `synth_wall-wood_door-wood_open-${n}.json`;
+  const SWING_STEPS = Array.from({ length: 19 }, (_, i) => +((i + 1) * 0.05).toFixed(2));
 
   const FOPEN = "synth_floor-wood_hatch-air_open-1.json";
   const FSHUT = "synth_floor-wood_hatch-wood_open-0.json";
@@ -384,8 +513,16 @@ function main() {
       name: "swing",
       note: "stand still in room B on-axis; the door opens then shuts (gradual cue)",
       seconds: 18,
-      states: () => [ st(SHUT, 0), st(T20, 3.0), st(T40, 3.6), st(T60, 4.2), st(T80, 4.8), st(OPEN, 5.4),
-                      st(T80, 12.0), st(T60, 12.6), st(T40, 13.2), st(T20, 13.8), st(SHUT, 14.4) ],
+      // open over 2.4 s from t=3, hold, then shut over 2.4 s from t=12 -- same envelope as before,
+      // now with 20 steps in each direction instead of 5.
+      states: () => {
+        const out = [st(SHUT, 0)];
+        SWING_STEPS.forEach((o, i) => out.push(st(SWING(o), 3.0 + 2.4 * (i + 1) / 20)));
+        out.push(st(OPEN, 3.0 + 2.4));
+        SWING_STEPS.slice().reverse().forEach((o, i) => out.push(st(SWING(o), 12.0 + 2.4 * (i + 1) / 20)));
+        out.push(st(SHUT, 12.0 + 2.4));
+        return out;
+      },
       waypoints: [ { t: 0, x: 26, y: 3, z: 11, yaw: Math.PI },
                    { t: 18, x: 26, y: 3, z: 11, yaw: Math.PI } ],
     },

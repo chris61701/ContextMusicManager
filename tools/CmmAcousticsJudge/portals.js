@@ -743,9 +743,22 @@ function makeNewEvaluator(D, G, src) {
     // glass is a little further away and no more blocked, so walking past barely changes the
     // level, which is what the author describes and what the physics says.
     const bm = barrierMid(D, sx5, sy5, sz5, lx, ly, lz);
-    let fanPow = 0;
+    // ── SPLIT THE ZONE INTO ITS OPEN AND BLOCKED SHARES ──────────────────────────
+    // The disc integrates over patches that are clear and patches that are solid, and sums them
+    // into one number. That number is right, but the two halves are physically DIFFERENT SOUNDS
+    // arriving from DIFFERENT PLACES: the clear share came straight from the speaker through air,
+    // the blocked share was re-radiated by the barrier. Merging them forced the renderer to pick one
+    // position and one filter for both, so as a sight line cleared, the image jumped from the
+    // barrier to the speaker and its tone swung dull to bright -- heard by the author as one doorway
+    // sounding like "several doors one after the other".
+    //
+    // Tracking the two shares separately costs one multiply per patch and gives the renderer a
+    // CONTINUOUS crossfade, because patch openness is continuous. Fully clear, the barrier component
+    // is silent; fully blocked, the direct component is. Nothing switches.
+    let fanPow = 0, fanOpenPow = 0;
     if (!bm) {
       fanPow = dbToPow(-SLOPE * d);                     // clear line: free field, no barrier
+      fanOpenPow = fanPow;                              // ... and all of it came through air
     } else {
       for (const p of FRESNEL_PTS) {
         const ox = (e1x * p.ca + e2x * p.sa) * p.r;
@@ -767,11 +780,13 @@ function makeNewEvaluator(D, G, src) {
         const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz, true, false)    // count the patch itself
                 + segDbAt(D, qx, qy, qz, lx, ly, lz, false, true);
         const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
-        fanPow += p.w * dbToPow(-(SLOPE * len + m));
+        const pw = p.w * dbToPow(-(SLOPE * len + m));
+        fanPow += pw;
+        fanOpenPow += openAtF(qx, qy, qz) * pw;         // this patch's share that passed through air
       }
       // If the disc found no barrier at all, the run it located is not a surface the listener is
       // behind -- fall back to the straight-line estimate rather than reporting silence.
-      if (fanPow <= 0) fanPow = dbToPow(-(SLOPE * d + segDbAt(D, sx5, sy5, sz5, lx, ly, lz)));
+      if (fanPow <= 0) { fanPow = dbToPow(-(SLOPE * d + segDbAt(D, sx5, sy5, sz5, lx, ly, lz))); fanOpenPow = 0; }
     }
     const fanDb = fanPow > 0 ? -powToDb(fanPow) : 120;
     const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
@@ -887,6 +902,14 @@ function makeNewEvaluator(D, G, src) {
       solidDb: solid ? solid.db : -120,
       matDb: centerMat, airLen: dom ? dom.len : d,
       entry: dom, airs, arrivals, kept,
+      // WHERE the transmitted sound radiates FROM, and how big that radiator is. The renderer needs
+      // both: placing transmitted sound at the SPEAKER contradicts the governing principle and is
+      // audibly wrong through a floor -- the author heard a point source sweeping left-to-right
+      // underfoot where a whole ceiling should have been radiating down at them.
+      bm: bm ? { x: bm.x, y: bm.y, z: bm.z, thick: bm.thick } : null,
+      // fraction of the transmitted-path power that actually came through AIR rather than through
+      // material -- the renderer's crossfade between "from the speaker" and "from the barrier"
+      openFrac: fanPow > 0 ? Math.max(0, Math.min(1, fanOpenPow / fanPow)) : 1,
       reached: airs.length > 0,
     };
   };
