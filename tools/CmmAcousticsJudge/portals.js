@@ -771,14 +771,20 @@ function makeNewEvaluator(D, G, src) {
     let diffDb = -120;
     if (nd >= 0) {
       let pTot = roomField(nd) * dbToPow(DIFFUSE_CAL);
-      for (const pid of G.nodes[nd].edges) {
-        const P = G.portals[pid];
-        const other = P.a === nd ? P.b : P.a;
-        if (roomOf(other) === roomOf(nd)) continue;   // a routing cut, not a real opening
-        const pf = roomField(other);
+      // Enumerated over the FIXED SET OF APERTURES, not over the listener's segment's edges.
+      // Gating on segment adjacency was gating on bookkeeping: standing one corridor segment deeper
+      // into a room you received nothing from the room next door, even a few blocks from its open
+      // doorway, so the level jumped 4.1 dB the moment you stepped into the segment that happened
+      // to touch it. Distance and constriction already decide how much arrives -- topology must
+      // not also decide WHETHER it arrives. Same rule as the air arrivals.
+      const myRoom = roomOf(nd);
+      for (const A of G.apertures) {
+        const other = A.roomA === myRoom ? A.roomB : A.roomA === undefined ? -1 : A.roomA;
+        if (A.roomA !== myRoom && A.roomB !== myRoom) continue;   // not an opening of this room
+        const pf = fieldOf[other] || 0;
         if (pf <= 0) continue;
-        const leg = Math.hypot(P.px - lx, P.py - ly, P.pz - lz);
-        const thru = dbToPow(constrictDb(P.openFrac) - SLOPE * leg + DIFFUSE_CAL);
+        const leg = Math.hypot(A.px - lx, A.py - ly, A.pz - lz);
+        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg + DIFFUSE_CAL);
         pTot += pf * thru;
       }
       if (pTot > 0) diffDb = powToDb(pTot);

@@ -542,7 +542,10 @@ function asGraph(D, mergeH) {
   // which stepped the level as a listener crossed one (approach 8.5 dB/block).
   const apertures = portals
     .filter(p => nodes[p.a].room !== nodes[p.b].room)
-    .map(p => ({ nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac }));
+    .map(p => ({ nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
+                 // both rooms, so a listener anywhere can take a neighbour's reverberation through
+                 // this opening without needing to be in a segment that happens to touch it
+                 roomA: nodes[p.a].room, roomB: nodes[p.b].room }));
   // A cut is also not a constriction for routing purposes: it passes everything.
   for (const p of portals) if (nodes[p.a].room === nodes[p.b].room) p.openFrac = 1;
   return { open, nodeOf, nodes, rooms, portals, apertures, walls, cell: 4, thick,
