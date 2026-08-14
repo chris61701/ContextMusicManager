@@ -105,6 +105,22 @@ function main() {
     warns.push("BASE   no baseline recorded — run with --accept once the state is known good");
   }
 
+  // Dump validity is reported but not fatal: the synth gates above do not read the real dumps, and
+  // a bad capture is fixed in-game rather than in code. It is surfaced because an invalid dump once
+  // spent days on the queue disguised as a segmentation defect -- see dumpcheck.js.
+  let dumpNote = null;
+  try {
+    const { checkDump } = require("./dumpcheck.js");
+    const dd = path.join(__dirname, "dumps");
+    if (fs.existsSync(dd)) {
+      const bad = fs.readdirSync(dd).filter(f => f.endsWith(".json"))
+        .map(f => checkDump(path.join(dd, f))).filter(r => !r.ok);
+      if (bad.length) dumpNote = `DUMPS  ${bad.length} unusable capture(s): ${bad.map(b => b.name).join(", ")}`
+                               + ` — do not read model behaviour off these (node dumpcheck.js)`;
+    }
+  } catch (e) { dumpNote = `DUMPS  validity check failed: ${e.message}`; }
+  if (dumpNote) warns.push(dumpNote);
+
   const tag = REGIONS ? "regions" : "cells";
   console.log(`\nacceptance gate (${tag})   ${cur.spec.length} scenarios, ${cur.smooth.length} routes\n`);
   for (const r of cur.smooth) {
