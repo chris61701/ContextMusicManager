@@ -102,7 +102,7 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // SLOPE dB/block is not inverse-square, so 4*P_in/R cannot be evaluated in absolute units. This
 // offset sets where the diffuse field sits relative to the direct component, and it is the one
 // honestly empirical constant in the model.
-const DIFFUSE_CAL = 16;  // set so the diffuse field sits ~+5 dB on the direct component at 5 blocks
+const DIFFUSE_CAL = process.env.CMM_DCAL === undefined ? 16 : +process.env.CMM_DCAL;  // see notes: a fudge over the distance-law mismatch
 // ── A SPACE MUST BE BIG ENOUGH TO HAVE A REVERBERANT FIELD AT ALL ─────────────
 // 4P/R assumes a diffuse field, which needs a space many wavelengths across so sound can bounce
 // many times before being absorbed. The segmentation happily produces ONE-VOXEL regions, and the
