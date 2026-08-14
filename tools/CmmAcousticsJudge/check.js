@@ -147,6 +147,23 @@ function main() {
   for (const r of cur.real || [])
     if (r.worst > STEP_LIMIT) warns.push(`REAL   ${r.dump} still ${r.worst.toFixed(2)} dB/block worst (${r.over3}% over ${STEP_LIMIT}) — outstanding`);
 
+  // ── DIFFUSE BALANCE ─────────────────────────────────────────────────────────
+  // Added because the author kept asking why the demos were drowned in reverb, and no gate here
+  // could answer: they all measure level or smoothness, and the diffuse field is the term that
+  // FLATTENS smoothness. An inflated one improves every other metric while wrecking the sound, so
+  // the suite was rewarding the defect. Fatal, because a model that puts reverberation where sound
+  // cannot reach is not shippable however smooth its gradients are.
+  try {
+    cp.execSync("node diffuse.js", { cwd: __dirname, env, encoding: "utf8", maxBuffer: 1 << 26 });
+  } catch (e) {
+    const out = (e.stdout || "").toString();
+    for (const line of out.split("\n")) {
+      const m = line.match(/^\s{2}(real|synth)\s+(.+)$/);
+      if (m) fails.push(`DIFFUSE ${m[2].trim()}`);
+    }
+    if (!fails.some(f => f.startsWith("DIFFUSE"))) fails.push("DIFFUSE balance gate failed (node diffuse.js)");
+  }
+
   const tag = REGIONS ? "regions" : "cells";
   console.log(`\nacceptance gate (${tag})   ${cur.spec.length} scenarios, ${cur.smooth.length} routes\n`);
   for (const r of cur.smooth) {

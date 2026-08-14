@@ -103,6 +103,24 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // offset sets where the diffuse field sits relative to the direct component, and it is the one
 // honestly empirical constant in the model.
 const DIFFUSE_CAL = 16;  // set so the diffuse field sits ~+5 dB on the direct component at 5 blocks
+// ── A SPACE MUST BE BIG ENOUGH TO HAVE A REVERBERANT FIELD AT ALL ─────────────
+// 4P/R assumes a diffuse field, which needs a space many wavelengths across so sound can bounce
+// many times before being absorbed. The segmentation happily produces ONE-VOXEL regions, and the
+// formula applied to those is not just inaccurate, it is explosive: surf 6, R 1.4, so the 4/R term
+// becomes +4.7 dB and with the calibration on top +20.7 dB of gain for a space one block wide.
+// Measured on the real bunker capture, the diffuse field came out a median of 96.6 dB ABOVE the
+// direct sound, which is not a reverberant room but a broken calculation.
+//
+// The physical test is the mean free path, 4V/S: the average distance sound travels between
+// bounces. When that is not large compared to a wavelength there is no diffuse field, only a small
+// resonant cavity, and the formula does not apply. Ramped rather than switched so a room does not
+// acquire reverberation the instant it crosses a threshold.
+//
+// This also explains why no gate caught it. The diffuse field is the term that FLATTENS gradients,
+// so an inflated one improves every smoothness metric here while wrecking the sound -- the
+// acceptance criteria were rewarding a degenerate answer.
+const WAVELEN_BLOCKS = 1.7;         // ~200 Hz, the band that carries through structure
+const MFP_MIN = 0.5 * WAVELEN_BLOCKS;   // below this, no diffuse field of its own at all
                          // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
 const WALL_AREA_SCALE = 1.0; // shared-wall area is in voxel-faces; 1.0 keeps it in those units
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
@@ -697,8 +715,13 @@ function makeNewEvaluator(D, G, src) {
       }
       if (pIn > 0) direct[rm] += pIn;
     }
-    for (let rm = 0; rm < nRooms; rm++)
-      direct[rm] = direct[rm] > 0 ? 4 * direct[rm] / Math.max(1, RM[rm].roomR) : 0;
+    for (let rm = 0; rm < nRooms; rm++) {
+      const R = RM[rm];
+      // mean free path 4V/S, in blocks; V is the voxel count, S the counted face area
+      const mfp = 4 * Math.max(1, R.n) / Math.max(1, R.surf);
+      const valid = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp);
+      direct[rm] = direct[rm] > 0 ? valid * 4 * direct[rm] / Math.max(1, R.roomR) : 0;
+    }
     // pass 2: power driven through SHARED WALLS by the neighbouring rooms. Power INCIDENT on a
     // surface of area S in a diffuse field is P*S/R, not field*S -- the standard relation carries a
     // factor of four cancelling the one in 4P/R, and getting that wrong made the receiving room
@@ -715,6 +738,24 @@ function makeNewEvaluator(D, G, src) {
         pWall += pOther * w.area / Math.max(1, other.roomR) * w.tau;
       }
       fieldOf[rm] = direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0);
+    }
+    if (process.env.CMM_DIFFDBG === "1") {
+      const dbg = [];
+      for (let rm = 0; rm < nRooms; rm++) {
+        const R = RM[rm];
+        const mfp = 4 * Math.max(1, R.n) / Math.max(1, R.surf);
+        dbg.push({ rm, n: R.n, surf: R.surf, R: +R.roomR.toFixed(1), mfp: +mfp.toFixed(2),
+                   valid: +sstep(MFP_MIN, WAVELEN_BLOCKS, mfp).toFixed(2),
+                   directDb: direct[rm] > 0 ? +powToDb(direct[rm]).toFixed(1) : -999,
+                   fieldDb: fieldOf[rm] > 0 ? +powToDb(fieldOf[rm]).toFixed(1) : -999,
+                   walls: (R.walls || []).length });
+      }
+      dbg.sort((a, b) => b.fieldDb - a.fieldDb);
+      console.error("room  vox   surf       R   mfp valid   directDb  fieldDb  walls");
+      for (const d of dbg.slice(0, 8))
+        console.error(String(d.rm).padStart(4) + String(d.n).padStart(6) + String(d.surf).padStart(7)
+          + String(d.R).padStart(9) + String(d.mfp).padStart(6) + String(d.valid).padStart(6)
+          + String(d.directDb).padStart(11) + String(d.fieldDb).padStart(9) + String(d.walls).padStart(7));
     }
   }
 
