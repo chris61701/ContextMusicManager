@@ -663,6 +663,47 @@ function makeNewEvaluator(D, G, src) {
   // An aperture's cost is the cheapest way for sound to arrive AT it -- the best of its own
   // node's portals plus the hop to the pinch point -- and then its own constriction, since
   // anything using it must squeeze through.
+  // Routed legs need, per aperture, the graph distance from its node to every node and which portal
+  // the route entered by. The node graph is tiny -- 33 nodes / 60 portals on the bunker, 55 / 179 on
+  // the cave -- so a Dijkstra per aperture is trivial, and it is computed ONCE per emitter here rather
+  // than per listener. A linear-scan Dijkstra beats a heap at this size.
+  const ROUTED_LEGS = process.env.CMM_ROUTEDLEGS === "1";
+  const apRoute = [];
+  if (ROUTED_LEGS) {
+    // OVER PORTALS, NOT NODES. Routing node-to-node via centroids inflates every leg: in a
+    // 52,538-voxel node the centroid is tens of blocks from both portals, so the route accumulates
+    // phantom distance and SLOPE*leg makes the arrival far too quiet -- measured as bunker orphan
+    // 1.4% -> 15.5%. MODEL.md already says the solve belongs over PORTALS, which is what solveAir
+    // does; portal-to-portal within a node is a real distance and needs no centroid.
+    const nP = G.portals.length;
+    for (const A of G.apertures) {
+      const dist = new Float64Array(nP).fill(Infinity);
+      const done = new Uint8Array(nP);
+      const NA = A.nid >= 0 && A.nid < G.nodes.length ? G.nodes[A.nid] : null;
+      if (NA) for (const pid of NA.edges) {
+        const P = G.portals[pid];
+        dist[pid] = Math.hypot(P.px - A.px, P.py - A.py, P.pz - A.pz);
+      }
+      for (;;) {
+        let u = -1, best = Infinity;
+        for (let i = 0; i < nP; i++) if (!done[i] && dist[i] < best) { best = dist[i]; u = i; }
+        if (u < 0) break;
+        done[u] = 1;
+        const PU = G.portals[u];
+        for (const side of [PU.a, PU.b]) {
+          if (side < 0 || side >= G.nodes.length) continue;
+          for (const pid of G.nodes[side].edges) {
+            if (done[pid] || pid === u) continue;
+            const PV = G.portals[pid];
+            const w = Math.hypot(PV.px - PU.px, PV.py - PU.py, PV.pz - PU.pz);
+            if (dist[u] + w < dist[pid]) dist[pid] = dist[u] + w;
+          }
+        }
+      }
+      apRoute.push({ dist });
+    }
+  }
+
   const cands = [{ cost: minSeed, px: sx5, py: sy5, pz: sz5, routeLen: 0, isSrc: true }];
   for (const A of G.apertures) {
     let bestDb = Infinity, bestLen = 0;
@@ -911,10 +952,47 @@ function makeNewEvaluator(D, G, src) {
     let pow = 0, bestDb = -Infinity, bestIdx = -1;
     for (let i = 0; i < cands.length; i++) {
       const c = cands[i];
-      const leg = Math.hypot(c.px - lx, c.py - ly, c.pz - lz);
+      let px = c.px, py = c.py, pz = c.pz;
+      let leg = Math.hypot(px - lx, py - ly, pz - lz);
       let db, legMat;
       if (c.isSrc) { legMat = centerMat; db = -(c.cost + fanDb); }
       else {
+        // ROUTED LEG. The candidate SET stays fixed -- every aperture, always -- so nothing steps in
+        // or out of it, which is what killed the previous two attempts. Only the LEG changes: rather
+        // than a straight line from a distant opening through whatever rock lies between, it follows
+        // the graph route from that opening's node to the listener's node, and only the final in-node
+        // hop is a straight line, which is the one place line of sight is guaranteed. The arrival is
+        // positioned at the portal it actually entered by, so it also comes from the right direction.
+        const R = ROUTED_LEGS && nd >= 0 ? apRoute[i - 1] : null;
+        if (R) {
+          // best portal of the listener's own node: routed distance to it plus the in-node hop, which
+          // is the one leg where a straight line is legitimate
+          let bl = Infinity, bp = -1;
+          for (const pid of G.nodes[nd].edges) {
+            const dd = R.dist[pid];
+            if (!isFinite(dd)) continue;
+            const P = G.portals[pid];
+            const tot = dd + Math.hypot(P.px - lx, P.py - ly, P.pz - lz);
+            if (tot < bl) { bl = tot; bp = pid; }
+          }
+          // Compare on the resulting LEVEL, not on distance. The routed path is always longer
+          // geometrically and almost always carries far less material, so a distance test rejects it
+          // exactly when it is needed -- with `bl < leg` the routed option essentially never won and
+          // the numbers came out identical to the straight-line baseline to every digit.
+          //
+          // Taking the louder of the two is choosing a better ESTIMATOR of one candidate's
+          // attenuation, not selecting between physical paths, so it does not conflict with the
+          // never-a-max rule that governs the arrival sum.
+          if (bp >= 0) {
+            const P = G.portals[bp];
+            const mS = legDb(D, px, py, pz, lx, ly, lz);
+            const mR = legDb(D, P.px, P.py, P.pz, lx, ly, lz);
+            if (-(SLOPE * bl + mR) > -(SLOPE * leg + mS)) {
+              px = P.px; py = P.py; pz = P.pz;
+              leg = bl;
+            }
+          }
+        }
         // THE SAME BUNDLE THE DIFFUSE TERM USES. Both answer one question -- how much of the
         // wavefront gets from this opening to the listener -- so measuring one with a five-ray bundle
         // and the other with a single ray made the model contradict itself. It did so spectacularly:
@@ -923,7 +1001,7 @@ function makeNewEvaluator(D, G, src) {
         // -18.9 dB through the very same openings. Sound cannot be present as reverberation and
         // absent as a direct arrival along one route; one of the two measurements had to be wrong,
         // and it was the ray.
-        legMat = legDb(D, c.px, c.py, c.pz, lx, ly, lz);
+        legMat = legDb(D, px, py, pz, lx, ly, lz);
         db = -(c.cost + SLOPE * leg + legMat);
       }
       // A candidate whose total route is barely longer than the straight line describes the
@@ -935,7 +1013,7 @@ function makeNewEvaluator(D, G, src) {
       // portal centroids), which made a doorway sitting exactly on the line of sight look like
       // a detour and get summed on top of the direct sound, pushing an open door 1.5 dB ABOVE
       // free field. Fresnel is about the geometric path difference, so measure that.
-      const geoExcess = Math.hypot(c.px - sx5, c.py - sy5, c.pz - sz5) + leg - d;
+      const geoExcess = Math.hypot(px - sx5, py - sy5, pz - sz5) + leg - d;
       // Tried additionally gating this on whether the listener can SEE the source (an aperture
       // being a way around a blocked path, so irrelevant with a clear line). Well motivated and
       // empirically wrong: centerMat transitions at the same wall plane, so both terms then
@@ -953,7 +1031,7 @@ function makeNewEvaluator(D, G, src) {
           + ` db=${db > -999 ? db.toFixed(1) : "-inf"}`.padEnd(12)
           + (w <= 1e-4 ? "DROPPED(w)" : db <= -110 ? "DROPPED(db)" : "kept"));
       if (w <= 1e-4 || db <= -110) continue;
-      arrivals.push({ db, w, px: c.px, py: c.py, pz: c.pz, legMat, len: c.routeLen + leg, isSrc: !!c.isSrc });
+      arrivals.push({ db, w, px, py, pz, legMat, len: c.routeLen + leg, isSrc: !!c.isSrc });
       pow += w * dbToPow(db);
       if (db > bestDb) { bestDb = db; bestIdx = arrivals.length - 1; }
     }
