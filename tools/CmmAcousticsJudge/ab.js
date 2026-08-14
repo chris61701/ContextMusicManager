@@ -66,8 +66,39 @@ function marker(hz, secs = 0.16) {
 }
 
 function main() {
-  const [fa, fb, fout] = process.argv.slice(2).filter(a => !a.startsWith("--"));
-  if (!fa || !fb || !fout) { console.error("usage: node ab.js A.wav B.wav out.wav [--at=..] [--window=3] [--label=a,b]"); process.exit(1); }
+  const files = process.argv.slice(2).filter(a => !a.startsWith("--"));
+  const fout = files.pop();
+  if (files.length < 2 || !fout) { console.error("usage: node ab.js A.wav B.wav [C.wav ...] out.wav [--at=..] [--window=3] [--full] [--label=a,b,..]"); process.exit(1); }
+  const [fa, fb] = files;
+  // --full plays each input WHOLE, in sequence, instead of excerpting matched windows. Needed when
+  // the thing being judged is a TRAJECTORY: the author could not tell where the doorway was supposed
+  // to be, because two 3 s excerpts taken from the same half of the walk never showed the sweep. A
+  // sweep has to be heard end to end.
+  if (process.argv.includes("--full")) {
+    const labels2 = (process.argv.find(a => a.startsWith("--label=")) || "--label=").split("=")[1].split(",");
+    const ins = files.map(readWav);
+    const gap2 = new Float32Array(Math.floor(SR * 0.5));
+    const mk = i => marker(1500 - i * 260, 0.18);
+    let total2 = 0;
+    ins.forEach((s, i) => { total2 += mk(i).length + s.L.length + gap2.length; });
+    const L2 = new Float32Array(total2), R2 = new Float32Array(total2);
+    let p = 0; const guide2 = [];
+    ins.forEach((s, i) => {
+      const m = mk(i);
+      for (let j = 0; j < m.length; j++) { L2[p + j] += m[j]; R2[p + j] += m[j]; }
+      p += m.length;
+      guide2.push(`${(p / SR).toFixed(1)}s  ${labels2[i] || "#" + (i + 1)}  (${(s.L.length / SR).toFixed(1)}s)`);
+      L2.set(s.L, p); R2.set(s.R, p); p += s.L.length + gap2.length;
+    });
+    writeWav(fout, L2, R2);
+    console.log(`
+${path.basename(fout)}  ${(total2 / SR).toFixed(1)}s — each version played WHOLE, in order.`);
+    console.log(`Marker pitch DROPS with each version, so you always know which one you are on.
+`);
+    for (const g of guide2) console.log("   " + g);
+    console.log();
+    return;
+  }
   const arg = k => (process.argv.find(a => a.startsWith(`--${k}=`)) || "").split("=")[1];
   const win = parseFloat(arg("window") || "3");
   const labels = (arg("label") || "A,B").split(",");

@@ -140,6 +140,8 @@ const solidFc = matDb => 20000 * Math.pow(10, -Math.max(0, matDb) / 26);
 const BARRIER_RADIUS_BLOCKS = 3.0;
 const DIFFUSE_FC = 3500;
 const DIFFUSE_EXTRA_BLOCKS = +(process.env.CMM_DPRE || 9);
+// Share of the reverberant field treated as EARLY reflections, which carry the source's direction.
+const DIFFUSE_EARLY = process.env.CMM_EARLY === undefined ? 0.5 : +process.env.CMM_EARLY;
 
 // ── DECORRELATION: an arrival is a BUNDLE of paths, not one ray ───────────────
 // Rendering arrivals as perfectly coherent copies of the same music makes them comb-filter, and
@@ -205,7 +207,11 @@ function newSlot(long) {
     s.r1 = new Float32Array(AP1_R); s.j1 = 0;
     s.r2 = new Float32Array(AP2_R); s.j2 = 0;
     s.r3 = new Float32Array(AP3_R); s.j3 = 0;
-    s.stereo = process.env.CMM_MONODIFF !== "1";
+    // NOTE: set per-frame from the arrival below, not here. Deciding it at allocation time made the
+    // EARLY reverb inherit the stereo bypass, which skips panning -- so the directional share was
+    // rendered non-directionally and the whole early/late split did nothing at any setting (0.6 dB
+    // of swing from early=0 through early=1.0).
+    s.stereo = false;
   }
   return s;
 }
@@ -285,9 +291,34 @@ function arrivalsNew(ev, em, lx, ly, lz) {
   // position -- it has no position to match. The single delayed, dulled copy is a STAND-IN for a
   // real tail: it carries the right level and the right "arrives later and duller" cue, but a
   // proper diffuse renderer needs a decaying multi-tap tail, which belongs with the echo work.
-  if (r.diffDb !== undefined && r.diffDb > -110 && process.env.CMM_NODIFF !== "1")
-    out.push({ id: "diffuse", fixedKey: "diffuse", db: r.diffDb, w: 1, omni: true, decor: true,
-               at: [lx, ly, lz], fc: DIFFUSE_FC, len: r.d + DIFFUSE_EXTRA_BLOCKS });
+  // ── A DIFFUSE FIELD IS NOT ISOTROPIC, AND THAT IS WHY ROOMS STILL LOCALISE ───
+  // Rendered fully isotropic it destroyed the image: the author heard "clicks in centre (perceived
+  // reverb)" for every single new-model excerpt while the old model localised plainly, and the
+  // balance swing along the walk collapsed from 20.6 dB to 1.2 dB. Decorrelation was not the
+  // problem -- measured L/R correlation was 0.107, genuinely diffuse. The field is simply 7-12 dB
+  // above the direct sound, so isotropic energy at that level swamps any direction cue.
+  //
+  // And the level is defensible: the classic formula puts the critical distance at ~3.7 m for this
+  // room, so at 15 m the reverberant field really should dominate. Real hearing localises anyway,
+  // because a real field is not isotropic -- the EARLY reflections come off surfaces near the source
+  // and therefore arrive preferentially from the source's direction. That early, directional portion
+  // is what makes a reverberant room still sound like the source is over there.
+  //
+  // So the field is split. The early share is rendered AT the same place the fused voice is, so it
+  // reinforces the image instead of erasing it; the late share stays isotropic and decorrelated and
+  // provides the envelopment and the smoothing. Power split, so the total the model computed is
+  // unchanged either way.
+  if (r.diffDb !== undefined && r.diffDb > -110 && process.env.CMM_NODIFF !== "1") {
+    const early = DIFFUSE_EARLY;
+    if (early > 1e-3)
+      out.push({ id: "diffuse-early", fixedKey: "diffuse-early", db: r.diffDb + 10 * Math.log10(early),
+                 w: 1, decor: true, followFused: true,
+                 at: [lx, ly, lz], fc: DIFFUSE_FC, len: r.d + DIFFUSE_EXTRA_BLOCKS });
+    if (early < 1 - 1e-3)
+      out.push({ id: "diffuse", fixedKey: "diffuse", db: r.diffDb + 10 * Math.log10(1 - early),
+                 w: 1, omni: true, decor: true,
+                 at: [lx, ly, lz], fc: DIFFUSE_FC, len: r.d + DIFFUSE_EXTRA_BLOCKS });
+  }
   return out;
 }
 
@@ -337,8 +368,8 @@ const NO_FUSE = process.env.CMM_NOFUSE === "1";
 
 function fuse(arr, lx, ly, lz) {
   if (NO_FUSE) return arr;
-  const diffuse = arr.filter(a => a.omni);
-  const taps = arr.filter(a => !a.omni);
+  const diffuse = arr.filter(a => a.omni || a.followFused);
+  const taps = arr.filter(a => !a.omni && !a.followFused);
   if (taps.length < 2) return arr;
   let minLen = Infinity;
   for (const a of taps) minLen = Math.min(minLen, a.len === undefined ? 0 : a.len);
@@ -363,6 +394,8 @@ function fuse(arr, lx, ly, lz) {
   if (!(P > 0)) return arr;
   const dl = Math.hypot(dx, dy, dz) || 1e-6;
   const meanDist = dist / P;
+  // hand the fused voice's direction to anything that asked to follow it (the early reverb)
+  for (const a of arr) if (a.followFused) a.at = null;   // resolved below once `one` exists
   const one = {
     id: "fused", fixedKey: "fused", w: 1,
     db: 10 * Math.log10(P),
@@ -371,6 +404,7 @@ function fuse(arr, lx, ly, lz) {
     len: ln / P,
     spread: sp / P,
   };
+  for (const a of diffuse) if (a.followFused) a.at = one.at.slice();
   return [one, ...far, ...diffuse];
 }
 
@@ -471,6 +505,8 @@ function render({ name, states, waypoints, seconds, music, model }) {
       s.at = a.at;
       if (a.len !== undefined) s.len = a.len;
       s.decor = decorAllowed && !!a.decor && !NO_DECOR;
+      // only the isotropic share bypasses panning
+      s.stereo = !!a.omni && !!s.r1 && process.env.CMM_MONODIFF !== "1";
       if (!s.dl) { s.dl = new Float32Array(MAX_DELAY); s.dw = 0; s.dsm = 0; }
       const wAmp = Math.sqrt(a.w === undefined ? 1 : a.w);   // model weights power; gain is amplitude
       const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20) * wAmp;
