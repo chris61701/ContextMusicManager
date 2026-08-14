@@ -40,6 +40,9 @@ const OPEN_EPS = 0.02;
 const FRESNEL_AREA = 20.0;
 const SEG_MIN_STEP = 6;      // blocks: shortest a corridor segment may be
 const SEG_STEP_MULT = 2.5;   // segment length as a multiple of the space's own thickness
+// Share of a region's boundary that must open onto the world before it counts as outdoors. Measured
+// separation is total -- enclosed regions read 0.0%, open ones 12% and up -- so this is not delicate.
+const SKY_SPLIT = 0.02;
 const THICK_CAP = 6.0;  // clearance beyond this is just "open"; do not subdivide it
 const SEED_MIN = 1.6;   // a room's core must be at least this open; below it, join rather than seed
 
@@ -229,6 +232,40 @@ function build(D, mergeH = 0.62) {
   // And process SHALLOWEST FIRST while carrying the merged region's core as the MAX of the two.
   // That is what stops chaining: as a region absorbs its neighbours it gets deeper, so the bar for
   // absorbing the next one rises, and a genuine doorway is never crossed by accident.
+  // ── INDOORS AND OUTDOORS ARE DIFFERENT ACOUSTIC SPACES ────────────────────────
+  // No pinch test can separate them, because a bunker entrance or a cave mouth is a perfectly wide
+  // opening -- there IS no pinch. So the watershed merged 777,541 voxels of the bunker capture, 97.6%
+  // of all its open space, into one region spanning open sky, terrain AND tortuous underground rock
+  // voids. That single region then has to share one reverberant field and one set of sight lines, and
+  // it produced 40.6 dB steps between voxels ONE BLOCK apart with identical aperture sets: in a
+  // winding void, lines to distant openings are blocked or clear almost at random.
+  //
+  // Whether a space is open to the world is measurable before any merging and it separates cleanly
+  // with no overlap: on the bunker the large raw regions read 74-99% of their boundary onto the world
+  // while the interior ones read 0.0%. So that boundary is an APERTURE between two spaces, never a
+  // seam within one, and the merge must not cross it however wide it is.
+  const rawSky = new Float64Array(regions.length);
+  {
+    const sx = D.sx, sy = D.sy, sz = D.sz;
+    const li = (x, y, z) => x + sx * (z + sz * y);
+    const nb6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    const oob = new Float64Array(regions.length), tot = new Float64Array(regions.length);
+    for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+      const i = li(x, y, z); const id = label[i];
+      if (id === undefined || id < 0) continue;
+      for (const [dx, dy, dz] of nb6) {
+        const nx = x + dx, ny = y + dy, nz = z + dz;
+        const o = nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz;
+        if (!o && open[li(nx, ny, nz)] > OPEN_EPS) continue;
+        tot[id]++; if (o) oob[id]++;
+      }
+    }
+    for (let i = 0; i < regions.length; i++) rawSky[i] = tot[i] > 0 ? oob[i] / tot[i] : 0;
+  }
+  const skyOob = new Float64Array(regions.length), skySurf = new Float64Array(regions.length);
+  for (let i = 0; i < regions.length; i++) { skyOob[i] = rawSky[i]; skySurf[i] = 1; }
+  const isOutdoor = a => (skyOob[a] / Math.max(1e-9, skySurf[a])) > SKY_SPLIT;
+
   const parent = regions.map(r => r.id);
   const coreOf = regions.map(r => r.core);
   const find = a => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
@@ -248,8 +285,10 @@ function build(D, mergeH = 0.62) {
     // how much of its own openness a space loses at its boundary.
     const core = Math.min(coreOf[ra], coreOf[rb]);
     if (p.thick < mergeH * core) continue;               // a real pinch: keep them apart
+    if (isOutdoor(ra) !== isOutdoor(rb)) continue;        // an enclosure never merges with the sky
     parent[rb] = ra;
     coreOf[ra] = Math.max(coreOf[ra], coreOf[rb]);       // deeper now, so harder to absorb the next
+    skyOob[ra] += skyOob[rb]; skySurf[ra] += skySurf[rb];
     merged++;
   }
   // ── 5. SPLIT ELONGATED REGIONS ────────────────────────────────────────────────
