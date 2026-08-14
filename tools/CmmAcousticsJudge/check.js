@@ -56,11 +56,27 @@ function parseSmooth(out) {
   return rows;
 }
 
+// real.js table: name, worst, mean, >1%, >3%
+function parseReal(out) {
+  const rows = [];
+  for (const line of out.split("\n")) {
+    const m = line.match(/^(\S+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)%\s+([\d.]+)%/);
+    if (m) rows.push({ dump: m[1], worst: parseFloat(m[2]), mean: parseFloat(m[3]), over3: parseFloat(m[5]) });
+  }
+  return rows;
+}
+
 function collect() {
   cp.execSync("node synth.js", { cwd: __dirname, env, encoding: "utf8" });
   const spec = parseSpec(run("scenarios.run.js"));
   const smooth = parseSmooth(run("smooth.js")).filter(r => r.model === "new");
-  return { spec, smooth };
+  // Real captures are measured whenever they exist. They caught two defects the synthetic gates
+  // were green through, so they are not optional -- but they are tracked against a baseline rather
+  // than held to the hard step limit, because the outstanding real-geometry roughness is known
+  // work rather than a regression, and a permanently red gate stops carrying information.
+  let real = [];
+  try { real = parseReal(run("real.js")); } catch (e) { /* no dumps, or harness missing */ }
+  return { spec, smooth, real };
 }
 
 function main() {
@@ -72,7 +88,7 @@ function main() {
 
   if (ACCEPT) {
     fs.writeFileSync(BASEFILE, JSON.stringify(cur, null, 1));
-    console.log(`baseline recorded (${REGIONS ? "regions" : "cells"}): ${cur.spec.length} scenarios, ${cur.smooth.length} routes`);
+    console.log(`baseline recorded (${REGIONS ? "regions" : "cells"}): ${cur.spec.length} scenarios, ${cur.smooth.length} routes, ${(cur.real || []).length} real dumps`);
     console.log(`  -> ${path.basename(BASEFILE)}`);
     return;
   }
@@ -121,6 +137,16 @@ function main() {
   } catch (e) { dumpNote = `DUMPS  validity check failed: ${e.message}`; }
   if (dumpNote) warns.push(dumpNote);
 
+  // ── REAL GEOMETRY ───────────────────────────────────────────────────────────
+  for (const r of cur.real || []) {
+    const b = base && (base.real || []).find(x => x.dump === r.dump);
+    if (!b) { warns.push(`REAL   ${r.dump} is new — not in baseline`); continue; }
+    if (r.worst > b.worst + TOL) fails.push(`REAL   ${r.dump} worst ${b.worst.toFixed(2)} -> ${r.worst.toFixed(2)} dB/block`);
+    if (r.mean > b.mean + TOL) fails.push(`REAL   ${r.dump} mean ${b.mean.toFixed(2)} -> ${r.mean.toFixed(2)} dB/block`);
+  }
+  for (const r of cur.real || [])
+    if (r.worst > STEP_LIMIT) warns.push(`REAL   ${r.dump} still ${r.worst.toFixed(2)} dB/block worst (${r.over3}% over ${STEP_LIMIT}) — outstanding`);
+
   const tag = REGIONS ? "regions" : "cells";
   console.log(`\nacceptance gate (${tag})   ${cur.spec.length} scenarios, ${cur.smooth.length} routes\n`);
   for (const r of cur.smooth) {
@@ -128,6 +154,11 @@ function main() {
     const delta = b ? (r.worst - b.worst >= 0 ? "+" : "") + (r.worst - b.worst).toFixed(2) : "  new";
     const flag = r.over3 > 0 ? "STEP" : r.worst > SMOOTH_LIMIT ? "over" : "ok";
     console.log(`  ${r.route.padEnd(16)} worst ${r.worst.toFixed(2).padStart(6)}  mean ${r.mean.toFixed(2).padStart(5)}  >3dB ${String(r.over3).padStart(5)}%  vs base ${delta.padStart(6)}  ${flag}`);
+  }
+  for (const r of cur.real || []) {
+    const b = base && (base.real || []).find(x => x.dump === r.dump);
+    const delta = b ? (r.worst - b.worst >= 0 ? "+" : "") + (r.worst - b.worst).toFixed(2) : "  new";
+    console.log(`  ${("real:" + r.dump).slice(0, 16).padEnd(16)} worst ${r.worst.toFixed(2).padStart(6)}  mean ${r.mean.toFixed(2).padStart(5)}  >3dB ${String(r.over3).padStart(5)}%  vs base ${delta.padStart(6)}  ${r.worst > STEP_LIMIT ? "todo" : "ok"}`);
   }
   console.log(`  ${"spec".padEnd(16)} ${cur.spec.filter(s => s.pass).length}/${cur.spec.length} pass`);
 

@@ -104,5 +104,25 @@
    "over1": 0,
    "over3": 0
   }
+ ],
+ "real": [
+  {
+   "dump": "bunker_00.100",
+   "worst": 5.52,
+   "mean": 0.2,
+   "over3": 0.37
+  },
+  {
+   "dump": "cave_09.7",
+   "worst": 0.6,
+   "mean": 0.15,
+   "over3": 0
+  },
+  {
+   "dump": "store_electronics_02.755",
+   "worst": 6.29,
+   "mean": 0.33,
+   "over3": 0.98
+  }
  ]
 }
