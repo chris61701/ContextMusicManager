@@ -4,62 +4,62 @@
    "name": "S2 door OPEN, wood wall",
    "pass": true,
    "probe": "B on-axis",
-   "value": -2.3
+   "value": -3
   },
   {
    "name": "S1 door SHUT, wood wall",
    "pass": true,
    "probe": "B on-axis",
-   "value": -5.7
+   "value": -7.3
   },
   {
    "name": "S3 door SHUT, concrete wall",
    "pass": true,
    "probe": "B off-set",
-   "value": -19.2
+   "value": -20
   },
   {
    "name": "S3b SEALED concrete shell (concrete door)",
    "pass": true,
    "probe": "B off-set",
-   "value": -30.2
+   "value": -31.4
   },
   {
    "name": "S4 VAULT door in WOOD wall (should NOT seal)",
    "pass": true,
    "probe": "B on-axis",
-   "value": -6.2
+   "value": -7.7
   },
   {
    "name": "S4 VAULT door in CONCRETE wall (should seal)",
    "pass": true,
    "probe": "B on-axis",
-   "value": -30.4
+   "value": -31.7
   },
   {
    "name": "S4 VAULT in 3-thick CONCRETE (bunker)",
    "pass": true,
    "probe": "B on-axis",
-   "value": -119.7
+   "value": -121
   },
   {
    "name": "D floor SHUT hatch, wood floor",
    "pass": true,
    "probe": "B on-axis",
-   "value": -10.7
+   "value": -13.8
   },
   {
    "name": "D floor OPEN hatch, wood floor",
    "pass": true,
    "probe": "B on-axis",
-   "value": -2.5
+   "value": -2.4
   }
  ],
  "smooth": [
   {
    "route": "approach",
    "model": "new",
-   "worst": 1.93,
+   "worst": 1.65,
    "mean": 0.18,
    "over1": 0.8,
    "over3": 0
@@ -67,40 +67,40 @@
   {
    "route": "pastdoor",
    "model": "new",
-   "worst": 0.43,
-   "mean": 0.11,
+   "worst": 0.46,
+   "mean": 0.14,
    "over1": 0,
    "over3": 0
   },
   {
    "route": "throughdoor",
    "model": "new",
-   "worst": 1.93,
-   "mean": 0.22,
+   "worst": 1.65,
+   "mean": 0.19,
    "over1": 1.6,
    "over3": 0
   },
   {
    "route": "alongwall-shut",
    "model": "new",
-   "worst": 0.08,
-   "mean": 0.06,
+   "worst": 0.05,
+   "mean": 0.02,
    "over1": 0,
    "over3": 0
   },
   {
    "route": "pasthatch",
    "model": "new",
-   "worst": 0.39,
-   "mean": 0.14,
-   "over1": 0,
+   "worst": 1.08,
+   "mean": 0.34,
+   "over1": 2.9,
    "over3": 0
   },
   {
    "route": "pasthatch-shut",
    "model": "new",
-   "worst": 0.34,
-   "mean": 0.17,
+   "worst": 0.18,
+   "mean": 0.13,
    "over1": 0,
    "over3": 0
   }

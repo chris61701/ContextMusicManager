@@ -752,19 +752,22 @@ function makeNewEvaluator(D, G, src) {
         const oy = (e1y * p.ca + e2y * p.sa) * p.r;
         const oz = (e1z * p.ca + e2z * p.sa) * p.r;
         const qx = bm.x + ox, qy = bm.y + oy, qz = bm.z + oz;
-        // A patch only transmits if there is BARRIER at it. Where the disc runs off the edge of
-        // the barrier the patch sits in air, and air is not a transmitting surface -- it is a
-        // gap, which is the aperture term's job. Counting it here both double-counted with the
-        // apertures and opened the free-path leak above. Weighted by how solid the patch is, from
-        // the same continuous openness field the graph uses, so a patch fades out as the disc
-        // crosses an edge instead of switching off.
-        const solidity = 1 - openAtF(qx, qy, qz);
-        if (solidity <= 1e-3) continue;
-        // source -> this patch of barrier -> listener, the patch radiating from where it is
-        const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz, true, false)    // count the patch: it IS the barrier
+        // EVERY patch counts, blocked or clear. Skipping the clear ones (on the reasoning that
+        // air is not a transmitting surface) threw away the UNBLOCKED share of the zone, so the
+        // instant a sight line clipped a corner the level fell off a cliff: measured on the real
+        // store dump at -3 dB one block and -22 the next, 160 such samples, because a grazing ray
+        // makes barrierMid non-null and every air patch was then discarded.
+        //
+        // Air is not a transmitter but it IS a passer, and partial obstruction of the first
+        // Fresnel zone attenuating gradually is exactly what diffraction does. Weighting by
+        // solidity was also a double count: each patch's own material is already integrated by
+        // the two legs, half a voxel each. So the honest form is a plain area integral over the
+        // zone -- fully blocked gives the wall's loss, fully clear gives free field, and partial
+        // gives the smooth in-between with no branch anywhere.
+        const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz, true, false)    // count the patch itself
                 + segDbAt(D, qx, qy, qz, lx, ly, lz, false, true);
         const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
-        fanPow += p.w * solidity * dbToPow(-(SLOPE * len + m));
+        fanPow += p.w * dbToPow(-(SLOPE * len + m));
       }
       // If the disc found no barrier at all, the run it located is not a surface the listener is
       // behind -- fall back to the straight-line estimate rather than reporting silence.
