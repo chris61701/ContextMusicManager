@@ -46,8 +46,14 @@ const LOSS_SCALE = 32;   // uint8 / 32 -> up to 7.97, enough for the vault's 4.0
 // index order must match the dumps: x + sx*(z + sz*y)
 const li = (x, y, z) => x + SX * (z + SZ * y);
 
-function build({ wall, door, open, thick }) {
+// Two-storey variant: instead of a dividing WALL it lays a horizontal FLOOR slab across the box,
+// with an optional hatch. Needed because the single-storey geometry cannot test the author's rule
+// that a one-block floor is not a one-block wall -- and implementing anisotropy without a route
+// that crosses a floor would be implementing something unmeasurable.
+const FLOORY = 6;            // the slab's height
+function build({ wall, door, open, thick, floor }) {
   const WALLT = thick || WALLT_DEFAULT;
+  if (floor) return buildFloor({ wall, door, open });
   const n = SX * SY * SZ;
   const loss = Buffer.alloc(n);
   const flags = Buffer.alloc(n);
@@ -118,6 +124,46 @@ function build({ wall, door, open, thick }) {
   };
 }
 
+function buildFloor({ wall, door, open }) {
+  const n = SX * SY * SZ;
+  const loss = Buffer.alloc(n), flags = Buffer.alloc(n), block = Buffer.alloc(n * 2);
+  const put = (i, lossVal, blockId) => {
+    loss[i] = Math.min(255, Math.round(lossVal * LOSS_SCALE));
+    flags[i] = lossVal <= 0.001 ? FLAG.air : FLAG.solidCube;
+    block.writeUInt16LE(blockId, i * 2);
+  };
+  const HATCH = { x0: 8, x1: 10, z0: 10, z1: 12 };
+  for (let y = 0; y < SY; y++) for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    const i = li(x, y, z);
+    const shell = x < SHELL || x >= SX - SHELL || y < SHELL || y >= SY - SHELL || z < SHELL || z >= SZ - SHELL;
+    if (shell) { put(i, MAT.concrete, 1); continue; }
+    if (y === FLOORY) {
+      const inHatch = x >= HATCH.x0 && x <= HATCH.x1 && z >= HATCH.z0 && z <= HATCH.z1;
+      if (!inHatch) { put(i, MAT[wall], 1); continue; }
+      put(i, MAT[door] * (1 - Math.max(0, Math.min(1, open))), 2);
+      continue;
+    }
+    put(i, MAT.air, 0);
+  }
+  const spk = { x: 9, y: 3, z: 11 };                 // ground floor, under the hatch
+  const si = li(spk.x, spk.y, spk.z);
+  put(si, MAT.wood, 1);
+  flags[si] |= FLAG.emitter;
+  return {
+    version: 2, poi: `synth_floor-${wall}_hatch-${door}_open-${open}`, poiId: 0,
+    poiBounds: { x: 0, y: 0, z: 0, sx: SX, sy: SY, sz: SZ },
+    bounds: { x: 0, y: 0, z: 0, sx: SX, sy: SY, sz: SZ },
+    order: "index = x + sx*(z + sz*y); coords relative to bounds origin",
+    lossScale: LOSS_SCALE, flagBits: FLAG, config: CFG,
+    emitters: [{ x: spk.x, y: spk.y, z: spk.z, name: "synthSpeaker", virtual: false }],
+    blocks: ["air", "floor", "hatch"],
+    loss: loss.toString("base64"), flags: flags.toString("base64"), block: block.toString("base64"),
+    regions: { roomA: { x0: SHELL, x1: SX - SHELL - 1, y0: SHELL, y1: FLOORY - 1, z0: SHELL, z1: SZ - SHELL - 1 },
+               roomB: { x0: SHELL, x1: SX - SHELL - 1, y0: FLOORY + 1, y1: SY - SHELL - 1, z0: SHELL, z1: SZ - SHELL - 1 },
+               floorY: FLOORY, hatch: HATCH, speaker: spk },
+  };
+}
+
 const MATRIX = [
   // scenario #2 — door open: room B should be nearly line-of-sight loud, from the doorway
   { wall: "wood",     door: "air",   open: 1.0,  tag: "S2 door OPEN, wood wall" },
@@ -131,6 +177,12 @@ const MATRIX = [
   { wall: "wood",     door: "wood",  open: 0.8,  tag: "S6 door 80% open" },
   // scenario #3 — heavy wall, doors shut: faint, material dependent
   { wall: "concrete", door: "wood",  open: 0.0,  tag: "S3 door SHUT, concrete wall" },
+  // ... and the same shell with a CONCRETE door, which is the only version that can actually
+  // demonstrate concrete-grade isolation. S3 above contains a WOOD door, so the wood is the
+  // weakest element and the wood is what you hear -- the author's glass-and-steel case. Asking
+  // S3 for concrete isolation was asking the model to ignore its own flanking, which is the one
+  // behaviour the whole design exists to produce. Split into two cases so each tests one thing.
+  { wall: "concrete", door: "concrete", open: 0.0, tag: "S3b SEALED concrete shell (concrete door)" },
   // scenario #4 — THE FLANKING TEST. Same vault door, two different walls.
   { wall: "wood",     door: "vault", open: 0.0,  tag: "S4 VAULT door in WOOD wall (should NOT seal)" },
   { wall: "concrete", door: "vault", open: 0.0,  tag: "S4 VAULT door in CONCRETE wall (should seal)" },
@@ -138,6 +190,9 @@ const MATRIX = [
   // surrounding wall is thick enough that flanking through it is also dead -- which is the
   // whole point of principle A, and a 1-block wall cannot demonstrate it.
   { wall: "concrete", door: "vault", open: 0.0, thick: 3, tag: "S4 VAULT in 3-thick CONCRETE (bunker)" },
+  // two-storey: the author's rule D, that a one-block FLOOR is not a one-block wall
+  { wall: "wood", door: "wood", open: 0.0, floor: true, tag: "D floor SHUT hatch, wood floor" },
+  { wall: "wood", door: "air",  open: 1.0, floor: true, tag: "D floor OPEN hatch, wood floor" },
 ];
 
 function main() {

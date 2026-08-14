@@ -49,6 +49,14 @@ const ROUTES = [
     from: [26, 3, 11], to: [10, 3, 11] },
   { name: "alongwall-shut", dump: "synth_wall-wood_door-wood_open-0.json",
     from: [21, 3, 3], to: [21, 3, 21] },
+  // The vertical twin of "pastdoor": walking the upper storey across an open hatch. This is the
+  // author's own jarring case rotated 90 degrees, and it was unmeasured until floor anisotropy
+  // existed -- so nothing stopped a floor change from putting a cliff overhead.
+  { name: "pasthatch", dump: "synth_floor-wood_hatch-air_open-1.json",
+    from: [9, 8, 3], to: [9, 8, 20] },
+  // ... and across a SHUT hatch, where the level should be low and almost featureless.
+  { name: "pasthatch-shut", dump: "synth_floor-wood_hatch-wood_open-0.json",
+    from: [9, 8, 3], to: [9, 8, 20] },
 ];
 
 function samples(r) {

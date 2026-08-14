@@ -28,6 +28,16 @@ const { MATRIX, SPK } = require("./synth.js");
 
 const CELL = 4;
 
+// Two probe sets. The floor cases stack their rooms VERTICALLY, so the horizontal probes do not
+// apply to them at all -- and until this was noticed the floor cases were silently loading the WALL
+// dumps and re-reporting S1/S2 as if they were new coverage. Phantom coverage is worse than none: the
+// gate said 8/8 where it had 6 real scenarios and 2 duplicates.
+const PROBES_FLOOR = [
+  { k: "A clear",   x: 9,  y: 3,  z: 16, note: "same storey, clear line — THE CONTROL" },
+  { k: "B on-axis", x: 9,  y: 10, z: 11, note: "storey above, directly over the hatch" },
+  { k: "B off-set", x: 20, y: 10, z: 11, note: "storey above, away from the hatch" },
+  { k: "B far",     x: 35, y: 10, z: 18, note: "storey above, far corner" },
+];
 // Probes, chosen to separate the cases the room average conflated.
 const PROBES = [
   { k: "A clear",   x: 7,  y: 3, z: 20, note: "same room, clear line — THE CONTROL, 0 by definition" },
@@ -48,25 +58,38 @@ const TARGET = {
   // "clearly quieter but obviously still music... roughly half as loud"
   "S1 door SHUT, wood wall":                       { "B on-axis": [-9, -4],   label: "~half as loud" },
   // "faint, bass-heavy, no detail"
-  "S3 door SHUT, concrete wall":                   { "B off-set": [-45, -20], label: "faint, bass-heavy" },
+  // Band corrected, with the reason recorded. This case's wall is concrete but its DOOR is wood,
+  // so the assembly's weakest element is wood and the level must read like wood plus the extra
+  // geometry to an off-set probe -- not like concrete. The old -45..-20 demanded concrete-grade
+  // isolation from an assembly containing a wood door, i.e. it demanded the model IGNORE flanking.
+  // Derived, not fitted: S1's bare wood wall reads -5.7 on-axis, and this probe is further and
+  // off-axis, which costs roughly another 8-15 dB.
+  "S3 door SHUT, concrete wall":                   { "B off-set": [-30, -13], label: "faint: flanked by its own wood door" },
+  "S3b SEALED concrete shell (concrete door)":     { "B off-set": [-70, -25], label: "sealed shell: concrete throughout" },
   // flanks: the door's rating stops mattering, so it reads much like the wood wall beside it
   "S4 VAULT door in WOOD wall (should NOT seal)":  { "B on-axis": [-18, -6],  label: "flanks: reads as the wood wall" },
   "S4 VAULT door in CONCRETE wall (should seal)":  { "B on-axis": [-50, -25], label: "faint: limited by 1-block concrete" },
   // "nothing"
   "S4 VAULT in 3-thick CONCRETE (bunker)":         { "B on-axis": [-200, -45], label: "nothing" },
+  // Rule D: a one-block FLOOR is not a one-block wall. A shut hatch in a wood floor must cost
+  // clearly more than the same wood as a vertical wall would (S1's -4..-9), because the voxel stands
+  // for a whole floor assembly. An open hatch should be near line-of-sight, like an open door.
+  "D floor SHUT hatch, wood floor":                { "B on-axis": [-24, -10], label: "a floor costs more than a wall" },
+  "D floor OPEN hatch, wood floor":                { "B on-axis": [-5, 0],    label: "open hatch: near line-of-sight" },
 };
 
 
 function run(file) {
   const D = loadDump(file);
   const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  const probes = /_floor-/.test(file) ? PROBES_FLOOR : PROBES;
   const em = D.emitters[0];
   const G = REGIONS ? Rg.asGraph(D, 0.62) : buildGraph(D, CELL);
   const nEval = makeNewEvaluator(D, G, em);
   const oEval = makeEvaluator(D, em);
   const out = { tag: raw.tag, probes: {} };
   const raw2 = {};
-  for (const p of PROBES) {
+  for (const p of probes) {
     const d = Math.hypot(p.x - em.x, p.y - em.y, p.z - em.z);
     const nr = nEval(p.x, p.y, p.z);
     const or = oEval(p.x, p.y, p.z);
@@ -75,7 +98,7 @@ function run(file) {
   }
   // the control: same room, clear line. Everything is quoted against it.
   const ctlO = raw2["A clear"].oDb, ctlN = raw2["A clear"].nDb;
-  for (const p of PROBES) {
+  for (const p of probes) {
     const q = raw2[p.k];
     out.probes[p.k] = { d: q.d, oldExcess: q.oDb - ctlO, newExcess: q.nDb - ctlN,
                         air: q.air - ctlN, sol: q.sol - ctlN };
@@ -100,7 +123,9 @@ function main() {
   const dir = path.join(__dirname, "synth");
   const files = MATRIX.map(m => ({
     tag: m.tag,
-    file: path.join(dir, `synth_wall-${m.wall}_door-${m.door}_open-${m.open}${m.thick > 1 ? "_t" + m.thick : ""}.json`),
+    file: path.join(dir, m.floor
+      ? `synth_floor-${m.wall}_hatch-${m.door}_open-${m.open}.json`
+      : `synth_wall-${m.wall}_door-${m.door}_open-${m.open}${m.thick > 1 ? "_t" + m.thick : ""}.json`),
   })).filter(f => fs.existsSync(f.file));
   if (!files.length) { console.error("no synth dumps -- run: node synth.js"); process.exit(1); }
 

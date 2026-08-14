@@ -53,7 +53,8 @@ const { loadDump, makeEvaluator, segLoss } = require("./judge3d.js");
 // giving cloth ~0.04, glass 1.4, wood 6.0, dirt 15, concrete 30, metal 40, vault 60.
 const DB_MAT = 40.1;        // scale: one voxel of the densest ordinary material (frac 1.0)
 const MAT_POW = 2.74;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
-const DB_VOXEL_MAX = 60.0;  // per-voxel ceiling (an airtight vault leaf)
+const DB_VOXEL_MAX = 60.0;
+const VERT_MULT = 2.6;      // a voxel crossed vertically stands for a floor assembly, not a wall  // per-voxel ceiling (an airtight vault leaf)
 const SLOPE = 0.35;         // distance attenuation, dB per block (exponential curve)
 const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is FULLY open
 const OPEN_FULL = 0.5;      // ...and at/above which it is fully closed; between, a fraction
@@ -161,7 +162,14 @@ function segDb(D, x0, y0, z0, x1, y1, z1) {
   return segDbAt(D, x0 + 0.5, y0 + 0.5, z0 + 0.5, x1 + 0.5, y1 + 0.5, z1 + 0.5);
 }
 
-function segDbAt(D, fx, fy, fz, tx, ty, tz) {
+// skipFrom / skipTo default TRUE, which is right for a source-to-listener ray: the speaker sits
+// inside a solid block of its own and must not be charged for it, and the listener's own voxel is
+// not a barrier between them. They must be FALSE when an endpoint is a barrier patch, whose whole
+// purpose is to sit inside material -- with both legs skipping it, the barrier vanished entirely
+// and every patch read 0.0 dB through a metre of concrete. Counting the patch voxel on both legs
+// is not a double count: one leg covers entry-to-patch, the other patch-to-exit, and together they
+// sum to exactly one crossing.
+function segDbAt(D, fx, fy, fz, tx, ty, tz, skipFrom = true, skipTo = true) {
   // A LINE INTEGRAL, not a voxel count. Counting whole voxels made the result flip by a
   // material's full value as the ray angle changed: a ONE-voxel-thick wall clips one or two
   // of its voxels depending on the angle, so a diagonal crossing read 12 dB where a
@@ -185,13 +193,25 @@ function segDbAt(D, fx, fy, fz, tx, ty, tz) {
   const tD = d => Math.abs(d) < 1e-6 ? Infinity : Math.abs(1 / d);
   let tmx = tM(fx, dx, x, sX), tmy = tM(fy, dy, y, sY), tmz = tM(fz, dz, z, sZ);
   const tDx = tD(dx), tDy = tD(dy), tDz = tD(dz);
+  // ── A ONE-BLOCK FLOOR IS NOT A ONE-BLOCK WALL (author, rule D) ──────────────
+  // A voxel does double duty. Used vertically it stands for a whole floor assembly -- deck, joists,
+  // ceiling below -- which is far deeper and heavier than the wall a voxel stands for horizontally.
+  // So the same material must cost MORE crossed vertically. The anisotropy is a property of what a
+  // voxel REPRESENTS, not of physics, which is why no amount of material tuning would find it.
+  //
+  // Scaled by how vertical the ray is, so it is continuous in direction rather than switching on an
+  // axis test: a horizontal ray pays 1x, a vertical one VERT_MULT. Magnitude from the mass law --
+  // a floor assembly is roughly 3x a wall's mass, and 20*log10(3) is about 9.5 dB, which on wood's
+  // 6 dB is a factor near 2.6.
+  const vert = 1 + (VERT_MULT - 1) * Math.abs(dy);
   let db = 0, tPrev = 0;
   for (let g = 0; g < 1024; g++) {
     const tNext = Math.min(tmx, tmy, tmz, dist);
     const seg = tNext - tPrev;                    // ray length inside the CURRENT voxel
-    if (seg > 1e-6 && y >= 0 && y < 256 && !(x === x0 && y === y0 && z === z0) && !(x === x1 && y === y1 && z === z1)) {
+    const atFrom = x === x0 && y === y0 && z === z0, atTo = x === x1 && y === y1 && z === z1;
+    if (seg > 1e-6 && y >= 0 && y < 256 && !(skipFrom && atFrom) && !(skipTo && atTo)) {
       const f = D.lossAt(x, y, z);
-      if (f > 1e-4) db += Math.min(DB_VOXEL_MAX, DB_MAT * Math.pow(f, MAT_POW)) * seg;
+      if (f > 1e-4) db += Math.min(DB_VOXEL_MAX * vert, DB_MAT * Math.pow(f, MAT_POW) * vert) * seg;
     }
     if (tNext >= dist - 1e-9) break;
     tPrev = tNext;
@@ -206,6 +226,22 @@ function segDbAt(D, fx, fy, fz, tx, ty, tz) {
 // exists. Needed because the transmission integral belongs at the barrier, not at the
 // listener -- a patch of barrier radiates from its own position (see reference spec G).
 // Returns null when the line is clear.
+// ── WHERE THE TRANSMITTING SURFACE IS ──────────────────────────────────────────
+// Returns the midpoint of the material run NEAREST THE LISTENER, and that run's thickness.
+//
+// This used to span from the FIRST material along the ray to the LAST, and take the middle of
+// that. A speaker IS a solid block, so the span began inside the speaker's own block and ended
+// at the far wall -- putting the "barrier" midpoint in OPEN AIR partway along the route. The
+// disc built around it then sampled a sphere of air, and patches at radius 3 landed on the far
+// side of a one-voxel floor with a clear path to the listener: the dominant patch paid
+// 0.0 + 0.0 dB through a solid floor and carried 55% of the power. A leak, not a mis-tuning,
+// and it is why walking over a shut hatch spiked 11.7 dB/block.
+//
+// The right definition comes straight from the governing principle: the surface that radiates
+// into the listener's space is the one bounding that space -- the run nearest the LISTENER. That
+// is also automatically immune to the source sitting inside a block, and it does the right thing
+// with two walls in a row (the inner face is what radiates at you; the outer wall's loss is still
+// paid along each leg).
 function barrierMid(D, fx, fy, fz, tx, ty, tz) {
   let dx = tx - fx, dy = ty - fy, dz = tz - fz;
   const dist = Math.hypot(dx, dy, dz);
@@ -217,12 +253,18 @@ function barrierMid(D, fx, fy, fz, tx, ty, tz) {
   const tD = d => Math.abs(d) < 1e-6 ? Infinity : Math.abs(1 / d);
   let tmx = tM(fx, dx, x, sX), tmy = tM(fy, dy, y, sY), tmz = tM(fz, dz, z, sZ);
   const tDx = tD(dx), tDy = tD(dy), tDz = tD(dz);
-  let first = -1, last = -1, tPrev = 0;
+  // Track material RUNS. A run breaks on any gap of air, so the speaker's own block and a wall
+  // beyond it are two runs rather than one long smear.
+  let runA = -1, runB = -1, lastA = -1, lastB = -1, tPrev = 0;
   for (let g = 0; g < 1024; g++) {
     const tNext = Math.min(tmx, tmy, tmz, dist);
-    if (tNext - tPrev > 1e-6 && y >= 0 && y < 256 && D.lossAt(x, y, z) > 0.05) {
-      if (first < 0) first = tPrev;
-      last = tNext;
+    if (tNext - tPrev > 1e-6 && y >= 0 && y < 256) {
+      if (D.lossAt(x, y, z) > 0.05) {
+        if (runA < 0) runA = tPrev;                    // a run opens
+        runB = tNext;
+      } else if (runA >= 0) {
+        lastA = runA; lastB = runB; runA = -1;         // a run closes; remember it
+      }
     }
     if (tNext >= dist - 1e-9) break;
     tPrev = tNext;
@@ -230,9 +272,10 @@ function barrierMid(D, fx, fy, fz, tx, ty, tz) {
     else if (tmy <= tmz) { y += sY; tmy += tDy; }
     else { z += sZ; tmz += tDz; }
   }
-  if (first < 0) return null;
-  const t = 0.5 * (first + last);
-  return { x: fx + dx * t, y: fy + dy * t, z: fz + dz * t };
+  if (runA >= 0) { lastA = runA; lastB = runB; }        // still open at the listener
+  if (lastA < 0) return null;
+  const t = 0.5 * (lastA + lastB);
+  return { x: fx + dx * t, y: fy + dy * t, z: fz + dz * t, thick: lastB - lastA };
 }
 
 const sstep = (a, b, x) => { if (b <= a) return x >= b ? 1 : 0; const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -559,6 +602,25 @@ function makeNewEvaluator(D, G, src) {
   const sx5 = src.x + 0.5, sy5 = src.y + 0.5, sz5 = src.z + 0.5;
   const minSeed = seeded.size ? Math.min(...seeded.values()) : 0;
 
+  // Openness at a FLOAT position, trilinear over voxel centres. Needed because the transmission
+  // disc has to know how much barrier is actually at each patch, and a nearest-voxel lookup would
+  // make that a step function of the listener's position -- the exact class of defect this whole
+  // model exists to remove. Out of bounds reads as open, so an unknown region never invents a wall.
+  const openAtF = (x, y, z) => {
+    const gx = x - 0.5, gy = y - 0.5, gz = z - 0.5;
+    const bx = Math.floor(gx), by = Math.floor(gy), bz = Math.floor(gz);
+    const tx = gx - bx, ty = gy - by, tz = gz - bz;
+    let acc = 0;
+    for (let i = 0; i < 8; i++) {
+      const ex = i & 1, ey = (i >> 1) & 1, ez = (i >> 2) & 1;
+      const w = (ex ? tx : 1 - tx) * (ey ? ty : 1 - ty) * (ez ? tz : 1 - tz);
+      if (w <= 0) continue;
+      const px = bx + ex, py = by + ey, pz = bz + ez;
+      acc += w * (D.inB(px, py, pz) ? G.open[D.idx(px, py, pz)] : 1);
+    }
+    return acc;
+  };
+
   // ── the FIXED candidate set ────────────────────────────────────────────────
   // One entry per aperture, plus the source itself. Fixed for the whole field: the listener
   // never gathers, selects by hop count, or searches a radius, because every one of those
@@ -690,11 +752,23 @@ function makeNewEvaluator(D, G, src) {
         const oy = (e1y * p.ca + e2y * p.sa) * p.r;
         const oz = (e1z * p.ca + e2z * p.sa) * p.r;
         const qx = bm.x + ox, qy = bm.y + oy, qz = bm.z + oz;
+        // A patch only transmits if there is BARRIER at it. Where the disc runs off the edge of
+        // the barrier the patch sits in air, and air is not a transmitting surface -- it is a
+        // gap, which is the aperture term's job. Counting it here both double-counted with the
+        // apertures and opened the free-path leak above. Weighted by how solid the patch is, from
+        // the same continuous openness field the graph uses, so a patch fades out as the disc
+        // crosses an edge instead of switching off.
+        const solidity = 1 - openAtF(qx, qy, qz);
+        if (solidity <= 1e-3) continue;
         // source -> this patch of barrier -> listener, the patch radiating from where it is
-        const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz) + segDbAt(D, qx, qy, qz, lx, ly, lz);
+        const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz, true, false)    // count the patch: it IS the barrier
+                + segDbAt(D, qx, qy, qz, lx, ly, lz, false, true);
         const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
-        fanPow += p.w * dbToPow(-(SLOPE * len + m));
+        fanPow += p.w * solidity * dbToPow(-(SLOPE * len + m));
       }
+      // If the disc found no barrier at all, the run it located is not a surface the listener is
+      // behind -- fall back to the straight-line estimate rather than reporting silence.
+      if (fanPow <= 0) fanPow = dbToPow(-(SLOPE * d + segDbAt(D, sx5, sy5, sz5, lx, ly, lz)));
     }
     const fanDb = fanPow > 0 ? -powToDb(fanPow) : 120;
     const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
@@ -919,4 +993,5 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, segDbAt, SLOPE };
+module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, segDbAt, SLOPE,
+                   barrierMid, FRESNEL_PTS };   // exported for per-patch diagnosis

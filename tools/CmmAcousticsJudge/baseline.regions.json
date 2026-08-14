@@ -4,60 +4,78 @@
    "name": "S2 door OPEN, wood wall",
    "pass": true,
    "probe": "B on-axis",
-   "value": -3.2
+   "value": -2.3
   },
   {
    "name": "S1 door SHUT, wood wall",
    "pass": true,
    "probe": "B on-axis",
-   "value": -7.7
+   "value": -5.7
   },
   {
    "name": "S3 door SHUT, concrete wall",
    "pass": true,
    "probe": "B off-set",
-   "value": -21.5
+   "value": -19.2
+  },
+  {
+   "name": "S3b SEALED concrete shell (concrete door)",
+   "pass": true,
+   "probe": "B off-set",
+   "value": -30.2
   },
   {
    "name": "S4 VAULT door in WOOD wall (should NOT seal)",
    "pass": true,
    "probe": "B on-axis",
-   "value": -8.4
+   "value": -6.2
   },
   {
    "name": "S4 VAULT door in CONCRETE wall (should seal)",
    "pass": true,
    "probe": "B on-axis",
-   "value": -32.3
+   "value": -30.4
   },
   {
    "name": "S4 VAULT in 3-thick CONCRETE (bunker)",
    "pass": true,
    "probe": "B on-axis",
-   "value": -104.3
+   "value": -119.7
+  },
+  {
+   "name": "D floor SHUT hatch, wood floor",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -10.7
+  },
+  {
+   "name": "D floor OPEN hatch, wood floor",
+   "pass": true,
+   "probe": "B on-axis",
+   "value": -2.5
   }
  ],
  "smooth": [
   {
    "route": "approach",
    "model": "new",
-   "worst": 1.57,
-   "mean": 0.19,
+   "worst": 1.93,
+   "mean": 0.18,
    "over1": 0.8,
    "over3": 0
   },
   {
    "route": "pastdoor",
    "model": "new",
-   "worst": 0.6,
-   "mean": 0.14,
+   "worst": 0.43,
+   "mean": 0.11,
    "over1": 0,
    "over3": 0
   },
   {
    "route": "throughdoor",
    "model": "new",
-   "worst": 1.57,
+   "worst": 1.93,
    "mean": 0.22,
    "over1": 1.6,
    "over3": 0
@@ -65,8 +83,24 @@
   {
    "route": "alongwall-shut",
    "model": "new",
-   "worst": 0.12,
-   "mean": 0.08,
+   "worst": 0.08,
+   "mean": 0.06,
+   "over1": 0,
+   "over3": 0
+  },
+  {
+   "route": "pasthatch",
+   "model": "new",
+   "worst": 0.39,
+   "mean": 0.14,
+   "over1": 0,
+   "over3": 0
+  },
+  {
+   "route": "pasthatch-shut",
+   "model": "new",
+   "worst": 0.34,
+   "mean": 0.17,
    "over1": 0,
    "over3": 0
   }
