@@ -457,10 +457,11 @@ function asGraph(D, mergeH) {
       const alpha = oob ? 0.95
         : Math.max(0.10, Math.min(0.85, 0.12 + 0.5 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
       a.surf++; a.absorb += alpha;
+      if (oob) a.sky++;              // a face onto the world, not onto a surface: energy leaves here
     }
   }
   const nRooms = roomSeen.size;
-  const rst = Array.from({ length: nRooms }, () => ({ n: 0, surf: 0, absorb: 0 }));
+  const rst = Array.from({ length: nRooms }, () => ({ n: 0, surf: 0, absorb: 0, sky: 0 }));
   const nodeRoom = new Int32Array(N).fill(0);
   for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
     const i = li(x, y, z); const id = nodeOf[i];
@@ -476,11 +477,15 @@ function asGraph(D, mergeH) {
       const alpha = oob ? 0.95
         : Math.max(0.10, Math.min(0.85, 0.12 + 0.5 * (1 - Math.min(1, D.loss[li(nx, ny, nz)]))));
       a.surf++; a.absorb += alpha;
+      if (oob) a.sky++;              // a face onto the world: energy leaves here rather than bouncing
     }
   }
   const rooms = rst.map((a, id) => ({
     id, n: Math.max(1, a.n),
     surf: Math.max(1, a.surf), alpha: a.surf > 0 ? a.absorb / a.surf : 0.5,
+    // Share of the boundary that is open to the world rather than a surface. A reverberant field is
+    // a property of an ENCLOSURE; where the boundary is sky, energy leaves instead of bouncing.
+    skyFrac: a.surf > 0 ? (a.sky || 0) / a.surf : 1,
     get roomR() { const al = Math.max(0.02, Math.min(0.95, this.alpha)); return this.surf * al / (1 - al); },
     walls: [],
   }));

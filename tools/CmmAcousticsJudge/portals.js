@@ -121,6 +121,19 @@ const DIFFUSE_CAL = 16;  // set so the diffuse field sits ~+5 dB on the direct c
 // acceptance criteria were rewarding a degenerate answer.
 const WAVELEN_BLOCKS = 1.7;         // ~200 Hz, the band that carries through structure
 const MFP_MIN = 0.5 * WAVELEN_BLOCKS;   // below this, no diffuse field of its own at all
+// ── AND A REVERBERANT FIELD IS A PROPERTY OF AN ENCLOSURE ─────────────────────
+// The worst case measured on the bunker was a listener buried under 439 dB of rock hearing the
+// field at -13 dB while no path delivered anything at all. The cause was not the level: it was that
+// the segmentation puts 777,541 voxels -- 97.6% of all open space in that capture, the outdoors and
+// the terrain and pockets deep inside stone -- into ONE region, and a uniform field is then applied
+// across all of it. "Uniform" is a statement about a closed space where sound bounces many times
+// before dying. It is meaningless across the open world.
+//
+// Sky exposure separates the two cleanly and with no overlap at all: every enclosed room in every
+// capture measures 0.0% of its boundary open to the world, while the outdoor regions measure
+// 43-57%. Where the boundary is sky, energy leaves instead of reverberating.
+const SKY_FULL = 0.05;   // below this share of open boundary, a full reverberant field
+const SKY_NONE = 0.25;   // above it, none at all
                          // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
 const WALL_AREA_SCALE = 1.0; // shared-wall area is in voxel-faces; 1.0 keeps it in those units
 const CLUSTER_BLOCKS = 4;    // entries closer than this are the same opening, not two
@@ -719,7 +732,8 @@ function makeNewEvaluator(D, G, src) {
       const R = RM[rm];
       // mean free path 4V/S, in blocks; V is the voxel count, S the counted face area
       const mfp = 4 * Math.max(1, R.n) / Math.max(1, R.surf);
-      const valid = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp);
+      const valid = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp)
+                  * (1 - sstep(SKY_FULL, SKY_NONE, R.skyFrac === undefined ? 0 : R.skyFrac));
       direct[rm] = direct[rm] > 0 ? valid * 4 * direct[rm] / Math.max(1, R.roomR) : 0;
     }
     // pass 2: power driven through SHARED WALLS by the neighbouring rooms. Power INCIDENT on a
@@ -928,7 +942,14 @@ function makeNewEvaluator(D, G, src) {
         const pf = fieldOf[other] || 0;
         if (pf <= 0) continue;
         const leg = Math.hypot(A.px - lx, A.py - ly, A.pz - lz);
-        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg + DIFFUSE_CAL);
+        // MATERIAL ON THE WAY OUT OF THE APERTURE COUNTS. This charged only for distance and
+        // constriction, so a neighbouring room's reverberation reached the listener through anything
+        // at all: measured on the bunker, a listener under 439 dB of rock received the field at
+        // -13 dB while no path delivered a thing. An aperture radiating into your space is subject to
+        // whatever stands between it and you, exactly as the air arrivals already are -- they compute
+        // this same legMat and it was simply missing here.
+        const legMat = segDbAt(D, A.px, A.py, A.pz, lx, ly, lz);
+        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg - legMat + DIFFUSE_CAL);
         pTot += pf * thru;
       }
       if (pTot > 0) diffDb = powToDb(pTot);

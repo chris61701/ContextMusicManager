@@ -42,6 +42,12 @@ const { checkDump } = require("./dumpcheck.js");
 const REVERB_MAX_OVER = 25;   // dB the field may sit above the dry path before it is absurd
 const REACH_FLOOR = -90;      // dB: below this the dry path is inaudible, so reverb must be too
 const STRIDE = 2;
+// AUDIBILITY FLOOR. This gate claims to test "audible reverb where sound cannot reach", and it must
+// actually do that rather than compare ratios between two inaudible numbers. A ratio of 80 dB
+// between signals at -40 and -120 dB is arithmetic, not a defect anyone can hear. So a voxel only
+// counts if its reverb is within this range of the LOUDEST point in the capture, i.e. if it is
+// genuinely part of the mix. Without it the gate flagged 16 voxels sitting at -40 dB and below.
+const AUDIBLE_RANGE = 40;
 
 function survey(file, label) {
   const D = loadDump(file);
@@ -49,6 +55,16 @@ function survey(file, label) {
   const em = D.emitters[0];
   const ev = P.makeNewEvaluator(D, G, em);
   const y = em.y + 1;
+  // loudest point in the capture, so audibility can be judged relative to it
+  let peak = -999;
+  for (let x = D.x0 + 1; x < D.x0 + D.sx - 1; x += STRIDE * 2)
+    for (let z = D.z0 + 1; z < D.z0 + D.sz - 1; z += STRIDE * 2) {
+      if (!D.inB(x, y, z) || G.open[D.idx(x, y, z)] < 0.9) continue;
+      const t = ev(x, y, z).total;
+      if (isFinite(t) && t > peak) peak = t;
+    }
+  const floor = peak - AUDIBLE_RANGE;
+
   const over = [];
   let orphan = 0, n = 0;
   for (let x = D.x0 + 1; x < D.x0 + D.sx - 1; x += STRIDE)
@@ -69,14 +85,15 @@ function survey(file, label) {
       const dryDb = dry > 0 ? 10 * Math.log10(dry) : -999;
       n++;
       if (r.diffDb <= -110) continue;
+      if (r.diffDb < floor) continue;          // inaudible in the mix: not a defect anyone can hear
       over.push(r.diffDb - dryDb);
-      // reverb where the dry path is inaudible: the room sound cannot reach is filling anyway
+      // reverb where the dry path is inaudible: a place sound cannot reach is filling anyway
       if (dryDb < REACH_FLOOR && r.diffDb > REACH_FLOOR) orphan++;
     }
   over.sort((a, b) => a - b);
   const q = f => over.length ? over[Math.min(over.length - 1, Math.floor(f * over.length))] : 0;
   return { label, n, med: q(0.5), p90: q(0.9), max: over.length ? over[over.length - 1] : 0,
-           orphanPct: n ? 100 * orphan / n : 0 };
+           orphanPct: n ? 100 * orphan / n : 0, peak, audible: over.length };
 }
 
 function main() {
