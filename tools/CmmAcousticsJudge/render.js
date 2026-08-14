@@ -734,6 +734,25 @@ function main() {
                    { t: 16, x: 23, y: 3, z: 21, yaw: Math.PI } ],
     },
     {
+      // ── THE NATURAL VERSION OF pastdoor ─────────────────────────────────────
+      // pastdoor faces the wall and sidesteps, which nobody does. It is built that way on purpose:
+      // facing across the direction of travel is the only way a doorway sweeps LEFT to RIGHT, and a
+      // left-right sweep is the sharpest possible localisation test. But the author, reasonably,
+      // could not picture themselves doing it -- "this is us strafing by a door?"
+      //
+      // So this is the same walk done the way a player actually moves: facing where you are going,
+      // straight past an open door on your left. The doorway stays left-of-centre the whole time
+      // and SWELLS as you draw level with it, because equal-power panning carries no front/back cue.
+      // A weaker localisation test and a far better naturalness test -- the question here is not
+      // "can you point at it" but "does that feel like walking past an open door".
+      name: "walkby",
+      note: "walk FORWARD past an open door on your LEFT, facing the way you are going",
+      seconds: 16,
+      states: () => [st(OPEN)],
+      waypoints: [ { t: 0, x: 23, y: 3, z: 3, yaw: Math.PI / 2 },
+                   { t: 16, x: 23, y: 3, z: 21, yaw: Math.PI / 2 } ],
+    },
+    {
       name: "swing",
       note: "stand still in room B on-axis; the door opens then shuts (gradual cue)",
       seconds: 18,
