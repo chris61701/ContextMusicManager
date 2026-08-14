@@ -587,6 +587,10 @@ function asGraph(D, mergeH) {
   const apertures = portals
     .filter(p => nodes[p.a].room !== nodes[p.b].room)
     .map(p => ({ nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
+                 // the opening's EXTENT, not just its centre. A listener stepping across a wide
+                 // boundary is right next to the opening even when it is far from its centroid, and
+                 // attenuating by centroid distance steps the field at exactly that moment.
+                 x0: p.x0, y0: p.y0, z0: p.z0, x1: p.x1, y1: p.y1, z1: p.z1,
                  // both rooms, so a listener anywhere can take a neighbour's reverberation through
                  // this opening without needing to be in a segment that happens to touch it
                  roomA: nodes[p.a].room, roomB: nodes[p.b].room }));

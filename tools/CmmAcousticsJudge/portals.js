@@ -1094,11 +1094,29 @@ function makeNewEvaluator(D, G, src) {
       // not also decide WHETHER it arrives. Same rule as the air arrivals.
       const myRoom = roomOf(nd);
       for (const A of G.apertures) {
-        const other = A.roomA === myRoom ? A.roomB : A.roomA === undefined ? -1 : A.roomA;
-        if (A.roomA !== myRoom && A.roomB !== myRoom) continue;   // not an opening of this room
-        const pf = fieldOf[other] || 0;
+        // NO ROOM-MEMBERSHIP GATE. This skipped every aperture that did not bound the listener's own
+        // room, so crossing a room boundary swapped the contributing set wholesale and stepped the
+        // field -- 10.1 dB across one block in the store, where the two sides of a boundary drew on
+        // completely different sets of third-party rooms. It is the identical mistake the loop above
+        // already fixed for SEGMENT adjacency: "topology must not also decide WHETHER it arrives".
+        // Distance, constriction and material decide how much; nothing decides whether.
+        //
+        // An opening radiates the reverberation of BOTH rooms behind it, so both count -- except the
+        // listener's own room, whose field they already receive directly as the uniform term, and which
+        // would otherwise be counted twice. That exclusion is on which FIELD is taken, never on whether
+        // the aperture contributes, so the candidate set stays fixed and nothing can step in or out.
+        let pf = 0;
+        if (A.roomA !== undefined && A.roomA >= 0 && A.roomA !== myRoom) pf += fieldOf[A.roomA] || 0;
+        if (A.roomB !== undefined && A.roomB >= 0 && A.roomB !== myRoom) pf += fieldOf[A.roomB] || 0;
         if (pf <= 0) continue;
-        const leg = Math.hypot(A.px - lx, A.py - ly, A.pz - lz);
+        // DISTANCE TO THE OPENING, not to its centre. The store's worst step -- 10.1 dB across one
+        // block -- is a room boundary crossing where the field went 7.3 -> -8.0 dB while the direct
+        // component barely moved. Standing just inside a room, a hand's width from a wide opening, you
+        // should receive the neighbour's reverberation almost undiminished; measuring to the centroid
+        // of a storefront-sized boundary charges tens of blocks of distance for being right beside it.
+        // Clamping to the opening's extent makes the coupling continuous across the boundary, which is
+        // what makes the two sides agree.
+        const leg = apDist(A, lx, ly, lz);
         // MATERIAL ON THE WAY OUT OF THE APERTURE COUNTS. This charged only for distance and
         // constriction, so a neighbouring room's reverberation reached the listener through anything
         // at all: measured on the bunker, a listener under 439 dB of rock received the field at
@@ -1146,6 +1164,16 @@ function makeNewEvaluator(D, G, src) {
   evalFn.fieldDb = fieldDbOf();
   evalFn.roomOfNode = rid => (rid >= 0 && rid < G.nodes.length ? G.nodes[rid].room : -1);
   return evalFn;
+}
+
+// Distance from a point to an opening's extent, not to its centre. Falls back to the centre when the
+// adapter did not supply bounds.
+function apDist(A, x, y, z) {
+  if (A.x0 === undefined) return Math.hypot(A.px - x, A.py - y, A.pz - z);
+  const cx = Math.max(A.x0, Math.min(A.x1, x));
+  const cy = Math.max(A.y0, Math.min(A.y1, y));
+  const cz = Math.max(A.z0, Math.min(A.z1, z));
+  return Math.hypot(cx - x, cy - y, cz - z);
 }
 
 // ── MATERIAL ALONG A LEG, MEASURED AS A BUNDLE RATHER THAN A RAY ──────────────
