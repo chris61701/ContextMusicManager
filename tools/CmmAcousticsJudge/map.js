@@ -28,7 +28,7 @@ const SCENARIOS = {
                      note: "far corner, in through the doorway, up to the speaker" },
   walkby:          { dump: "synth_wall-wood_door-air_open-1.json", y: 3, secs: 16,
                      from: [23, 3, 3], to: [23, 3, 21], yaw: Math.PI / 2,
-                     note: "walk FORWARD past an open door on your LEFT (the natural version)" },
+                     note: "walk FORWARD past an open door on your RIGHT (the natural version)" },
   swing:           { dump: "synth_wall-wood_door-wood_open-0.json", y: 3, secs: 18,
                      from: [26, 3, 11], to: [26, 3, 11], yaw: Math.PI,
                      note: "stand still on-axis while the door opens then shuts" },

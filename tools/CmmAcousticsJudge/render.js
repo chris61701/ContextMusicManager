@@ -24,7 +24,7 @@
 // Output: renders/<path>_<model>.wav
 // ───────────────────────────────────────────────────────────────────────────────
 "use strict";
-const fs = require("fs"), path = require("path");
+const fs = require("fs"), path = require("path"), cp = require("child_process");
 const { loadDump, makeEvaluator } = require("./judge3d.js");
 const { buildGraph, makeNewEvaluator, SLOPE } = require("./portals.js");
 const Rg = require("./regions.js");
@@ -689,11 +689,37 @@ function main() {
     }
     srcName = "steady pink noise (field probe: every dB shown is the model)";
   } else {
+    // ── REAL MUSIC, FROM THE MIDDLE OF THE TRACK ─────────────────────────────────
+    // The author's own library is mp3, and this renderer reads PCM16 wav only, so anything that is
+    // not already a wav goes through ffmpeg. --mid starts at the track's midpoint rather than its
+    // beginning, because intros are quiet and a quiet source tells you nothing about a model whose
+    // whole job is level and position: "start it from the middle of the song so it is at its peak".
+    //
+    // One command, reproducible, no manual pre-trimming to get out of step with.
+    //   node render.js --music="J:/.../Kristari - Emo.mp3" --mid
+    //   node render.js --music=<file> --offset=106 --dur=40
     const music = musicArg || "C:/_Games/CMM_TestMusic/ambient/Ashen Verge.wav";
-    const w = readWav(music);
+    const wantMid = args.includes("--mid");
+    const offArg = (args.find(a => a.startsWith("--offset=")) || "").split("=")[1];
+    const durArg = (args.find(a => a.startsWith("--dur=")) || "").split("=")[1];
+    const needFfmpeg = !/\.wav$/i.test(music) || wantMid || offArg !== undefined;
+    let src = music, off = 0;
+    if (needFfmpeg) {
+      const ff = process.env.CMM_FFMPEG || "ffmpeg";
+      if (wantMid && offArg === undefined) {
+        const probe = cp.execSync(`${ff.replace(/ffmpeg$/, "ffprobe")} -v error `
+          + `-show_entries format=duration -of csv=p=0 "${music}"`, { encoding: "utf8" }).trim();
+        off = Math.max(0, Math.floor(parseFloat(probe) / 2));
+      } else off = offArg === undefined ? 0 : +offArg;
+      const secs = durArg === undefined ? 60 : +durArg;
+      src = path.join(__dirname, ".music-cache.wav");
+      cp.execSync(`"${ff}" -y -v error -ss ${off} -t ${secs} -i "${music}" `
+        + `-ac 1 -ar ${SR} -sample_fmt s16 -f wav "${src}"`, { stdio: "inherit" });
+    }
+    const w = readWav(src);
     mono = w.mono; rate = w.rate;
     if (rate !== SR) console.warn(`warning: music is ${rate} Hz, renderer assumes ${SR}`);
-    srcName = path.basename(music);
+    srcName = path.basename(music) + (off ? `  from ${off}s (mid-track)` : "");
   }
   console.log(`source: ${srcName}  ${(mono.length / rate).toFixed(1)}s mono\n`);
 
@@ -741,12 +767,12 @@ function main() {
       // could not picture themselves doing it -- "this is us strafing by a door?"
       //
       // So this is the same walk done the way a player actually moves: facing where you are going,
-      // straight past an open door on your left. The doorway stays left-of-centre the whole time
+      // straight past an open door on your right. The doorway stays right-of-centre the whole time
       // and SWELLS as you draw level with it, because equal-power panning carries no front/back cue.
       // A weaker localisation test and a far better naturalness test -- the question here is not
       // "can you point at it" but "does that feel like walking past an open door".
       name: "walkby",
-      note: "walk FORWARD past an open door on your LEFT, facing the way you are going",
+      note: "walk FORWARD past an open door on your RIGHT, facing the way you are going",
       seconds: 16,
       states: () => [st(OPEN)],
       waypoints: [ { t: 0, x: 23, y: 3, z: 3, yaw: Math.PI / 2 },

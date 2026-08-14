@@ -383,3 +383,7 @@ UpgradeLog.htm
 /tools/CmmAcousticsJudge/dumps/
 /tools/CmmAcousticsJudge/dumps-v2/
 /tools/CmmAcousticsJudge/viewer/
+
+# Decoded copy of the author's own music, used as a render source. Copyrighted and large:
+# regenerate with  node render.js --music=<file.mp3> --mid
+tools/CmmAcousticsJudge/.music-cache.wav
