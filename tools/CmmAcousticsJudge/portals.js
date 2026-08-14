@@ -83,6 +83,7 @@ const AIR_FLAG = 1;
 // The radius is the first Fresnel zone's scale: sqrt(lambda*d)/2 is about 2 blocks at 500 Hz
 // over 23 m and about 4 at 100 Hz, so a few blocks is the right order -- the old cross was
 // roughly the right SIZE and wrong in every other respect.
+const CAND_DBG = process.env.CMM_CANDDBG ? process.env.CMM_CANDDBG.split(',').map(Number) : null;
 const FRESNEL_R = 3.0;
 // Rings as [radius fraction, sample count]; annulus boundaries at 0.25/0.75/1.0 of R give
 // the area shares below, summing to 1.
@@ -887,7 +888,15 @@ function makeNewEvaluator(D, G, src) {
       let db, legMat;
       if (c.isSrc) { legMat = centerMat; db = -(c.cost + fanDb); }
       else {
-        legMat = segDbAt(D, c.px, c.py, c.pz, lx, ly, lz);
+        // THE SAME BUNDLE THE DIFFUSE TERM USES. Both answer one question -- how much of the
+        // wavefront gets from this opening to the listener -- so measuring one with a five-ray bundle
+        // and the other with a single ray made the model contradict itself. It did so spectacularly:
+        // at 2.3% of the bunker's standable voxels EVERY dry candidate was dropped with legMat of
+        // 80-930 dB while the routed costs were a modest 18-59, and the diffuse field arrived at
+        // -18.9 dB through the very same openings. Sound cannot be present as reverberation and
+        // absent as a direct arrival along one route; one of the two measurements had to be wrong,
+        // and it was the ray.
+        legMat = legDb(D, c.px, c.py, c.pz, lx, ly, lz);
         db = -(c.cost + SLOPE * leg + legMat);
       }
       // A candidate whose total route is barely longer than the straight line describes the
@@ -905,6 +914,17 @@ function makeNewEvaluator(D, G, src) {
       // empirically wrong: centerMat transitions at the same wall plane, so both terms then
       // jumped together and the doorway crossing went from 8.4 to 10.3 dB/block. Left out.
       const w = c.isSrc ? 1 : sstep(0, 2, geoExcess);
+      if (CAND_DBG && Math.abs(lx - CAND_DBG[0] - 0.5) < 0.01
+                   && Math.abs(ly - CAND_DBG[1] - 0.5) < 0.01
+                   && Math.abs(lz - CAND_DBG[2] - 0.5) < 0.01)
+        console.error(`  ${(c.isSrc ? "SRC " : "aper").padEnd(5)}`
+          + ` cost=${c.cost === Infinity ? "INF" : c.cost.toFixed(1)}`.padEnd(14)
+          + ` leg=${leg.toFixed(1)}`.padEnd(10)
+          + ` legMat=${legMat.toFixed(1)}`.padEnd(14)
+          + ` excess=${geoExcess.toFixed(1)}`.padEnd(15)
+          + ` w=${w.toFixed(3)}`.padEnd(10)
+          + ` db=${db > -999 ? db.toFixed(1) : "-inf"}`.padEnd(12)
+          + (w <= 1e-4 ? "DROPPED(w)" : db <= -110 ? "DROPPED(db)" : "kept"));
       if (w <= 1e-4 || db <= -110) continue;
       arrivals.push({ db, w, px: c.px, py: c.py, pz: c.pz, legMat, len: c.routeLen + leg, isSrc: !!c.isSrc });
       pow += w * dbToPow(db);
