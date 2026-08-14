@@ -880,6 +880,33 @@ function makeNewEvaluator(D, G, src) {
     const nd = D.inB(Math.floor(wx), Math.floor(wy), Math.floor(wz))
       ? G.nodeOf[D.idx(Math.floor(wx), Math.floor(wy), Math.floor(wz))] : -1;
 
+    // ── ROUTED LEGS: TWO VARIANTS TRIED AND BOTH REJECTED, WITH NUMBERS ─────────
+    // The straight leg from a global aperture to the listener is only valid where line of sight holds,
+    // and through a void that bends it is nonsense -- 225 candidates dropped at 80-930 dB of legMat
+    // while the diffuse field arrived at -18.9 dB through the same openings. The obvious fix is to
+    // route the leg instead. Every route must cross a portal bounding the listener's OWN node, and
+    // line of sight inside a node is guaranteed by construction, so the node's own portals look like
+    // the complete and correct arrival set. Measured, they are not:
+    //
+    //   REPLACE the global apertures with the node's portals:  bunker orphan 1.4% -> 15.3%.
+    //     The node's own portals do not carry enough. A listener deep in a void has few of them and
+    //     their routed costs are high, so removing the straight-leg candidates loses more than the
+    //     routing gains.
+    //   UNION of both sets (can only raise a level, double count bounded at 3 dB):
+    //     better on reverb balance (cave max 27.4 -> 11.6, store 16.7 -> 16.4) but
+    //     cave smoothness 1.59 -> 4.08 dB/block, over the step limit.
+    //
+    // That regression is MODEL.md's rule earning itself again: a candidate set that changes with
+    // listener position steps the field. Adding the node's portals makes the set change at every node
+    // boundary, and the cave -- all corridors, so all boundaries -- pays for it.
+    //
+    // WHAT SHOULD WORK, for the next pass: keep the FIXED global aperture set and make only the LEG
+    // routed. Attenuate each aperture along the graph route from its node to the listener's node, plus
+    // the final in-node straight hop where a line is legitimate. The node graph is tiny (33 nodes, 60
+    // portals on the bunker), so a Dijkstra from each aperture over NODES is cheap and precomputable
+    // per aperture. Fixed set, routed legs, no topology deciding WHETHER anything arrives -- only how
+    // much. The per-node term still steps at boundaries, but by the difference in routed distance
+    // between adjacent nodes, which is bounded by their shared portal geometry rather than unbounded.
     const arrivals = [];
     let pow = 0, bestDb = -Infinity, bestIdx = -1;
     for (let i = 0; i < cands.length; i++) {
