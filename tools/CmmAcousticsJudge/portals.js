@@ -967,7 +967,7 @@ function makeNewEvaluator(D, G, src) {
         // -13 dB while no path delivered a thing. An aperture radiating into your space is subject to
         // whatever stands between it and you, exactly as the air arrivals already are -- they compute
         // this same legMat and it was simply missing here.
-        const legMat = segDbAt(D, A.px, A.py, A.pz, lx, ly, lz);
+        const legMat = process.env.CMM_NOLEGMAT === '1' ? 0 : legDb(D, A.px, A.py, A.pz, lx, ly, lz);
         const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg - legMat + DIFFUSE_CAL);
         pTot += pf * thru;
       }
@@ -1005,6 +1005,39 @@ function makeNewEvaluator(D, G, src) {
       reached: airs.length > 0,
     };
   };
+}
+
+// ── MATERIAL ALONG A LEG, MEASURED AS A BUNDLE RATHER THAN A RAY ──────────────
+// A single straight ray is discontinuous: it clips a corner and the whole term jumps. Charging the
+// aperture-to-listener leg with one ray was necessary for correctness -- without it a neighbouring
+// room's reverberation reached listeners under hundreds of dB of rock -- but it put 20-33 dB cliffs
+// into the field, which is the same defect, and the same cause, as the old whole-voxel raycast.
+//
+// A listener and an aperture on their own room's boundary are in the SAME connected region, so a
+// straight line between them clipping geometry is usually non-convexity rather than real
+// obstruction. Energy-summing a small bundle answers "how much of the wavefront gets through"
+// instead of "does this one line hit something": a ray grazing a corner contributes little while its
+// neighbours carry the arrival, so the result moves smoothly with position.
+const LEG_FAN_R = 1.5;    // blocks: bundle radius, about a first-Fresnel zone at room scale
+const LEG_FAN = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]];
+function legDb(D, ax, ay, az, lx, ly, lz) {
+  let ux = lx - ax, uy = ly - ay, uz = lz - az;
+  const ul = Math.hypot(ux, uy, uz) || 1;
+  ux /= ul; uy /= ul; uz /= ul;
+  // any two vectors perpendicular to the leg
+  let px = -uz, py = 0, pz = ux;
+  let pl = Math.hypot(px, py, pz);
+  if (pl < 1e-3) { px = 1; py = 0; pz = 0; pl = 1; }
+  px /= pl; py /= pl; pz /= pl;
+  const qx = uy * pz - uz * py, qy = uz * px - ux * pz, qz = ux * py - uy * px;
+  let pow = 0;
+  for (const [a, b] of LEG_FAN) {
+    const ox = (px * a + qx * b) * LEG_FAN_R;
+    const oy = (py * a + qy * b) * LEG_FAN_R;
+    const oz = (pz * a + qz * b) * LEG_FAN_R;
+    pow += dbToPow(-segDbAt(D, ax + ox, ay + oy, az + oz, lx, ly, lz)) / LEG_FAN.length;
+  }
+  return pow > 0 ? -powToDb(pow) : 120;
 }
 
 // ── continuity / reach metrics (same shape as judge3d's adjacency measure) ─────
