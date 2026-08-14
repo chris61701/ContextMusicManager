@@ -586,7 +586,7 @@ function asGraph(D, mergeH) {
   // which stepped the level as a listener crossed one (approach 8.5 dB/block).
   const apertures = portals
     .filter(p => nodes[p.a].room !== nodes[p.b].room)
-    .map(p => ({ nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac,
+    .map(p => ({ nid: p.a, px: p.px, py: p.py, pz: p.pz, throat: p.openFrac, area: p.area,
                  // the opening's EXTENT, not just its centre. A listener stepping across a wide
                  // boundary is right next to the opening even when it is far from its centroid, and
                  // attenuating by centroid distance steps the field at exactly that moment.

@@ -783,6 +783,25 @@ function makeNewEvaluator(D, G, src) {
     // (intensity x area / 4, which is what the portal areas are for) but this is a hard physical
     // ceiling rather than a fitted constant, and it cannot be wrong in the direction that matters.
     for (let rm = 0; rm < nRooms; rm++) if (direct[rm] > 1) direct[rm] = 1;
+    // ── AN OPENING IS AN ABSORBER ────────────────────────────────────────────
+    // R counted material surfaces only, so a room's openings were free. They are not: sound leaving
+    // through a doorway does not come back, which makes an opening the most absorbing surface a room
+    // has. Omitting it let small rooms with large openings reach R = 1 against a 9-block opening, and
+    // the room-to-room coupling gain S/R came out at 9.4 -- a room amplifying what enters it ninefold,
+    // which is both unphysical and divergent if iterated.
+    //
+    // Adding the open area to the absorption fixes the level AND makes coupling passive by
+    // construction, since a shared opening's own area is part of the receiving room's absorption and
+    // so S_a/A_Y can never exceed 1. This is the standard treatment; its absence was the reason the
+    // coupling could not be solved at all.
+    const openArea = new Float64Array(nRooms);
+    for (const A of G.apertures) {
+      const a = (A.area === undefined ? 1 : A.area) * (A.throat === undefined ? 1 : A.throat);
+      if (A.roomA >= 0 && A.roomA < nRooms) openArea[A.roomA] += a;
+      if (A.roomB >= 0 && A.roomB < nRooms) openArea[A.roomB] += a;
+    }
+    const absorbOf = rm => Math.max(1, RM[rm].roomR) + openArea[rm];
+
     // How much of a reverberant field each room can sustain at all. Kept so it can be applied to
     // the FINAL field: gating only `direct` left the wall-coupling pass free to give the outdoors a
     // field anyway, and that is precisely where it does the most damage, because the outdoor region
@@ -795,7 +814,7 @@ function makeNewEvaluator(D, G, src) {
       const mfp = 4 * Math.max(1, R.n) / Math.max(1, R.surf);
       canReverb[rm] = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp)
                     * (1 - sstep(SKY_FULL, SKY_NONE, R.skyFrac === undefined ? 0 : R.skyFrac));
-      direct[rm] = direct[rm] > 0 ? canReverb[rm] * 4 * direct[rm] / Math.max(1, R.roomR) : 0;
+      direct[rm] = direct[rm] > 0 ? canReverb[rm] * 4 * direct[rm] / absorbOf(rm) : 0;
     }
     // pass 2: power driven through SHARED WALLS by the neighbouring rooms. Power INCIDENT on a
     // surface of area S in a diffuse field is P*S/R, not field*S -- the standard relation carries a
@@ -809,15 +828,15 @@ function makeNewEvaluator(D, G, src) {
         const src = direct[w.other];
         if (src <= 0) continue;
         const other = RM[w.other];
-        const pOther = src * Math.max(1, other.roomR) / 4;
-        pWall += pOther * w.area / Math.max(1, other.roomR) * w.tau;
+        const pOther = src * absorbOf(w.other) / 4;
+        pWall += pOther * w.area / absorbOf(w.other) * w.tau;
       }
       // The calibration belongs to the FIELD's absolute scale, applied once per room here, not to
       // every contribution at the listener. Applied there it multiplied the coupled terms too, which
       // makes the coupling an amplifier -- a passivity test flags it on 100% of voxels, correctly.
       // Numerically identical either way; structurally this is the honest place for it, and it makes
       // "coupling may only attenuate" a statement the model can actually satisfy.
-      fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0))
+      fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / absorbOf(rm) : 0))
                   * dbToPow(DIFFUSE_CAL);
     }
     if (process.env.CMM_DIFFDBG === "1") {

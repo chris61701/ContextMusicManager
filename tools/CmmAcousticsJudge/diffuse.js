@@ -118,13 +118,17 @@ function survey(file, label) {
       const nd = G.nodeOf[D.idx(x, y, z)];
       const myRoom = ev.roomOfNode ? ev.roomOfNode(nd) : -1;
       if (myRoom >= 0 && ev.fieldDb) {
+        // Count contributing APERTURES, not rooms. The model sums one term per aperture and several
+        // apertures can join the same pair of rooms, so a per-room count under-states the legitimate
+        // energy sum and flags honest arithmetic as amplification -- it put the store at 1.9% the
+        // moment openings began absorbing and the fields got closer together.
         let best = ev.fieldDb[myRoom], n = best > -900 ? 1 : 0;
         for (const A of G.apertures) {
           if (A.roomA !== myRoom && A.roomB !== myRoom) continue;
           const other = A.roomA === myRoom ? A.roomB : A.roomA;
           const f = ev.fieldDb[other];
           if (f === undefined || f <= -900) continue;
-          n++;
+          n++;                                  // one per APERTURE, matching how the model sums
           if (f > best) best = f;
         }
         if (best > -900) {
