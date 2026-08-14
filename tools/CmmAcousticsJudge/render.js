@@ -87,10 +87,21 @@ const airFc = len => 20000 * Math.exp(-Math.max(0, len) / 140);
 // Transmission is inherently lowpass -- highs do not survive mass. This is the cue that
 // makes a wall sound like a wall instead of a fader.
 const solidFc = matDb => 20000 * Math.pow(10, -Math.max(0, matDb) / 26);
+// The diffuse field has been absorbed off many surfaces before it reaches anyone, so it is dull,
+// and it has travelled further than the direct sound by construction. Both are stand-in constants
+// until the multi-tap tail exists.
+const DIFFUSE_FC = 3500;
+const DIFFUSE_EXTRA_BLOCKS = 9;
 
 // ── arrival extraction ────────────────────────────────────────────────────────
 function arrivalsNew(ev, em, lx, ly, lz) {
-  const r = ev(Math.round(lx), Math.round(ly), Math.round(lz));
+  // DO NOT ROUND. The evaluator takes float positions, and rounding turned a field that is smooth
+  // in position into a staircase with a step at every voxel boundary -- the whole inter-voxel change
+  // landing inside one 0.25 s window. Measured on the pastdoor walk: the model varies 1.2 dB in
+  // total along that path (worst 0.39 dB/s) and the render showed 3.3 dB/s, eight times as rough.
+  // The author has been judging this model by ear off these renders, so the roughness they were
+  // hearing was partly the renderer's own.
+  const r = ev(lx, ly, lz);
   const out = [];
   // One arrival per kept entry portal, each at its OWN position -- so the sound comes from
   // the doorway it actually came through, and two doorways into a room both contribute.
@@ -107,6 +118,21 @@ function arrivalsNew(ev, em, lx, ly, lz) {
   if (!out.length) out.push({ id: "air", db: -120, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: airFc(r.d) });
   // SOLID — through the barrier, so it points at the speaker and is heavily dulled.
   out.push({ id: "solid", db: r.solidDb, w: 1, at: [em.x + 0.5, em.y + 0.5, em.z + 0.5], fc: solidFc(r.matDb), len: r.d });
+  // ── THE DIFFUSE FIELD, which was not being rendered at all ───────────────────
+  // airs excludes isSrc AND isDiffuse, and only the isSrc stand-in above was being added back. So
+  // every render so far has been the DRY arrivals with nothing underneath them -- which MODEL.md
+  // explicitly warns is the wrong thing to listen to: "the position-dependent part is a small
+  // perturbation riding on a much larger constant, so an indoor trajectory should be nearly flat.
+  // Rendering dry arrivals with nothing underneath them exposes every dB of their variation."
+  // The term written to flatten these walks was in the model and missing from the audio.
+  //
+  // Omnidirectional by nature, so it gets a fixed slot and centre pan rather than being matched by
+  // position -- it has no position to match. The single delayed, dulled copy is a STAND-IN for a
+  // real tail: it carries the right level and the right "arrives later and duller" cue, but a
+  // proper diffuse renderer needs a decaying multi-tap tail, which belongs with the echo work.
+  if (r.diffDb !== undefined && r.diffDb > -110)
+    out.push({ id: "diffuse", fixedKey: "diffuse", db: r.diffDb, w: 1, omni: true,
+               at: [lx, ly, lz], fc: DIFFUSE_FC, len: r.d + DIFFUSE_EXTRA_BLOCKS });
   return out;
 }
 
@@ -169,6 +195,13 @@ function render({ name, states, waypoints, seconds, music, model }) {
     // roughly the same place, so match on that and the filter and pan state carry over.
     const free = new Set(slots.keys());
     for (const a of arr) {
+      // An arrival with no position cannot be matched by position. The diffuse field is the case:
+      // it is omnidirectional, so it keeps one permanent slot instead of competing for the nearest.
+      if (a.fixedKey) {
+        if (!slots.has(a.fixedKey)) slots.set(a.fixedKey, { g: 0, pan: 0, c: coefFor(20000), lp: 0,
+                                                            dl: new Float32Array(MAX_DELAY), dw: 0, dsm: 0 });
+        free.delete(a.fixedKey); a.key = a.fixedKey; continue;
+      }
       let bestKey = null, bestD = MATCH_BLOCKS;
       for (const k of free) {
         const s = slots.get(k);
@@ -196,7 +229,8 @@ function render({ name, states, waypoints, seconds, music, model }) {
       const gTarget = a.db <= -110 ? 0 : Math.pow(10, a.db / 20) * wAmp;
       let dx = a.at[0] - (wp.x + 0.5), dy = a.at[1] - (wp.y + 0.5), dz = a.at[2] - (wp.z + 0.5);
       const dl = Math.hypot(dx, dy, dz) || 1;
-      const panTarget = Math.max(-1, Math.min(1, (dx * right[0] + dy * right[1] + dz * right[2]) / dl)) * STEREO_WIDTH;
+      const panTarget = a.omni ? 0
+        : Math.max(-1, Math.min(1, (dx * right[0] + dy * right[1] + dz * right[2]) / dl)) * STEREO_WIDTH;
       const cTarget = coefFor(a.fc);
       // delay in samples from this arrival's own path length, slewed so a route change glides
       const dTarget = Math.min(MAX_DELAY - 2, Math.max(0, (a.len === undefined ? 0 : a.len) / SPEED_BLOCKS_PER_SEC * SR));
@@ -236,16 +270,79 @@ function loadState(file) {
   return { D, em, cfg: D.cfg, evNew: makeNewEvaluator(D, G, em), evOld: makeEvaluator(D, em) };
 }
 
+// ── READ A LURCH INSTEAD OF LISTENING FOR ONE ─────────────────────────────────
+// The author's own preference, and a good one: "I don't have to listen to it, unless I'm reading
+// it." A sudden level change is exactly what the ear objects to, so print the short-term loudness
+// as a sparkline plus the worst rate of change in dB per second. A walk is ~1.5 blocks/s, so the
+// 3 dB/block step limit is about 4.5 dB/s -- but a door SWING is allowed to be faster than a walk,
+// which is why this is reported rather than gated.
+const BLOCKS = " ▁▂▃▄▅▆▇█";
+const SETTLE_S = 0.75;   // ignore the render's own start-up ramp when reporting worst dB/s
+// A remaining gap between this number and smooth.js is EXPECTED and is not a defect. The model sums
+// arrivals in POWER, which is the incoherent statistical average; the renderer sums PRESSURE through
+// real delay lines, so arrivals comb-filter and the broadband RMS legitimately wobbles a few dB as
+// relative delays sweep. Two coherent arrivals sum anywhere from cancellation to +6 dB. So expect
+// the render to read rougher than the field by a few dB/s, and judge the FIELD by smooth.js and
+// real.js, the SOUND by these files. Do not chase the difference; it is two different questions.
+function envelope(L, R, sr, win = 0.25) {
+  const n = Math.floor(L.length / (sr * win));
+  const db = [];
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    const a = Math.floor(i * sr * win), b = Math.floor((i + 1) * sr * win);
+    for (let j = a; j < b; j++) s += L[j] * L[j] + R[j] * R[j];
+    db.push(10 * Math.log10(s / Math.max(1, b - a) + 1e-12));
+  }
+  // Skip the settling period. Every slot starts at zero gain and slews up, so the first windows
+  // ramp from silence and reported 13.7 dB/s at 0.3 s on every scenario -- the renderer starting,
+  // not the field moving.
+  let worst = 0, at = 0;
+  const first = Math.max(1, Math.ceil(SETTLE_S / win));
+  for (let i = first; i < db.length; i++) {
+    const g = Math.abs(db[i] - db[i - 1]) / win;
+    if (g > worst) { worst = g; at = i * win; }
+  }
+  // scale the sparkline over this render's own 36 dB window, so shape is visible at any level
+  const hi = Math.max(...db), lo = hi - 36;
+  const spark = db.map(v => BLOCKS[Math.max(0, Math.min(8, Math.round(8 * (v - lo) / 36)))]).join("");
+  return { worst, at, spark, db };
+}
+
 function main() {
   const args = process.argv.slice(2);
   const musicArg = (args.find(a => a.startsWith("--music=")) || "").split("=")[1];
   const onlyArg = (args.find(a => a.startsWith("--only=")) || "").split("=")[1];
   const secArg = parseFloat((args.find(a => a.startsWith("--seconds=")) || "=0").split("=")[1]) || 0;
 
-  const music = musicArg || "C:/_Games/CMM_TestMusic/ambient/Ashen Verge.wav";
-  const { mono, rate } = readWav(music);
-  if (rate !== SR) console.warn(`warning: music is ${rate} Hz, renderer assumes ${SR}`);
-  console.log(`music: ${path.basename(music)}  ${(mono.length / rate).toFixed(1)}s mono\n`);
+  // ── --noise: make the envelope trace an honest field probe ───────────────────
+  // With music as the source, the printed envelope measures the music's own dynamics ADDED to the
+  // field's, and the two are not separable by eye. That mattered immediately: the envelope claimed
+  // 36 dB/s on the over-hatch walk while smooth.js measured 1.08 dB/block on the very same route,
+  // and two measurements disagreeing must be resolved before either is acted on (method rule 2).
+  //
+  // Steady pink-ish noise has no dynamics of its own, so every dB the envelope shows is the model.
+  // Use --noise to read the field and music to judge how it sounds.
+  let mono, rate = SR, srcName;
+  if (args.includes("--noise")) {
+    mono = new Float32Array(SR * 30);
+    let b0 = 0, b1 = 0, b2 = 0, seed = 12345;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x40000000 - 1; };
+    for (let i = 0; i < mono.length; i++) {
+      const w = rnd();
+      b0 = 0.99765 * b0 + w * 0.0990460;      // Paul Kellett's pink filter, 3 poles
+      b1 = 0.96300 * b1 + w * 0.2965164;
+      b2 = 0.57000 * b2 + w * 1.0526913;
+      mono[i] = (b0 + b1 + b2 + w * 0.1848) * 0.20;
+    }
+    srcName = "steady pink noise (field probe: every dB shown is the model)";
+  } else {
+    const music = musicArg || "C:/_Games/CMM_TestMusic/ambient/Ashen Verge.wav";
+    const w = readWav(music);
+    mono = w.mono; rate = w.rate;
+    if (rate !== SR) console.warn(`warning: music is ${rate} Hz, renderer assumes ${SR}`);
+    srcName = path.basename(music);
+  }
+  console.log(`source: ${srcName}  ${(mono.length / rate).toFixed(1)}s mono\n`);
 
   const S = f => path.join(__dirname, "synth", f);
   const st = (f, t = 0) => ({ t, ...loadState(S(f)) });
@@ -256,6 +353,9 @@ function main() {
   const T40  = "synth_wall-wood_door-wood_open-0.4.json";
   const T60  = "synth_wall-wood_door-wood_open-0.6.json";
   const T80  = "synth_wall-wood_door-wood_open-0.8.json";
+
+  const FOPEN = "synth_floor-wood_hatch-air_open-1.json";
+  const FSHUT = "synth_floor-wood_hatch-wood_open-0.json";
 
   const SCENARIOS = [
     {
@@ -289,6 +389,26 @@ function main() {
       waypoints: [ { t: 0, x: 26, y: 3, z: 11, yaw: Math.PI },
                    { t: 18, x: 26, y: 3, z: 11, yaw: Math.PI } ],
     },
+    {
+      // Rule D made audible. A voxel used as a floor now costs 2.6x what the same material costs
+      // as a wall, because it stands for a whole floor assembly rather than a partition. Walking
+      // the storey ABOVE a speaker should therefore be clearly muffled with the hatch shut, and
+      // should open up as you pass over it when the hatch is open -- the vertical twin of pastdoor.
+      name: "overhatch",
+      note: "walk the storey ABOVE the speaker, across an OPEN hatch, facing across the walk",
+      seconds: 16,
+      states: () => [st(FOPEN)],
+      waypoints: [ { t: 0, x: 9, y: 8, z: 3, yaw: Math.PI },
+                   { t: 16, x: 9, y: 8, z: 20, yaw: Math.PI } ],
+    },
+    {
+      name: "overhatch-shut",
+      note: "the same walk with the hatch SHUT: quiet, dull and nearly featureless",
+      seconds: 16,
+      states: () => [st(FSHUT)],
+      waypoints: [ { t: 0, x: 9, y: 8, z: 3, yaw: Math.PI },
+                   { t: 16, x: 9, y: 8, z: 20, yaw: Math.PI } ],
+    },
   ];
 
   const outDir = path.join(__dirname, "renders");
@@ -312,7 +432,10 @@ function main() {
       for (let i = 0; i < r.L.length; i++) { r.L[i] *= norm; r.R[i] *= norm; }
       const f = path.join(outDir, `${sc.name}_${model}.wav`);
       writeWav(f, r.L, r.R);
-      console.log(`   ${model.padEnd(4)} peak ${(20 * Math.log10(r.peak + 1e-9)).toFixed(1)} dBFS -> renders/${path.basename(f)}`);
+      const e = envelope(r.L, r.R, 44100);
+      console.log(`   ${model.padEnd(4)} peak ${(20 * Math.log10(r.peak + 1e-9)).toFixed(1)} dBFS`
+        + `  worst ${e.worst.toFixed(1)} dB/s at ${e.at.toFixed(1)}s  -> renders/${path.basename(f)}`);
+      console.log(`        ${e.spark}`);
     }
     console.log();
   }
