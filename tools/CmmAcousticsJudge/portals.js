@@ -812,7 +812,13 @@ function makeNewEvaluator(D, G, src) {
         const pOther = src * Math.max(1, other.roomR) / 4;
         pWall += pOther * w.area / Math.max(1, other.roomR) * w.tau;
       }
-      fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0));
+      // The calibration belongs to the FIELD's absolute scale, applied once per room here, not to
+      // every contribution at the listener. Applied there it multiplied the coupled terms too, which
+      // makes the coupling an amplifier -- a passivity test flags it on 100% of voxels, correctly.
+      // Numerically identical either way; structurally this is the honest place for it, and it makes
+      // "coupling may only attenuate" a statement the model can actually satisfy.
+      fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / Math.max(1, node.roomR) : 0))
+                  * dbToPow(DIFFUSE_CAL);
     }
     if (process.env.CMM_DIFFDBG === "1") {
       const dbg = [];
@@ -834,7 +840,14 @@ function makeNewEvaluator(D, G, src) {
     }
   }
 
-  return function (wx, wy, wz) {
+  // Exposed so the acceptance gates can test CONSERVATION rather than guess at it: a coupling that
+  // carries a room's reverberation into another space may attenuate it, never amplify it. Without the
+  // room fields in hand, a gate can only compare the field against the dry path, which is the wrong
+  // reference -- a room's field is accumulated energy and is legitimately louder than any single
+  // direct arrival at its own opening.
+  const fieldDbOf = () => Array.from(fieldOf, v => (v > 0 ? powToDb(v) : -999));
+
+  const evalFn = function (wx, wy, wz) {
     const d = Math.hypot(wx - src.x, wy - src.y, wz - src.z);
     const lx = wx + 0.5, ly = wy + 0.5, lz = wz + 0.5;
 
@@ -1072,7 +1085,7 @@ function makeNewEvaluator(D, G, src) {
 
     let diffDb = -120;
     if (nd >= 0) {
-      let pTot = roomField(nd) * dbToPow(DIFFUSE_CAL);
+      let pTot = roomField(nd);
       // Enumerated over the FIXED SET OF APERTURES, not over the listener's segment's edges.
       // Gating on segment adjacency was gating on bookkeeping: standing one corridor segment deeper
       // into a room you received nothing from the room next door, even a few blocks from its open
@@ -1093,7 +1106,7 @@ function makeNewEvaluator(D, G, src) {
         // whatever stands between it and you, exactly as the air arrivals already are -- they compute
         // this same legMat and it was simply missing here.
         const legMat = process.env.CMM_NOLEGMAT === '1' ? 0 : legDb(D, A.px, A.py, A.pz, lx, ly, lz);
-        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg - legMat + DIFFUSE_CAL);
+        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg - legMat);
         pTot += pf * thru;
       }
       if (pTot > 0) diffDb = powToDb(pTot);
@@ -1130,6 +1143,9 @@ function makeNewEvaluator(D, G, src) {
       reached: airs.length > 0,
     };
   };
+  evalFn.fieldDb = fieldDbOf();
+  evalFn.roomOfNode = rid => (rid >= 0 && rid < G.nodes.length ? G.nodes[rid].room : -1);
+  return evalFn;
 }
 
 // ── MATERIAL ALONG A LEG, MEASURED AS A BUNDLE RATHER THAN A RAY ──────────────
