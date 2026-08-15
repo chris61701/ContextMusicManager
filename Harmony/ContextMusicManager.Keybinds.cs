@@ -576,7 +576,13 @@ namespace CMM
                 ? PersonalRadio.VoiceId
                 : System.Threading.Interlocked.Read(ref _nativeVoiceId);
             if (vid == 0) { _npRight = null; _npRightSecs = int.MinValue; return; }
-            if (!(CmmMixer.Instance?.TryGetState(vid, out double pos, out double len, out bool active) ?? false)
+            // Declared and initialised up front rather than inline in the null-conditional call.
+            // `Instance?.TryGetState(... out ...)` does not run when Instance is null, so the outs
+            // stay unassigned while the following line reads them -- CS0165, a hard compile error
+            // that has been sitting in this file since it was written.
+            double pos = 0.0, len = 0.0; bool active = false;
+            var mixer = CmmMixer.Instance;
+            if (mixer == null || !mixer.TryGetState(vid, out pos, out len, out active)
                 || !active || len <= 0.0 || double.IsInfinity(len))
             {
                 _npRight = null;
