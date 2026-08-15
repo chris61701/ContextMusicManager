@@ -1407,6 +1407,26 @@ function makeNewEvaluator(D, G, src) {
         // left to differ across a boundary. Pass 2 already does one Jacobi iteration of WALL coupling;
         // the same treatment for APERTURE coupling, solved to convergence over 13-55 rooms, is a small
         // linear system and it removes the entire class rather than trading one symptom for another.
+        // ── WHERE THE OPEN-AIR REVERB FLOOR COMES FROM, AND WHAT DOES NOT FIX IT ────────
+        // A speaker in an open field sits under a flat -20 dB floor that never varies with
+        // position; past ~8 blocks it overtakes the direct sound and becomes the level, which is
+        // why occlusion stops working out there. The listener's own region is correctly silent
+        // (outdoors, sky-exposed, canReverb ~0). The floor is the BUILDING's interior reverb
+        // radiating out of this loop, and the reason it is so loud is visible in the trace:
+        //
+        //     aper rooms 8/12   field=-20.8  leg=10.6  ->  -29.2 dB
+        //     aper rooms 8/12   field=-20.8  leg=13.5  ->  -31.4 dB
+        //     aper rooms 8/12   field=-20.8  leg=11.1  ->  -33.7 dB
+        //     ... six openings between the SAME pair of rooms, summing to -20.4 dB
+        //
+        // Each opening hands the listener room 12's ENTIRE field. Between them they can only
+        // carry the power that actually crossed that boundary -- the same "an opening is not a
+        // source" argument that fixed the direct arrivals, not yet applied to what ROOMS exchange.
+        //
+        // Capping the sum at free field was tried and is not the answer: it fixes the level
+        // (+10.1 -> +2.2 dB at 32-40 blocks) and triples the roughness (store 4.50 -> 16.18
+        // dB/block), because a hard clamp steps wherever it engages. The bound has to act on what
+        // the rooms exchange, not on what the listener receives.
         let pf = 0;
         if (A.roomA !== undefined && A.roomA >= 0 && A.roomA !== myRoom) pf += fieldOf[A.roomA] || 0;
         if (A.roomB !== undefined && A.roomB >= 0 && A.roomB !== myRoom) pf += fieldOf[A.roomB] || 0;
