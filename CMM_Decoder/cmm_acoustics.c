@@ -174,7 +174,36 @@ double cmm_ac_diffuse_cal = 7.0;
  * listener and asking what each ray crosses answers "what is directly between us", which
  * is the wrong question: behind a steel column in a glass wall it charges you for the
  * column, when what you hear is the glass beside it radiating into your space. */
-#define FRESNEL_R 3.0
+/* THE ZONE'S RADIUS IS GEOMETRY, NOT A CONSTANT.
+ * A flat 3.0 blocks wherever the barrier happens to be is wrong in the one place it matters
+ * most. The first Fresnel zone's radius is sqrt(lambda*d1*d2/(d1+d2)) and COLLAPSES as the
+ * barrier approaches either end of the path. A speaker sits inside its own block, so for the
+ * near barrier -- its own casing -- d1 is a fraction of a block and the true radius is under
+ * one, not three.
+ *
+ * At three blocks the disc reaches past the speaker entirely and samples the shelf it stands
+ * on, the wall behind it and the ceiling above, then charges that geometry as occlusion between
+ * the speaker and a listener standing right next to it. Measured on the real captures: -3.3 dB
+ * in the bunker and -2.1 dB beside the store's shelf speakers with NOTHING in the way. With the
+ * radius computed rather than fixed, -0.7 and -0.6.
+ *
+ * That is what "it gets muffled when I'm closer to it, especially while right on top of it"
+ * was. It could never be seen in a synthetic scene, because a test room puts nothing beside the
+ * speaker to sample.
+ *
+ * Mid-path the formula gives sqrt(1.7*d/4) -- 2.9 blocks over 20 -- so the old constant was
+ * right for the case it was fitted on and wrong everywhere else. Floored at one block: the
+ * geometry IS a voxel grid, so a disc narrower than a block samples below the resolution of its
+ * own input and collapses toward a single ray. */
+#define FRESNEL_LAMBDA 1.7
+#define FRESNEL_R_MIN 1.0
+#define FRESNEL_R_MAX 4.0
+static double fresnel_r(double d1, double d2)
+{
+    double s = d1 + d2;
+    double r = sqrt(FRESNEL_LAMBDA * d1 * d2 / (s > 1e-3 ? s : 1e-3));
+    return r < FRESNEL_R_MIN ? FRESNEL_R_MIN : (r > FRESNEL_R_MAX ? FRESNEL_R_MAX : r);
+}
 #define PRUNE_DB 25.0        /* below the strongest is under 0.4% of the energy */
 #define MIN_TRANSMIT_DB 3.0  /* under this a path is an opening, not a partition */
 #define LEG_FAN_R 1.5        /* bundle radius for aperture-to-listener material */
@@ -1650,7 +1679,10 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
             double rf, ca, sa, w;
             fresnel_pt(i, &rf, &ca, &sa, &w);
             if (w <= 0) continue;
-            double pr = rf * FRESNEL_R;
+            /* radius from where the barrier actually sits, not a constant */
+            double fzr = fresnel_r(sqrt((bx - sx5) * (bx - sx5) + (by - sy5) * (by - sy5) + (bz - sz5) * (bz - sz5)),
+                                   sqrt((bx - lx) * (bx - lx) + (by - ly) * (by - ly) + (bz - lz) * (bz - lz)));
+            double pr = rf * fzr;
             double qx = bx + (e1x * ca + e2x * sa) * pr;
             double qy = by + (e1y * ca + e2y * sa) * pr;
             double qz = bz + (e1z * ca + e2z * sa) * pr;

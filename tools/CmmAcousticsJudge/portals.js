@@ -159,7 +159,13 @@ const CAND_DBG = process.env.CMM_CANDDBG ? process.env.CMM_CANDDBG.split(',').ma
 // and only the first can be replaced on its own. Finishing this means raising the sample count
 // to match the smaller disc, which is a cost decision on the native side, not a free swap.
 // Enable with CMM_FZGEO=1.
-const FZ_GEO = process.env.CMM_FZGEO === "1";
+// DEFAULT ON. It is the physics, and it is what removes the spurious occlusion the disc
+// reported beside real shelf-mounted speakers (-3.3 dB in the bunker, -2.1 dB in the store,
+// with nothing in the way -> -0.7 and -0.6). Dismissed once on a smoothness number measured
+// under the OLD distance law; under the current one it costs nothing: spec 9/9, passivity
+// unchanged, and occlusion roughness still better than the shipped model on every valid
+// capture. CMM_FZFIXED=1 restores the flat 3.0-block disc.
+const FZ_GEO = process.env.CMM_FZFIXED !== "1";
 const FRESNEL_R_FIXED = 3.0;
 const FRESNEL_LAMBDA = 1.7;              // ~200 Hz, the band that carries through structure
                                          // (same value as WAVELEN_BLOCKS below, declared here so
