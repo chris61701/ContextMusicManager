@@ -269,22 +269,36 @@ namespace CMM
                 var src = SourceAt(sp);
                 if (src == null) { ptGain[k] = 0f; continue; }
 
-                double db = src.LevelDb(ear);
+                // ── TRANSPORT OCCLUSION, NOT AN ABSOLUTE LEVEL ───────────────────────────────
+                // This took the model's absolute level and solved for the distance that produces
+                // it, which quietly handed the model's DISTANCE LAW to the audio layer as well.
+                // The model's law is SLOPE = 0.35 dB/block -- about 2 dB over 8 blocks, nearly
+                // flat -- so the game's own tuned falloff was replaced by one that barely falls.
+                // Heard in game as "the speaker sounds far away no matter how close I get to it",
+                // and it is also why the wall knob did nothing: a level pinned near the top of the
+                // range by a flat law inverts to extra = 0 whatever the material does.
+                //
+                // Divide by the model's own free field at the same distance and the distance law
+                // cancels on both sides. What is left is the only thing the model genuinely knows
+                // -- how much the GEOMETRY took away relative to a clear line at that range -- and
+                // the game's curve goes back to doing distance, which it was always better at.
+                //
+                //   want:  curve(d + extra) = curve(d) * A
+                //   so:    extra = (mx - d) * (1 - A^(1/fexp))
+                //
+                // which is >= 0 for any A <= 1 and cannot saturate: full occlusion lands exactly
+                // on the curve's silence point instead of overshooting it.
+                float d = Vector3.Distance(ear, sp);
+                double db = src.LevelDb(ear) - NativeAcoustics.cmm_ac_freefield_db(d);
                 double amp = Math.Pow(10.0, db / 20.0);          // dB is a power ratio; att is amplitude
-                // COUNT BOTH CLAMPS. Only the quiet side was counted, and the loud side is the one
-                // that mattered: a model above unity has no attenuation that reproduces it, so it
-                // publishes FULLY UNOCCLUDED and no tuning can reach the point. That was happening
-                // at 58% of positions in a store POI and it was invisible, because the counter said
-                // zero. A clamp that changes the physics has to be visible in the readout.
+                // Both clamps counted. The loud side is the one that mattered and was invisible:
+                // a model above unity has no attenuation that reproduces it, so it published FULLY
+                // UNOCCLUDED and no tuning could reach the point.
                 if (amp > 1.0) { amp = 1.0; GainPoints++; }
                 if (amp < 1e-6) { amp = 1e-6; SaturatedPoints++; }
 
-                float d = Vector3.Distance(ear, sp);
-                float dEff = (float)(mx - span * Math.Pow(amp, 1.0 / fexp));
-                float extra = dEff - d;
-                // Never negative: the model can only take level away relative to a clear line at
-                // this distance, and a negative extra would make an occluded speaker LOUDER than
-                // an unoccluded one at the same range.
+                float head = mx - d;                              // room left on the curve
+                float extra = head > 0f ? (float)(head * (1.0 - Math.Pow(amp, 1.0 / fexp))) : 0f;
                 ptGain[k] = extra > 0f ? extra : 0f;
             }
             return true;

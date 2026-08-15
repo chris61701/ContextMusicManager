@@ -234,6 +234,23 @@ struct cmm_ac {
 
 int cmm_ac_abi(void) { return CMM_AC_ABI; }
 
+/* The model's own FREE-FIELD level at a distance: what a listener would get with nothing in
+ * the way. Exposed (ABI 3) because the caller needs it as a REFERENCE, not as an answer.
+ *
+ * eval_db returns an absolute level whose distance dependence is this model's SLOPE -- 0.35
+ * dB/block, about 2 dB over 8 blocks. Handing that absolute number to the audio layer makes it
+ * REPLACE the game's own distance curve with a nearly flat one, and a speaker then sounds the
+ * same distance away wherever you stand. Reported from the game in exactly those words: "the
+ * speaker sounds far away no matter how close I get to it".
+ *
+ * Divide the two and the distance law cancels. What is left is the ratio the model actually
+ * knows something about -- how much the geometry took away relative to a clear line at the same
+ * range -- and the game's tuned curve keeps doing distance, which it was always better at. */
+double cmm_ac_freefield_db(double dist)
+{
+    return -SLOPE * (dist > 0.0 ? dist : 0.0);
+}
+
 /* Material loss and the diffuse field's absolute scale, live.
  *
  * WHICH ONE NEEDS A REBUILD, AND WHY IT MATTERS: db_mat and mat_pow feed the wall

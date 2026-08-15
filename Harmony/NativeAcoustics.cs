@@ -41,7 +41,7 @@ namespace CMM
 
         // The ABI this build expects. Checked on first use so a stale DLL fails loudly with a
         // number rather than crashing somewhere inside the solve.
-        internal const int ExpectedAbi = 2;
+        internal const int ExpectedAbi = 3;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_ac_abi();
@@ -55,6 +55,12 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_ac_get_tuning(out double dbMat, out double matPow, out double diffuseCal);
+
+        // The model's free-field level at a distance -- the REFERENCE eval_db is divided by, so
+        // the bridge transports occlusion rather than an absolute level carrying the model's own
+        // (nearly flat) distance law. Native-side so the two can never drift apart.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern double cmm_ac_freefield_db(double dist);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr cmm_ac_create(int sx, int sy, int sz, int x0, int y0, int z0);
