@@ -62,6 +62,8 @@ int main(int argc, char **argv) {
     printf("contacts         %lld\n", cmm_ac_stat(ac, 6));
     printf("merged rooms     %lld\n", cmm_ac_stat(ac, 7));
     printf("largest room     %lld voxels\n", cmm_ac_stat(ac, 8));
+    printf("nodes            %lld\n", cmm_ac_stat(ac, 9));
+    printf("node edges       %lld\n", cmm_ac_stat(ac, 10));
     printf("segment          %.0f ms\n", ms2);
 
     /* A few spot values, so a whole-grid statistic that happens to match cannot

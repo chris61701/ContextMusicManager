@@ -114,7 +114,7 @@ CMM_AC_API float cmm_ac_thick_at(const cmm_ac *ac, int wx, int wy, int wz);
 /* Aggregate stats, so a parity run compares numbers rather than eyeballing grids.
  * `what` selects: 0 voxels, 1 open voxels (>OPEN_EPS), 2 fully-open voxels,
  * 3 voxels at the thickness cap, 4 arena bytes, 5 raw regions, 6 contacts,
- * 7 merged rooms, 8 voxels in the largest room. */
+ * 7 merged rooms, 8 voxels in the largest room, 9 routing nodes, 10 node edges. */
 CMM_AC_API long long cmm_ac_stat(const cmm_ac *ac, int what);
 /* Mean thickness over open voxels — a single number that catches a sweep-order
  * or boundary-handling divergence immediately. */

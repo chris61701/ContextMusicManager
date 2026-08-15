@@ -50,6 +50,16 @@
  * and up -- so this is not delicate. */
 #define SKY_SPLIT 0.02f
 
+/* Corridor subdivision. A tunnel has no pinch, so the merge correctly keeps it whole
+ * -- and that is wrong acoustically, because the model assumes LINE OF SIGHT within a
+ * region and you cannot see round a bend. Measured on the real cave capture: the whole
+ * tunnel system came out as one 382k-voxel region and the longest air route found was
+ * exactly the straight-line distance, ratio 1.00 everywhere. No tunnel routing happened
+ * at all, which is why caves could never work. So a region much longer than it is thick
+ * is cut along its long axis at intervals of a few times its own thickness. */
+#define SEG_MIN_STEP 6.0f
+#define SEG_STEP_MULT 2.5f
+
 /* A raw watershed region, before merging. Centroid is accumulated as sums so it
  * needs no second pass. surf/absorb are the enclosure's area and area-weighted
  * absorption, which the diffuse field needs; sky counts faces onto the world. */
@@ -69,6 +79,27 @@ struct ac_port {
     double area;
     double sx, sy, sz;       /* area-weighted position sums, WORLD coords */
     float thick;             /* widest clearance on the contact, for the pinch test */
+};
+
+/* A node-level boundary: the graph edge the routing solve walks. Carries the shared
+ * open area, its area-weighted centre, the extent (so a listener beside a wide opening
+ * is not charged the distance to its centroid), and the openness fraction. */
+struct ac_edge {
+    int a, b;                /* node ids */
+    double area;
+    double sx, sy, sz;       /* area-weighted position sums, WORLD */
+    float thick;
+    float x0, y0, z0, x1, y1, z1;   /* extent, WORLD */
+    int   ra, rb;            /* the ROOMS either side, for the diffuse coupling */
+};
+
+/* A merged room: the unit that holds one reverberant field. */
+struct ac_room {
+    int n;                   /* voxels */
+    int surf;                /* boundary faces onto material */
+    double absorb;           /* area-weighted alpha over those faces */
+    int sky;                 /* faces onto the world */
+    double open_area;        /* total area of its openings -- an opening ABSORBS */
 };
 
 struct cmm_ac {
@@ -95,6 +126,13 @@ struct cmm_ac {
     struct ac_region *reg; int nreg, cap_reg;
     struct ac_port   *prt; int nprt, cap_prt;
     int *ph; int ph_cap;     /* pair -> contact index, so contacts() is O(faces) */
+
+    /* stage 3: corridor segments, nodes, node-level edges, rooms */
+    int *node;               /* n: compact node id per voxel, -1 for solid */
+    int nnodes;
+    struct ac_edge *edge; int nedge, cap_edge;
+    struct ac_room *room; int cap_room;
+    int *eh; int eh_cap;     /* node-pair -> edge index */
     int nrooms;              /* merged regions that survive, renumbered 0..nrooms-1 */
 };
 
@@ -124,7 +162,7 @@ cmm_ac *cmm_ac_create(int sx, int sy, int sz, int x0, int y0, int z0) {
      * structure per POI, not a per-emitter field, and it replaces the shipped
      * design's per-listener flood entirely. */
     size_t nf = (size_t)ac->n;
-    size_t bytes = nf * (3 * sizeof(float) + 2 * sizeof(int) + 1);
+    size_t bytes = nf * (3 * sizeof(float) + 3 * sizeof(int) + 1);
     ac->arena = malloc(bytes);
     if (!ac->arena) { free(ac); return NULL; }
     memset(ac->arena, 0, bytes);
@@ -136,6 +174,7 @@ cmm_ac *cmm_ac_create(int sx, int sy, int sz, int x0, int y0, int z0) {
     ac->thick = (float *)p;         p += nf * sizeof(float);
     ac->label = (int *)p;           p += nf * sizeof(int);
     ac->root  = (int *)p;           p += nf * sizeof(int);
+    ac->node  = (int *)p;           p += nf * sizeof(int);
     ac->flags = p;
     return ac;
 }
@@ -145,6 +184,9 @@ void cmm_ac_destroy(cmm_ac *ac) {
     free(ac->reg);
     free(ac->prt);
     free(ac->ph);
+    free(ac->edge);
+    free(ac->room);
+    free(ac->eh);
     free(ac->arena);
     free(ac);
 }
@@ -535,11 +577,230 @@ static int merge_regions(cmm_ac *ac) {
     return 1;
 }
 
+/* --- corridor split and node assembly -------------------------------------
+ * The final node id is (room, corridor segment). Nodes are the routing units and a
+ * straight line inside one is legitimate; rooms are the units that hold a reverberant
+ * field. Keeping them distinct matters: a corridor cut is NOT a constriction and must
+ * not radiate, and treating every cut as an aperture put phantom radiators at each one,
+ * stepping the level by 8.5 dB as a listener crossed. */
+static int eh_init(cmm_ac *ac, int expect) {
+    int cap = 1024;
+    while (cap < expect * 4) cap <<= 1;
+    if (ac->eh_cap != cap) {
+        int *t = (int *)realloc(ac->eh, (size_t)cap * sizeof(int));
+        if (!t) return 0;
+        ac->eh = t; ac->eh_cap = cap;
+    }
+    for (int i = 0; i < ac->eh_cap; i++) ac->eh[i] = -1;
+    return 1;
+}
+
+static int edge_find_or_add(cmm_ac *ac, int a, int b) {
+    int lo = a < b ? a : b, hi = a < b ? b : a;
+    unsigned mask = (unsigned)ac->eh_cap - 1u;
+    unsigned s = pair_hash(lo, hi) & mask;
+    for (unsigned probe = 0; probe <= mask; probe++) {
+        int slot = (int)((s + probe) & mask);
+        int ei = ac->eh[slot];
+        if (ei < 0) {
+            if (ac->nedge == ac->cap_edge) {
+                int cap = ac->cap_edge ? ac->cap_edge * 2 : 256;
+                struct ac_edge *e = (struct ac_edge *)realloc(ac->edge, (size_t)cap * sizeof(*e));
+                if (!e) return -1;
+                ac->edge = e; ac->cap_edge = cap;
+            }
+            struct ac_edge *E = &ac->edge[ac->nedge];
+            memset(E, 0, sizeof(*E));
+            E->a = lo; E->b = hi;
+            E->x0 = E->y0 = E->z0 = 1e30f; E->x1 = E->y1 = E->z1 = -1e30f;
+            E->ra = E->rb = -1;
+            ac->eh[slot] = ac->nedge;
+            return ac->nedge++;
+        }
+        if (ac->edge[ei].a == lo && ac->edge[ei].b == hi) return ei;
+    }
+    return -1;
+}
+
+static int split_and_nodes(cmm_ac *ac) {
+    const int sx = ac->sx, sy = ac->sy, sz = ac->sz;
+    const int nr = ac->nrooms;
+    if (nr <= 0) { ac->nnodes = 0; return 1; }
+
+    /* per-room extent and mean thickness, to decide whether it is a corridor */
+    int *x0 = (int *)malloc((size_t)nr * sizeof(int)), *x1 = (int *)malloc((size_t)nr * sizeof(int));
+    int *y0 = (int *)malloc((size_t)nr * sizeof(int)), *y1 = (int *)malloc((size_t)nr * sizeof(int));
+    int *z0 = (int *)malloc((size_t)nr * sizeof(int)), *z1 = (int *)malloc((size_t)nr * sizeof(int));
+    double *tsum = (double *)calloc((size_t)nr, sizeof(double));
+    long long *cnt = (long long *)calloc((size_t)nr, sizeof(long long));
+    if (!x0 || !x1 || !y0 || !y1 || !z0 || !z1 || !tsum || !cnt) {
+        free(x0); free(x1); free(y0); free(y1); free(z0); free(z1); free(tsum); free(cnt); return 0;
+    }
+    for (int r = 0; r < nr; r++) { x0[r] = y0[r] = z0[r] = 1 << 29; x1[r] = y1[r] = z1[r] = -(1 << 29); }
+    for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
+        long long i = idx_of(ac, x, y, z);
+        int r = ac->root[i];
+        if (r < 0) continue;
+        cnt[r]++; tsum[r] += ac->thick[i];
+        if (x < x0[r]) x0[r] = x; if (x > x1[r]) x1[r] = x;
+        if (y < y0[r]) y0[r] = y; if (y > y1[r]) y1[r] = y;
+        if (z < z0[r]) z0[r] = z; if (z > z1[r]) z1[r] = z;
+    }
+
+    int *axis = (int *)malloc((size_t)nr * sizeof(int));
+    double *step = (double *)malloc((size_t)nr * sizeof(double));
+    int *lo = (int *)malloc((size_t)nr * sizeof(int));
+    if (!axis || !step || !lo) { free(axis); free(step); free(lo); return 0; }
+    for (int r = 0; r < nr; r++) {
+        axis[r] = -1;
+        if (cnt[r] <= 0) continue;
+        int ex[3] = { x1[r] - x0[r] + 1, y1[r] - y0[r] + 1, z1[r] - z0[r] + 1 };
+        int a = 0;
+        if (ex[1] > ex[a]) a = 1;
+        if (ex[2] > ex[a]) a = 2;
+        double meanT = tsum[r] / (double)cnt[r];
+        if (meanT < 1.0) meanT = 1.0;
+        double st = meanT * SEG_STEP_MULT;
+        if (st < SEG_MIN_STEP) st = SEG_MIN_STEP;
+        if ((double)ex[a] / st < 2.0) continue;    /* compact enough: leave it whole */
+        axis[r] = a; step[r] = st;
+        lo[r] = a == 0 ? x0[r] : (a == 1 ? y0[r] : z0[r]);
+    }
+
+    /* segment index per voxel, then a compact node id per (room, segment) pair */
+    for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
+        long long i = idx_of(ac, x, y, z);
+        int r = ac->root[i];
+        if (r < 0) { ac->node[i] = -1; continue; }
+        int s = 0;
+        if (axis[r] >= 0) {
+            int cc = axis[r] == 0 ? x : (axis[r] == 1 ? y : z);
+            s = (int)((double)(cc - lo[r]) / step[r]);
+            if (s < 0) s = 0;
+        }
+        ac->node[i] = r * 4096 + s;              /* provisional, compacted below */
+    }
+    /* Compact each distinct provisional id to 0..nnodes-1 in FIRST-SEEN order, so the
+     * numbering is deterministic across runs and platforms -- an id space that depends
+     * on iteration order or hash layout would make every downstream parity check
+     * meaningless even when the structure was identical. */
+    ac->nnodes = 0;
+    {
+        /* hash provisional -> compact, so the 4096 stride never needs allocating */
+        int hcap = 1024; while (hcap < nr * 8) hcap <<= 1;
+        int *hk = (int *)malloc((size_t)hcap * sizeof(int));
+        int *hv = (int *)malloc((size_t)hcap * sizeof(int));
+        if (!hk || !hv) { free(hk); free(hv); free(axis); free(step); free(lo);
+                          free(x0); free(x1); free(y0); free(y1); free(z0); free(z1);
+                          free(tsum); free(cnt); return 0; }
+        for (int i = 0; i < hcap; i++) hk[i] = -1;
+        unsigned mask = (unsigned)hcap - 1u;
+        for (long long i = 0; i < ac->n; i++) {
+            int prov = ac->node[i];
+            if (prov < 0) continue;
+            unsigned s = pair_hash(prov, 0x9e37) & mask;
+            for (unsigned probe = 0; probe <= mask; probe++) {
+                int slot = (int)((s + probe) & mask);
+                if (hk[slot] < 0) { hk[slot] = prov; hv[slot] = ac->nnodes++; ac->node[i] = hv[slot]; break; }
+                if (hk[slot] == prov) { ac->node[i] = hv[slot]; break; }
+            }
+        }
+        free(hk); free(hv);
+    }
+
+    free(axis); free(step); free(lo);
+    free(x0); free(x1); free(y0); free(y1); free(z0); free(z1); free(tsum); free(cnt);
+    return 1;
+}
+
+/* --- node-level edges, and rooms with absorption -------------------------- */
+static int build_edges_and_rooms(cmm_ac *ac) {
+    const int sx = ac->sx, sy = ac->sy, sz = ac->sz;
+    ac->nedge = 0;
+    if (!eh_init(ac, ac->nnodes * 8 + 64)) return 0;
+
+    for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
+        long long i = idx_of(ac, x, y, z);
+        if (ac->open[i] <= OPEN_EPS) continue;
+        int a = ac->node[i];
+        for (int d = 0; d < 3; d++) {
+            int nx = x + (d == 0), ny = y + (d == 1), nz = z + (d == 2);
+            if (nx >= sx || ny >= sy || nz >= sz) continue;
+            long long j = idx_of(ac, nx, ny, nz);
+            if (ac->open[j] <= OPEN_EPS) continue;
+            int b = ac->node[j];
+            if (b == a) continue;
+            int ei = edge_find_or_add(ac, a, b);
+            if (ei < 0) return 0;
+            struct ac_edge *E = &ac->edge[ei];
+            double aw = ac->open[i] < ac->open[j] ? ac->open[i] : ac->open[j];
+            float th = ac->thick[i] < ac->thick[j] ? ac->thick[i] : ac->thick[j];
+            double cx = ac->x0 + x + (d == 0 ? 1.0 : 0.5);
+            double cy = ac->y0 + y + (d == 1 ? 1.0 : 0.5);
+            double cz = ac->z0 + z + (d == 2 ? 1.0 : 0.5);
+            E->area += aw; E->sx += cx * aw; E->sy += cy * aw; E->sz += cz * aw;
+            if (th > E->thick) E->thick = th;
+            if (cx < E->x0) E->x0 = (float)cx; if (cx > E->x1) E->x1 = (float)cx;
+            if (cy < E->y0) E->y0 = (float)cy; if (cy > E->y1) E->y1 = (float)cy;
+            if (cz < E->z0) E->z0 = (float)cz; if (cz > E->z1) E->z1 = (float)cz;
+            E->ra = ac->root[i]; E->rb = ac->root[j];
+        }
+    }
+
+    /* rooms: area, absorption, sky exposure, accumulated over voxels rather than
+     * aggregated from raw regions, so it matches the JS which recomputes them here */
+    if (ac->cap_room < ac->nrooms) {
+        struct ac_room *r = (struct ac_room *)realloc(ac->room, (size_t)(ac->nrooms + 1) * sizeof(*r));
+        if (!r) return 0;
+        ac->room = r; ac->cap_room = ac->nrooms + 1;
+    }
+    memset(ac->room, 0, (size_t)(ac->nrooms > 0 ? ac->nrooms : 1) * sizeof(struct ac_room));
+    for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
+        long long i = idx_of(ac, x, y, z);
+        int r = ac->root[i];
+        if (r < 0) continue;
+        struct ac_room *R = &ac->room[r];
+        R->n++;
+        for (int d = 0; d < 6; d++) {
+            int nx = x + NB6[d][0], ny = y + NB6[d][1], nz = z + NB6[d][2];
+            int oob = nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz;
+            if (!oob && ac->open[idx_of(ac, nx, ny, nz)] > OPEN_EPS) continue;
+            double alpha;
+            if (oob) { alpha = 0.95; R->sky++; }
+            else {
+                double l = ac->loss[idx_of(ac, nx, ny, nz)];
+                if (l > 1.0) l = 1.0;
+                alpha = 0.12 + 0.5 * (1.0 - l);
+                if (alpha < 0.10) alpha = 0.10;
+                if (alpha > 0.85) alpha = 0.85;
+            }
+            R->surf++; R->absorb += alpha;
+        }
+    }
+
+    /* AN OPENING IS AN ABSORBER. Sound leaving through a doorway does not come back,
+     * which makes an opening the most absorbing surface a room has. Omitting it let
+     * small rooms reach an absorption area of 1 against a 9-block opening, and the
+     * room-to-room coupling gain S/A came out at 9.4 -- a room amplifying what enters
+     * it ninefold, which is unphysical and divergent if iterated. */
+    for (int e = 0; e < ac->nedge; e++) {
+        const struct ac_edge *E = &ac->edge[e];
+        if (E->ra >= 0 && E->rb >= 0 && E->ra != E->rb) {
+            double a = E->area * (E->thick > 0 ? 1.0 : 1.0);
+            ac->room[E->ra].open_area += a;
+            ac->room[E->rb].open_area += a;
+        }
+    }
+    return 1;
+}
+
 int cmm_ac_build_segments(cmm_ac *ac) {
     if (!ac) return 0;
     if (!segment(ac)) return 0;
     if (!contacts(ac)) return 0;
     if (!merge_regions(ac)) return 0;
+    if (!split_and_nodes(ac)) return 0;
+    if (!build_edges_and_rooms(ac)) return 0;
     return 1;
 }
 
@@ -587,6 +848,8 @@ long long cmm_ac_stat(const cmm_ac *ac, int what) {
             for (int r = 0; r < ac->nrooms; r++) if (cnt[r] > mx) mx = cnt[r];
             free(cnt); return mx;
         }
+        case 9:  return ac->nnodes;   /* routing nodes: rooms cut into corridor segments */
+        case 10: return ac->nedge;    /* node-level boundaries */
         default: return -1;
     }
 }
