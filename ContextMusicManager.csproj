@@ -159,6 +159,7 @@
     <Compile Include="Harmony\CmmGuard.cs" />
     <Compile Include="Harmony\NativeAcoustics.cs" />
     <Compile Include="Harmony\AcousticScene.cs" />
+    <Compile Include="Harmony\AcousticBridge.cs" />
     <Compile Include="Harmony\ContextMusicManager.cs" />
     <Compile Include="Harmony\ContextMusicManager.FileWatch.cs" />
     <Compile Include="Harmony\ContextMusicManager.ConfigWatch.cs" />

@@ -195,6 +195,10 @@ namespace CMM
         // comes with the radio-coloration phase). PerBlock = gain multiplier per solid block on the
         // line of sight (0.5 ≈ −6 dB/block); Floor = the minimum gain however many walls there are.
         public static bool   WorldEmitterOcclusion         = true;
+        // Route occlusion through the NATIVE acoustic model (cmm_acoustics) instead of the
+        // shipped ear-anchored flood. Off by default until it has been heard in game: the old
+        // path stays reachable so the two can be A/B'd without a rebuild.
+        public static bool   WorldEmitterNativeAcoustics   = false;
         // Occlusion is modelled as VIRTUAL DISTANCE: a wall makes the speaker sound farther (quieter +
         // duller on the same smooth curve) instead of a hard volume cut — so it fades gradually, not
         // all-or-nothing. WallDistance = blocks of virtual distance a FULL solid wall adds on the path.

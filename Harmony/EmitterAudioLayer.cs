@@ -373,6 +373,13 @@ namespace CMM
                     if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
                     if (occlude)
                     {
+                        // The native model first when enabled, falling back to the shipped flood if
+                        // it is unavailable or its scene is not built -- so a missing DLL or a failed
+                        // rebuild degrades to the old behaviour instead of going silent.
+                        bool nativeDone = false;
+                        if (CMMConfig.WorldEmitterNativeAcoustics && AcousticBridge.EnsureScene(world, ear))
+                            nativeDone = AcousticBridge.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world);
+                        if (!nativeDone)
                         EmitterAcoustics.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world);
                         st.Seal = EmitterAcoustics.ReverbSeal;
                         st.Solid = EmitterAcoustics.ReverbSolid;
