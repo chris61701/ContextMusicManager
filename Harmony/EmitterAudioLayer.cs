@@ -217,6 +217,11 @@ namespace CMM
                     }
                     // Advance any in-flight per-speaker field build one slice (Phase 2 cache).
                     if (CMMConfig.WorldEmitterFieldCache) EmitterFieldCache.BuildStep(w);
+                    // The native scene bakes door state into its voxel grid, so it goes stale on the
+                    // same edge a cached field does. Watched HERE, per frame and independently of the
+                    // field cache: a swing can start and settle between two 4 Hz ticks, and the
+                    // native path must not depend on an unrelated feature being switched on.
+                    AcousticBridge.WatchDoors(EmitterAcoustics.AnyDoorAnimating);
                 }
             }
 
@@ -293,7 +298,26 @@ namespace CMM
             if (!anyAudible) { _occlPending = false; return; }
 
             World world = GameManager.Instance?.World;
-            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && world != null)
+            // ── PHASE 3 (native acoustics): the whole occlusion model, in C, off a scene bound to
+            // GEOMETRY rather than to the ear. Sits AHEAD of both existing paths because it replaces
+            // them outright — it is not a source of gains for the flood to blend, it is the flood's
+            // successor. Anything it declines (warming up, door mid-swing, native DLL missing) falls
+            // through to the shipped paths below unchanged, so the A/B is a live config flip.
+            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterNativeAcoustics && world != null
+                && TryNativeOcclusion(player, world, audibleR))
+            {
+                // Keep the listener-anchored ROOM flood running underneath, exactly as the field
+                // path does: AirRoomSize follows bends the ray probe cannot see, and the reverb
+                // reads it. Room-ONLY — the native gains have already been published.
+                if (!_occlPending)
+                {
+                    _occlEar = ListenerWorldPos(player);
+                    EmitterAcoustics.OcclusionBegin(_occlEar, world);
+                    _occlPending = true;
+                }
+                _floodRoomOnly = true;
+            }
+            else if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting && world != null)
             {
                 // ── PHASE 2 (field cache): sample each speaker's CACHED static field instead of
                 // re-flooding around the moving ear — spatial continuity by construction (the
@@ -373,13 +397,6 @@ namespace CMM
                     if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
                     if (occlude)
                     {
-                        // The native model first when enabled, falling back to the shipped flood if
-                        // it is unavailable or its scene is not built -- so a missing DLL or a failed
-                        // rebuild degrades to the old behaviour instead of going silent.
-                        bool nativeDone = false;
-                        if (CMMConfig.WorldEmitterNativeAcoustics && AcousticBridge.EnsureScene(world, ear))
-                            nativeDone = AcousticBridge.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world);
-                        if (!nativeDone)
                         EmitterAcoustics.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world);
                         st.Seal = EmitterAcoustics.ReverbSeal;
                         st.Solid = EmitterAcoustics.ReverbSolid;
@@ -393,6 +410,58 @@ namespace CMM
                 }
                 PushReverb(player);
             }
+        }
+
+        // ── PHASE 3: occlusion from the native acoustic model ───────────────────────────────
+        // Publishes every audible station from the native solve, or returns false and lets the
+        // shipped paths run this tick. It declines in three cases, all deliberate:
+        //
+        //   DOOR MID-SWING — the door acoustics are the most carefully tuned behaviour in the
+        //     emitter system and they live on the legacy synchronous path. Until the native model
+        //     is measured against them, a swing hands straight back. Same rule the field cache uses.
+        //   NO SCENE YET — the scene is a ~310 ms voxel walk on the scheduler thread; until the
+        //     first one lands, and after every re-centre, the shipped model covers.
+        //   UNSEEDED REVERB STATE — the native model produces a level, not a seal/solid/depth, so
+        //     a station that has never been through a legacy or field tick has nothing for the
+        //     reverb to carry. One legacy tick seeds it, then this path takes over.
+        private static bool TryNativeOcclusion(EntityPlayerLocal player, World world, float audibleR)
+        {
+            if (EmitterAcoustics.AnyDoorAnimating) { _statWhy = "doorswing"; return false; }
+
+            Vector3 ear = ListenerWorldPos(player);
+            if (!AcousticBridge.EnsureScene(world, ear)) { _statWhy = "ac-warming"; return false; }
+
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0 || st.NearestDist > audibleR || st.PtCount == 0) continue;
+                if (st.Seal == 0f && st.Solid == 0f && st.Depth == 0f) { _statWhy = "ac-unseeded"; return false; }
+            }
+
+            bool any = false;
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                if (st.PtCount == 0)
+                {
+                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                    RecordPtPush(st, 0);
+                    continue;
+                }
+                if (!AcousticBridge.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world))
+                { _statWhy = "ac-declined"; return false; }   // scene swapped under us — legacy covers this tick
+                // Seal/Solid/Depth deliberately carried over: the reverb bus stays on the shipped
+                // measure so an A/B changes ONE thing — the occlusion — and not the room sound too.
+                PostProcessGains(st);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                RecordPtPush(st, st.PtCount);
+                any = true;
+            }
+            if (!any) { _statWhy = "ac-nopoints"; return false; }
+            _statWhy = "native";
+            PushReverb(player);
+            return true;
         }
 
         // ── PHASE 2: occlusion from the per-speaker field cache ─────────────────────────────

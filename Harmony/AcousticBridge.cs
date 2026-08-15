@@ -44,54 +44,132 @@ namespace CMM
         // the listener leaves the box the geometry was captured over.
         const float RecentreDist = 24f;
 
+        // The scene is built on the SCHEDULER thread and read on the decision thread, so the swap
+        // and every read are serialised. Reads are microseconds (a graph solve per speaker), so
+        // holding the gate across a publish costs nothing; the 310 ms BUILD happens outside it,
+        // against a scene nobody can see yet, and only the swap is inside.
+        static readonly object _gate = new object();
         static AcousticScene _scene;
         static Vector3 _sceneCentre;
+        static Vector3 _wantCentre;
+        static bool _wantValid;
+        // Bumped every time the world's blocks change under us. A build carries the generation it
+        // started from, so a build that raced a door swing can be recognised and dropped.
+        static long _geomGen;
         static readonly Dictionary<Vector3i, AcousticSource> _sources = new Dictionary<Vector3i, AcousticSource>();
-        static NativeAcoustics.Arrival[] _arrivals = new NativeAcoustics.Arrival[32];
+        // Reused, never per-call: an allocation here would land on the decision tick every publish.
+        static readonly NativeAcoustics.Arrival[] _arrivals = new NativeAcoustics.Arrival[32];
 
         internal static int SaturatedPoints;   // how many points clamped last publish
         internal static long LastBuildMs;
         internal static string LastStatus = "not built";
 
-        internal static bool Ready => _scene != null && _scene.Valid;
+        internal static bool Ready { get { lock (_gate) return _scene != null && _scene.Valid; } }
 
         // Drop everything. Native memory is invisible to the GC, so this must be reachable from
         // every teardown path -- world unload, mod disable, a failed rebuild.
         internal static void Reset()
         {
-            foreach (var s in _sources.Values) s?.Dispose();
-            _sources.Clear();
-            _scene?.Dispose();
-            _scene = null;
-            LastStatus = "reset";
+            lock (_gate)
+            {
+                foreach (var s in _sources.Values) s?.Dispose();
+                _sources.Clear();
+                _scene?.Dispose();
+                _scene = null;
+                LastStatus = "reset";
+            }
         }
 
-        // Build or re-centre the scene around the listener. Returns false if the native side is
-        // unavailable, in which case the caller keeps using the shipped model.
-        internal static bool EnsureScene(World world, Vector3 ear)
+        // Called from the decision tick: cheap, just records where the listener is. The actual
+        // build is the scheduler's job -- a 310 ms voxel walk has no business on the frame loop,
+        // and a door swing must never be able to stutter the game.
+        internal static void NoteListener(Vector3 ear)
         {
-            if (!NativeAcoustics.Available || world == null) return false;
-            if (_scene != null && _scene.Valid && (ear - _sceneCentre).sqrMagnitude < RecentreDist * RecentreDist)
-                return true;
+            _wantCentre = ear;
+            _wantValid = true;
+        }
 
-            // Re-centring invalidates every source: they were solved against geometry that this
-            // scene no longer describes.
-            foreach (var s in _sources.Values) s?.Dispose();
-            _sources.Clear();
-            _scene?.Dispose();
-            _scene = null;
+        // Per-frame door edge watcher. Called with the live "is any door mid-swing" flag; the scene
+        // is dropped on the FALLING edge, once the swing has settled and the world's blocks are
+        // final. Watching the edge rather than the flag means one rebuild per swing instead of one
+        // per frame of it, and the shipped model covers the ~0.5 s until the rebuild lands.
+        static bool _doorSeen;
+        internal static void WatchDoors(bool animating)
+        {
+            if (animating) { _doorSeen = true; return; }
+            if (!_doorSeen) return;
+            _doorSeen = false;
+            InvalidateGeometry();
+        }
 
-            int cx = Mathf.FloorToInt(ear.x), cy = Mathf.FloorToInt(ear.y), cz = Mathf.FloorToInt(ear.z);
+        // Registered with CmmScheduler. Builds the new scene OUTSIDE the gate, then swaps under it,
+        // so readers never touch a half-built scene and never block for the build.
+        internal static void SchedulerTick()
+        {
+            if (!CMMConfig.WorldEmitterNativeAcoustics || !_wantValid) return;
+            if (!NativeAcoustics.Available) return;
+
+            Vector3 want = _wantCentre;
+            bool need;
+            long gen;
+            lock (_gate)
+            {
+                gen = _geomGen;
+                need = _scene == null || !_scene.Valid
+                    || (want - _sceneCentre).sqrMagnitude >= RecentreDist * RecentreDist;
+            }
+            if (!need) return;
+
+            World world = GameManager.Instance?.World;
+            if (world == null) return;
+
+            int cx = Mathf.FloorToInt(want.x), cy = Mathf.FloorToInt(want.y), cz = Mathf.FloorToInt(want.z);
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            _scene = AcousticScene.Build(world, cx - HalfX, cy - Below, cz - HalfZ,
-                                         HalfX * 2 + 1, Below + Above + 1, HalfZ * 2 + 1);
+            AcousticScene built = null;
+            try
+            {
+                built = AcousticScene.Build(world, cx - HalfX, cy - Below, cz - HalfZ,
+                                            HalfX * 2 + 1, Below + Above + 1, HalfZ * 2 + 1);
+            }
+            catch (Exception e)
+            {
+                CMMConfig.D($"[CMM] acoustics scene build threw: {e.Message}");
+            }
             sw.Stop();
             LastBuildMs = sw.ElapsedMilliseconds;
-            if (_scene == null) { LastStatus = "build failed"; return false; }
-            _sceneCentre = ear;
-            LastStatus = $"rooms {_scene.Rooms}, nodes {_scene.Nodes}, edges {_scene.Edges}, "
-                       + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms";
-            return true;
+
+            lock (_gate)
+            {
+                if (built == null) { LastStatus = $"build failed ({LastBuildMs} ms)"; return; }
+                // Geometry changed WHILE this was building (a door settled mid-walk), so the scene
+                // just built already describes a world that no longer exists. Throw it away rather
+                // than install it: a stale scene is silent and permanent, where a discarded one
+                // costs 310 ms and is rebuilt on the very next tick.
+                if (gen != _geomGen)
+                {
+                    built.Dispose();
+                    LastStatus = $"discarded stale build ({LastBuildMs} ms)";
+                    return;
+                }
+                // Re-centring invalidates every source: they were solved against geometry this
+                // scene no longer describes.
+                foreach (var s in _sources.Values) s?.Dispose();
+                _sources.Clear();
+                _scene?.Dispose();
+                _scene = built;
+                _sceneCentre = want;
+                LastStatus = $"rooms {_scene.Rooms}, nodes {_scene.Nodes}, edges {_scene.Edges}, "
+                           + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms";
+            }
+        }
+
+        // Readiness only -- this NEVER builds. It used to, inline on the decision tick, which put a
+        // 310 ms voxel walk on the frame path; the build now belongs to SchedulerTick. Returns false
+        // until a scene exists, and the caller keeps using the shipped model until then.
+        internal static bool EnsureScene(World world, Vector3 ear)
+        {
+            NoteListener(ear);
+            lock (_gate) return _scene != null && _scene.Valid;
         }
 
         static AcousticSource SourceAt(Vector3 p)
@@ -108,7 +186,10 @@ namespace CMM
         // one-line swap. Returns false if anything is missing, so the caller falls back.
         internal static bool ComputeOcclusion(Vector3 ear, float[] pts, int ptCount, float[] ptGain, World world)
         {
-            if (!Ready || pts == null || ptGain == null || ptCount <= 0) return false;
+            if (pts == null || ptGain == null || ptCount <= 0) return false;
+            lock (_gate)
+            {
+            if (_scene == null || !_scene.Valid) return false;
 
             float mn = CMMConfig.WorldEmitterMinDistance;
             float mx = CMMConfig.WorldEmitterRange;
@@ -137,6 +218,44 @@ namespace CMM
                 ptGain[k] = extra > 0f ? extra : 0f;
             }
             return true;
+            }
+        }
+
+        // Human-readable breakdown at one position: the total, and every arrival that makes it up.
+        // Reported per KIND because that is what makes a wrong sound diagnosable by ear -- "the
+        // barrier component is 20 dB too loud" is actionable where "it sounds off" is not.
+        internal static string DescribeAt(Vector3 ear)
+        {
+            lock (_gate)
+            {
+                if (_scene == null || !_scene.Valid) return "no scene";
+                if (_sources.Count == 0) return "scene ready, no speakers solved yet";
+                var sb = new System.Text.StringBuilder();
+                sb.Append("scene: ").Append(LastStatus);
+                foreach (var kv in _sources)
+                {
+                    var src = kv.Value;
+                    if (src == null || !src.Valid) continue;
+                    int n = src.Evaluate(ear, _arrivals);
+                    double tot = src.LevelDb(ear);
+                    sb.Append("\n  speaker ").Append(kv.Key).Append("  total ").Append(tot.ToString("0.0")).Append(" dB");
+                    double[] byKind = new double[4];
+                    int[] cnt = new int[4];
+                    for (int i = 0; i < n; i++)
+                    {
+                        int k = _arrivals[i].kind;
+                        if (k < 0 || k > 3) continue;
+                        byKind[k] += _arrivals[i].weight * Math.Pow(10.0, _arrivals[i].db / 10.0);
+                        cnt[k]++;
+                    }
+                    string[] nm = { "direct", "barrier", "aperture", "diffuse" };
+                    for (int k = 0; k < 4; k++)
+                        if (cnt[k] > 0)
+                            sb.Append("\n    ").Append(nm[k]).Append(" x").Append(cnt[k]).Append("  ")
+                              .Append((10.0 * Math.Log10(byKind[k])).ToString("0.0")).Append(" dB");
+                }
+                return sb.ToString();
+            }
         }
 
         // The listener has moved; speakers have not. Nothing to re-solve -- which is the point of
@@ -146,12 +265,15 @@ namespace CMM
         // A speaker moved (vehicle-mounted, later enemies). Graph-sized and allocation-free.
         internal static void MoveSource(Vector3 from, Vector3 to)
         {
+            lock (_gate)
+            {
             var key = new Vector3i(Mathf.FloorToInt(from.x), Mathf.FloorToInt(from.y), Mathf.FloorToInt(from.z));
             if (!_sources.TryGetValue(key, out var s) || s == null) return;
             if (s.Move(to))
             {
                 _sources.Remove(key);
                 _sources[new Vector3i(Mathf.FloorToInt(to.x), Mathf.FloorToInt(to.y), Mathf.FloorToInt(to.z))] = s;
+            }
             }
         }
 
@@ -160,11 +282,15 @@ namespace CMM
         // EnsureScene, which runs off the frame loop.
         internal static void InvalidateGeometry()
         {
-            foreach (var s in _sources.Values) s?.Dispose();
-            _sources.Clear();
-            _scene?.Dispose();
-            _scene = null;
-            LastStatus = "invalidated";
+            lock (_gate)
+            {
+                foreach (var s in _sources.Values) s?.Dispose();
+                _sources.Clear();
+                _scene?.Dispose();
+                _scene = null;
+                _geomGen++;
+                LastStatus = "invalidated";
+            }
         }
     }
 }

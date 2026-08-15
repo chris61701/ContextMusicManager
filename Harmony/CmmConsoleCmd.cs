@@ -39,7 +39,11 @@ namespace CMM
             "  cmm nativeplay <context> - (experimental) play a track via CMM's own\n" +
             "                             audio output, off Unity's threads\n" +
             "  cmm nativenext           - crossfade to another track in that context\n" +
-            "  cmm nativestop           - stop the native-output player"
+            "  cmm nativestop           - stop the native-output player\n" +
+            "  cmm acoustics            - world-emitter acoustic model: state\n" +
+            "  cmm acoustics on|off     - switch between the new and shipped model live\n" +
+            "  cmm acoustics rebuild    - force a scene rebuild\n" +
+            "  cmm acoustics here       - level at the player, broken down by arrival"
 #if GV_V3
             + "\n" +
             "  cmm acsweep <poi|here>   - export a POI's acoustic voxel grid + parity\n" +
@@ -88,7 +92,56 @@ namespace CMM
             }
 #endif
 
+            if (sub == "acoustics" || sub == "ac")
+            {
+                Out(AcousticsCommand(_params));
+                return;
+            }
+
             Out("unknown subcommand '" + _params[0] + "'.\n" + Help);
+        }
+
+        // ── cmm acoustics ─────────────────────────────────────────────────────────────
+        // The A/B switch and the state readout for the native acoustic model. Exists because the
+        // difference between the two models is a listening judgement, and a listening judgement
+        // needs to be made in game, on the same speaker, seconds apart -- not from two recordings
+        // rendered an hour apart by a scaffold that turned out to have bugs of its own.
+        //
+        //   cmm acoustics            what the bridge is doing right now
+        //   cmm acoustics on|off     switch models live, no rebuild, no relog
+        //   cmm acoustics rebuild    force a scene rebuild (after changing geometry)
+        //   cmm acoustics here       the model's level at the player, broken down by arrival
+        static string AcousticsCommand(List<string> p)
+        {
+            string arg = p.Count > 1 ? p[1].ToLowerInvariant() : "";
+
+            if (arg == "on" || arg == "off")
+            {
+                CMMConfig.WorldEmitterNativeAcoustics = (arg == "on");
+                if (arg == "off") AcousticBridge.Reset();
+                return "native acoustics " + (arg == "on" ? "ON" : "OFF")
+                     + " (the other model is one 'cmm acoustics " + (arg == "on" ? "off" : "on") + "' away)";
+            }
+
+            if (arg == "rebuild")
+            {
+                AcousticBridge.InvalidateGeometry();
+                return "scene invalidated; the scheduler rebuilds it within ~0.5 s";
+            }
+
+            if (arg == "here")
+            {
+                var pl = GameManager.Instance?.World?.GetPrimaryPlayer();
+                if (pl == null) return "no player";
+                if (!AcousticBridge.Ready) return "no scene yet — " + AcousticBridge.LastStatus;
+                return AcousticBridge.DescribeAt(pl.getHeadPosition());
+            }
+
+            return "native acoustics: " + (CMMConfig.WorldEmitterNativeAcoustics ? "ON" : "OFF")
+                 + (NativeAcoustics.Available ? "" : "  [native unavailable]")
+                 + "\n  scene:     " + AcousticBridge.LastStatus
+                 + "\n  saturated: " + AcousticBridge.SaturatedPoints + " point(s) clamped at last publish"
+                 + "\n  usage:     cmm acoustics on|off|rebuild|here";
         }
 
         static void Out(string s)
