@@ -69,8 +69,17 @@
  * the ray's angle, and a single block of listener movement could swap them. That was
  * the root of the 10-16 dB/block cliffs, which is why fixing the candidate set three
  * different ways never removed them. */
-#define DB_MAT 40.1
-#define MAT_POW 2.74
+/* RUNTIME, not compile-time, and the reason is a listening report. The author's first
+ * in-game verdict on this model was "on the other side of a wall it sounds like there's
+ * barely anything between me and that wall", and the measurement agreed: a shut wooden
+ * wall costs about 11 dB, of which most of what remains never crossed the wall as a ray
+ * at all. Which number is RIGHT is a judgement made by ear, in the game, on a real POI --
+ * so the ear needs to be able to turn it there rather than wait for a rebuild per guess.
+ * Defaults are the ported values, so an untouched build is bit-identical to the port. */
+double cmm_ac_db_mat = 40.1;
+double cmm_ac_mat_pow = 2.74;
+#define DB_MAT cmm_ac_db_mat
+#define MAT_POW cmm_ac_mat_pow
 #define DB_VOXEL_MAX 60.0
 
 /* A voxel crossed VERTICALLY stands for a whole floor assembly -- deck, joists,
@@ -101,7 +110,8 @@
  * costs three spec scenarios and doubles real-geometry roughness to remove, and never
  * touches the reach failures it was suspected of, so it stays until the distance law is
  * settled. */
-#define DIFFUSE_CAL 16.0
+double cmm_ac_diffuse_cal = 16.0;
+#define DIFFUSE_CAL cmm_ac_diffuse_cal
 
 /* A reverberant field needs a space many wavelengths across, so sound bounces many times
  * before being absorbed. The segmentation happily produces ONE-VOXEL regions, and 4P/R
@@ -223,6 +233,28 @@ struct cmm_ac {
 };
 
 int cmm_ac_abi(void) { return CMM_AC_ABI; }
+
+/* Material loss and the diffuse field's absolute scale, live.
+ *
+ * WHICH ONE NEEDS A REBUILD, AND WHY IT MATTERS: db_mat and mat_pow feed the wall
+ * transmission used when the SCENE's room coupling is built, so changing them leaves the
+ * existing scene describing the old material until it is rebuilt. diffuse_cal is applied
+ * where the room fields are computed, which is also scene time. So: all three are scene
+ * inputs, and the caller must rebuild for a change to take full effect. Passing a
+ * non-positive value leaves that parameter alone, so one knob can be turned at a time. */
+void cmm_ac_set_tuning(double db_mat, double mat_pow, double diffuse_cal)
+{
+    if (db_mat > 0.0) cmm_ac_db_mat = db_mat;
+    if (mat_pow > 0.0) cmm_ac_mat_pow = mat_pow;
+    if (diffuse_cal >= 0.0) cmm_ac_diffuse_cal = diffuse_cal;
+}
+
+void cmm_ac_get_tuning(double *db_mat, double *mat_pow, double *diffuse_cal)
+{
+    if (db_mat) *db_mat = cmm_ac_db_mat;
+    if (mat_pow) *mat_pow = cmm_ac_mat_pow;
+    if (diffuse_cal) *diffuse_cal = cmm_ac_diffuse_cal;
+}
 
 /* index, matching the dump layout exactly so nothing needs reindexing */
 static inline long long idx_of(const cmm_ac *ac, int x, int y, int z) {

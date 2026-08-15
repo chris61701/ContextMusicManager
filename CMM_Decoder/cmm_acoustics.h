@@ -79,8 +79,13 @@ typedef struct cmm_ac_src cmm_ac_src;
 /* ABI for the acoustics surface, independent of the decoder's. Bumped on any
  * breaking change; the managed side checks it on load.
  *   v1: scene create/destroy, voxel upload, openness + thickness. */
-#define CMM_AC_ABI 1
+#define CMM_AC_ABI 2
 CMM_AC_API int cmm_ac_abi(void);
+
+/* Live tuning (ABI 2). Scene inputs: rebuild for a change to take full effect. A
+ * non-positive argument leaves that parameter unchanged, so one can be turned alone. */
+CMM_AC_API void cmm_ac_set_tuning(double db_mat, double mat_pow, double diffuse_cal);
+CMM_AC_API void cmm_ac_get_tuning(double *db_mat, double *mat_pow, double *diffuse_cal);
 
 /* Voxel flag bits, matching the acsweep dump so the managed uploader can pass
  * them through unchanged. Only AIR is consumed by the model. */

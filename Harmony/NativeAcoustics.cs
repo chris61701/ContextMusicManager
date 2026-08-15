@@ -41,10 +41,20 @@ namespace CMM
 
         // The ABI this build expects. Checked on first use so a stale DLL fails loudly with a
         // number rather than crashing somewhere inside the solve.
-        internal const int ExpectedAbi = 1;
+        internal const int ExpectedAbi = 2;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_ac_abi();
+
+        // Live tuning (ABI 2). These are SCENE inputs -- material loss feeds the room coupling
+        // and the calibration feeds the room fields, both computed at build time -- so a change
+        // only takes full effect after a rebuild. A non-positive argument leaves that parameter
+        // alone, so one knob can be turned without disturbing the others.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_ac_set_tuning(double dbMat, double matPow, double diffuseCal);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_ac_get_tuning(out double dbMat, out double matPow, out double diffuseCal);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr cmm_ac_create(int sx, int sy, int sz, int x0, int y0, int z0);

@@ -32,6 +32,9 @@ const P = require("./portals.js");
 const { checkDump } = require("./dumpcheck.js");
 
 const SLABS = parseInt((process.argv.find(a => a.startsWith("--slabs=")) || "=1").split("=")[1], 10) || 1;
+// Measure ONE capture. The disc-variant leg bundle is 3x the rays, and sweeping all five
+// captures to answer a question about one of them just buys a timeout.
+const ONLY = (process.argv.find(a => a.startsWith("--only=")) || "=").split("=")[1];
 const OPEN_MIN = 0.9;   // only measure where a listener could actually stand
 
 // THE SUM OVER EVERY EMITTER, because that is the only thing anyone hears. Measuring one speaker
@@ -81,7 +84,7 @@ function measure(file) {
 function main() {
   const dir = path.join(__dirname, "dumps");
   if (!fs.existsSync(dir)) { console.error("no dumps/ directory"); process.exit(1); }
-  const files = fs.readdirSync(dir).filter(f => f.endsWith(".json")).map(f => path.join(dir, f));
+  const files = fs.readdirSync(dir).filter(f => f.endsWith(".json") && (!ONLY || f.includes(ONLY))).map(f => path.join(dir, f));
   console.log(`\nREAL-GEOMETRY GRADIENT, dB per block, over every standable voxel of ${SLABS} slab(s).`);
   console.log(`Past ~3 dB/block reads as a step rather than a slope.\n`);
   console.log(`${"dump".padEnd(26)}${"worst".padStart(7)}${"mean".padStart(7)}${">1".padStart(8)}${">3".padStart(8)}   spk rooms/aper  worst at`);

@@ -1336,6 +1336,28 @@ function apDist(A, x, y, z) {
 // instead of "does this one line hit something": a ray grazing a corner contributes little while its
 // neighbours carry the arrival, so the result moves smoothly with position.
 const LEG_FAN_R = 1.5;    // blocks: bundle radius, about a first-Fresnel zone at room scale
+// A CROSS IS NOT AN AREA SAMPLE -- the same mistake the Fresnel disc above was built to
+// replace, still sitting here. Five rays at the arms of a plus sign, each weighted 1/5, sample
+// a bundle whose integrand has a hard edge in it wherever the leg passes a corner: rays clear
+// that corner one at a time, and in a POWER sum one ray of five clearing while the rest stay
+// blocked can move the result several dB in a single block. Measured on the store capture --
+// the worst real number we have, 4.58 dB/block -- all eight speakers stepped together through
+// one shared opening, which is the signature of a shared leg, not of any speaker's geometry.
+//
+// CMM_LEGDISC=1 swaps in an area-weighted disc of the same radius (centre plus two rings),
+// which is what the bundle was always meant to be.
+const LEG_DISC = process.env.CMM_LEGDISC === "1";
+const LEG_FAN_W = LEG_DISC
+  ? (() => {
+      const out = [];
+      for (const [rf, n, share] of [[0, 1, 0.1], [0.6, 6, 0.45], [1.0, 8, 0.45]])
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2 + rf * 1.7;
+          out.push([rf * Math.cos(a), rf * Math.sin(a), share / n]);
+        }
+      return out;
+    })()
+  : [[0, 0, 0.2], [1, 0, 0.2], [-1, 0, 0.2], [0, 1, 0.2], [0, -1, 0.2]];
 const LEG_FAN = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]];
 function legDb(D, ax, ay, az, lx, ly, lz) {
   let ux = lx - ax, uy = ly - ay, uz = lz - az;
@@ -1348,11 +1370,11 @@ function legDb(D, ax, ay, az, lx, ly, lz) {
   px /= pl; py /= pl; pz /= pl;
   const qx = uy * pz - uz * py, qy = uz * px - ux * pz, qz = ux * py - uy * px;
   let pow = 0;
-  for (const [a, b] of LEG_FAN) {
+  for (const [a, b, w] of LEG_FAN_W) {
     const ox = (px * a + qx * b) * LEG_FAN_R;
     const oy = (py * a + qy * b) * LEG_FAN_R;
     const oz = (pz * a + qz * b) * LEG_FAN_R;
-    pow += dbToPow(-segDbAt(D, ax + ox, ay + oy, az + oz, lx, ly, lz)) / LEG_FAN.length;
+    pow += w * dbToPow(-segDbAt(D, ax + ox, ay + oy, az + oz, lx, ly, lz));
   }
   return pow > 0 ? -powToDb(pow) : 120;
 }

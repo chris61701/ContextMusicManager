@@ -43,7 +43,9 @@ namespace CMM
             "  cmm acoustics            - world-emitter acoustic model: state\n" +
             "  cmm acoustics on|off     - switch between the new and shipped model live\n" +
             "  cmm acoustics rebuild    - force a scene rebuild\n" +
-            "  cmm acoustics here       - level at the player, broken down by arrival"
+            "  cmm acoustics here       - level at the player, broken down by arrival\n" +
+            "  cmm acoustics wall <n>   - how much material blocks (default 40.1, higher = more)\n" +
+            "  cmm acoustics verb <n>   - room-sound level behind walls (default 16, lower = less)"
 #if GV_V3
             + "\n" +
             "  cmm acsweep <poi|here>   - export a POI's acoustic voxel grid + parity\n" +
@@ -121,6 +123,32 @@ namespace CMM
                 if (arg == "off") AcousticBridge.Reset();
                 return "native acoustics " + (arg == "on" ? "ON" : "OFF")
                      + " (the other model is one 'cmm acoustics " + (arg == "on" ? "off" : "on") + "' away)";
+            }
+
+            // ── the two knobs that decide how much a wall is worth ────────────────────────
+            // Turned in game, by ear, because that is the only instrument that can judge them.
+            // Both are scene inputs, so each sets and then rebuilds -- the number is live within
+            // about half a second, which is fast enough to hear the difference while standing in
+            // the same spot.
+            if (arg == "wall" || arg == "verb")
+            {
+                if (!NativeAcoustics.Available) return "native unavailable";
+                double mat, pow, cal;
+                NativeAcoustics.cmm_ac_get_tuning(out mat, out pow, out cal);
+                if (p.Count > 2 && double.TryParse(p[2], System.Globalization.NumberStyles.Float,
+                                                   System.Globalization.CultureInfo.InvariantCulture, out double v))
+                {
+                    if (arg == "wall") NativeAcoustics.cmm_ac_set_tuning(v, -1, -1);
+                    else               NativeAcoustics.cmm_ac_set_tuning(-1, -1, v);
+                    double was = (arg == "wall") ? mat : cal;   // captured BEFORE the set
+                    AcousticBridge.InvalidateGeometry();
+                    return (arg == "wall" ? "material scale " : "reverb level ") + v.ToString("0.##")
+                         + "  (was " + was.ToString("0.##") + ")"
+                         + "; rebuilding, live in ~0.5 s";
+                }
+                return "material scale " + mat.ToString("0.##") + " (default 40.1 -- higher = walls block more)"
+                     + "\n  reverb level " + cal.ToString("0.##") + " (default 16 -- lower = less room sound behind walls)"
+                     + "\n  usage: cmm acoustics wall <n> | cmm acoustics verb <n>";
             }
 
             if (arg == "rebuild")
