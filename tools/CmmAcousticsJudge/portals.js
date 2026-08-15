@@ -81,8 +81,27 @@ const SLOPE = 0.35;
 // the law's SHAPE, not its scale -- which is what makes changing it safe now and unsafe
 // before. Routing still orders on SLOPE*length (Dijkstra wants an additive metric and length
 // is one, monotone either way); only the LEVEL uses the law.
-const INV_SQ = process.env.CMM_INVSQ === "1";
-const distDb = len => INV_SQ ? 20 * Math.log10(Math.max(1, len)) : SLOPE * len;         // distance attenuation, dB per block (exponential curve)
+// DEFAULT ON. CMM_EXPLAW=1 restores the shipped exponential law for an A/B.
+const INV_SQ = process.env.CMM_EXPLAW !== "1";
+// DEFAULT ON, for the same reason: it is what makes the room boundary continuous.
+const SA_COUPLE = process.env.CMM_NOSA !== "1";
+//
+// A RADIATOR IS NOT A POINT, and 1/r says otherwise the moment you stand next to one. The
+// derivative of 20*log10(r) is 8.7/r dB per block, so at one block it is 8.7 dB/block and at half
+// a block it is 17 -- a cliff, purely from the algebra, sitting exactly where a listener walks:
+// through the doorway. That is the roughness the law change bought, and it is not a modelling
+// error to be tuned out. It is the near field of a point source, and there are no point sources
+// here: a speaker is a block, and an opening is a doorway-sized sheet of air.
+//
+// A finite radiator of radius a is effectively a plane wave for r << a (no falloff -- you are
+// inside its near field) and 1/r for r >> a. sqrt(r^2 + a^2) is the standard way to write that,
+// and it removes the singularity without touching the far field, which is where every
+// calibration lives. Same reasoning as measuring to an opening's EXTENT rather than its centroid,
+// which is already in the model for the diffuse coupling.
+const distDb = (len, rad = 0.5) =>
+  INV_SQ ? 20 * Math.log10(Math.max(1, Math.hypot(len, rad))) : SLOPE * len;
+// An opening's own radius, from its area: the scale over which it stops looking like a point.
+const apRad = A => Math.max(0.5, Math.sqrt(Math.max(1, A.area || 1) / Math.PI));         // distance attenuation, dB per block (exponential curve)
 const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is FULLY open
 const OPEN_FULL = 0.5;      // ...and at/above which it is fully closed; between, a fraction
 const OPEN_EPS  = 0.02;     // openness below this does not connect at all
@@ -194,7 +213,7 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // SLOPE dB/block is not inverse-square, so 4*P_in/R cannot be evaluated in absolute units. This
 // offset sets where the diffuse field sits relative to the direct component, and it is the one
 // honestly empirical constant in the model.
-const DIFFUSE_CAL = process.env.CMM_DCAL === undefined ? 16 : +process.env.CMM_DCAL;  // see notes: a fudge over the distance-law mismatch
+const DIFFUSE_CAL = process.env.CMM_DCAL === undefined ? 6 : +process.env.CMM_DCAL;  // see notes: a fudge over the distance-law mismatch
 // ── A SPACE MUST BE BIG ENOUGH TO HAVE A REVERBERANT FIELD AT ALL ─────────────
 // 4P/R assumes a diffuse field, which needs a space many wavelengths across so sound can bounce
 // many times before being absorbed. The segmentation happily produces ONE-VOXEL regions, and the
@@ -801,24 +820,57 @@ function makeNewEvaluator(D, G, src) {
     }
   }
 
+  // ── SOUND ARRIVES AT AN OPENING BY EVERY ROUTE, NOT BY THE BEST ONE ─────────────
+  // This took the MINIMUM cost over the portals feeding the aperture's node, which is an
+  // argmin: perfectly smooth until the winner changes, and then a step the size of the gap
+  // between the two routes. Under the shipped distance law that gap is small -- a route ten
+  // blocks longer costs 3.5 dB -- so the steps were survivable. Under a physical law the same
+  // switch costs 20*log10 of the length ratio, and every one of them becomes audible lurching.
+  // Measured: worst occlusion gradient went 6.37 -> 11.65 dB/block on the store with the law
+  // changed and nothing else.
+  //
+  // The model already knows better than this. Its own rule for the arrival set is "never a max,
+  // because an energy sum is dominated by its largest term without any winner-takes-all step".
+  // The same argument applies here and was simply not applied: the routes into a node are
+  // alternative physical paths, they all carry sound, and their powers add. The sum tracks the
+  // minimum within 10*log10(N) and has no step in it anywhere -- a route fading in contributes
+  // nothing until it is comparable, instead of seizing the whole arrival the moment it wins.
+  //
+  // Length is blended by the same power weights, so the reported route length -- which the delay
+  // and the distance law both use -- moves continuously too, rather than teleporting with the
+  // winner.
+  // DEFAULT OFF, and the reason is worth keeping. Summing the routes is the more correct
+  // statement -- sound does arrive by all of them -- but measured against the worst occlusion
+  // gradient it changed nothing (store 11.65 -> 11.56 dB/block), which is how the theory that
+  // route SWITCHING caused the roughness was killed. It is not worth a native port and a
+  // parity gap for a change no measurement can see; JS and native agreeing is the discipline
+  // that has caught nearly every real bug here. CMM_BLEND=1 to try it again.
+  const BLEND = process.env.CMM_BLEND === "1";
   const cands = [{ cost: minSeed, px: sx5, py: sy5, pz: sz5, routeLen: 0, isSrc: true }];
   for (const A of G.apertures) {
     let bestDb = Infinity, bestLen = 0;
+    let pSum = 0, pLen = 0;
+    const addRoute = (cDb, len) => {
+      if (!Number.isFinite(cDb)) return;
+      const p = dbToPow(-cDb);
+      pSum += p; pLen += p * len;
+      if (cDb < bestDb) { bestDb = cDb; bestLen = len; }
+    };
     if (seeded.has(A.nid)) {
-      bestDb = seeded.get(A.nid) + SLOPE * Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5);
-      bestLen = Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5);
+      const h = Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5);
+      addRoute(seeded.get(A.nid) + SLOPE * h, h);
     }
     for (const pid of G.nodes[A.nid].edges) {
       const pc = cost[pid];
       if (!pc) continue;
       const P = G.portals[pid];
       const hop = Math.hypot(A.px - P.px, A.py - P.py, A.pz - P.pz);
-      const cand = pc.add - constrictDb(pc.bneck) + SLOPE * hop;
-      if (cand < bestDb) { bestDb = cand; bestLen = pc.len + hop; }
+      addRoute(pc.add - constrictDb(pc.bneck) + SLOPE * hop, pc.len + hop);
     }
+    if (BLEND && pSum > 0) { bestDb = -powToDb(pSum); bestLen = pLen / pSum; }
     if (!Number.isFinite(bestDb)) continue;
     cands.push({ cost: bestDb - constrictDb(A.throat), px: A.px, py: A.py, pz: A.pz,
-                 routeLen: bestLen, throat: A.throat, area: A.area,
+                 routeLen: bestLen, throat: A.throat, area: A.area, rad: apRad(A),
                  srcDist: Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5) });
   }
 
@@ -1180,9 +1232,26 @@ function makeNewEvaluator(D, G, src) {
             const P = G.portals[bp];
             const mS = legDb(D, px, py, pz, lx, ly, lz);
             const mR = legDb(D, P.px, P.py, P.pz, lx, ly, lz);
-            if (-(distDb(bl) + mR) > -(distDb(leg) + mS)) {
-              px = P.px; py = P.py; pz = P.pz;
-              leg = bl;
+            // A MAX IS A SWITCH, AND A SWITCH MOVES THE ARRIVAL'S POSITION. Taking the louder
+            // of the two estimators was defensible -- it is choosing a better estimate of ONE
+            // candidate's attenuation, not selecting between physical paths -- but it is still
+            // a hard changeover, and it does not only step the LEVEL: the arrival's position
+            // jumps from the aperture to a portal, so the sound's apparent direction jumps with
+            // it. That is the most audible kind of discontinuity this model can produce.
+            //
+            // Blended by power instead. Where one estimator clearly wins it dominates and the
+            // result is what the max gave; where they are comparable the position slides
+            // between them rather than snapping.
+            const dbS = -(distDb(leg) + mS), dbR = -(distDb(bl) + mR);
+            if (!BLEND) {
+              if (dbR > dbS) { px = P.px; py = P.py; pz = P.pz; leg = bl; }
+            } else {
+              const wS = dbToPow(dbS), wR = dbToPow(dbR), wT = wS + wR;
+              if (wT > 0) {
+                const f = wR / wT;
+                px += (P.px - px) * f; py += (P.py - py) * f; pz += (P.pz - pz) * f;
+                leg += (bl - leg) * f;
+              }
             }
           }
         }
@@ -1196,7 +1265,7 @@ function makeNewEvaluator(D, G, src) {
         // and it was the ray.
         legMat = legDb(D, px, py, pz, lx, ly, lz);
         db = INV_SQ
-           ? -((c.cost - SLOPE * c.routeLen) + distDb(c.routeLen + leg) + legMat)
+           ? -((c.cost - SLOPE * c.routeLen) + distDb(c.routeLen + leg, c.rad || 0.5) + legMat)
            : -(c.cost + SLOPE * leg + legMat);
       }
       // A candidate whose total route is barely longer than the straight line describes the
@@ -1325,7 +1394,29 @@ function makeNewEvaluator(D, G, src) {
         // whatever stands between it and you, exactly as the air arrivals already are -- they compute
         // this same legMat and it was simply missing here.
         const legMat = process.env.CMM_NOLEGMAT === '1' ? 0 : legDb(D, A.px, A.py, A.pz, lx, ly, lz);
-        const thru = dbToPow(constrictDb(A.throat) - distDb(leg) - legMat);
+        // ── HOW MUCH OF THE OPENING YOU ACTUALLY SEE ────────────────────────────────
+        // The neighbour's reverberation came through here as: a CONSTRICTION penalty from the
+        // opening's area, plus a spreading term, plus material. The constriction is the problem.
+        // It is a fixed penalty applied to everyone outside the room and to nobody inside it, so
+        // it lands as a STEP exactly at the boundary -- and the model's own continuity argument
+        // ("approaching an opening the neighbour's arrival tends to full strength, cross over and
+        // the two swap roles, and the SUM is symmetric") only holds if that penalty vanishes at
+        // the opening. It does not.
+        //
+        // Measured on the store: stepping from the outdoors into a 122-voxel enclosed pocket
+        // jumped the diffuse field 14 dB in one block, identically for all eight speakers -- the
+        // signature of a listener-side term, and the worst standable step in the capture.
+        //
+        // Constriction and spreading are the same fact told twice: an opening of radius a seen
+        // from distance r subtends 2*pi*(1 - r/sqrt(r^2+a^2)) of the hemisphere. That IS the
+        // fraction of the neighbour's field that reaches you. It is 1 with your nose in the
+        // doorway -- so the boundary is continuous by construction, not by argument -- and falls
+        // to area/(2*pi*r^2) far away, which is the constriction and the spreading together.
+        // One continuous geometric quantity replacing two terms, neither of which was continuous.
+        const aRad = apRad(A);
+        const thru = SA_COUPLE
+          ? (1 - leg / Math.sqrt(leg * leg + aRad * aRad)) * dbToPow(-legMat)
+          : dbToPow(constrictDb(A.throat) - distDb(leg, aRad) - legMat);
         pTot += pf * thru;
         if (DIFF_VOX && Math.abs(lx - DIFF_VOX[0] - 0.5) < 0.01
                      && Math.abs(ly - DIFF_VOX[1] - 0.5) < 0.01

@@ -98,6 +98,39 @@ double cmm_ac_mat_pow = 2.74;
  * question, not a port question. */
 #define SLOPE 0.35
 
+/* DISTANCE, AS A LAW RATHER THAN A SLOPE.
+ *
+ * SLOPE dB/block is exponential and at 0.35 nearly flat: eight blocks costs 2.8 dB where
+ * inverse-square costs 18. Two consequences, both reported from the game and neither tunable:
+ *
+ *   "the speaker sounds far away no matter how close I get to it"; and
+ *   "wall 100, speaker right behind the wall, still sounds like it isn't muffled at all" --
+ *   because the sound is not coming THROUGH the wall, it is coming AROUND, and a detour three
+ *   times as long cost 3.5 dB where the physical answer is 9.5. No material constant can reach
+ *   a path the material is not on.
+ *
+ * A RADIATOR IS NOT A POINT, so 1/r alone will not do either: d/dr of 20*log10(r) is 8.7/r dB
+ * per block, a cliff at close range sitting exactly where a listener walks. A finite radiator of
+ * radius a is a plane wave for r << a and 1/r for r >> a, which sqrt(r^2 + a^2) writes exactly,
+ * removing the singularity without touching the far field where the calibration lives.
+ *
+ * Safe to change only because the bridge transports a RATIO against this model's own free field,
+ * so what matters is the law's shape rather than its scale. Routing still orders on SLOPE*length:
+ * Dijkstra wants an additive metric, length is one, and the order is monotone either way. */
+static double dist_db(double len, double rad)
+{
+    if (rad < 0.5) rad = 0.5;
+    double r = sqrt(len * len + rad * rad);
+    return 20.0 * log10(r < 1.0 ? 1.0 : r);
+}
+
+/* An opening's radius from its area: the scale over which it stops looking like a point. */
+static double ap_rad(double area)
+{
+    double a = sqrt((area > 1.0 ? area : 1.0) / 3.14159265358979323846);
+    return a < 0.5 ? 0.5 : a;
+}
+
 #define BEND_DB 6.0          /* full reversal through a fully-pinched portal */
 #define MIN_APERTURE_DB (-30.0)  /* a pinhole is not infinite loss */
 #define SEED_R 3             /* air pockets within this radius seed the solve */
@@ -110,7 +143,9 @@ double cmm_ac_mat_pow = 2.74;
  * costs three spec scenarios and doubles real-geometry roughness to remove, and never
  * touches the reach failures it was suspected of, so it stays until the distance law is
  * settled. */
-double cmm_ac_diffuse_cal = 16.0;
+/* 16 bridged an exponential direct path to a 4P/R diffuse term that assumes inverse-square.
+ * With both on the same law that gap is gone; 6 is what the nine spec scenarios want. */
+double cmm_ac_diffuse_cal = 6.0;
 #define DIFFUSE_CAL cmm_ac_diffuse_cal
 
 /* A reverberant field needs a space many wavelengths across, so sound bounces many times
@@ -248,7 +283,7 @@ int cmm_ac_abi(void) { return CMM_AC_ABI; }
  * range -- and the game's tuned curve keeps doing distance, which it was always better at. */
 double cmm_ac_freefield_db(double dist)
 {
-    return -SLOPE * (dist > 0.0 ? dist : 0.0);
+    return -dist_db(dist > 0.0 ? dist : 0.0, 0.5);
 }
 
 /* Material loss and the diffuse field's absolute scale, live.
@@ -1599,7 +1634,7 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
     int has_barrier = barrier_mid(ac, sx5, sy5, sz5, lx, ly, lz, &bx, &by, &bz);
     double fan_pow = 0.0, fan_open = 0.0;
     if (!has_barrier) {
-        fan_pow = pow(10.0, -SLOPE * d / 10.0);
+        fan_pow = pow(10.0, -dist_db(d, 0.5) / 10.0);
         fan_open = fan_pow;
     } else {
         double ux = lx - sx5, uy = ly - sy5, uz = lz - sz5;
@@ -1626,14 +1661,14 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
                      + seg_db_at(ac, qx, qy, qz, lx, ly, lz, 0, 1);
             double len = sqrt((qx - sx5) * (qx - sx5) + (qy - sy5) * (qy - sy5) + (qz - sz5) * (qz - sz5))
                        + sqrt((qx - lx) * (qx - lx) + (qy - ly) * (qy - ly) + (qz - lz) * (qz - lz));
-            double pw = w * pow(10.0, -(SLOPE * len + m) / 10.0);
+            double pw = w * pow(10.0, -(dist_db(len, 0.5) + m) / 10.0);
             fan_pow += pw;
             /* "Came through air" is a property of the PATH, not of where the sample sits: a
              * patch in air on the FAR side of a barrier still had to cross it. */
             fan_open += (1.0 - sstep(0, 2 * MIN_TRANSMIT_DB, m)) * pw;
         }
         if (fan_pow <= 0) {
-            fan_pow = pow(10.0, -(SLOPE * d + seg_db_at(ac, sx5, sy5, sz5, lx, ly, lz, 1, 1)) / 10.0);
+            fan_pow = pow(10.0, -(dist_db(d, 0.5) + seg_db_at(ac, sx5, sy5, sz5, lx, ly, lz, 1, 1)) / 10.0);
             fan_open = 0;
         }
     }
@@ -1763,7 +1798,10 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
         double route_len = best_len;
         double leg = sqrt((px - lx) * (px - lx) + (py - ly) * (py - ly) + (pz - lz) * (pz - lz));
         double legmat = leg_db(ac, px, py, pz, lx, ly, lz);
-        double db = -(cost + SLOPE * leg + legmat);
+        /* The route accumulated its geometry as SLOPE*length while Dijkstra ordered on it.
+         * Take that back out and charge the whole path -- route plus final leg -- once under the
+         * law, so a detour costs what a detour costs. */
+        double db = -((cost - SLOPE * route_len) + dist_db(route_len + leg, ap_rad(E->area)) + legmat);
         /* A candidate whose route is barely longer than the straight line describes the SAME
          * physical path as the direct sound, not an alternative -- the Fresnel criterion, and
          * why a wide-open doorway directly ahead adds nothing on top of the direct arrival.
@@ -1812,7 +1850,22 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
             double pz = E->sz / (E->area > 0 ? E->area : 1);
             double leg = ap_dist(E, lx, ly, lz);
             double lm = leg_db(ac, px, py, pz, lx, ly, lz);
-            ptot += pf * pow(10.0, (constrict_db(E->open_frac) - SLOPE * leg - lm) / 10.0);
+            /* HOW MUCH OF THE OPENING YOU ACTUALLY SEE.
+             * Constriction was a fixed penalty charged to everyone outside a room and to nobody
+             * inside it, so it landed as a STEP at the boundary -- and the model's own continuity
+             * argument ("approaching an opening the neighbour's arrival tends to full strength;
+             * cross over and the two swap roles, and the SUM is symmetric") only holds if that
+             * penalty vanishes at the opening. It did not. Measured on the store: crossing into a
+             * 122-voxel enclosed pocket jumped the diffuse field 14 dB in one block, identically
+             * for all eight speakers -- the worst standable step in the capture.
+             *
+             * Constriction and spreading are one fact told twice. An opening of radius a seen from
+             * r subtends 2*pi*(1 - r/sqrt(r^2+a^2)) of the hemisphere, and that IS the fraction of
+             * the neighbour's field that reaches you: 1 with your nose in the doorway, so the
+             * boundary is continuous by construction rather than by argument, and area/(2*pi*r^2)
+             * far away, which is the constriction and the spreading together. */
+            double arad = ap_rad(E->area);
+            ptot += pf * (1.0 - leg / sqrt(leg * leg + arad * arad)) * pow(10.0, -lm / 10.0);
         }
         if (getenv("CMM_ONE")) fprintf(stderr, "  [dbg] diffuse ptot=%.6g\n", ptot);
         if (ptot > 1e-12) {
