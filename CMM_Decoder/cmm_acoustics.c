@@ -94,6 +94,7 @@ struct cmm_ac {
      * never does. A rebuild happens when a door swings, not every frame. */
     struct ac_region *reg; int nreg, cap_reg;
     struct ac_port   *prt; int nprt, cap_prt;
+    int *ph; int ph_cap;     /* pair -> contact index, so contacts() is O(faces) */
     int nrooms;              /* merged regions that survive, renumbered 0..nrooms-1 */
 };
 
@@ -143,6 +144,7 @@ void cmm_ac_destroy(cmm_ac *ac) {
     if (!ac) return;
     free(ac->reg);
     free(ac->prt);
+    free(ac->ph);
     free(ac->arena);
     free(ac);
 }
@@ -348,8 +350,57 @@ static int segment(cmm_ac *ac) {
 /* --- contacts between differently-labelled regions ------------------------
  * Area-weighted centre and the widest clearance across the contact. A boundary IS an
  * aperture: found, never detected by a heuristic. */
+/* Open-addressed hash from a region PAIR to its contact index. The obvious linear
+ * scan over the contact list costs O(faces x contacts), and on the bunker that is
+ * 800k open voxels against ~1800 contacts: 949 ms, which is a visible hitch and a
+ * door swing triggers a rebuild. Hashing makes it O(faces).
+ *
+ * Sized to a power of two well above the contact count and rebuilt per segmentation,
+ * so it never grows during the walk and never needs a resize path. */
+static unsigned pair_hash(int lo, int hi) {
+    unsigned h = (unsigned)lo * 2654435761u ^ (unsigned)hi * 2246822519u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return h;
+}
+
+static int ph_init(cmm_ac *ac, int expect) {
+    int cap = 1024;
+    while (cap < expect * 4) cap <<= 1;
+    if (ac->ph_cap != cap) {
+        int *t = (int *)realloc(ac->ph, (size_t)cap * sizeof(int));
+        if (!t) return 0;
+        ac->ph = t; ac->ph_cap = cap;
+    }
+    for (int i = 0; i < ac->ph_cap; i++) ac->ph[i] = -1;
+    return 1;
+}
+
 static int prt_find_or_add(cmm_ac *ac, int a, int b) {
     int lo = a < b ? a : b, hi = a < b ? b : a;
+    if (ac->ph && ac->ph_cap > 0) {
+        unsigned mask = (unsigned)ac->ph_cap - 1u;
+        unsigned s = pair_hash(lo, hi) & mask;
+        for (unsigned probe = 0; probe <= mask; probe++) {
+            int slot = (int)((s + probe) & mask);
+            int pi = ac->ph[slot];
+            if (pi < 0) {
+                /* free slot: create the contact and record it here */
+                if (ac->nprt == ac->cap_prt) {
+                    int cap = ac->cap_prt ? ac->cap_prt * 2 : 256;
+                    struct ac_port *p = (struct ac_port *)realloc(ac->prt, (size_t)cap * sizeof(*p));
+                    if (!p) return -1;
+                    ac->prt = p; ac->cap_prt = cap;
+                }
+                struct ac_port *P = &ac->prt[ac->nprt];
+                memset(P, 0, sizeof(*P));
+                P->a = lo; P->b = hi;
+                ac->ph[slot] = ac->nprt;
+                return ac->nprt++;
+            }
+            if (ac->prt[pi].a == lo && ac->prt[pi].b == hi) return pi;
+        }
+        /* table full: fall through to the linear path rather than fail */
+    }
     for (int i = 0; i < ac->nprt; i++) if (ac->prt[i].a == lo && ac->prt[i].b == hi) return i;
     if (ac->nprt == ac->cap_prt) {
         int cap = ac->cap_prt ? ac->cap_prt * 2 : 256;
@@ -366,6 +417,9 @@ static int prt_find_or_add(cmm_ac *ac, int a, int b) {
 static int contacts(cmm_ac *ac) {
     const int sx = ac->sx, sy = ac->sy, sz = ac->sz;
     ac->nprt = 0;
+    /* Contacts are bounded in practice by a few per region; 8x the region count is a
+     * generous expectation and the table falls back to a scan if it ever fills. */
+    if (!ph_init(ac, ac->nreg * 8 + 64)) return 0;
     for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
         long long i = idx_of(ac, x, y, z);
         if (ac->open[i] <= OPEN_EPS) continue;
