@@ -45,7 +45,7 @@ namespace CMM
             "  cmm acoustics rebuild    - force a scene rebuild\n" +
             "  cmm acoustics here       - level at the player, broken down by arrival\n" +
             "  cmm acoustics wall <n>   - how much material blocks (default 40.1, higher = more)\n" +
-            "  cmm acoustics verb <n>   - room-sound level behind walls (default 6, lower = less)"
+            "  cmm acoustics verb <n>   - room-sound level behind walls (default 7, lower = less)"
 #if GV_V3
             + "\n" +
             "  cmm acsweep <poi|here>   - export a POI's acoustic voxel grid + parity\n" +
@@ -147,7 +147,7 @@ namespace CMM
                          + "; rebuilding, live in ~0.5 s";
                 }
                 return "material scale " + mat.ToString("0.##") + " (default 40.1 -- higher = walls block more)"
-                     + "\n  reverb level " + cal.ToString("0.##") + " (default 6 -- lower = less room sound behind walls)"
+                     + "\n  reverb level " + cal.ToString("0.##") + " (default 7 -- lower = less room sound behind walls)"
                      + "\n  usage: cmm acoustics wall <n> | cmm acoustics verb <n>";
             }
 

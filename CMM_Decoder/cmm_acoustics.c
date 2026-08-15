@@ -144,8 +144,8 @@ static double ap_rad(double area)
  * touches the reach failures it was suspected of, so it stays until the distance law is
  * settled. */
 /* 16 bridged an exponential direct path to a 4P/R diffuse term that assumes inverse-square.
- * With both on the same law that gap is gone; 6 is what the nine spec scenarios want. */
-double cmm_ac_diffuse_cal = 6.0;
+ * With both on the same law that gap is gone; 7 is where all nine spec scenarios pass. */
+double cmm_ac_diffuse_cal = 7.0;
 #define DIFFUSE_CAL cmm_ac_diffuse_cal
 
 /* A reverberant field needs a space many wavelengths across, so sound bounces many times
@@ -1661,7 +1661,23 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
                      + seg_db_at(ac, qx, qy, qz, lx, ly, lz, 0, 1);
             double len = sqrt((qx - sx5) * (qx - sx5) + (qy - sy5) * (qy - sy5) + (qz - sz5) * (qz - sz5))
                        + sqrt((qx - lx) * (qx - lx) + (qy - ly) * (qy - ly) + (qz - lz) * (qz - lz));
-            double pw = w * pow(10.0, -(dist_db(len, 0.5) + m) / 10.0);
+            /* THE DISC MEASURES TRANSMISSION. DISTANCE IS THE DIRECT PATH'S JOB.
+             * Each patch was charged for its OWN path, source->patch->listener, longer than the
+             * direct line by the patch's offset. Under the shipped flat law that was worth ~0.3 dB.
+             * Under a physical law it is fatal: a speaker sits inside its own block, so barrier_mid
+             * always finds a "barrier" at the source, the disc integrates patches up to three
+             * blocks off-axis, and their paths cost 15 dB against a free field of 0. Measured half
+             * a block from a speaker in open air with nothing in the way: -12.6 dB of occlusion.
+             * Reported from the game as "it gets muffled when I'm closer to it, especially while
+             * right on top of it".
+             *
+             * The path DIFFERENCE across a Fresnel zone is a PHASE difference -- it is what makes
+             * the zones interfere -- and this sum is incoherent, over power, so it carries no
+             * energy cost here. What the disc measures is the FRACTION of the wavefront that gets
+             * through. Charge the direct distance once and let the patches differ only by the
+             * material they cross: with no material anywhere the disc then sums to exactly free
+             * field, which is the answer it always should have given. */
+            double pw = w * pow(10.0, -(dist_db(d, 0.5) + m) / 10.0);
             fan_pow += pw;
             /* "Came through air" is a property of the PATH, not of where the sample sits: a
              * patch in air on the FAR side of a barrier still had to cross it. */

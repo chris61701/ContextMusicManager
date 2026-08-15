@@ -213,7 +213,11 @@ const MIN_TRANSMIT_DB = 3;   // below this a ray is an opening, not a partition
 // SLOPE dB/block is not inverse-square, so 4*P_in/R cannot be evaluated in absolute units. This
 // offset sets where the diffuse field sits relative to the direct component, and it is the one
 // honestly empirical constant in the model.
-const DIFFUSE_CAL = process.env.CMM_DCAL === undefined ? 6 : +process.env.CMM_DCAL;  // see notes: a fudge over the distance-law mismatch
+// 7, not 16. The old value bridged an exponential direct path to a 4P/R diffuse term that
+// assumes inverse-square -- 17 dB apart at 12 blocks. With both on the same law the gap is
+// gone and what remains is a real calibration: 7 is where all nine spec scenarios pass and
+// passivity holds at 0.0-0.1%.
+const DIFFUSE_CAL = process.env.CMM_DCAL === undefined ? 7 : +process.env.CMM_DCAL;  // see notes: a fudge over the distance-law mismatch
 // ── A SPACE MUST BE BIG ENOUGH TO HAVE A REVERBERANT FIELD AT ALL ─────────────
 // 4P/R assumes a diffuse field, which needs a space many wavelengths across so sound can bounce
 // many times before being absorbed. The segmentation happily produces ONE-VOXEL regions, and the
@@ -1132,10 +1136,32 @@ function makeNewEvaluator(D, G, src) {
         // the two legs, half a voxel each. So the honest form is a plain area integral over the
         // zone -- fully blocked gives the wall's loss, fully clear gives free field, and partial
         // gives the smooth in-between with no branch anywhere.
+        // (Tried also skipping the source's own block on leg B, on the theory that a speaker's
+        // casing should not attenuate its own output. Worth -0.3 dB at half a block and nothing
+        // beyond, so it is not the residual and not worth a parity gap. The residual at sub-block
+        // range is the fixed disc radius sampling floor and walls three blocks off-axis; at any
+        // reachable listening position -- an ear is 1-2 blocks from a block's centre -- occlusion
+        // is now within 0.3 dB of zero in open air.)
         const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz, true, false)    // count the patch itself
                 + segDbAt(D, qx, qy, qz, lx, ly, lz, false, true);
         const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
-        const pw = p.w * dbToPow(-(distDb(len) + m));
+        // THE DISC MEASURES TRANSMISSION. DISTANCE IS THE DIRECT PATH'S JOB.
+        // Each patch was charged for its OWN path length, source->patch->listener, which is
+        // longer than the direct line by the patch's offset. Under the shipped flat law that was
+        // worth ~0.3 dB and did no harm. Under a physical law it is fatal: a speaker sits inside
+        // its own block, so barrierMid always finds a "barrier" right at the source, the disc
+        // then integrates over patches up to three blocks off-axis, and their paths cost 15 dB
+        // against a free field of 0. Measured standing half a block from a speaker in open air
+        // with nothing in the way: -12.6 dB of occlusion. Reported from the game as "it gets
+        // muffled when I'm closer to it, especially while right on top of it".
+        //
+        // The path DIFFERENCE across a Fresnel zone is a phase difference -- it is what makes the
+        // zones interfere -- and this sum is incoherent, over power, so that difference carries no
+        // energy cost here. What the disc is measuring is what FRACTION of the wavefront gets
+        // through the barrier. Charging the direct distance once, and letting each patch differ
+        // only by the material it crosses, is that quantity: with no material anywhere the disc
+        // sums to exactly free field, which is the answer it always should have given.
+        const pw = p.w * dbToPow(-(distDb(d) + m));
         fanPow += pw;
         // "Came through air" is a property of the PATH, not of where the sample point happens to sit.
         // This asked openAtF(patch) -- is the point itself in air -- which is a different question and
