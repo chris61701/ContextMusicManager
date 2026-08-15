@@ -199,6 +199,10 @@ namespace CMM
         // shipped ear-anchored flood. Off by default until it has been heard in game: the old
         // path stays reachable so the two can be A/B'd without a rebuild.
         public static bool   WorldEmitterNativeAcoustics   = false;
+        // Occlusion (dB) at which the emitter tone reaches full dullness, when the native acoustic
+        // model is driving. 8 dB is about what the shipped model's virtual distance produced for a
+        // wall at mid range, so a wall keeps sounding like a wall.
+        public static float  WorldEmitterOcclusionFullDb   = 8f;
         // Occlusion is modelled as VIRTUAL DISTANCE: a wall makes the speaker sound farther (quieter +
         // duller on the same smooth curve) instead of a hard volume cut — so it fades gradually, not
         // all-or-nothing. WallDistance = blocks of virtual distance a FULL solid wall adds on the path.

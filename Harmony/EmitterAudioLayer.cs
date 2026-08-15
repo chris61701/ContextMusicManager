@@ -1048,6 +1048,11 @@ namespace CMM
         // spatializer — how in-game settings.xml edits take effect live.
         private static void PushTuning()
         {
+            // Tone follows the model that produced the number. The shipped model's occlusion IS a
+            // virtual distance and reads correctly as one; the native model's is an attenuation, and
+            // reading it as distance dulled a speaker the listener was standing on.
+            CmmMixer.Instance?.SetEmitterOcclTone(CMMConfig.WorldEmitterNativeAcoustics,
+                                                  CMMConfig.WorldEmitterOcclusionFullDb);
             CmmMixer.Instance?.SetEmitterTuning(CMMConfig.WorldEmitterMinDistance,
                                                 CMMConfig.WorldEmitterRange,
                                                 CMMConfig.WorldEmitterFalloff,

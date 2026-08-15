@@ -167,6 +167,13 @@ typedef struct cmm_decoder cmm_decoder;
  *        nothing to render anyway) while every control ABI keeps returning immediately. Also:
  *        cmm_mix_play_sfx no longer drops the click during the open window — the voice arms and
  *        renders when the device arrives.
+ *   v42:+ TONE FROM OCCLUSION — cmm_mix_set_emitter_occl_tone(enable, fullDb). The emitter's
+ *         dullness was read off EFFECTIVE distance, which carries occlusion as added blocks; how
+ *         many blocks an attenuation is worth depends on where you stand, so one wall dulled far
+ *         more up close than at range and a listener on top of a speaker heard it muffled with
+ *         nothing in the way. Enabled, the mixer recovers the pure occlusion ratio (this point's
+ *         attenuation over what it would be unobstructed) and dulls from that; real distance still
+ *         dulls on its own. Off by default — the shipped model is unchanged.
  *   v41:  SLEWED MASTERS (no interface change) — cmm_mix_set_master / cmm_mix_set_emitter_master
  *        now set a TARGET the producer walks toward at a bounded rate (25ms full-scale) instead
  *        of a value applied as a per-block constant. An instant master change was a step
@@ -176,7 +183,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        with them). The ramp is per FRAME so channels share a gain (no stereo shift), emitter
  *        slots all ramp from one start value so the K slots stay locked, and both masters snap to
  *        target on device attach so a fresh device opens at level instead of fading in. */
-#define CMM_DECODER_ABI 41
+#define CMM_DECODER_ABI 42
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -436,6 +443,7 @@ int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames);
  * occlusion virtual distances and per-speaker render flags (v34: bit0 = ham class; NULL = all 0).
  * count 0 = this slot inaudible this block (residual mono discarded).
  * The listener basis + curve tuning are GLOBAL (shared by every slot). Lock-free. */
+void cmm_out_set_emitter_occl_tone(cmm_out* o, int enable, float fullDb);
 void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, const float* lisRight3,
                                  const float* pts, const float* gains, const int* flags, int count,
                                  float minDist, float maxDist, float falloffExp, float muffle,
@@ -575,6 +583,9 @@ CMM_API void cmm_mix_set_emitter_pos(long long id, float x, float y, float z);
  * speaker is heard at once from the one decode. count<=0/xyz NULL silences until the next update.
  * v34: `flags` holds `count` per-speaker render flags — bit0 = HAM class (that point's signal gets
  * the ham coloration set); bits 1-2 reserved for the stereo-pair channel split. NULL = all speaker. */
+/* v42: drive emitter TONE from occlusion instead of virtual distance (see cmm_out.c). */
+CMM_API void cmm_mix_set_emitter_occl_tone(int enable, float fullDb);
+
 CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains,
                                         const int* flags, int count);
 

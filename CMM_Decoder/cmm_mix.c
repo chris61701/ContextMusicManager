@@ -177,6 +177,11 @@ static volatile float g_emMaxDist     = 40.0f;
 static volatile float g_emFalloffExp  = 1.5f;
 static volatile float g_emMuffle      = 0.7f;
 static volatile float g_emStereoWidth = 0.85f;
+/* v42: tone from occlusion rather than from virtual distance. Off by default so the shipped
+ * occlusion model -- whose door behaviour is the most carefully tuned thing in the emitter
+ * system -- is bit-identical; the native acoustic model turns it on. */
+static volatile int   g_emOcclTone   = 0;
+static volatile float g_emOcclFullDb = 8.0f;
 
 /* Live emitter reverb (room reflection) params, from the managed room probe. v31: the CARRY send
  * level + air-route depth are PER-SLOT (each station's seal/route differs); the room shape is shared. */
@@ -675,6 +680,7 @@ static void pump_body(void) {
                         any = 1;
                         /* min/max come from the LIVE tuning globals (not the voice's baked-in values)
                          * so range + plateau are hot-tunable; falloff + muffle likewise. */
+                        cmm_out_set_emitter_occl_tone(dev, g_emOcclTone, g_emOcclFullDb);
                         cmm_out_set_emitter_spatial(dev, s, lp, lr, em->emitPts, em->emitPtGain,
                                                     em->emitPtFlags, em->emitPtCount,
                                                     g_emMinDist, g_emMaxDist,
@@ -1306,6 +1312,16 @@ CMM_API void cmm_mix_set_emitter_pos(long long id, float x, float y, float z) {
  * point's signal gets the HAM coloration set; `flags` may be NULL for all-speaker). The render sums
  * every point's pan+attenuation×gain, so all the speakers are heard at once. count<=0 (or xyz NULL)
  * silences the spatial output until the next update. Missing/non-emitter id = no-op. */
+/* v42: tone from occlusion. enable=0 restores the shipped behaviour exactly. fullDb is the
+ * occlusion at which the tone reaches full dullness -- 8 dB is about what the shipped model's
+ * virtual distance produced for a wall at mid range, so a wall keeps sounding like a wall. */
+CMM_API void cmm_mix_set_emitter_occl_tone(int enable, float fullDb)
+{
+    if (fullDb < 0.5f) fullDb = 8.0f; else if (fullDb > 60.0f) fullDb = 60.0f;
+    g_emOcclTone = enable ? 1 : 0;
+    g_emOcclFullDb = fullDb;
+}
+
 CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const float* gains,
                                         const int* flags, int count) {
     int i, k;

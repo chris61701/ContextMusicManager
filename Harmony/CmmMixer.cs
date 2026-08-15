@@ -86,6 +86,12 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_points(long id, float[] xyz, float[] gains, int[] flags, int count);
 
+        // v42: drive emitter TONE from occlusion rather than from virtual distance. Off restores the
+        // shipped behaviour exactly; the native acoustic model turns it on, because the number it
+        // publishes is an attenuation whose worth in BLOCKS depends on where the listener stands.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_occl_tone(int enable, float fullDb);
+
         // v21 — live spatial-curve tuning (plateau, range, falloff steepness, distance-muffle), pushed
         // from config each tick so it can be dialled in-game without a rebuild.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -346,6 +352,13 @@ namespace CMM
         public void SetEmitterTuning(float minDist, float maxDist, float falloffExp, float muffle, float stereoWidth)
         {
             NativeMix.cmm_mix_set_emitter_tuning(minDist, maxDist, falloffExp, muffle, stereoWidth);
+        }
+
+        // v42: tone from occlusion instead of virtual distance. Follows the acoustic model, since it
+        // is that model's output the old rule mis-reads (see cmm_out.c).
+        public void SetEmitterOcclTone(bool enable, float fullDb)
+        {
+            NativeMix.cmm_mix_set_emitter_occl_tone(enable ? 1 : 0, fullDb);
         }
 
         // Push the live emitter reverb (room reflections) from the room probe. Every tick.

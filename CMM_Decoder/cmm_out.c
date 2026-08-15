@@ -158,6 +158,12 @@ struct cmm_out {
     volatile float emColHamStatic;
     volatile float emColHamVoice;
     float emColLoCoef, emColHiCoef;  /* fixed cutoffs, computed from the device rate at open */
+    /* v42: drive the emitter's TONE from occlusion rather than from virtual distance. Off by
+     * default, so the shipped occlusion model's carefully tuned door behaviour is bit-identical;
+     * the native acoustic model turns it on, because it publishes an occlusion whose worth in
+     * BLOCKS varies with distance even when the occlusion itself does not. */
+    int   emOcclTone;
+    float emOcclFullDb;              /* occlusion (dB) at which the tone is fully dulled */
 
     /* Reverb (room reflections) — ONE shared pair of buses for every slot (reverb is a property of
      * the listener's ROOM, not the station). Room-shape params relayed live from the managed probe;
@@ -322,7 +328,34 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2],
         float contrib = cL * cL + cR * cR;
         if (contrib > bestContrib[cls]) {
             bestContrib[cls] = contrib;
-            float nd = (dEff - mn) / CMM_EMIT_MUFFLE_REF;
+            float nd;
+            if (o->emOcclTone) {
+                /* --- TONE FROM OCCLUSION, NOT FROM VIRTUAL DISTANCE ---
+                 * dEff carries occlusion as ADDED BLOCKS, and how many blocks a given
+                 * attenuation is worth depends on where you stand: near a speaker there is a
+                 * whole Range of headroom to spend, far away there is almost none. So one
+                 * physical wall dulled the tone far more up close than at distance, and a
+                 * listener standing ON a speaker heard it heavily muffled with nothing in the
+                 * way. Reported exactly so: "it gets muffled when I'm closer to it, especially
+                 * while right on top of it."
+                 *
+                 * The level path is right -- the curve inversion reproduces the model's gain at
+                 * any distance -- so the fault is only that TONE reads the same number. Recover
+                 * the pure occlusion ratio by dividing this point's attenuation by what it would
+                 * be with nothing in the way, which needs nothing the mixer does not already
+                 * have, and drive the dullness from that. Distance still dulls on its own (air
+                 * absorbs), but now it is the REAL distance rather than the virtual one. */
+                float attClear;
+                if (d <= mn) attClear = 1.0f;
+                else if (d >= mx) attClear = 0.0f;
+                else attClear = powf((mx - d) / span, fexp);
+                float occlAmp = (attClear > 1e-6f) ? (att / attClear) : 1.0f;
+                if (occlAmp > 1.0f) occlAmp = 1.0f;
+                float occlDb = (occlAmp > 1e-6f) ? (-20.0f * log10f(occlAmp)) : 120.0f;
+                nd = (d - mn) / CMM_EMIT_MUFFLE_REF + occlDb / o->emOcclFullDb;
+            } else {
+                nd = (dEff - mn) / CMM_EMIT_MUFFLE_REF;
+            }
             if (nd < 0.0f) nd = 0.0f; else if (nd > 1.0f) nd = 1.0f;
             bestBright[cls] = 1.0f - muffle * nd;        /* farther / more-occluded ⇒ duller (one curve) */
         }
@@ -981,6 +1014,14 @@ int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames)
 /* v20/v31/v34 — relay one SLOT's live spatial state (plus the shared listener + curve tuning). Lock-free
  * volatile writes (a torn read mis-pans at most one ~10ms callback). count clamps to CMM_MAX_EMIT_PTS.
  * v34: `flags` = per-point render flags (bit0 = ham class; NULL = all 0 = speaker class). */
+/* v42: see the tone rule in cmm_emitter_gains. Off restores the shipped behaviour exactly. */
+void cmm_out_set_emitter_occl_tone(cmm_out* o, int enable, float fullDb)
+{
+    if (!o) return;
+    o->emOcclTone = enable ? 1 : 0;
+    o->emOcclFullDb = (fullDb > 0.5f) ? fullDb : 8.0f;
+}
+
 void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, const float* lisRight3,
                                  const float* pts, const float* gains, const int* flags, int count,
                                  float minDist, float maxDist, float falloffExp, float muffle,
