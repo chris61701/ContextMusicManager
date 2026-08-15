@@ -222,6 +222,10 @@ namespace CMM
                     // field cache: a swing can start and settle between two 4 Hz ticks, and the
                     // native path must not depend on an unrelated feature being switched on.
                     AcousticBridge.WatchDoors(EmitterAcoustics.AnyDoorAnimating);
+                    // Advance the native scene's world READ one slab (~1.5 ms). The read has to be
+                    // here, on the main thread, because the game's chunks are not safe to touch from
+                    // another one; only the solve that follows it runs on the scheduler.
+                    AcousticBridge.FrameStep(w);
                 }
             }
 

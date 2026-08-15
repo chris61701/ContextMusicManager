@@ -76,6 +76,11 @@ namespace CMM
                 _sources.Clear();
                 _scene?.Dispose();
                 _scene = null;
+                // Bump the generation as well: an in-flight read or a filled box describes a world
+                // this reset just said we are no longer in (unload, mod disable, model switched off).
+                _geomGen++;
+                _filled = null;
+                _wantValid = false;
                 LastStatus = "reset";
             }
         }
@@ -88,6 +93,63 @@ namespace CMM
             _wantCentre = ear;
             _wantValid = true;
         }
+
+        // ── The build, split across two threads ──────────────────────────────────────────────
+        // MAIN thread fills a VoxelBox from the world, a slab per frame under a budget. SCHEDULER
+        // thread turns a filled box into a scene. The split is not an optimisation: reading the
+        // game's blocks off-thread races the chunk loader, and that failure is a crash rather than
+        // an exception, so the read cannot leave the main thread. Everything after it touches only
+        // our own memory and has no business ON the main thread.
+        const float ReadBudgetMs = 1.5f;
+        static VoxelBox _box;              // main thread owns this while filling
+        static VoxelBox _filled;           // handed to the scheduler under _gate
+        static bool _consuming;            // scheduler is reading the shared buffers right now
+        static Vector3 _boxCentre;         // where the in-flight read is centred
+        static long _boxGen;               // the geometry generation the read started from
+
+        // Per frame, main thread. Decides when a read is needed and advances it.
+        internal static void FrameStep(World world)
+        {
+            if (!CMMConfig.WorldEmitterNativeAcoustics || !NativeAcoustics.Available) return;
+            if (world == null || !_wantValid) return;
+
+            if (_box == null)
+            {
+                bool need;
+                lock (_gate)
+                    need = _filled == null && !_consuming
+                        && (_scene == null || !_scene.Valid
+                            || (_wantCentre - _sceneCentre).sqrMagnitude >= RecentreDist * RecentreDist);
+                if (!need) return;
+
+                int sx = HalfX * 2 + 1, sy = Below + Above + 1, sz = HalfZ * 2 + 1;
+                if (_reusable == null || _reusable.Sx != sx || _reusable.Sy != sy || _reusable.Sz != sz)
+                    _reusable = new VoxelBox(sx, sy, sz);
+                _box = _reusable;
+                _boxCentre = _wantCentre;
+                lock (_gate) _boxGen = _geomGen;
+                _box.Restart(Mathf.FloorToInt(_boxCentre.x) - HalfX,
+                             Mathf.FloorToInt(_boxCentre.y) - Below,
+                             Mathf.FloorToInt(_boxCentre.z) - HalfZ);
+                LastStatus = "reading world 0%";
+                return;
+            }
+
+            // Geometry changed under an in-flight read: what has been read already describes a
+            // world that no longer exists, so start over rather than build from a mixture.
+            lock (_gate)
+                if (_boxGen != _geomGen) { _box = null; return; }
+
+            if (!_box.Step(world, ReadBudgetMs))
+            {
+                LastStatus = $"reading world {_box.ProgressPct:0}%";
+                return;
+            }
+            lock (_gate) { _filled = _box; }
+            _box = null;
+            LastStatus = "read complete, building";
+        }
+        static VoxelBox _reusable;
 
         // Per-frame door edge watcher. Called with the live "is any door mid-swing" flag; the scene
         // is dropped on the FALLING edge, once the swing has settled and the world's blocks are
@@ -106,30 +168,27 @@ namespace CMM
         // so readers never touch a half-built scene and never block for the build.
         internal static void SchedulerTick()
         {
-            if (!CMMConfig.WorldEmitterNativeAcoustics || !_wantValid) return;
+            if (!CMMConfig.WorldEmitterNativeAcoustics) return;
             if (!NativeAcoustics.Available) return;
 
-            Vector3 want = _wantCentre;
-            bool need;
+            VoxelBox box;
             long gen;
+            Vector3 want;
             lock (_gate)
             {
-                gen = _geomGen;
-                need = _scene == null || !_scene.Valid
-                    || (want - _sceneCentre).sqrMagnitude >= RecentreDist * RecentreDist;
+                box = _filled;
+                _filled = null;
+                gen = _boxGen;
+                want = _boxCentre;
+                if (box != null) _consuming = true;   // the buffers are REUSED: no new read until done
             }
-            if (!need) return;
+            if (box == null) return;
 
-            World world = GameManager.Instance?.World;
-            if (world == null) return;
-
-            int cx = Mathf.FloorToInt(want.x), cy = Mathf.FloorToInt(want.y), cz = Mathf.FloorToInt(want.z);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             AcousticScene built = null;
             try
             {
-                built = AcousticScene.Build(world, cx - HalfX, cy - Below, cz - HalfZ,
-                                            HalfX * 2 + 1, Below + Above + 1, HalfZ * 2 + 1);
+                built = AcousticScene.FromVoxels(box);
             }
             catch (Exception e)
             {
@@ -140,6 +199,7 @@ namespace CMM
 
             lock (_gate)
             {
+                _consuming = false;
                 if (built == null) { LastStatus = $"build failed ({LastBuildMs} ms)"; return; }
                 // Geometry changed WHILE this was building (a door settled mid-walk), so the scene
                 // just built already describes a world that no longer exists. Throw it away rather
@@ -289,6 +349,7 @@ namespace CMM
                 _scene?.Dispose();
                 _scene = null;
                 _geomGen++;
+                _filled = null;   // read against the pre-change world; the gen bump restarts it
                 LastStatus = "invalidated";
             }
         }

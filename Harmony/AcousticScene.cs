@@ -34,69 +34,26 @@ namespace CMM
             _h = h; _x0 = x0; _y0 = y0; _z0 = z0; _sx = sx; _sy = sy; _sz = sz;
         }
 
-        // Build a scene over a world box. Returns null if the native side is unavailable or the
-        // box is unreasonable -- callers fall back to the shipped model rather than failing.
-        //
-        // Cost is voxel-sized (~310 ms for a 1.09M-voxel POI), so this belongs on the scheduler
-        // thread. It is triggered by geometry changing, never by anything per-frame.
-        internal static AcousticScene Build(World world, int x0, int y0, int z0, int sx, int sy, int sz)
+        // Build a scene from an ALREADY-READ box of voxels. Everything here is native work on
+        // native memory -- no game API is touched -- which is what makes it safe on the scheduler
+        // thread. Reading the world is the other half, and it is deliberately NOT here: see
+        // VoxelBox.
+        internal static AcousticScene FromVoxels(VoxelBox box)
         {
-            if (!NativeAcoustics.Available) return null;
-            if (sx <= 0 || sy <= 0 || sz <= 0) return null;
-            long n = (long)sx * sy * sz;
-            if (n > 64_000_000L) return null;
+            if (!NativeAcoustics.Available || box == null || !box.Complete) return null;
 
-            IntPtr h = NativeAcoustics.cmm_ac_create(sx, sy, sz, x0, y0, z0);
+            IntPtr h = NativeAcoustics.cmm_ac_create(box.Sx, box.Sy, box.Sz, box.X0, box.Y0, box.Z0);
             if (h == IntPtr.Zero) return null;
 
-            var scene = new AcousticScene(h, x0, y0, z0, sx, sy, sz);
-            if (!scene.Upload(world) || !scene.Rebuild())
+            var scene = new AcousticScene(h, box.X0, box.Y0, box.Z0, box.Sx, box.Sy, box.Sz);
+            if (NativeAcoustics.cmm_ac_set_voxels(h, box.Loss, box.Flags) == 0
+                || NativeAcoustics.cmm_ac_build_fields(h) == 0
+                || NativeAcoustics.cmm_ac_build_segments(h) == 0)
             {
                 scene.Dispose();
                 return null;
             }
             return scene;
-        }
-
-        // Read the game's blocks into the native grid. CellLoss is live-engine state -- per
-        // instance IsSeeThrough, resolved lightOpacity, shape bounds, density, water -- which is
-        // why the model consumes it rather than parsing prefabs: parsing offline would model an
-        // approximation of the game instead of the game.
-        bool Upload(World world)
-        {
-            if (world == null || _h == IntPtr.Zero) return false;
-            long n = (long)_sx * _sy * _sz;
-            var loss = new float[n];
-            var flags = new byte[n];
-            try
-            {
-                for (int y = 0; y < _sy; y++)
-                    for (int z = 0; z < _sz; z++)
-                        for (int x = 0; x < _sx; x++)
-                        {
-                            int wx = _x0 + x, wy = _y0 + y, wz = _z0 + z;
-                            long i = x + (long)_sx * (z + (long)_sz * y);
-                            BlockValue bv = world.GetBlock(wx, wy, wz);
-                            if (bv.isair) { flags[i] = (byte)NativeAcoustics.AIR; loss[i] = 0f; continue; }
-                            loss[i] = EmitterAcoustics.DebugCellLoss(bv, world, wx, wy, wz);
-                        }
-            }
-            catch (Exception e)
-            {
-                CMMConfig.D($"[CMM] acoustics upload failed: {e.Message}");
-                return false;
-            }
-            return NativeAcoustics.cmm_ac_set_voxels(_h, loss, flags) != 0;
-        }
-
-        // Derive the fields and the graph. Separate from Upload so a geometry change can reuse
-        // the same buffers later without reallocating the scene.
-        bool Rebuild()
-        {
-            if (_h == IntPtr.Zero) return false;
-            if (NativeAcoustics.cmm_ac_build_fields(_h) == 0) return false;
-            if (NativeAcoustics.cmm_ac_build_segments(_h) == 0) return false;
-            return true;
         }
 
         internal long Stat(int what) => _h == IntPtr.Zero ? -1 : NativeAcoustics.cmm_ac_stat(_h, what);
@@ -123,6 +80,90 @@ namespace CMM
             if (_h == IntPtr.Zero) return;
             NativeAcoustics.cmm_ac_destroy(_h);
             _h = IntPtr.Zero;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // VoxelBox — the world read, on the main thread, a slice at a time
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Reading blocks is the ONE part of a scene build that touches the game, and the game's
+    // world is not safe to read from another thread: chunk access races a loader and gets you a
+    // torn read or a hard crash, not an exception you can catch. So the read stays where every
+    // other block read in this mod already is -- the main thread -- and is amortized across
+    // frames under a millisecond budget, exactly like the shipped flood and the field cache.
+    // Only the native half runs on the scheduler, where it touches nothing but its own arena.
+    //
+    // The buffers are allocated ONCE and reused for every rebuild. A 97x41x97 box is 1.5 MB of
+    // float plus 386 KB of byte; re-allocating that per door swing on Unity's non-generational
+    // GC is exactly the kind of churn this whole subsystem exists to avoid.
+    internal sealed class VoxelBox
+    {
+        internal readonly int Sx, Sy, Sz;
+        internal int X0, Y0, Z0;
+        internal readonly float[] Loss;
+        internal readonly byte[] Flags;
+        internal bool Complete { get; private set; }
+
+        int _cursorY;                     // next y-slab to read; the box is filled slab by slab
+        internal float ProgressPct => Sy == 0 ? 0f : 100f * _cursorY / Sy;
+
+        internal VoxelBox(int sx, int sy, int sz)
+        {
+            Sx = sx; Sy = sy; Sz = sz;
+            long n = (long)sx * sy * sz;
+            Loss = new float[n];
+            Flags = new byte[n];
+        }
+
+        // Point the box at a new origin and start over. Buffers are kept; only the cursor moves.
+        internal void Restart(int x0, int y0, int z0)
+        {
+            X0 = x0; Y0 = y0; Z0 = z0;
+            _cursorY = 0;
+            Complete = false;
+        }
+
+        // Read up to budgetMs worth of slabs. Returns true once the whole box is filled. Whole
+        // slabs only: the cost of one is bounded and predictable, and a partial slab would need a
+        // second cursor for no benefit.
+        //
+        // CellLoss is live-engine state -- per-instance IsSeeThrough, resolved lightOpacity, shape
+        // bounds, density, water -- which is why the model consumes it rather than parsing prefabs:
+        // parsing offline would model an approximation of the game instead of the game.
+        internal bool Step(World world, float budgetMs)
+        {
+            if (Complete) return true;
+            if (world == null) return false;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            try
+            {
+                while (_cursorY < Sy)
+                {
+                    int y = _cursorY;
+                    for (int z = 0; z < Sz; z++)
+                        for (int x = 0; x < Sx; x++)
+                        {
+                            int wx = X0 + x, wy = Y0 + y, wz = Z0 + z;
+                            long i = x + (long)Sx * (z + (long)Sz * y);
+                            BlockValue bv = world.GetBlock(wx, wy, wz);
+                            if (bv.isair) { Flags[i] = (byte)NativeAcoustics.AIR; Loss[i] = 0f; continue; }
+                            Flags[i] = 0;
+                            Loss[i] = EmitterAcoustics.DebugCellLoss(bv, world, wx, wy, wz);
+                        }
+                    _cursorY++;
+                    if ((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs >= budgetMs) break;
+                }
+            }
+            catch (Exception e)
+            {
+                CMMConfig.D($"[CMM] acoustics voxel read failed: {e.Message}");
+                Complete = false;
+                _cursorY = 0;
+                return false;
+            }
+            if (_cursorY >= Sy) Complete = true;
+            return Complete;
         }
     }
 
