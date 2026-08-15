@@ -63,6 +63,31 @@ namespace CMM
         internal static int SaturatedPoints;   // clamped at the QUIET end last publish
         internal static int GainPoints;        // clamped at UNITY -- the model reported gain
         internal static int PublishedPoints;   // denominator: gain/pts is the share switched off
+
+        // Nearest-point diagnostics, refreshed every publish and read by the 1 Hz log line.
+        static float _dbgNearest = 1e9f;
+        static double _dbgRaw, _dbgFree, _dbgOccl;
+        static int _dbgN;
+        static readonly double[] _dbgKind = new double[4];
+        static float _dbgExtra;
+
+        internal static string DescribeNearest()
+        {
+            if (_dbgNearest > 1e8f) return "no point";
+            string[] nm = { "dir", "bar", "ap", "diff" };
+            var sb = new System.Text.StringBuilder();
+            sb.Append("d=").Append(_dbgNearest.ToString("0.0"))
+              .Append(" model=").Append(_dbgRaw.ToString("0.0"))
+              .Append(" free=").Append(_dbgFree.ToString("0.0"))
+              .Append(" OCCL=").Append(_dbgOccl.ToString("0.0"))
+              .Append(" extra=").Append(_dbgExtra.ToString("0.0"))
+              .Append(" [");
+            for (int k = 0; k < 4; k++)
+                if (_dbgKind[k] > 0)
+                    sb.Append(nm[k]).Append(' ')
+                      .Append((10.0 * Math.Log10(_dbgKind[k])).ToString("0.0")).Append(' ');
+            return sb.Append(']').ToString();
+        }
         internal static long LastBuildMs;
         internal static string LastStatus = "not built";
 
@@ -263,6 +288,7 @@ namespace CMM
             SaturatedPoints = 0;
             GainPoints = 0;
             PublishedPoints = ptCount;
+            _dbgNearest = 1e9f;
             for (int k = 0; k < ptCount; k++)
             {
                 var sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
@@ -297,9 +323,31 @@ namespace CMM
                 if (amp > 1.0) { amp = 1.0; GainPoints++; }
                 if (amp < 1e-6) { amp = 1e-6; SaturatedPoints++; }
 
+                // WHAT IS ACTUALLY PUBLISHED, for the NEAREST point, once a second. Every diagnosis
+                // in this subsystem that turned out to be wrong was wrong because the offline scene
+                // was not the player's scene: an empty test room around a speaker cannot show what a
+                // shelf, a wall behind it and a ceiling do to the transmission disc. This is the one
+                // number that was never looked at in game, and it is cheap.
+                if (d < _dbgNearest)
+                {
+                    _dbgNearest = d;
+                    _dbgRaw = src.LevelDb(ear);
+                    _dbgFree = NativeAcoustics.cmm_ac_freefield_db(d);
+                    _dbgOccl = db;
+                    _dbgN = src.Evaluate(ear, _arrivals);
+                    _dbgKind[0] = _dbgKind[1] = _dbgKind[2] = _dbgKind[3] = 0.0;
+                    for (int a = 0; a < _dbgN; a++)
+                    {
+                        int kk = _arrivals[a].kind;
+                        if (kk >= 0 && kk < 4)
+                            _dbgKind[kk] += _arrivals[a].weight * Math.Pow(10.0, _arrivals[a].db / 10.0);
+                    }
+                }
+
                 float head = mx - d;                              // room left on the curve
                 float extra = head > 0f ? (float)(head * (1.0 - Math.Pow(amp, 1.0 / fexp))) : 0f;
                 ptGain[k] = extra > 0f ? extra : 0f;
+                if (d <= _dbgNearest) _dbgExtra = ptGain[k];
             }
             return true;
             }

@@ -265,6 +265,7 @@ namespace CMM
                             (CMMConfig.WorldEmitterNativeAcoustics
                                 ? $" | ac gain={AcousticBridge.GainPoints} sat={AcousticBridge.SaturatedPoints}"
                                   + $" pts={AcousticBridge.PublishedPoints} scene={AcousticBridge.LastStatus}"
+                                  + $"\n[CMM]   ac nearest: {AcousticBridge.DescribeNearest()}"
                                 : ""));
                 _statFieldTicks = _statLegacyTicks = 0;
                 _statPubSum = _statPubMax = 0f; _statPubN = 0;
