@@ -56,7 +56,10 @@ const { loadDump, makeEvaluator, segLoss } = require("./judge3d.js");
 // verdict was that a wall does not sound like a wall, and that is a judgement about THIS number.
 const DB_MAT = process.env.CMM_DBMAT === undefined ? 40.1 : +process.env.CMM_DBMAT;
                             // scale: one voxel of the densest ordinary material (frac 1.0)
-const MAT_POW = 2.74;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
+// Sweepable with DB_MAT: together they set how far APART a door and a wall are priced, which is
+// the defect underneath 'a wall sounds like barely anything'. dB = DB_MAT * frac^MAT_POW, so
+// MAT_POW is the SPREAD (a door's frac is low, a wall's high) and DB_MAT the overall scale.
+const MAT_POW = process.env.CMM_MATPOW === undefined ? 2.74 : +process.env.CMM_MATPOW;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
 const DB_VOXEL_MAX = 60.0;
 const VERT_MULT = 2.6;      // a voxel crossed vertically stands for a floor assembly, not a wall  // per-voxel ceiling (an airtight vault leaf)
 const SLOPE = 0.35;         // distance attenuation, dB per block (exponential curve)
