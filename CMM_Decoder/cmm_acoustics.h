@@ -39,7 +39,42 @@ extern "C" {
 #define CMM_AC_API __attribute__((visibility("default")))
 #endif
 
+/* ── TWO OBJECTS, AND THE SPLIT IS LOAD-BEARING ────────────────────────────
+ * cmm_ac      A SCENE. Geometry only: voxels, openness, thickness, regions,
+ *             portals, rooms, absorption. Contains nothing about any source and
+ *             is rebuilt only when the WORLD changes -- a door swings, a wall
+ *             breaks, a chunk loads. Expensive: voxel-sized work.
+ * cmm_ac_src  A SOURCE bound to a scene. The routed solve from one position:
+ *             Dijkstra over portals, the room-field solve, the candidate set.
+ *             Cheap: graph-sized work, not voxel-sized. On the largest real
+ *             capture that is 60 portals and 33 rooms, so microseconds.
+ *
+ * WHY IT IS SPLIT THIS WAY, stated now because retrofitting it later is the
+ * expensive path. Speakers will move -- vehicle-mounted ones are a planned
+ * multiplayer feature, and the same engine is intended for enemies and the wider
+ * sound engine later. None of that is in scope now, but the shape has to admit it
+ * or the shape has to be thrown away. So:
+ *
+ *   - A scene is SOURCE-INDEPENDENT. Moving a source must be a lookup against an
+ *     unchanged scene, never a rebuild. This is the requirement MODEL.md records
+ *     as structural, and it is the one the shipped ear-anchored flood violates --
+ *     that design rebuilds its field around the LISTENER, which is why it cannot
+ *     scale to many sources and why its cost grows with movement rather than with
+ *     geometry.
+ *   - cmm_ac_src_move() recomputes in place and ALLOCATES NOTHING. A source's
+ *     arena is sized once at create from the scene's graph, so N moving sources
+ *     cost N graph solves per tick and zero allocation -- which is what makes
+ *     enemies affordable later without redesign.
+ *   - Many sources may share one scene concurrently for reading. The scene is
+ *     single-writer: rebuild it on the scheduler thread while no source solve is
+ *     running against it.
+ *
+ * Tuning for moving sources is therefore a matter of how OFTEN move() is called
+ * and how many sources exist, not of the model's structure. That is the property
+ * being bought here.
+ * ───────────────────────────────────────────────────────────────────────── */
 typedef struct cmm_ac cmm_ac;
+typedef struct cmm_ac_src cmm_ac_src;
 
 /* ABI for the acoustics surface, independent of the decoder's. Bumped on any
  * breaking change; the managed side checks it on load.
@@ -78,6 +113,33 @@ CMM_AC_API long long cmm_ac_stat(const cmm_ac *ac, int what);
 /* Mean thickness over open voxels — a single number that catches a sweep-order
  * or boundary-handling divergence immediately. */
 CMM_AC_API double cmm_ac_mean_thick(const cmm_ac *ac);
+
+/* ── source solves (stage 4; declared now so the split is fixed) ───────────
+ * create binds a source to a scene and allocates its arena from the scene's graph
+ * size. move() re-solves in place for a new position and allocates nothing, so it
+ * is the call a moving speaker -- or an enemy -- makes every tick it moves. A
+ * scene rebuild invalidates every source bound to it: call cmm_ac_src_rebind()
+ * after one, which resizes the arena only if the graph actually grew. */
+CMM_AC_API cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z);
+CMM_AC_API void cmm_ac_src_destroy(cmm_ac_src *src);
+CMM_AC_API int cmm_ac_src_move(cmm_ac_src *src, float x, float y, float z);
+CMM_AC_API int cmm_ac_src_rebind(cmm_ac_src *src);
+
+/* Evaluate one listener against one source. Writes the arrival set the audio layer
+ * needs -- level, direction, filter cutoff, reverb send -- into caller-owned
+ * storage, so evaluation allocates nothing on either side of the boundary.
+ * Returns the number of arrivals written, or -1 on error. */
+typedef struct {
+    float db;              /* level, dB relative to the source */
+    float px, py, pz;      /* where it radiates FROM, for panning */
+    float fc;              /* lowpass cutoff, Hz: a wall is a filter, not a fader */
+    float len;             /* path length in blocks, for delay */
+    float weight;          /* share, so one path counted once is not counted twice */
+    int   kind;            /* 0 direct, 1 through a barrier, 2 aperture, 3 diffuse */
+} cmm_ac_arrival;
+
+CMM_AC_API int cmm_ac_eval(cmm_ac_src *src, float lx, float ly, float lz,
+                           cmm_ac_arrival *out, int max_out);
 
 #ifdef __cplusplus
 }
