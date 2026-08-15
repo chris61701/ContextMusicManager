@@ -84,17 +84,80 @@ const AIR_FLAG = 1;
 // over 23 m and about 4 at 100 Hz, so a few blocks is the right order -- the old cross was
 // roughly the right SIZE and wrong in every other respect.
 const DIFF_VOX = process.env.CMM_DIFFVOX ? process.env.CMM_DIFFVOX.split(',').map(Number) : null;
+const FAN_DBG = process.env.CMM_FANDBG === undefined ? null : +process.env.CMM_FANDBG;
 const CAND_DBG = process.env.CMM_CANDDBG ? process.env.CMM_CANDDBG.split(',').map(Number) : null;
-const FRESNEL_R = 3.0;
+// ── THE ZONE'S RADIUS IS GEOMETRY, NOT A CONSTANT ────────────────────────────
+// This was a flat 3.0 blocks wherever the barrier happened to be, and that is wrong in the one
+// place it matters most. The first Fresnel zone's radius is
+//
+//     r = sqrt(lambda * d1 * d2 / (d1 + d2))
+//
+// which COLLAPSES as the barrier approaches either end of the path. A speaker sits inside its
+// own block, so for the near barrier -- the speaker's own casing -- d1 is about a quarter of a
+// block and the true radius is ~0.6, not 3.0. At 3.0 the disc splayed samples nearly three
+// blocks off-axis on a five-block path: they were not sampling a barrier surface at all, they
+// were sampling completely different routes, some clipping the hatch rim and some not. Each one
+// flipped between 0 and 5-11 dB independently as the listener moved, and the sum stepped. That
+// is the whole of pasthatch's 2.40 dB/block, and it is why adding samples made it WORSE -- more
+// samples of an incoherent set is more things to flip.
+//
+// Mid-path the formula gives sqrt(1.7*d/4), which is 2.9 blocks over 20 -- so the old constant
+// was right for the case it was fitted on and wrong everywhere else. Nothing needs recalibrating.
+// OFF BY DEFAULT, and the reason is worth keeping. The geometric radius is the correct
+// physics and it fixes what it was aimed at -- pasthatch 2.40 -> 1.93 dB/block, under the
+// limit for the first time. But it makes the disc SMALLER almost everywhere (a wall five
+// blocks away gets 1.46 rather than 3.0), and at that size 15 samples under-resolve it: the
+// real captures roughened in step (bunker 2.57 -> 3.26, cave 1.31 -> 1.90).
+//
+// So the flat 3.0 was doing two jobs -- a zone radius, badly, and a spatial smoother, well --
+// and only the first can be replaced on its own. Finishing this means raising the sample count
+// to match the smaller disc, which is a cost decision on the native side, not a free swap.
+// Enable with CMM_FZGEO=1.
+const FZ_GEO = process.env.CMM_FZGEO === "1";
+const FRESNEL_R_FIXED = 3.0;
+const FRESNEL_LAMBDA = 1.7;              // ~200 Hz, the band that carries through structure
+                                         // (same value as WAVELEN_BLOCKS below, declared here so
+                                         //  the zone radius does not depend on declaration order)
+// FLOOR AT ONE BLOCK. Not a safety margin -- a resolution limit. The geometry IS a voxel grid,
+// so no feature smaller than a block exists in it, and a disc narrower than that is sampling
+// below the resolution of its own input: it collapses toward a single ray and steps every time
+// that ray crosses a voxel face. Measured: at 0.35 the real captures roughened (bunker 2.57 ->
+// 3.26) even as the synthetic hatch improved, which is the signature of under-sampling, not of
+// a wrong radius.
+const FRESNEL_R_MIN = process.env.CMM_FRMIN === undefined ? 1.0 : +process.env.CMM_FRMIN;
+const FRESNEL_R_MAX = 4.0;               // and never wider than the features it is measuring
+function fresnelR(d1, d2) {
+  const r = Math.sqrt(FRESNEL_LAMBDA * d1 * d2 / Math.max(1e-3, d1 + d2));
+  return r < FRESNEL_R_MIN ? FRESNEL_R_MIN : r > FRESNEL_R_MAX ? FRESNEL_R_MAX : r;
+}
 // Rings as [radius fraction, sample count]; annulus boundaries at 0.25/0.75/1.0 of R give
 // the area shares below, summing to 1.
+// ── HOW MANY SAMPLES, AND WHY IT IS NOT A FREE PARAMETER ─────────────────────
+// The integrand has a genuine STEP in it wherever the barrier has an edge -- the rim of a
+// hatch, the jamb of a door. Slide the disc across that edge and a sample crosses from wood
+// into open air, and because the sum is over POWER and the open path can be 15 dB louder,
+// one sample flipping moves the total by far more than its area share suggests.
+//
+// This is a QUADRATURE error, not a modelling one, and it shrinks in proportion to the number
+// of samples: with 15 samples pasthatch measured 2.40 dB/block, every step landing exactly
+// where the barrier midpoint crossed a voxel boundary. Nothing else about the model was wrong
+// there -- the barrier midpoint, its thickness and the two legs were all perfectly smooth.
+//
+// It cannot be fixed by smoothing the material field instead: a ray running PARALLEL to a
+// floor then accumulates loss from a floor it never crosses, which is most of what walking an
+// upper storey produces (measured: pasthatch-shut 0.25 -> 4.83 dB/block). Nor by a smooth
+// radial window, which changes what the integral MEANS. More samples is the honest answer,
+// and the area normalisation is what makes it safe -- adding samples refines this estimate
+// rather than shifting it, so no other constant has to move.
+//
+// Four annuli, boundaries at 0.2/0.5/0.8/1.0 of R, shares from their areas.
 const FRESNEL_RINGS = [[0.0, 1, 0.0625], [0.5, 6, 0.5], [1.0, 8, 0.4375]];
 const FRESNEL_PTS = (() => {
   const out = [];
   for (const [rf, n, share] of FRESNEL_RINGS) {
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + (rf * 1.7);   // stagger rings so samples do not line up
-      out.push({ r: rf * FRESNEL_R, ca: Math.cos(a), sa: Math.sin(a), w: share / n });
+      out.push({ rf, ca: Math.cos(a), sa: Math.sin(a), w: share / n });
     }
   }
   return out;
@@ -243,6 +306,12 @@ function segDbAt(D, fx, fy, fz, tx, ty, tz, skipFrom = true, skipTo = true) {
     const seg = tNext - tPrev;                    // ray length inside the CURRENT voxel
     const atFrom = x === x0 && y === y0 && z === z0, atTo = x === x1 && y === y1 && z === z1;
     if (seg > 1e-6 && y >= 0 && y < 256 && !(skipFrom && atFrom) && !(skipTo && atTo)) {
+      // Nearest-voxel on purpose. Interpolating the material field here was tried and is worse:
+      // it smears a surface into the air beside it, so a ray running PARALLEL to a floor -- which
+      // is most of what a listener walking an upper storey produces -- accumulates loss from a
+      // floor it never crosses. pasthatch-shut went 0.25 -> 4.83 dB/block on that alone. The
+      // aperture-edge step this was meant to fix belongs to the disc's SAMPLING, and is fixed
+      // there (see FRESNEL_RINGS).
       const f = D.lossAt(x, y, z);
       if (f > 1e-4) db += Math.min(DB_VOXEL_MAX * vert, DB_MAT * Math.pow(f, MAT_POW) * vert) * seg;
     }
@@ -922,10 +991,16 @@ function makeNewEvaluator(D, G, src) {
       fanPow = dbToPow(-SLOPE * d);                     // clear line: free field, no barrier
       fanOpenPow = fanPow;                              // ... and all of it came through air
     } else {
+      // The zone's radius depends on where along the path the barrier sits, so it is computed
+      // per evaluation from the two leg lengths rather than being a constant.
+      const fzR = FZ_GEO
+        ? fresnelR(Math.hypot(bm.x - sx5, bm.y - sy5, bm.z - sz5),
+                   Math.hypot(bm.x - lx, bm.y - ly, bm.z - lz))
+        : FRESNEL_R_FIXED;
       for (const p of FRESNEL_PTS) {
-        const ox = (e1x * p.ca + e2x * p.sa) * p.r;
-        const oy = (e1y * p.ca + e2y * p.sa) * p.r;
-        const oz = (e1z * p.ca + e2z * p.sa) * p.r;
+        const ox = (e1x * p.ca + e2x * p.sa) * (p.rf * fzR);
+        const oy = (e1y * p.ca + e2y * p.sa) * (p.rf * fzR);
+        const oz = (e1z * p.ca + e2z * p.sa) * (p.rf * fzR);
         const qx = bm.x + ox, qy = bm.y + oy, qz = bm.z + oz;
         // EVERY patch counts, blocked or clear. Skipping the clear ones (on the reasoning that
         // air is not a transmitting surface) threw away the UNBLOCKED share of the zone, so the
@@ -956,7 +1031,13 @@ function makeNewEvaluator(D, G, src) {
         // the path is an opening; above it, a partition. That constant already exists for exactly
         // this distinction, and ramping over it keeps the split continuous.
         fanOpenPow += (1 - sstep(0, 2 * MIN_TRANSMIT_DB, m)) * pw;
+        if (FAN_DBG !== null && Math.abs(lz - FAN_DBG) < 0.01)
+          console.error(`    patch r=${(p.rf*fzR).toFixed(2)} at ${qx.toFixed(2)},${qy.toFixed(2)},${qz.toFixed(2)}`
+            + `  m=${m.toFixed(2).padStart(7)}  len=${len.toFixed(2)}  w=${p.w.toFixed(4)}`
+            + `  pw=${pw.toExponential(3)}`);
       }
+      if (FAN_DBG !== null && Math.abs(lz - FAN_DBG) < 0.01)
+        console.error(`  bm=${bm.x.toFixed(2)},${bm.y.toFixed(2)},${bm.z.toFixed(2)} t=${bm.thick.toFixed(3)}  fanPow=${fanPow.toExponential(4)}`);
       // If the disc found no barrier at all, the run it located is not a surface the listener is
       // behind -- fall back to the straight-line estimate rather than reporting silence.
       if (fanPow <= 0) { fanPow = dbToPow(-(SLOPE * d + segDbAt(D, sx5, sy5, sz5, lx, ly, lz))); fanOpenPow = 0; }
