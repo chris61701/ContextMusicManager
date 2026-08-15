@@ -387,3 +387,8 @@ UpgradeLog.htm
 # Decoded copy of the author's own music, used as a render source. Copyrighted and large:
 # regenerate with  node render.js --music=<file.mp3> --mid
 tools/CmmAcousticsJudge/.music-cache.wav
+
+# Parity grids for the acoustics port: derived from the acsweep dumps, large, and
+# regenerable with  node tools/CmmAcousticsJudge/export-grid.js --all
+CMM_Decoder/grids/
+CMM_Decoder/test_acoustics.exe
