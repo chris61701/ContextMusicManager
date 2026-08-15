@@ -92,6 +92,37 @@
 #define MIN_APERTURE_DB (-30.0)  /* a pinhole is not infinite loss */
 #define SEED_R 3             /* air pockets within this radius seed the solve */
 
+/* --- diffuse field --------------------------------------------------------- */
+/* Calibration for the field's absolute scale, applied ONCE per room where the field is
+ * computed. Applied at the listener instead it multiplied every coupled term too, which
+ * makes the coupling an amplifier -- a passivity test flagged 100% of voxels, correctly.
+ * It is also a fudge over the exponential-vs-inverse-square mismatch: swept 0/6/10/16 it
+ * costs three spec scenarios and doubles real-geometry roughness to remove, and never
+ * touches the reach failures it was suspected of, so it stays until the distance law is
+ * settled. */
+#define DIFFUSE_CAL 16.0
+
+/* A reverberant field needs a space many wavelengths across, so sound bounces many times
+ * before being absorbed. The segmentation happily produces ONE-VOXEL regions, and 4P/R
+ * applied to those is not merely inaccurate but explosive: surf 6, R 1.4, so the 4/R term
+ * alone is +4.7 dB. The physical test is the mean free path 4V/S against a wavelength. */
+#define WAVELEN_BLOCKS 1.7
+#define MFP_MIN (0.5 * WAVELEN_BLOCKS)
+
+/* And a reverberant field is a property of an ENCLOSURE. Sky exposure separates indoors
+ * from outdoors with no overlap: enclosed rooms measure 0.0% of their boundary open to the
+ * world, outdoor ones 43-57%. Gating only the direct term left the wall-coupling pass free
+ * to hand the outdoors a field anyway, which is where it does the most damage. */
+#define SKY_FULL 0.05
+#define SKY_NONE 0.25
+
+#define WALL_MAX_THICK 3     /* regions farther apart than this share no wall */
+
+/* First-Fresnel-zone area in blocks^2 at typical room geometry: the coherent extent of
+ * the wavefront an opening samples. An opening wider than this is not a constriction at
+ * all, which is why openFrac saturates at 1. */
+#define FRESNEL_AREA 20.0
+
 /* A raw watershed region, before merging. Centroid is accumulated as sums so it
  * needs no second pass. surf/absorb are the enclosure's area and area-weighted
  * absorption, which the diffuse field needs; sky counts faces onto the world. */
@@ -119,6 +150,7 @@ struct ac_port {
 struct ac_edge {
     int a, b;                /* node ids */
     double area;
+    double open_frac;        /* constriction: the open area against a Fresnel zone */
     double sx, sy, sz;       /* area-weighted position sums, WORLD */
     float thick;
     float x0, y0, z0, x1, y1, z1;   /* extent, WORLD */
@@ -133,6 +165,13 @@ struct ac_room {
     int sky;                 /* faces onto the world */
     double open_area;        /* total area of its openings -- an opening ABSORBS */
 };
+
+/* Where two rooms touch through MATERIAL rather than through an opening. The
+ * segmentation records openings and says nothing about walls, and a sealed room's
+ * reverberation is driven by its neighbour's field hitting the wall they share.
+ * Computing that from a ray to the room's centroid instead put ~7 dB of pure distance
+ * into a quantity that has no distance in it. */
+struct ac_wall { int a, b; double area, tau; };
 
 struct cmm_ac {
     int sx, sy, sz;          /* grid dimensions */
@@ -165,6 +204,8 @@ struct cmm_ac {
     struct ac_edge *edge; int nedge, cap_edge;
     struct ac_room *room; int cap_room;
     int *eh; int eh_cap;     /* node-pair -> edge index */
+    struct ac_wall *wall; int nwall, cap_wall;
+    int *wh; int wh_cap;     /* room-pair -> wall index */
     int nrooms;              /* merged regions that survive, renumbered 0..nrooms-1 */
 };
 
@@ -219,6 +260,8 @@ void cmm_ac_destroy(cmm_ac *ac) {
     free(ac->edge);
     free(ac->room);
     free(ac->eh);
+    free(ac->wall);
+    free(ac->wh);
     free(ac->arena);
     free(ac);
 }
@@ -842,6 +885,17 @@ static int build_edges_and_rooms(cmm_ac *ac) {
         }
     }
 
+    /* Constriction per edge, and the rule that a corridor CUT is not one. A cut exists
+     * purely so the pathfinder does not treat a bend as line of sight -- it does not pinch
+     * and it does not radiate, and charging it as an aperture put phantom radiators at every
+     * cut, stepping the level 8.5 dB as a listener crossed one. */
+    for (int e = 0; e < ac->nedge; e++) {
+        struct ac_edge *E = &ac->edge[e];
+        double f = E->area / FRESNEL_AREA;
+        E->open_frac = f > 1.0 ? 1.0 : f;
+        if (E->ra >= 0 && E->ra == E->rb) E->open_frac = 1.0;   /* a cut passes everything */
+    }
+
     /* rooms: area, absorption, sky exposure, accumulated over voxels rather than
      * aggregated from raw regions, so it matches the JS which recomputes them here */
     if (ac->cap_room < ac->nrooms) {
@@ -889,6 +943,78 @@ static int build_edges_and_rooms(cmm_ac *ac) {
     return 1;
 }
 
+static int wall_find_or_add(cmm_ac *ac, int a, int b) {
+    int lo = a < b ? a : b, hi = a < b ? b : a;
+    unsigned mask = (unsigned)ac->wh_cap - 1u;
+    unsigned s = pair_hash(lo, hi) & mask;
+    for (unsigned probe = 0; probe <= mask; probe++) {
+        int slot = (int)((s + probe) & mask);
+        int wi = ac->wh[slot];
+        if (wi < 0) {
+            if (ac->nwall == ac->cap_wall) {
+                int cap = ac->cap_wall ? ac->cap_wall * 2 : 256;
+                struct ac_wall *w = (struct ac_wall *)realloc(ac->wall, (size_t)cap * sizeof(*w));
+                if (!w) return -1;
+                ac->wall = w; ac->cap_wall = cap;
+            }
+            struct ac_wall *W = &ac->wall[ac->nwall];
+            memset(W, 0, sizeof(*W));
+            W->a = lo; W->b = hi;
+            ac->wh[slot] = ac->nwall;
+            return ac->nwall++;
+        }
+        if (ac->wall[wi].a == lo && ac->wall[wi].b == hi) return wi;
+    }
+    return -1;
+}
+
+static int build_walls(cmm_ac *ac) {
+    const int sx = ac->sx, sy = ac->sy, sz = ac->sz;
+    ac->nwall = 0;
+    int cap = 1024;
+    while (cap < (ac->nrooms > 0 ? ac->nrooms : 1) * 16) cap <<= 1;
+    if (ac->wh_cap != cap) {
+        int *t = (int *)realloc(ac->wh, (size_t)cap * sizeof(int));
+        if (!t) return 0;
+        ac->wh = t; ac->wh_cap = cap;
+    }
+    for (int i = 0; i < ac->wh_cap; i++) ac->wh[i] = -1;
+
+    for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
+        long long i = idx_of(ac, x, y, z);
+        if (ac->open[i] <= OPEN_EPS) continue;
+        int a = ac->root[i];
+        if (a < 0) continue;
+        for (int d = 0; d < 6; d++) {
+            int nx = x + NB6[d][0], ny = y + NB6[d][1], nz = z + NB6[d][2];
+            /* must START in material, or this is an opening and the aperture path has it */
+            if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
+            if (ac->open[idx_of(ac, nx, ny, nz)] > OPEN_EPS) continue;
+            int steps = 0;
+            while (steps < WALL_MAX_THICK) {
+                nx += NB6[d][0]; ny += NB6[d][1]; nz += NB6[d][2]; steps++;
+                if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) { steps = -1; break; }
+                if (ac->open[idx_of(ac, nx, ny, nz)] > OPEN_EPS) break;
+            }
+            if (steps < 0 || steps >= WALL_MAX_THICK) continue;
+            long long j = idx_of(ac, nx, ny, nz);
+            if (ac->open[j] <= OPEN_EPS) continue;
+            int b = ac->root[j];
+            if (b < 0 || b == a) continue;
+            double lossDb = seg_db_at(ac, ac->x0 + x + 0.5, ac->y0 + y + 0.5, ac->z0 + z + 0.5,
+                                          ac->x0 + nx + 0.5, ac->y0 + ny + 0.5, ac->z0 + nz + 0.5, 1, 1);
+            int wi = wall_find_or_add(ac, a, b);
+            if (wi < 0) return 0;
+            ac->wall[wi].area += 1.0;
+            ac->wall[wi].tau  += pow(10.0, -lossDb / 10.0);
+        }
+    }
+    /* area-weighted mean power transmission per link */
+    for (int i = 0; i < ac->nwall; i++)
+        if (ac->wall[i].area > 0) ac->wall[i].tau /= ac->wall[i].area;
+    return 1;
+}
+
 int cmm_ac_build_segments(cmm_ac *ac) {
     if (!ac) return 0;
     if (!segment(ac)) return 0;
@@ -896,6 +1022,7 @@ int cmm_ac_build_segments(cmm_ac *ac) {
     if (!merge_regions(ac)) return 0;
     if (!split_and_nodes(ac)) return 0;
     if (!build_edges_and_rooms(ac)) return 0;
+    if (!build_walls(ac)) return 0;
     return 1;
 }
 
@@ -926,7 +1053,8 @@ float cmm_ac_thick_at(const cmm_ac *ac, int wx, int wy, int wz) {
  * Everything here is graph-sized, so move() is cheap and allocates nothing: the arena
  * is sized once at create from the scene's edge and room counts. That is the property
  * that makes moving speakers -- and later enemies -- a lookup rather than a rebuild. */
-struct ac_cost { double add, bneck, len; int from; int set; };
+struct ac_cost { double add, bneck, len; int from; int set;
+                 double inx, iny, inz, inlen; };   /* direction of arrival, for the bend */
 
 struct cmm_ac_src {
     cmm_ac *sc;
@@ -934,10 +1062,12 @@ struct cmm_ac_src {
     void *arena; size_t arena_bytes;
     struct ac_cost *cost;    /* per node-edge */
     double *seed;            /* per node: cost to reach it from the source, or -1 */
+    double *field, *absorb, *canrev, *pin, *direct;   /* per room */
+    int    *node_room;       /* per node -> its room */
     int    *heap;            /* edge ids */
     double *hkey;
     int nheap, heap_cap;
-    int nedge_cap, nnode_cap;
+    int nedge_cap, nnode_cap, nroom_cap;
 };
 
 /* LAZY-DELETION DIJKSTRA PUSHES ON EVERY IMPROVEMENT, not once per edge, so the heap
@@ -1017,12 +1147,14 @@ static void src_solve(cmm_ac_src *s) {
             double py = E->sy / (E->area > 0 ? E->area : 1);
             double pz = E->sz / (E->area > 0 ? E->area : 1);
             double leg = sqrt((px - spx) * (px - spx) + (py - spy) * (py - spy) + (pz - spz) * (pz - spz));
-            double bneck = E->area > 0 ? 1.0 : 1.0;   /* node throat is 1; edge openness below */
+            double bneck = E->open_frac;              /* node throat is 1, so the edge decides */
             double add = s->seed[nd] + SLOPE * leg;
             double key = add - constrict_db(bneck);
             if (!s->cost[e].set || (s->cost[e].add - constrict_db(s->cost[e].bneck)) > key) {
                 s->cost[e].add = add; s->cost[e].bneck = bneck; s->cost[e].len = leg;
                 s->cost[e].from = nd; s->cost[e].set = 1;
+                s->cost[e].inx = px - spx; s->cost[e].iny = py - spy; s->cost[e].inz = pz - spz;
+                s->cost[e].inlen = leg;
                 heap_push(s, e, key);
             }
         }
@@ -1049,15 +1181,110 @@ static void src_solve(cmm_ac_src *s) {
             double lx = qx - px, ly = qy - py, lz = qz - pz;
             double leg = sqrt(lx * lx + ly * ly + lz * lz);
             if (leg < 1e-6) continue;
-            double nadd = live->add + SLOPE * leg;
-            double nb = live->bneck;
+            /* Bend is charged AT this portal, gated by how pinched it is: turning in open
+             * space is free, because a source radiates every way at once. Energy is lost
+             * diffracting round an EDGE, and only where there is an edge to diffract round. */
+            double bend = 0.0;
+            if (live->inlen > 1e-6) {
+                double cosang = (live->inx * lx + live->iny * ly + live->inz * lz) / (live->inlen * leg);
+                if (cosang > 1.0) cosang = 1.0;
+                if (cosang < -1.0) cosang = -1.0;
+                bend = BEND_DB * (1.0 - cosang) / 2.0 * (1.0 - E->open_frac);
+            }
+            double nadd = live->add + SLOPE * leg + bend;
+            /* the bottleneck is the narrowest opening on the route, paid ONCE */
+            double nb = live->bneck < Q->open_frac ? live->bneck : Q->open_frac;
             double nkey = nadd - constrict_db(nb);
             if (!s->cost[q].set || (s->cost[q].add - constrict_db(s->cost[q].bneck)) > nkey) {
                 s->cost[q].add = nadd; s->cost[q].bneck = nb; s->cost[q].len = live->len + leg;
                 s->cost[q].from = far; s->cost[q].set = 1;
+                s->cost[q].inx = lx; s->cost[q].iny = ly; s->cost[q].inz = lz; s->cost[q].inlen = leg;
                 heap_push(s, q, nkey);
             }
         }
+    }
+}
+
+/* --- the room-field solve -------------------------------------------------
+ *     P_diffuse = 4 * P_entering / A,   A = absorption incl. the openings
+ * Power entering a room is what its inlets deliver; the field it sustains is that power
+ * spread over its absorption. Then neighbours drive it through shared WALLS. */
+static void src_fields(cmm_ac_src *s) {
+    cmm_ac *ac = s->sc;
+    const int nr = ac->nrooms;
+    for (int r = 0; r < nr; r++) s->field[r] = 0.0;
+    if (nr <= 0) return;
+
+    /* absorption including the openings, and how much field each room can sustain */
+    for (int r = 0; r < nr; r++) {
+        const struct ac_room *R = &ac->room[r];
+        double al = R->surf > 0 ? R->absorb / (double)R->surf : 0.5;
+        if (al < 0.02) al = 0.02;
+        if (al > 0.95) al = 0.95;
+        double roomR = (double)R->surf * al / (1.0 - al);
+        if (roomR < 1.0) roomR = 1.0;
+        s->absorb[r] = roomR + R->open_area;
+        double mfp = 4.0 * (double)(R->n > 0 ? R->n : 1) / (double)(R->surf > 0 ? R->surf : 1);
+        double v1 = (mfp - MFP_MIN) / (WAVELEN_BLOCKS - MFP_MIN);
+        if (v1 < 0) v1 = 0; if (v1 > 1) v1 = 1;
+        v1 = v1 * v1 * (3.0 - 2.0 * v1);
+        double sky = R->surf > 0 ? (double)R->sky / (double)R->surf : 0.0;
+        double v2 = (sky - SKY_FULL) / (SKY_NONE - SKY_FULL);
+        if (v2 < 0) v2 = 0; if (v2 > 1) v2 = 1;
+        v2 = v2 * v2 * (3.0 - 2.0 * v2);
+        s->canrev[r] = v1 * (1.0 - v2);
+    }
+
+    /* pass 1: power arriving at each room's inlets */
+    double *pin = s->pin;
+    for (int r = 0; r < nr; r++) pin[r] = 0.0;
+    for (int nd = 0; nd < ac->nnodes; nd++) {
+        int rm = s->node_room[nd];
+        if (rm < 0) continue;
+        double p = 0.0;
+        if (s->seed[nd] >= 0) p += pow(10.0, -s->seed[nd] / 10.0);
+        for (int e = 0; e < ac->nedge; e++) {
+            const struct ac_edge *E = &ac->edge[e];
+            if (E->a != nd && E->b != nd) continue;
+            int other = (E->a == nd) ? E->b : E->a;
+            if (s->node_room[other] == rm) continue;   /* a routing cut inside a room is not an inlet */
+            if (!s->cost[e].set) continue;
+            p += pow(10.0, -(s->cost[e].add - constrict_db(s->cost[e].bneck)) / 10.0);
+        }
+        pin[rm] += p;
+    }
+    /* ENERGY CONSERVATION. The loop above walks every NODE of a room and, per node, sums
+     * over all its inlets, so the same sound can be counted more than once. A room cannot
+     * receive more power than the source radiates; levels here are relative to the source,
+     * so that bound is unity. Working back from an unbounded version, one room implied
+     * +11.6 dB of input -- more than the speaker emits -- which is how its reverberation
+     * came to be 54 dB louder than the air route feeding it. */
+    for (int r = 0; r < nr; r++) if (pin[r] > 1.0) pin[r] = 1.0;
+
+    double *direct = s->direct;
+    for (int r = 0; r < nr; r++)
+        direct[r] = pin[r] > 0 ? s->canrev[r] * 4.0 * pin[r] / s->absorb[r] : 0.0;
+
+    /* pass 2: power driven through shared WALLS by the neighbouring rooms. Power incident
+     * on a surface of area S in a diffuse field is P*S/A, not field*S -- the standard
+     * relation carries a factor of four cancelling the one in 4P/A, and getting that wrong
+     * made the receiving room LOUDER than its source. One Jacobi iteration suffices: wall
+     * transmission is a large loss, so the coupling is weak. */
+    for (int r = 0; r < nr; r++) {
+        double pwall = 0.0;
+        for (int w = 0; w < ac->nwall; w++) {
+            const struct ac_wall *W = &ac->wall[w];
+            int other = -1;
+            if (W->a == r) other = W->b;
+            else if (W->b == r) other = W->a;
+            else continue;
+            double src = direct[other];
+            if (src <= 0) continue;
+            double pOther = src * s->absorb[other] / 4.0;
+            pwall += pOther * W->area / s->absorb[other] * W->tau;
+        }
+        s->field[r] = s->canrev[r] * (direct[r] + (pwall > 0 ? 4.0 * pwall / s->absorb[r] : 0.0))
+                    * pow(10.0, DIFFUSE_CAL / 10.0);
     }
 }
 
@@ -1069,10 +1296,13 @@ cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z) {
     int ne = scene->nedge > 0 ? scene->nedge : 1;
     int nn = scene->nnodes > 0 ? scene->nnodes : 1;
     int hc = ne * 32 + 1024;
+    int nrm = scene->nrooms > 0 ? scene->nrooms : 1;
     size_t bytes = (size_t)ne * sizeof(struct ac_cost)
                  + (size_t)nn * sizeof(double)
                  + (size_t)hc * sizeof(int)
-                 + (size_t)hc * sizeof(double);
+                 + (size_t)hc * sizeof(double)
+                 + (size_t)nrm * 5 * sizeof(double)
+                 + (size_t)nn * sizeof(int);
     s->arena = malloc(bytes);
     if (!s->arena) { free(s); return NULL; }
     memset(s->arena, 0, bytes);
@@ -1081,10 +1311,23 @@ cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z) {
     s->cost = (struct ac_cost *)p; p += (size_t)ne * sizeof(struct ac_cost);
     s->seed = (double *)p;         p += (size_t)nn * sizeof(double);
     s->heap = (int *)p;            p += (size_t)hc * sizeof(int);
-    s->hkey = (double *)p;
+    s->hkey = (double *)p;         p += (size_t)hc * sizeof(double);
+    s->field  = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->absorb = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->canrev = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->pin    = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->direct = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->node_room = (int *)p;
     s->heap_cap = hc;
-    s->nedge_cap = ne; s->nnode_cap = nn;
+    s->nedge_cap = ne; s->nnode_cap = nn; s->nroom_cap = nrm;
+    /* node -> room, once: the mapping is scene geometry and does not change with position */
+    for (int nd = 0; nd < nn; nd++) s->node_room[nd] = -1;
+    for (long long i = 0; i < scene->n; i++) {
+        int nd = scene->node[i];
+        if (nd >= 0 && nd < nn && s->node_room[nd] < 0) s->node_room[nd] = scene->root[i];
+    }
     src_solve(s);
+    src_fields(s);
     return s;
 }
 
@@ -1102,6 +1345,7 @@ int cmm_ac_src_move(cmm_ac_src *s, float x, float y, float z) {
     if (s->sc->nedge > s->nedge_cap || s->sc->nnodes > s->nnode_cap) return 0;
     s->x = x; s->y = y; s->z = z;
     src_solve(s);
+    src_fields(s);
     return 1;
 }
 
@@ -1134,6 +1378,11 @@ long long cmm_ac_src_stat(const cmm_ac_src *s, int what) {
     if (what == 0) { long long c = 0; for (int e = 0; e < s->sc->nedge; e++) if (s->cost[e].set) c++; return c; }
     if (what == 1) { long long c = 0; for (int n = 0; n < s->sc->nnodes; n++) if (s->seed[n] >= 0) c++; return c; }
     return -1;
+}
+double cmm_ac_src_field_db(const cmm_ac_src *s, int room) {
+    if (!s || room < 0 || room >= s->sc->nrooms) return -999.0;
+    double v = s->field[room];
+    return v > 1e-12 ? 10.0 * log10(v) : -999.0;
 }
 double cmm_ac_src_cost(const cmm_ac_src *s, int edge) {
     if (!s || edge < 0 || edge >= s->sc->nedge || !s->cost[edge].set) return -1.0;

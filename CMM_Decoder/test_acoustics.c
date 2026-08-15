@@ -88,6 +88,22 @@ int main(int argc, char **argv) {
                 for (int k = 0; k < 20; k++) cmm_ac_src_move(src, (float)ex, (float)ey, (float)ez);
                 double mv = 1000.0 * (double)(clock() - t3) / CLOCKS_PER_SEC;
                 printf("move x20         %.1f ms  (%.2f ms each, allocation-free)\n", mv, mv / 20.0);
+                /* Room fields, SORTED. Room numbering need not agree between the two
+                 * implementations even when the structure does, so comparing sorted values
+                 * tests the physics without depending on an id space. */
+                int nr = (int)cmm_ac_stat(ac, 7);
+                double *fv = (double *)malloc((size_t)(nr > 0 ? nr : 1) * sizeof(double));
+                int nf = 0;
+                for (int r = 0; r < nr; r++) {
+                    double v = cmm_ac_src_field_db(src, r);
+                    if (v > -900) fv[nf++] = v;
+                }
+                for (int a = 0; a < nf; a++) for (int b = a + 1; b < nf; b++)
+                    if (fv[b] > fv[a]) { double tv = fv[a]; fv[a] = fv[b]; fv[b] = tv; }
+                printf("room fields dB   %d with a field:", nf);
+                for (int r = 0; r < nf && r < 8; r++) printf(" %.1f", fv[r]);
+                printf("\n");
+                free(fv);
                 cmm_ac_src_destroy(src);
             }
         }

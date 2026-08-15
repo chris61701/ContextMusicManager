@@ -134,6 +134,7 @@ CMM_AC_API int cmm_ac_src_rebind(cmm_ac_src *src);
 /* Parity read-back for the routing solve: 0 = edges reached, 1 = seeded nodes. */
 CMM_AC_API long long cmm_ac_src_stat(const cmm_ac_src *src, int what);
 CMM_AC_API double cmm_ac_src_cost(const cmm_ac_src *src, int edge);
+CMM_AC_API double cmm_ac_src_field_db(const cmm_ac_src *src, int room);
 
 /* Evaluate one listener against one source. Writes the arrival set the audio layer
  * needs -- level, direction, filter cutoff, reverb send -- into caller-owned
