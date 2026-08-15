@@ -51,7 +51,11 @@ const { loadDump, makeEvaluator, segLoss } = require("./judge3d.js");
 // concrete ~30 dB per voxel:
 //     dB = DB_MAT * frac^MAT_POW,  clamped per voxel
 // giving cloth ~0.04, glass 1.4, wood 6.0, dirt 15, concrete 30, metal 40, vault 60.
-const DB_MAT = 40.1;        // scale: one voxel of the densest ordinary material (frac 1.0)
+// Overridable so the value can be swept against the gate rather than argued about. The native
+// side made the same constant runtime-settable for the same reason -- the author's first in-game
+// verdict was that a wall does not sound like a wall, and that is a judgement about THIS number.
+const DB_MAT = process.env.CMM_DBMAT === undefined ? 40.1 : +process.env.CMM_DBMAT;
+                            // scale: one voxel of the densest ordinary material (frac 1.0)
 const MAT_POW = 2.74;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
 const DB_VOXEL_MAX = 60.0;
 const VERT_MULT = 2.6;      // a voxel crossed vertically stands for a floor assembly, not a wall  // per-voxel ceiling (an airtight vault leaf)
