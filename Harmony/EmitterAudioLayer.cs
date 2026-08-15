@@ -258,7 +258,14 @@ namespace CMM
                             $"fields={EmitterFieldCache.StatReady}/{EmitterFieldCache.StatWanted} " +
                             $"building={EmitterFieldCache.StatBuilding} built={EmitterFieldCache.StatBuilds} " +
                             $"lastBuildCpuMs={EmitterFieldCache.StatLastBuildMs:0} doorDrops={EmitterFieldCache.StatDoorDrops} " +
-                            $"floodR={CMMConfig.WorldEmitterFloodRadius} range={CMMConfig.WorldEmitterRange:0}");
+                            $"floodR={CMMConfig.WorldEmitterFloodRadius} range={CMMConfig.WorldEmitterRange:0}" +
+                            // The clamp counters, in the 1 Hz line, because they are the difference
+                            // between "the model is quiet here" and "the model is switched off here"
+                            // and I had to ask for them by hand three times before getting one.
+                            (CMMConfig.WorldEmitterNativeAcoustics
+                                ? $" | ac gain={AcousticBridge.GainPoints} sat={AcousticBridge.SaturatedPoints}"
+                                  + $" pts={AcousticBridge.PublishedPoints} scene={AcousticBridge.LastStatus}"
+                                : ""));
                 _statFieldTicks = _statLegacyTicks = 0;
                 _statPubSum = _statPubMax = 0f; _statPubN = 0;
                 EmitterAcoustics.StatReset();

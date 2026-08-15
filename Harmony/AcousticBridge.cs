@@ -62,6 +62,7 @@ namespace CMM
 
         internal static int SaturatedPoints;   // clamped at the QUIET end last publish
         internal static int GainPoints;        // clamped at UNITY -- the model reported gain
+        internal static int PublishedPoints;   // denominator: gain/pts is the share switched off
         internal static long LastBuildMs;
         internal static string LastStatus = "not built";
 
@@ -119,7 +120,7 @@ namespace CMM
                 bool need;
                 lock (_gate)
                     need = _filled == null && !_consuming
-                        && (_scene == null || !_scene.Valid
+                        && (_stale || _scene == null || !_scene.Valid
                             || (_wantCentre - _sceneCentre).sqrMagnitude >= RecentreDist * RecentreDist);
                 if (!need) return;
 
@@ -219,6 +220,7 @@ namespace CMM
                 _scene?.Dispose();
                 _scene = built;
                 _sceneCentre = want;
+                _stale = false;          // the swap is what clears it, never the request
                 LastStatus = $"rooms {_scene.Rooms}, nodes {_scene.Nodes}, edges {_scene.Edges}, "
                            + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms";
             }
@@ -260,6 +262,7 @@ namespace CMM
 
             SaturatedPoints = 0;
             GainPoints = 0;
+            PublishedPoints = ptCount;
             for (int k = 0; k < ptCount; k++)
             {
                 var sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
@@ -345,9 +348,32 @@ namespace CMM
         }
 
         // Geometry changed inside the scene box -- a door swung, a wall broke. The scene has to be
-        // rebuilt and every source re-solved against it; dropping the scene forces that on the next
-        // EnsureScene, which runs off the frame loop.
+        // rebuilt and every source re-solved against it.
+        //
+        // STALE BUT STILL SERVING, rather than dropped. Dropping the scene means the native path
+        // has nothing to answer with, so it hands back to the SHIPPED model for the second or so
+        // the rebuild takes -- and that handback is audible. It made every A/B dishonest: changing
+        // a tuning value produced a clear change in the sound that was just the other model
+        // passing through, identical whatever number was typed, which is exactly what the author
+        // reported ("does the exact same thing it did the last two launches"). Confirmed in the
+        // log: 'why=warming' for one tick after each command, then 'why=native' again.
+        //
+        // A one-second-old scene is a far better answer than a different model. The rebuild is
+        // started, the old scene keeps serving until the new one is ready, and the swap is silent.
         internal static void InvalidateGeometry()
+        {
+            lock (_gate)
+            {
+                _geomGen++;       // in-flight reads and filled boxes describe the pre-change world
+                _filled = null;
+                _stale = true;    // ... and this is what makes FrameStep start a fresh one
+                LastStatus = "stale, rebuilding (still serving the previous scene)";
+            }
+        }
+        static bool _stale;
+
+        // Drop it outright. Only for teardown, where there IS no correct answer to keep serving.
+        internal static void DropScene()
         {
             lock (_gate)
             {
@@ -356,8 +382,9 @@ namespace CMM
                 _scene?.Dispose();
                 _scene = null;
                 _geomGen++;
-                _filled = null;   // read against the pre-change world; the gen bump restarts it
-                LastStatus = "invalidated";
+                _filled = null;
+                _stale = false;
+                LastStatus = "dropped";
             }
         }
     }
