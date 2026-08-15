@@ -62,7 +62,27 @@ const DB_MAT = process.env.CMM_DBMAT === undefined ? 40.1 : +process.env.CMM_DBM
 const MAT_POW = process.env.CMM_MATPOW === undefined ? 2.74 : +process.env.CMM_MATPOW;       // curve: (0.9/0.5)^POW = 5, i.e. concrete costs 5x wood
 const DB_VOXEL_MAX = 60.0;
 const VERT_MULT = 2.6;      // a voxel crossed vertically stands for a floor assembly, not a wall  // per-voxel ceiling (an airtight vault leaf)
-const SLOPE = 0.35;         // distance attenuation, dB per block (exponential curve)
+const SLOPE = 0.35;
+// ── DISTANCE, AS A LAW RATHER THAN A SLOPE ───────────────────────────────────
+// SLOPE dB/block is exponential, and at 0.35 it is nearly flat: eight blocks costs 2.8 dB
+// where inverse-square costs 18. Two consequences, both heard in game and neither fixable
+// by tuning:
+//
+//   a speaker sounds the same distance away wherever you stand; and
+//   a DETOUR is almost free -- routing three times as far around through a doorway costs
+//   3.5 dB where the physical answer is 9.5 -- so being behind a wall with an open door
+//   elsewhere in the house is barely quieter than standing in front of the speaker.
+//
+// The second is the live complaint: "wall 100, speaker right behind the wall, still sounds
+// like it isn't muffled at all". No material constant can fix it, because the sound is not
+// coming through the material; it is coming AROUND, and the way around is priced at nothing.
+//
+// The bridge now transports a RATIO against this model's own free field, so what matters is
+// the law's SHAPE, not its scale -- which is what makes changing it safe now and unsafe
+// before. Routing still orders on SLOPE*length (Dijkstra wants an additive metric and length
+// is one, monotone either way); only the LEVEL uses the law.
+const INV_SQ = process.env.CMM_INVSQ === "1";
+const distDb = len => INV_SQ ? 20 * Math.log10(Math.max(1, len)) : SLOPE * len;         // distance attenuation, dB per block (exponential curve)
 const OPEN_LOSS = 0.05;     // per-voxel loss at/below which a voxel is FULLY open
 const OPEN_FULL = 0.5;      // ...and at/above which it is fully closed; between, a fraction
 const OPEN_EPS  = 0.02;     // openness below this does not connect at all
@@ -1034,7 +1054,7 @@ function makeNewEvaluator(D, G, src) {
     // is silent; fully blocked, the direct component is. Nothing switches.
     let fanPow = 0, fanOpenPow = 0;
     if (!bm) {
-      fanPow = dbToPow(-SLOPE * d);                     // clear line: free field, no barrier
+      fanPow = dbToPow(-distDb(d));                     // clear line: free field, no barrier
       fanOpenPow = fanPow;                              // ... and all of it came through air
     } else {
       // The zone's radius depends on where along the path the barrier sits, so it is computed
@@ -1063,7 +1083,7 @@ function makeNewEvaluator(D, G, src) {
         const m = segDbAt(D, sx5, sy5, sz5, qx, qy, qz, true, false)    // count the patch itself
                 + segDbAt(D, qx, qy, qz, lx, ly, lz, false, true);
         const len = Math.hypot(qx - sx5, qy - sy5, qz - sz5) + Math.hypot(qx - lx, qy - ly, qz - lz);
-        const pw = p.w * dbToPow(-(SLOPE * len + m));
+        const pw = p.w * dbToPow(-(distDb(len) + m));
         fanPow += pw;
         // "Came through air" is a property of the PATH, not of where the sample point happens to sit.
         // This asked openAtF(patch) -- is the point itself in air -- which is a different question and
@@ -1086,7 +1106,7 @@ function makeNewEvaluator(D, G, src) {
         console.error(`  bm=${bm.x.toFixed(2)},${bm.y.toFixed(2)},${bm.z.toFixed(2)} t=${bm.thick.toFixed(3)}  fanPow=${fanPow.toExponential(4)}`);
       // If the disc found no barrier at all, the run it located is not a surface the listener is
       // behind -- fall back to the straight-line estimate rather than reporting silence.
-      if (fanPow <= 0) { fanPow = dbToPow(-(SLOPE * d + segDbAt(D, sx5, sy5, sz5, lx, ly, lz))); fanOpenPow = 0; }
+      if (fanPow <= 0) { fanPow = dbToPow(-(distDb(d) + segDbAt(D, sx5, sy5, sz5, lx, ly, lz))); fanOpenPow = 0; }
     }
     const fanDb = fanPow > 0 ? -powToDb(fanPow) : 120;
     const centerMat = segDbAt(D, sx5, sy5, sz5, lx, ly, lz);
@@ -1160,7 +1180,7 @@ function makeNewEvaluator(D, G, src) {
             const P = G.portals[bp];
             const mS = legDb(D, px, py, pz, lx, ly, lz);
             const mR = legDb(D, P.px, P.py, P.pz, lx, ly, lz);
-            if (-(SLOPE * bl + mR) > -(SLOPE * leg + mS)) {
+            if (-(distDb(bl) + mR) > -(distDb(leg) + mS)) {
               px = P.px; py = P.py; pz = P.pz;
               leg = bl;
             }
@@ -1175,7 +1195,9 @@ function makeNewEvaluator(D, G, src) {
         // absent as a direct arrival along one route; one of the two measurements had to be wrong,
         // and it was the ray.
         legMat = legDb(D, px, py, pz, lx, ly, lz);
-        db = -(c.cost + SLOPE * leg + legMat);
+        db = INV_SQ
+           ? -((c.cost - SLOPE * c.routeLen) + distDb(c.routeLen + leg) + legMat)
+           : -(c.cost + SLOPE * leg + legMat);
       }
       // A candidate whose total route is barely longer than the straight line describes the
       // SAME physical path as the direct sound, not an alternative -- which is the Fresnel
@@ -1303,7 +1325,7 @@ function makeNewEvaluator(D, G, src) {
         // whatever stands between it and you, exactly as the air arrivals already are -- they compute
         // this same legMat and it was simply missing here.
         const legMat = process.env.CMM_NOLEGMAT === '1' ? 0 : legDb(D, A.px, A.py, A.pz, lx, ly, lz);
-        const thru = dbToPow(constrictDb(A.throat) - SLOPE * leg - legMat);
+        const thru = dbToPow(constrictDb(A.throat) - distDb(leg) - legMat);
         pTot += pf * thru;
         if (DIFF_VOX && Math.abs(lx - DIFF_VOX[0] - 0.5) < 0.01
                      && Math.abs(ly - DIFF_VOX[1] - 0.5) < 0.01
@@ -1529,5 +1551,5 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, segDbAt, SLOPE,
+module.exports = { buildGraph, solveAir, makeNewEvaluator, measure, makeOpenTest, segDb, segDbAt, SLOPE, distDb,
                    barrierMid, FRESNEL_PTS };   // exported for per-patch diagnosis
