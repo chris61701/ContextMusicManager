@@ -113,6 +113,20 @@ int main(int argc, char **argv) {
                                v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
                     }
                 }
+                if (getenv("CMM_EVAL")) {
+                    /* Level at a lattice of standable positions, which is what the whole
+                     * model exists to produce. Printed for diff against the JS evaluator. */
+                    printf("EVAL x y z totalDb arrivals\n");
+                    int em_y = ey + 1;
+                    for (int zz = z0 + 4; zz < z0 + sz - 4; zz += 9)
+                        for (int xx = x0 + 4; xx < x0 + sx - 4; xx += 9) {
+                            if (cmm_ac_open_at(ac, xx, em_y, zz) < 0.9f) continue;
+                            cmm_ac_arrival ar[32];
+                            int na = cmm_ac_eval(src, (float)xx, (float)em_y, (float)zz, ar, 32);
+                            printf("EVAL %d %d %d %.3f %d\n", xx, em_y, zz,
+                                   cmm_ac_eval_db(src, (float)xx, (float)em_y, (float)zz), na);
+                        }
+                }
                 cmm_ac_src_destroy(src);
             }
         }

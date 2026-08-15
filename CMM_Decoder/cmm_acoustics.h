@@ -154,6 +154,10 @@ typedef struct {
 CMM_AC_API int cmm_ac_eval(cmm_ac_src *src, float lx, float ly, float lz,
                            cmm_ac_arrival *out, int max_out);
 
+/* The energy sum of every arrival: total level at a listener, dB relative to the source.
+ * The convenience form for callers that want a number rather than a set. */
+CMM_AC_API double cmm_ac_eval_db(cmm_ac_src *src, float lx, float ly, float lz);
+
 #ifdef __cplusplus
 }
 #endif

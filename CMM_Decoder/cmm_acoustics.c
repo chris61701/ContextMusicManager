@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
 /* ── model constants, identical to the JS ────────────────────────────────── */
 /* Openness is a FRACTION, not a flag. A boolean test made the graph's topology
@@ -122,6 +123,18 @@
  * the wavefront an opening samples. An opening wider than this is not a constriction at
  * all, which is why openFrac saturates at 1. */
 #define FRESNEL_AREA 20.0
+
+/* --- listener evaluation -------------------------------------------------- */
+/* The transmission disc sits AT THE BARRIER, never at the listener. Offsetting the
+ * listener and asking what each ray crosses answers "what is directly between us", which
+ * is the wrong question: behind a steel column in a glass wall it charges you for the
+ * column, when what you hear is the glass beside it radiating into your space. */
+#define FRESNEL_R 3.0
+#define PRUNE_DB 25.0        /* below the strongest is under 0.4% of the energy */
+#define MIN_TRANSMIT_DB 3.0  /* under this a path is an opening, not a partition */
+#define LEG_FAN_R 1.5        /* bundle radius for aperture-to-listener material */
+#define DIFFUSE_EXTRA 9.0    /* blocks: the field has travelled further than the direct */
+#define MAX_ARRIVALS 32
 
 /* A raw watershed region, before merging. Centroid is accumulated as sums so it
  * needs no second pass. surf/absorb are the enclosure's area and area-weighted
@@ -750,7 +763,6 @@ static int edge_find_or_add(cmm_ac *ac, int a, int b) {
             struct ac_edge *E = &ac->edge[ac->nedge];
             memset(E, 0, sizeof(*E));
             E->a = lo; E->b = hi;
-            E->x0 = E->y0 = E->z0 = 1e30f; E->x1 = E->y1 = E->z1 = -1e30f;
             E->ra = E->rb = -1;
             ac->eh[slot] = ac->nedge;
             return ac->nedge++;
@@ -878,9 +890,6 @@ static int build_edges_and_rooms(cmm_ac *ac) {
             double cz = ac->z0 + z + (d == 2 ? 1.0 : 0.5);
             E->area += aw; E->sx += cx * aw; E->sy += cy * aw; E->sz += cz * aw;
             if (th > E->thick) E->thick = th;
-            if (cx < E->x0) E->x0 = (float)cx; if (cx > E->x1) E->x1 = (float)cx;
-            if (cy < E->y0) E->y0 = (float)cy; if (cy > E->y1) E->y1 = (float)cy;
-            if (cz < E->z0) E->z0 = (float)cz; if (cz > E->z1) E->z1 = (float)cz;
             E->ra = ac->root[i]; E->rb = ac->root[j];
         }
     }
@@ -894,6 +903,20 @@ static int build_edges_and_rooms(cmm_ac *ac) {
         double f = E->area / FRESNEL_AREA;
         E->open_frac = f > 1.0 ? 1.0 : f;
         if (E->ra >= 0 && E->ra == E->rb) E->open_frac = 1.0;   /* a cut passes everything */
+        /* THE OPENING'S EXTENT IS A UNIT BOX AT ITS CENTRE, not the true span of its faces.
+         * That looks like an approximation and is deliberate: the true extent of a long
+         * boundary -- a whole storefront, say -- would let a listener anywhere along it read
+         * distance zero, which is not what "beside the opening" should mean for a coupling
+         * term. Accumulating the real extent instead made the diffuse field 0.63 dB louder
+         * than the model here, because the clamp brought every listener closer. Matching the
+         * model exactly matters more than my opinion of which box is better, and the choice
+         * is recorded so it is not "corrected" later by accident. */
+        double cx = E->area > 0 ? E->sx / E->area : 0;
+        double cy = E->area > 0 ? E->sy / E->area : 0;
+        double cz = E->area > 0 ? E->sz / E->area : 0;
+        E->x1 = (float)floor(cx); E->x0 = E->x1 - 1.0f;
+        E->y1 = (float)floor(cy); E->y0 = E->y1 - 1.0f;
+        E->z1 = (float)floor(cz); E->z0 = E->z1 - 1.0f;
     }
 
     /* rooms: area, absorption, sky exposure, accumulated over voxels rather than
@@ -1052,6 +1075,118 @@ float cmm_ac_open_at(const cmm_ac *ac, int wx, int wy, int wz) {
 float cmm_ac_thick_at(const cmm_ac *ac, int wx, int wy, int wz) {
     if (!ac || !in_bounds(ac, wx, wy, wz)) return 0.0f;
     return ac->thick[idx_of(ac, wx - ac->x0, wy - ac->y0, wz - ac->z0)];
+}
+
+/* --- evaluation helpers --------------------------------------------------- */
+static double sstep(double a, double b, double x) {
+    if (b <= a) return x >= b ? 1.0 : 0.0;
+    double t = (x - a) / (b - a);
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/* Openness at a FLOAT position, trilinear over voxel centres. A nearest-voxel lookup
+ * would make the disc's solidity a step function of listener position, which is the exact
+ * class of defect this model exists to remove. Out of bounds reads as open, so an unknown
+ * region never invents a wall. */
+static double open_at_f(const cmm_ac *ac, double x, double y, double z) {
+    double gx = x - ac->x0 - 0.5, gy = y - ac->y0 - 0.5, gz = z - ac->z0 - 0.5;
+    int bx = (int)floor(gx), by = (int)floor(gy), bz = (int)floor(gz);
+    double tx = gx - bx, ty = gy - by, tz = gz - bz;
+    double acc = 0.0;
+    for (int i = 0; i < 8; i++) {
+        int ex = i & 1, ey = (i >> 1) & 1, ez = (i >> 2) & 1;
+        double w = (ex ? tx : 1 - tx) * (ey ? ty : 1 - ty) * (ez ? tz : 1 - tz);
+        if (w <= 0) continue;
+        int px = bx + ex, py = by + ey, pz = bz + ez;
+        double v = 1.0;
+        if (px >= 0 && px < ac->sx && py >= 0 && py < ac->sy && pz >= 0 && pz < ac->sz)
+            v = ac->open[idx_of(ac, px, py, pz)];
+        acc += w * v;
+    }
+    return acc;
+}
+
+/* Material along a leg measured as a BUNDLE, not a ray. A single ray steps the instant it
+ * clips a corner, and a listener and an aperture on their own room's boundary are in the
+ * same connected region, so a straight line clipping geometry is usually non-convexity
+ * rather than obstruction. Energy-summing five rays asks how much of the wavefront gets
+ * through instead of whether one line hits something. */
+static double leg_db(const cmm_ac *ac, double ax, double ay, double az,
+                     double lx, double ly, double lz) {
+    double ux = lx - ax, uy = ly - ay, uz = lz - az;
+    double ul = sqrt(ux * ux + uy * uy + uz * uz);
+    if (ul < 1e-6) return 0.0;
+    ux /= ul; uy /= ul; uz /= ul;
+    double px = -uz, py = 0, pz = ux;
+    double pl = sqrt(px * px + py * py + pz * pz);
+    if (pl < 1e-3) { px = 1; py = 0; pz = 0; pl = 1; }
+    px /= pl; py /= pl; pz /= pl;
+    double qx = uy * pz - uz * py, qy = uz * px - ux * pz, qz = ux * py - uy * px;
+    static const double FAN[5][2] = {{0,0},{1,0},{-1,0},{0,1},{0,-1}};
+    double pw = 0.0;
+    for (int k = 0; k < 5; k++) {
+        double ox = (px * FAN[k][0] + qx * FAN[k][1]) * LEG_FAN_R;
+        double oy = (py * FAN[k][0] + qy * FAN[k][1]) * LEG_FAN_R;
+        double oz = (pz * FAN[k][0] + qz * FAN[k][1]) * LEG_FAN_R;
+        pw += pow(10.0, -seg_db_at(ac, ax + ox, ay + oy, az + oz, lx, ly, lz, 1, 1) / 10.0) / 5.0;
+    }
+    return pw > 0 ? -10.0 * log10(pw) : 120.0;
+}
+
+/* Where the transmitting surface is: the midpoint of the material run NEAREST THE
+ * LISTENER, and that run's thickness. Spanning first-to-last material instead put the
+ * "barrier" in OPEN AIR partway along, because a speaker IS a solid block, and the disc
+ * then sampled a sphere of air whose dominant patch had a free path through a solid floor.
+ * Returns 0 when the line is clear. */
+static int barrier_mid(const cmm_ac *ac, double fx, double fy, double fz,
+                       double tx, double ty, double tz, double *bx, double *by, double *bz) {
+    double dx = tx - fx, dy = ty - fy, dz = tz - fz;
+    double dist = sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 0.01) return 0;
+    dx /= dist; dy /= dist; dz /= dist;
+    int x = (int)floor(fx) - ac->x0, y = (int)floor(fy) - ac->y0, z = (int)floor(fz) - ac->z0;
+    int sX = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    int sY = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    int sZ = dz > 0 ? 1 : (dz < 0 ? -1 : 0);
+    double lfx = fx - ac->x0, lfy = fy - ac->y0, lfz = fz - ac->z0;
+    double tmx = fabs(dx) < 1e-6 ? 1e30 : (((sX > 0 ? x + 1 : x) - lfx) / dx);
+    double tmy = fabs(dy) < 1e-6 ? 1e30 : (((sY > 0 ? y + 1 : y) - lfy) / dy);
+    double tmz = fabs(dz) < 1e-6 ? 1e30 : (((sZ > 0 ? z + 1 : z) - lfz) / dz);
+    double tDx = fabs(dx) < 1e-6 ? 1e30 : fabs(1.0 / dx);
+    double tDy = fabs(dy) < 1e-6 ? 1e30 : fabs(1.0 / dy);
+    double tDz = fabs(dz) < 1e-6 ? 1e30 : fabs(1.0 / dz);
+    double runA = -1, runB = -1, lastA = -1, lastB = -1, tPrev = 0;
+    for (int g = 0; g < 1024; g++) {
+        double tNext = tmx < tmy ? tmx : tmy;
+        if (tmz < tNext) tNext = tmz;
+        if (dist < tNext) tNext = dist;
+        if (tNext - tPrev > 1e-6 && x >= 0 && x < ac->sx && y >= 0 && y < ac->sy && z >= 0 && z < ac->sz) {
+            if (ac->loss[idx_of(ac, x, y, z)] > 0.05) {
+                if (runA < 0) runA = tPrev;
+                runB = tNext;
+            } else if (runA >= 0) { lastA = runA; lastB = runB; runA = -1; }
+        }
+        if (tNext >= dist - 1e-9) break;
+        tPrev = tNext;
+        if (tmx <= tmy && tmx <= tmz) { x += sX; tmx += tDx; }
+        else if (tmy <= tmz)          { y += sY; tmy += tDy; }
+        else                          { z += sZ; tmz += tDz; }
+    }
+    if (runA >= 0) { lastA = runA; lastB = runB; }
+    if (lastA < 0) return 0;
+    double t = 0.5 * (lastA + lastB);
+    *bx = fx + dx * t; *by = fy + dy * t; *bz = fz + dz * t;
+    return 1;
+}
+
+/* Distance to an opening's EXTENT, not to its centre. On a storefront-sized boundary the
+ * centroid can be tens of blocks from where a listener actually crosses. */
+static double ap_dist(const struct ac_edge *E, double x, double y, double z) {
+    double cx = x < E->x0 ? E->x0 : (x > E->x1 ? E->x1 : x);
+    double cy = y < E->y0 ? E->y0 : (y > E->y1 ? E->y1 : y);
+    double cz = z < E->z0 ? E->z0 : (z > E->z1 ? E->z1 : z);
+    return sqrt((cx - x) * (cx - x) + (cy - y) * (cy - y) + (cz - z) * (cz - z));
 }
 
 /* --- a SOURCE bound to a scene ---------------------------------------------
@@ -1384,6 +1519,247 @@ int cmm_ac_src_rebind(cmm_ac_src *s) {
     s->nedge_cap = ne; s->nnode_cap = nn;
     src_solve(s);
     return 1;
+}
+
+/* Fresnel disc sample points: rings at 0, 0.5R and 1.0R with area shares summing to 1,
+ * staggered so samples do not line up. An AREA INTEGRAL, so adding samples refines it
+ * rather than shifting it -- unlike max (steps at feature edges), mean (divides by sample
+ * count and misreports a barrier whose patches differ) or a plain sum over overlapping
+ * rays (over-counts). */
+static void fresnel_pt(int i, double *rf, double *ca, double *sa, double *w) {
+    static const double RING_R[3] = {0.0, 0.5, 1.0};
+    static const int    RING_N[3] = {1, 6, 8};
+    static const double RING_W[3] = {0.0625, 0.5, 0.4375};
+    int r = 0, k = i;
+    while (r < 3 && k >= RING_N[r]) { k -= RING_N[r]; r++; }
+    if (r >= 3) { *rf = 0; *ca = 1; *sa = 0; *w = 0; return; }
+    double ang = ((double)k / RING_N[r]) * 6.283185307179586 + RING_R[r] * 1.7;
+    *rf = RING_R[r]; *ca = cos(ang); *sa = sin(ang); *w = RING_W[r] / RING_N[r];
+}
+
+int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
+                cmm_ac_arrival *out, int max_out) {
+    if (!s || !out || max_out <= 0) return -1;
+    cmm_ac *ac = s->sc;
+    double lx = lxf + 0.5, ly = lyf + 0.5, lz = lzf + 0.5;
+    double sx5 = floor(s->x) + 0.5, sy5 = floor(s->y) + 0.5, sz5 = floor(s->z) + 0.5;
+    double d = sqrt((lx - sx5) * (lx - sx5) + (ly - sy5) * (ly - sy5) + (lz - sz5) * (lz - sz5));
+
+    /* --- the transmission disc, at the barrier --- */
+    double bx, by, bz;
+    int has_barrier = barrier_mid(ac, sx5, sy5, sz5, lx, ly, lz, &bx, &by, &bz);
+    double fan_pow = 0.0, fan_open = 0.0;
+    if (!has_barrier) {
+        fan_pow = pow(10.0, -SLOPE * d / 10.0);
+        fan_open = fan_pow;
+    } else {
+        double ux = lx - sx5, uy = ly - sy5, uz = lz - sz5;
+        double ul = sqrt(ux * ux + uy * uy + uz * uz); if (ul < 1e-9) ul = 1;
+        ux /= ul; uy /= ul; uz /= ul;
+        double axx = 0, ayy = 1, azz = 0;
+        if (fabs(uy) > 0.9) { axx = 1; ayy = 0; azz = 0; }
+        double e1x = uy * azz - uz * ayy, e1y = uz * axx - ux * azz, e1z = ux * ayy - uy * axx;
+        double e1l = sqrt(e1x * e1x + e1y * e1y + e1z * e1z); if (e1l < 1e-9) e1l = 1;
+        e1x /= e1l; e1y /= e1l; e1z /= e1l;
+        double e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
+        for (int i = 0; i < 15; i++) {
+            double rf, ca, sa, w;
+            fresnel_pt(i, &rf, &ca, &sa, &w);
+            if (w <= 0) continue;
+            double pr = rf * FRESNEL_R;
+            double qx = bx + (e1x * ca + e2x * sa) * pr;
+            double qy = by + (e1y * ca + e2y * sa) * pr;
+            double qz = bz + (e1z * ca + e2z * sa) * pr;
+            /* EVERY patch counts, blocked or clear. Skipping the clear ones threw away the
+             * unblocked share of the zone, so the instant a sight line clipped a corner the
+             * level fell off a cliff -- measured at -3.3 dB one block and -21.5 the next. */
+            double m = seg_db_at(ac, sx5, sy5, sz5, qx, qy, qz, 1, 0)
+                     + seg_db_at(ac, qx, qy, qz, lx, ly, lz, 0, 1);
+            double len = sqrt((qx - sx5) * (qx - sx5) + (qy - sy5) * (qy - sy5) + (qz - sz5) * (qz - sz5))
+                       + sqrt((qx - lx) * (qx - lx) + (qy - ly) * (qy - ly) + (qz - lz) * (qz - lz));
+            double pw = w * pow(10.0, -(SLOPE * len + m) / 10.0);
+            fan_pow += pw;
+            /* "Came through air" is a property of the PATH, not of where the sample sits: a
+             * patch in air on the FAR side of a barrier still had to cross it. */
+            fan_open += (1.0 - sstep(0, 2 * MIN_TRANSMIT_DB, m)) * pw;
+        }
+        if (fan_pow <= 0) {
+            fan_pow = pow(10.0, -(SLOPE * d + seg_db_at(ac, sx5, sy5, sz5, lx, ly, lz, 1, 1)) / 10.0);
+            fan_open = 0;
+        }
+    }
+    double fan_db = fan_pow > 0 ? -10.0 * log10(fan_pow) : 120.0;
+    double open_frac = fan_pow > 0 ? fan_open / fan_pow : 1.0;
+    if (open_frac < 0) open_frac = 0; if (open_frac > 1) open_frac = 1;
+    double center_mat = seg_db_at(ac, sx5, sy5, sz5, lx, ly, lz, 1, 1);
+
+    int lxi = (int)floor(lxf) - ac->x0, lyi = (int)floor(lyf) - ac->y0, lzi = (int)floor(lzf) - ac->z0;
+    int nd = -1;
+    if (lxi >= 0 && lxi < ac->sx && lyi >= 0 && lyi < ac->sy && lzi >= 0 && lzi < ac->sz)
+        nd = ac->node[idx_of(ac, lxi, lyi, lzi)];
+    int my_room = (nd >= 0 && nd < ac->nnodes) ? s->node_room[nd] : -1;
+
+    int n = 0;
+    double pow_tot = 0.0, best_db = -1e30;
+
+    /* --- the source arrival, split where it physically splits --- */
+    double min_seed = 1e30;
+    for (int i = 0; i < ac->nnodes; i++) if (s->seed[i] >= 0 && s->seed[i] < min_seed) min_seed = s->seed[i];
+    if (min_seed > 1e29) min_seed = 0;
+    double src_db = -(min_seed + fan_db);
+    if (src_db > -110 && n < max_out) {
+        if (open_frac > 1e-4) {
+            out[n].db = (float)(src_db + 10.0 * log10(open_frac));
+            out[n].px = (float)sx5; out[n].py = (float)sy5; out[n].pz = (float)sz5;
+            out[n].fc = (float)(20000.0 * exp(-d / 140.0));
+            out[n].len = (float)d; out[n].weight = 1.0f; out[n].kind = 0;
+            pow_tot += pow(10.0, out[n].db / 10.0);
+            if (out[n].db > best_db) best_db = out[n].db;
+            n++;
+        }
+        if (open_frac < 1 - 1e-4 && n < max_out) {
+            double px = has_barrier ? bx : sx5, py = has_barrier ? by : sy5, pz = has_barrier ? bz : sz5;
+            out[n].db = (float)(src_db + 10.0 * log10(1.0 - open_frac));
+            out[n].px = (float)px; out[n].py = (float)py; out[n].pz = (float)pz;
+            out[n].fc = (float)(20000.0 * pow(10.0, -(center_mat > 0 ? center_mat : 0) / 26.0));
+            out[n].len = (float)d; out[n].weight = 1.0f; out[n].kind = 1;
+            pow_tot += pow(10.0, out[n].db / 10.0);
+            if (out[n].db > best_db) best_db = out[n].db;
+            n++;
+        }
+    }
+
+    /* --- aperture arrivals, over the FIXED candidate set ---
+     * TWO CAPACITY FAULTS LIVED HERE, and both silently changed the physics:
+     *
+     * The loop stopped at max_out, so on the store its 81 apertures filled all 32 slots and
+     * the DIFFUSE FIELD -- the loudest component by far, and the term the whole model leans
+     * on to keep levels smooth -- was never added at all. Measured -10.9 dB against the
+     * model's -0.65. A capacity limit must never decide which physics runs, so the diffuse
+     * now has a reserved slot.
+     *
+     * And when full, the loop kept the FIRST candidates by edge index rather than the
+     * loudest, which is an arbitrary choice dressed up as a limit. It now displaces the
+     * weakest arrival when a louder one arrives, so the cap costs accuracy in the tail
+     * instead of wherever the edge numbering happened to fall. */
+    const int ap_cap = max_out - 1;          /* one reserved for the diffuse field */
+    for (int e = 0; e < ac->nedge; e++) {
+        const struct ac_edge *E = &ac->edge[e];
+        if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;   /* a cut is not an aperture */
+        double px = E->sx / (E->area > 0 ? E->area : 1);
+        double py = E->sy / (E->area > 0 ? E->area : 1);
+        double pz = E->sz / (E->area > 0 ? E->area : 1);
+        /* An aperture's cost is the CHEAPEST way for sound to arrive AT it, which is the best
+         * of its own node's portals plus the hop from there -- not merely this edge's own
+         * routed cost. Using the edge's cost alone overstates it whenever a neighbouring
+         * portal offers a shorter route into the same node, and the aperture then reads too
+         * quiet. Its own constriction is charged after, since anything using it must squeeze
+         * through. */
+        int an = E->a;
+        double best = 1e30, best_len = 0;
+        if (an >= 0 && an < ac->nnodes && s->seed[an] >= 0) {
+            double h = sqrt((px - sx5) * (px - sx5) + (py - sy5) * (py - sy5) + (pz - sz5) * (pz - sz5));
+            best = s->seed[an] + SLOPE * h;
+            best_len = h;
+        }
+        for (int q = 0; q < ac->nedge; q++) {
+            if (!s->cost[q].set) continue;
+            const struct ac_edge *Q = &ac->edge[q];
+            if (Q->a != an && Q->b != an) continue;
+            double qx = Q->sx / (Q->area > 0 ? Q->area : 1);
+            double qy = Q->sy / (Q->area > 0 ? Q->area : 1);
+            double qz = Q->sz / (Q->area > 0 ? Q->area : 1);
+            double hop = sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy) + (pz - qz) * (pz - qz));
+            double cand = s->cost[q].add - constrict_db(s->cost[q].bneck) + SLOPE * hop;
+            if (cand < best) { best = cand; best_len = s->cost[q].len + hop; }
+        }
+        if (best > 1e29) continue;
+        double cost = best - constrict_db(E->open_frac);
+        double route_len = best_len;
+        double leg = sqrt((px - lx) * (px - lx) + (py - ly) * (py - ly) + (pz - lz) * (pz - lz));
+        double legmat = leg_db(ac, px, py, pz, lx, ly, lz);
+        double db = -(cost + SLOPE * leg + legmat);
+        /* A candidate whose route is barely longer than the straight line describes the SAME
+         * physical path as the direct sound, not an alternative -- the Fresnel criterion, and
+         * why a wide-open doorway directly ahead adds nothing on top of the direct arrival.
+         * Measured GEOMETRICALLY: the routed polyline bends through portal centroids and
+         * overestimates, which made a doorway on the line of sight look like a detour. */
+        double geo = sqrt((px - sx5) * (px - sx5) + (py - sy5) * (py - sy5) + (pz - sz5) * (pz - sz5))
+                   + leg - d;
+        double w = sstep(0, 2, geo);
+        if (w <= 1e-4 || db <= -110) continue;
+        int slot = n;
+        if (n >= ap_cap) {
+            /* full: displace the weakest APERTURE arrival, and only if this one beats it */
+            int worst = -1;
+            for (int i = 0; i < n; i++)
+                if (out[i].kind == 2 && (worst < 0 || out[i].db < out[worst].db)) worst = i;
+            if (worst < 0 || out[worst].db >= db) continue;
+            pow_tot -= out[worst].weight * pow(10.0, out[worst].db / 10.0);
+            slot = worst;
+        } else n++;
+        out[slot].db = (float)db;
+        out[slot].px = (float)px; out[slot].py = (float)py; out[slot].pz = (float)pz;
+        out[slot].fc = (float)(20000.0 * exp(-(route_len + leg) / 140.0));
+        out[slot].len = (float)(route_len + leg);
+        out[slot].weight = (float)w; out[slot].kind = 2;
+        pow_tot += w * pow(10.0, db / 10.0);
+        if (db > best_db) best_db = db;
+    }
+
+    if (getenv("CMM_ONE")) {
+        fprintf(stderr, "  [dbg] node=%d room=%d ownField=%.3g nedge=%d openFrac=%.3f\n",
+                nd, my_room, my_room >= 0 ? s->field[my_room] : -1.0, ac->nedge, open_frac);
+    }
+    /* --- the diffuse field, which always gets its slot --- */
+    if (my_room >= 0 && n < max_out) {
+        double ptot = s->field[my_room];
+        for (int e = 0; e < ac->nedge; e++) {
+            const struct ac_edge *E = &ac->edge[e];
+            if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;
+            /* NO room-membership gate: topology decides how much arrives, never whether. */
+            double pf = 0;
+            if (E->ra != my_room) pf += s->field[E->ra];
+            if (E->rb != my_room) pf += s->field[E->rb];
+            if (pf <= 0) continue;
+            double px = E->sx / (E->area > 0 ? E->area : 1);
+            double py = E->sy / (E->area > 0 ? E->area : 1);
+            double pz = E->sz / (E->area > 0 ? E->area : 1);
+            double leg = ap_dist(E, lx, ly, lz);
+            double lm = leg_db(ac, px, py, pz, lx, ly, lz);
+            ptot += pf * pow(10.0, (constrict_db(E->open_frac) - SLOPE * leg - lm) / 10.0);
+        }
+        if (getenv("CMM_ONE")) fprintf(stderr, "  [dbg] diffuse ptot=%.6g\n", ptot);
+        if (ptot > 1e-12) {
+            double ddb = 10.0 * log10(ptot);
+            if (ddb > -110) {
+                out[n].db = (float)ddb;
+                out[n].px = (float)lx; out[n].py = (float)ly; out[n].pz = (float)lz;
+                out[n].fc = 3500.0f;
+                out[n].len = (float)(d + DIFFUSE_EXTRA);
+                out[n].weight = 1.0f; out[n].kind = 3;
+                pow_tot += pow(10.0, ddb / 10.0);
+                n++;
+            }
+        }
+    }
+
+    /* prune by CONTRIBUTION only -- never by topology or search radius, which would make the
+     * set a step function of position and put a cliff in the field */
+    int keep = 0;
+    for (int i = 0; i < n; i++)
+        if (out[i].kind == 3 || out[i].db >= best_db - PRUNE_DB) out[keep++] = out[i];
+    return keep;
+}
+
+/* Total level at a listener, dB relative to the source: the energy sum of every arrival. */
+double cmm_ac_eval_db(cmm_ac_src *s, float lx, float ly, float lz) {
+    cmm_ac_arrival a[MAX_ARRIVALS];
+    int n = cmm_ac_eval(s, lx, ly, lz, a, MAX_ARRIVALS);
+    if (n <= 0) return -120.0;
+    double p = 0;
+    for (int i = 0; i < n; i++) p += a[i].weight * pow(10.0, a[i].db / 10.0);
+    return p > 1e-12 ? 10.0 * log10(p) : -120.0;
 }
 
 /* parity read-back: how many edges the solve reached, and the best routed cost */
