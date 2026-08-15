@@ -935,7 +935,12 @@ static int build_edges_and_rooms(cmm_ac *ac) {
     for (int e = 0; e < ac->nedge; e++) {
         const struct ac_edge *E = &ac->edge[e];
         if (E->ra >= 0 && E->rb >= 0 && E->ra != E->rb) {
-            double a = E->area * (E->thick > 0 ? 1.0 : 1.0);
+            /* AREA TIMES OPENNESS, not raw area. A placeholder here added the whole contact
+             * area, which overstates every room's absorption and so understates its field --
+             * and it did so unevenly, since openness saturates at 1 for wide openings and
+             * scales with area for narrow ones. A 3-voxel room came out at 7.25 against the
+             * model's 1.326, which is exactly sum(area^2)/FRESNEL_AREA over its two openings. */
+            double a = E->area * E->open_frac;
             ac->room[E->ra].open_area += a;
             ac->room[E->rb].open_area += a;
         }
@@ -1228,6 +1233,15 @@ static void src_fields(cmm_ac_src *s) {
         double v1 = (mfp - MFP_MIN) / (WAVELEN_BLOCKS - MFP_MIN);
         if (v1 < 0) v1 = 0; if (v1 > 1) v1 = 1;
         v1 = v1 * v1 * (3.0 - 2.0 * v1);
+        /* A room with NO enclosure surface cannot hold a reverberant field: 4P/R needs an R,
+         * and a space with no boundary has none. Defaulting its sky fraction to 0 instead
+         * treated it as perfectly enclosed, which is the opposite of the truth.
+         *
+         * Two bunker rooms reach surf == 0 here where the model gets surf == 1 -- a total of
+         * 2 sky faces out of 95,964, an 0.002% accumulation difference whose cause is NOT
+         * yet explained and is recorded rather than papered over. The guard is right
+         * independently of it, and with it the room fields match the model exactly. */
+        if (R->surf <= 0) { s->canrev[r] = 0.0; continue; }
         double sky = R->surf > 0 ? (double)R->sky / (double)R->surf : 0.0;
         double v2 = (sky - SKY_FULL) / (SKY_NONE - SKY_FULL);
         if (v2 < 0) v2 = 0; if (v2 > 1) v2 = 1;
@@ -1379,6 +1393,24 @@ long long cmm_ac_src_stat(const cmm_ac_src *s, int what) {
     if (what == 1) { long long c = 0; for (int n = 0; n < s->sc->nnodes; n++) if (s->seed[n] >= 0) c++; return c; }
     return -1;
 }
+/* Per-room diagnostics, so a parity failure names the ROOM and the TERM rather than
+ * showing two sorted lists that cannot say which one diverged. Fields, in order:
+ * voxels, surf, sky, open_area, absorption, canreverb, pin, direct, field(dB). */
+int cmm_ac_src_room_info(const cmm_ac_src *s, int room, double *out, int nout) {
+    if (!s || room < 0 || room >= s->sc->nrooms || nout < 9) return 0;
+    const struct ac_room *R = &s->sc->room[room];
+    out[0] = (double)R->n;
+    out[1] = (double)R->surf;
+    out[2] = (double)R->sky;
+    out[3] = R->open_area;
+    out[4] = s->absorb[room];
+    out[5] = s->canrev[room];
+    out[6] = s->pin[room];
+    out[7] = s->direct[room];
+    out[8] = s->field[room] > 1e-12 ? 10.0 * log10(s->field[room]) : -999.0;
+    return 1;
+}
+
 double cmm_ac_src_field_db(const cmm_ac_src *s, int room) {
     if (!s || room < 0 || room >= s->sc->nrooms) return -999.0;
     double v = s->field[room];

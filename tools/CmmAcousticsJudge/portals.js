@@ -784,6 +784,7 @@ function makeNewEvaluator(D, G, src) {
     // (intensity x area / 4, which is what the portal areas are for) but this is a hard physical
     // ceiling rather than a fitted constant, and it cannot be wrong in the direction that matters.
     for (let rm = 0; rm < nRooms; rm++) if (direct[rm] > 1) direct[rm] = 1;
+    const dbgPin = process.env.CMM_ROOMS === "1" ? Array.from(direct) : null;
     // ── AN OPENING IS AN ABSORBER ────────────────────────────────────────────
     // R counted material surfaces only, so a room's openings were free. They are not: sound leaving
     // through a doorway does not come back, which makes an opening the most absorbing surface a room
@@ -839,6 +840,18 @@ function makeNewEvaluator(D, G, src) {
       // "coupling may only attenuate" a statement the model can actually satisfy.
       fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / absorbOf(rm) : 0))
                   * dbToPow(DIFFUSE_CAL);
+    }
+    if (process.env.CMM_ROOMS === "1") {
+      // Per-room terms, to diff against the native port term by term. Sorted lists cannot
+      // say WHICH room diverged, and that is the only question once totals are close.
+      console.error("ROOM n surf sky openArea absorb canrev pin direct fieldDb");
+      for (let rm = 0; rm < nRooms; rm++) {
+        const R = RM[rm];
+        const f = fieldOf[rm] > 1e-12 ? powToDb(fieldOf[rm]) : -999;
+        console.error(`ROOM ${R.n} ${R.surf} ${Math.round(R.skyFrac * R.surf)} `
+          + `${openArea[rm].toFixed(3)} ${absorbOf(rm).toFixed(3)} ${canReverb[rm].toFixed(4)} `
+          + `${(dbgPin ? dbgPin[rm] : 0).toPrecision(6)} ${direct[rm].toPrecision(6)} ${f.toFixed(2)}`);
+      }
     }
     if (process.env.CMM_DIFFDBG === "1") {
       const dbg = [];

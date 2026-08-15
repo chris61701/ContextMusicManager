@@ -104,6 +104,15 @@ int main(int argc, char **argv) {
                 for (int r = 0; r < nf && r < 8; r++) printf(" %.1f", fv[r]);
                 printf("\n");
                 free(fv);
+                if (getenv("CMM_ROOMS")) {
+                    printf("ROOM n surf sky openArea absorb canrev pin direct fieldDb\n");
+                    for (int r = 0; r < nr; r++) {
+                        double v[9];
+                        if (!cmm_ac_src_room_info(src, r, v, 9)) continue;
+                        printf("ROOM %.0f %.0f %.0f %.3f %.3f %.4f %.6g %.6g %.2f\n",
+                               v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+                    }
+                }
                 cmm_ac_src_destroy(src);
             }
         }
