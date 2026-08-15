@@ -32,13 +32,22 @@ function stats(file) {
     if (open[i] > OPEN_EPS) { o++; s += thick[i]; if (thick[i] >= THICK_CAP) cap++; }
     if (open[i] >= 0.999) full++;
   }
-  return { n: D.n, open: o, full, cap, mean: o ? s / o : 0 };
+  // stage 2: raw watershed regions, and the rooms the merge leaves
+  const seg = Rg.segment(D, open, thick);
+  const raw = seg.regions.length;
+  const G = Rg.asGraph(D, 0.62);
+  let largest = 0;
+  for (const r of G.rooms) if (r.n > largest) largest = r.n;
+  return { n: D.n, open: o, full, cap, mean: o ? s / o : 0,
+           raw, rooms: G.rooms.length, largest };
 }
 
 function report(label, file) {
   const r = stats(file);
   console.log(`${label.padEnd(28)} open=${String(r.open).padStart(8)}  fullyOpen=${String(r.full).padStart(8)}`
-            + `  atCap=${String(r.cap).padStart(8)}  meanThick=${r.mean.toFixed(4)}`);
+            + `  atCap=${String(r.cap).padStart(8)}  meanThick=${r.mean.toFixed(4)}`
+            + `  raw=${String(r.raw).padStart(5)}  rooms=${String(r.rooms).padStart(4)}`
+            + `  largest=${String(r.largest).padStart(8)}`);
 }
 
 function main() {

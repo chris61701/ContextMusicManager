@@ -101,6 +101,11 @@ CMM_AC_API int cmm_ac_set_voxels(cmm_ac *ac, const float *loss, const unsigned c
  * a voxel upload when geometry changes (a door, a broken wall). */
 CMM_AC_API int cmm_ac_build_fields(cmm_ac *ac);
 
+/* Segment the scene: watershed regions, their contacts, and the merge that turns
+ * them into rooms -- including the indoor/outdoor barrier, which no pinch test can
+ * substitute for. Call after cmm_ac_build_fields. */
+CMM_AC_API int cmm_ac_build_segments(cmm_ac *ac);
+
 /* Read-back for parity checking against the JS model. Returns 0 and writes
  * nothing if the index is out of range. */
 CMM_AC_API float cmm_ac_open_at(const cmm_ac *ac, int wx, int wy, int wz);
@@ -108,7 +113,8 @@ CMM_AC_API float cmm_ac_thick_at(const cmm_ac *ac, int wx, int wy, int wz);
 
 /* Aggregate stats, so a parity run compares numbers rather than eyeballing grids.
  * `what` selects: 0 voxels, 1 open voxels (>OPEN_EPS), 2 fully-open voxels,
- * 3 voxels at the thickness cap, 4 arena bytes. */
+ * 3 voxels at the thickness cap, 4 arena bytes, 5 raw regions, 6 contacts,
+ * 7 merged rooms, 8 voxels in the largest room. */
 CMM_AC_API long long cmm_ac_stat(const cmm_ac *ac, int what);
 /* Mean thickness over open voxels — a single number that catches a sweep-order
  * or boundary-handling divergence immediately. */

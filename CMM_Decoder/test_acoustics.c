@@ -55,6 +55,15 @@ int main(int argc, char **argv) {
     printf("arena            %.1f MB\n", (double)cmm_ac_stat(ac, 4) / 1e6);
     printf("build            %.0f ms\n", ms);
 
+    clock_t t1 = clock();
+    if (!cmm_ac_build_segments(ac)) { fprintf(stderr, "segment failed\n"); return 1; }
+    double ms2 = 1000.0 * (double)(clock() - t1) / CLOCKS_PER_SEC;
+    printf("raw regions      %lld\n", cmm_ac_stat(ac, 5));
+    printf("contacts         %lld\n", cmm_ac_stat(ac, 6));
+    printf("merged rooms     %lld\n", cmm_ac_stat(ac, 7));
+    printf("largest room     %lld voxels\n", cmm_ac_stat(ac, 8));
+    printf("segment          %.0f ms\n", ms2);
+
     /* A few spot values, so a whole-grid statistic that happens to match cannot
      * hide a local divergence. Sampled on a coarse lattice for stability. */
     printf("spot open/thick:");
