@@ -60,6 +60,38 @@
 #define SEG_MIN_STEP 6.0f
 #define SEG_STEP_MULT 2.5f
 
+/* --- transmission and routing constants ---------------------------------- */
+/* Per-voxel transmission loss is SUPERLINEAR in material density (the mass law):
+ * dB = DB_MAT * frac^MAT_POW, so concrete at 0.9 costs about five times wood at 0.5.
+ * Summed along the path as a LINE INTEGRAL weighted by the ray's length inside each
+ * voxel -- counting whole voxels made a one-voxel wall cost 6 or 12 dB depending on
+ * the ray's angle, and a single block of listener movement could swap them. That was
+ * the root of the 10-16 dB/block cliffs, which is why fixing the candidate set three
+ * different ways never removed them. */
+#define DB_MAT 40.1
+#define MAT_POW 2.74
+#define DB_VOXEL_MAX 60.0
+
+/* A voxel crossed VERTICALLY stands for a whole floor assembly -- deck, joists,
+ * ceiling below -- not for the thin partition a voxel means sideways, so the same
+ * material must cost more. Scaled by the ray's verticality so it is continuous in
+ * direction rather than switching on an axis test. Magnitude from the mass law: a
+ * floor is roughly 3x a wall's mass, and 20*log10(3) is about 9.5 dB, which on wood's
+ * 6 dB is a factor near 2.6. */
+#define VERT_MULT 2.6
+
+/* Distance attenuation, dB per block. Exponential rather than inverse-square: the
+ * choice predates occlusion being expressed in dB and is the one architectural
+ * inconsistency the offline work did not resolve -- 4P/R assumes inverse-square, and
+ * at 12 blocks the two laws differ by 17 dB, which DIFFUSE_CAL patches at roughly one
+ * distance. Ported as-is so the port reproduces the model; revisiting it is a model
+ * question, not a port question. */
+#define SLOPE 0.35
+
+#define BEND_DB 6.0          /* full reversal through a fully-pinched portal */
+#define MIN_APERTURE_DB (-30.0)  /* a pinhole is not infinite loss */
+#define SEED_R 3             /* air pockets within this radius seed the solve */
+
 /* A raw watershed region, before merging. Centroid is accumulated as sums so it
  * needs no second pass. surf/absorb are the enclosure's area and area-weighted
  * absorption, which the diffuse field needs; sky counts faces onto the world. */
@@ -272,6 +304,69 @@ static void derive_thick(cmm_ac *ac) {
     }
 
     for (long long i = 0; i < n; i++) if (t[i] > THICK_CAP) t[i] = THICK_CAP;
+}
+
+/* --- material along a ray, as a LINE INTEGRAL --------------------------------
+ * skip_from / skip_to default to true for a source-to-listener ray: the speaker sits
+ * inside a solid block of its own and must not be charged for it, and the listener's
+ * own voxel is not a barrier between them. They must be FALSE when an endpoint is a
+ * barrier patch, whose whole purpose is to sit inside material -- with both legs
+ * skipping it the barrier vanished entirely and every patch read 0.0 dB through a
+ * metre of concrete. */
+static double seg_db_at(const cmm_ac *ac, double fx, double fy, double fz,
+                        double tx, double ty, double tz, int skip_from, int skip_to) {
+    double dx = tx - fx, dy = ty - fy, dz = tz - fz;
+    double dist = sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 0.01) return 0.0;
+    dx /= dist; dy /= dist; dz /= dist;
+
+    int x = (int)floor(fx) - ac->x0, y = (int)floor(fy) - ac->y0, z = (int)floor(fz) - ac->z0;
+    const int x0 = x, y0 = y, z0 = z;
+    const int x1 = (int)floor(tx) - ac->x0, y1 = (int)floor(ty) - ac->y0, z1 = (int)floor(tz) - ac->z0;
+    int sX = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+    int sY = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+    int sZ = dz > 0 ? 1 : (dz < 0 ? -1 : 0);
+    double lfx = fx - ac->x0, lfy = fy - ac->y0, lfz = fz - ac->z0;
+    double tmx = fabs(dx) < 1e-6 ? 1e30 : (((sX > 0 ? x + 1 : x) - lfx) / dx);
+    double tmy = fabs(dy) < 1e-6 ? 1e30 : (((sY > 0 ? y + 1 : y) - lfy) / dy);
+    double tmz = fabs(dz) < 1e-6 ? 1e30 : (((sZ > 0 ? z + 1 : z) - lfz) / dz);
+    double tDx = fabs(dx) < 1e-6 ? 1e30 : fabs(1.0 / dx);
+    double tDy = fabs(dy) < 1e-6 ? 1e30 : fabs(1.0 / dy);
+    double tDz = fabs(dz) < 1e-6 ? 1e30 : fabs(1.0 / dz);
+
+    const double vert = 1.0 + (VERT_MULT - 1.0) * fabs(dy);
+    double db = 0.0, tPrev = 0.0;
+    for (int g = 0; g < 1024; g++) {
+        double tNext = tmx < tmy ? tmx : tmy;
+        if (tmz < tNext) tNext = tmz;
+        if (dist < tNext) tNext = dist;
+        double seg = tNext - tPrev;
+        int atFrom = (x == x0 && y == y0 && z == z0);
+        int atTo   = (x == x1 && y == y1 && z == z1);
+        if (seg > 1e-6 && y >= 0 && y < ac->sy && x >= 0 && x < ac->sx && z >= 0 && z < ac->sz
+            && !(skip_from && atFrom) && !(skip_to && atTo)) {
+            double f = ac->loss[idx_of(ac, x, y, z)];
+            if (f > 1e-4) {
+                double v = DB_MAT * pow(f, MAT_POW) * vert;
+                double cap = DB_VOXEL_MAX * vert;
+                db += (v < cap ? v : cap) * seg;
+            }
+        }
+        if (tNext >= dist - 1e-9) break;
+        tPrev = tNext;
+        if (tmx <= tmy && tmx <= tmz) { x += sX; tmx += tDx; }
+        else if (tmy <= tmz)          { y += sY; tmy += tDy; }
+        else                          { z += sZ; tmz += tDz; }
+    }
+    return db;
+}
+
+/* One aperture's constriction loss, applied ONCE at the bottleneck. Power through a
+ * chain of openings is limited by the narrowest one, paid once -- a corridor of
+ * constant width does not keep charging. */
+static double constrict_db(double f) {
+    double v = 10.0 * log10(f > 1e-4 ? f : 1e-4);
+    return v < MIN_APERTURE_DB ? MIN_APERTURE_DB : v;
 }
 
 /* --- watershed segmentation ------------------------------------------------
@@ -825,6 +920,224 @@ float cmm_ac_open_at(const cmm_ac *ac, int wx, int wy, int wz) {
 float cmm_ac_thick_at(const cmm_ac *ac, int wx, int wy, int wz) {
     if (!ac || !in_bounds(ac, wx, wy, wz)) return 0.0f;
     return ac->thick[idx_of(ac, wx - ac->x0, wy - ac->y0, wz - ac->z0)];
+}
+
+/* --- a SOURCE bound to a scene ---------------------------------------------
+ * Everything here is graph-sized, so move() is cheap and allocates nothing: the arena
+ * is sized once at create from the scene's edge and room counts. That is the property
+ * that makes moving speakers -- and later enemies -- a lookup rather than a rebuild. */
+struct ac_cost { double add, bneck, len; int from; int set; };
+
+struct cmm_ac_src {
+    cmm_ac *sc;
+    float x, y, z;
+    void *arena; size_t arena_bytes;
+    struct ac_cost *cost;    /* per node-edge */
+    double *seed;            /* per node: cost to reach it from the source, or -1 */
+    int    *heap;            /* edge ids */
+    double *hkey;
+    int nheap, heap_cap;
+    int nedge_cap, nnode_cap;
+};
+
+/* LAZY-DELETION DIJKSTRA PUSHES ON EVERY IMPROVEMENT, not once per edge, so the heap
+ * must be sized well above the edge count. Sizing it to nedge segfaulted on the store
+ * capture while the bunker happened to stay under -- the kind of difference that makes
+ * a crash look geometry-specific when it is really a capacity bug. The guard drops a
+ * push rather than overflowing if the bound is ever wrong: the cost table is already
+ * updated, so the solve degrades rather than corrupting memory. */
+static void heap_push(cmm_ac_src *s, int eid, double key) {
+    if (s->nheap >= s->heap_cap) return;
+    int i = s->nheap++;
+    s->heap[i] = eid; s->hkey[i] = key;
+    while (i > 0) {
+        int p = (i - 1) >> 1;
+        if (s->hkey[p] <= s->hkey[i]) break;
+        int te = s->heap[p]; double tk = s->hkey[p];
+        s->heap[p] = s->heap[i]; s->hkey[p] = s->hkey[i];
+        s->heap[i] = te; s->hkey[i] = tk;
+        i = p;
+    }
+}
+
+static int heap_pop(cmm_ac_src *s, double *key) {
+    int top = s->heap[0]; *key = s->hkey[0];
+    s->nheap--;
+    if (s->nheap > 0) {
+        s->heap[0] = s->heap[s->nheap]; s->hkey[0] = s->hkey[s->nheap];
+        int i = 0;
+        for (;;) {
+            int l = 2 * i + 1, r = l + 1, m = i;
+            if (l < s->nheap && s->hkey[l] < s->hkey[m]) m = l;
+            if (r < s->nheap && s->hkey[r] < s->hkey[m]) m = r;
+            if (m == i) break;
+            int te = s->heap[m]; double tk = s->hkey[m];
+            s->heap[m] = s->heap[i]; s->hkey[m] = s->hkey[i];
+            s->heap[i] = te; s->hkey[i] = tk;
+            i = m;
+        }
+    }
+    return top;
+}
+
+static void src_solve(cmm_ac_src *s) {
+    cmm_ac *ac = s->sc;
+    for (int e = 0; e < ac->nedge; e++) { s->cost[e].set = 0; }
+    for (int nd = 0; nd < ac->nnodes; nd++) s->seed[nd] = -1.0;
+    s->nheap = 0;
+    if (ac->nnodes <= 0 || ac->nedge <= 0) return;
+
+    /* Seed every distinct air pocket within SEED_R, each paying for the material
+     * between the speaker and it. Radius 1 finds the void INSIDE the furniture rather
+     * than the room: a speaker on a shelf seeded its own cavity and every shelf speaker
+     * would have been inaudible. */
+    int sxi = (int)floorf(s->x), syi = (int)floorf(s->y), szi = (int)floorf(s->z);
+    for (int dz = -SEED_R; dz <= SEED_R; dz++)
+    for (int dy = -SEED_R; dy <= SEED_R; dy++)
+    for (int dx = -SEED_R; dx <= SEED_R; dx++) {
+        int wx = sxi + dx, wy = syi + dy, wz = szi + dz;
+        int lx = wx - ac->x0, ly = wy - ac->y0, lz = wz - ac->z0;
+        if (lx < 0 || lx >= ac->sx || ly < 0 || ly >= ac->sy || lz < 0 || lz >= ac->sz) continue;
+        int nd = ac->node[idx_of(ac, lx, ly, lz)];
+        if (nd < 0) continue;
+        double d = sqrt((double)(dx * dx + dy * dy + dz * dz));
+        double cst = SLOPE * d + seg_db_at(ac, sxi + 0.5, syi + 0.5, szi + 0.5,
+                                           wx + 0.5, wy + 0.5, wz + 0.5, 1, 1);
+        if (s->seed[nd] < 0 || cst < s->seed[nd]) s->seed[nd] = cst;
+    }
+
+    /* from the source into every edge bounding a seeded pocket */
+    double spx = sxi + 0.5, spy = syi + 0.5, spz = szi + 0.5;
+    for (int nd = 0; nd < ac->nnodes; nd++) {
+        if (s->seed[nd] < 0) continue;
+        for (int e = 0; e < ac->nedge; e++) {
+            const struct ac_edge *E = &ac->edge[e];
+            if (E->a != nd && E->b != nd) continue;
+            double px = E->sx / (E->area > 0 ? E->area : 1);
+            double py = E->sy / (E->area > 0 ? E->area : 1);
+            double pz = E->sz / (E->area > 0 ? E->area : 1);
+            double leg = sqrt((px - spx) * (px - spx) + (py - spy) * (py - spy) + (pz - spz) * (pz - spz));
+            double bneck = E->area > 0 ? 1.0 : 1.0;   /* node throat is 1; edge openness below */
+            double add = s->seed[nd] + SLOPE * leg;
+            double key = add - constrict_db(bneck);
+            if (!s->cost[e].set || (s->cost[e].add - constrict_db(s->cost[e].bneck)) > key) {
+                s->cost[e].add = add; s->cost[e].bneck = bneck; s->cost[e].len = leg;
+                s->cost[e].from = nd; s->cost[e].set = 1;
+                heap_push(s, e, key);
+            }
+        }
+    }
+
+    while (s->nheap > 0) {
+        double key;
+        int eid = heap_pop(s, &key);
+        const struct ac_cost *live = &s->cost[eid];
+        if (!live->set) continue;
+        if (fabs((live->add - constrict_db(live->bneck)) - key) > 1e-9) continue;  /* superseded */
+        const struct ac_edge *E = &ac->edge[eid];
+        int far = (E->a == live->from) ? E->b : E->a;
+        double px = E->sx / (E->area > 0 ? E->area : 1);
+        double py = E->sy / (E->area > 0 ? E->area : 1);
+        double pz = E->sz / (E->area > 0 ? E->area : 1);
+        for (int q = 0; q < ac->nedge; q++) {
+            if (q == eid) continue;
+            const struct ac_edge *Q = &ac->edge[q];
+            if (Q->a != far && Q->b != far) continue;
+            double qx = Q->sx / (Q->area > 0 ? Q->area : 1);
+            double qy = Q->sy / (Q->area > 0 ? Q->area : 1);
+            double qz = Q->sz / (Q->area > 0 ? Q->area : 1);
+            double lx = qx - px, ly = qy - py, lz = qz - pz;
+            double leg = sqrt(lx * lx + ly * ly + lz * lz);
+            if (leg < 1e-6) continue;
+            double nadd = live->add + SLOPE * leg;
+            double nb = live->bneck;
+            double nkey = nadd - constrict_db(nb);
+            if (!s->cost[q].set || (s->cost[q].add - constrict_db(s->cost[q].bneck)) > nkey) {
+                s->cost[q].add = nadd; s->cost[q].bneck = nb; s->cost[q].len = live->len + leg;
+                s->cost[q].from = far; s->cost[q].set = 1;
+                heap_push(s, q, nkey);
+            }
+        }
+    }
+}
+
+cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z) {
+    if (!scene) return NULL;
+    cmm_ac_src *s = (cmm_ac_src *)calloc(1, sizeof(cmm_ac_src));
+    if (!s) return NULL;
+    s->sc = scene; s->x = x; s->y = y; s->z = z;
+    int ne = scene->nedge > 0 ? scene->nedge : 1;
+    int nn = scene->nnodes > 0 ? scene->nnodes : 1;
+    int hc = ne * 32 + 1024;
+    size_t bytes = (size_t)ne * sizeof(struct ac_cost)
+                 + (size_t)nn * sizeof(double)
+                 + (size_t)hc * sizeof(int)
+                 + (size_t)hc * sizeof(double);
+    s->arena = malloc(bytes);
+    if (!s->arena) { free(s); return NULL; }
+    memset(s->arena, 0, bytes);
+    s->arena_bytes = bytes;
+    unsigned char *p = (unsigned char *)s->arena;
+    s->cost = (struct ac_cost *)p; p += (size_t)ne * sizeof(struct ac_cost);
+    s->seed = (double *)p;         p += (size_t)nn * sizeof(double);
+    s->heap = (int *)p;            p += (size_t)hc * sizeof(int);
+    s->hkey = (double *)p;
+    s->heap_cap = hc;
+    s->nedge_cap = ne; s->nnode_cap = nn;
+    src_solve(s);
+    return s;
+}
+
+void cmm_ac_src_destroy(cmm_ac_src *s) {
+    if (!s) return;
+    free(s->arena);
+    free(s);
+}
+
+int cmm_ac_src_move(cmm_ac_src *s, float x, float y, float z) {
+    if (!s) return 0;
+    /* ALLOCATES NOTHING. This is the call a moving speaker makes every tick it moves,
+     * and later every enemy: the arena was sized at create from the scene's graph, so
+     * N moving sources cost N graph solves and zero allocation. */
+    if (s->sc->nedge > s->nedge_cap || s->sc->nnodes > s->nnode_cap) return 0;
+    s->x = x; s->y = y; s->z = z;
+    src_solve(s);
+    return 1;
+}
+
+int cmm_ac_src_rebind(cmm_ac_src *s) {
+    if (!s) return 0;
+    if (s->sc->nedge <= s->nedge_cap && s->sc->nnodes <= s->nnode_cap) { src_solve(s); return 1; }
+    /* the graph grew past what this source was sized for: reallocate once, then re-solve */
+    int ne = s->sc->nedge > 0 ? s->sc->nedge : 1;
+    int nn = s->sc->nnodes > 0 ? s->sc->nnodes : 1;
+    int hc = ne * 32 + 1024;
+    size_t bytes = (size_t)ne * sizeof(struct ac_cost) + (size_t)nn * sizeof(double)
+                 + (size_t)hc * sizeof(int) + (size_t)hc * sizeof(double);
+    void *a = realloc(s->arena, bytes);
+    if (!a) return 0;
+    s->arena = a; s->arena_bytes = bytes;
+    unsigned char *p = (unsigned char *)s->arena;
+    s->cost = (struct ac_cost *)p; p += (size_t)ne * sizeof(struct ac_cost);
+    s->seed = (double *)p;         p += (size_t)nn * sizeof(double);
+    s->heap = (int *)p;            p += (size_t)hc * sizeof(int);
+    s->hkey = (double *)p;
+    s->heap_cap = hc;
+    s->nedge_cap = ne; s->nnode_cap = nn;
+    src_solve(s);
+    return 1;
+}
+
+/* parity read-back: how many edges the solve reached, and the best routed cost */
+long long cmm_ac_src_stat(const cmm_ac_src *s, int what) {
+    if (!s) return -1;
+    if (what == 0) { long long c = 0; for (int e = 0; e < s->sc->nedge; e++) if (s->cost[e].set) c++; return c; }
+    if (what == 1) { long long c = 0; for (int n = 0; n < s->sc->nnodes; n++) if (s->seed[n] >= 0) c++; return c; }
+    return -1;
+}
+double cmm_ac_src_cost(const cmm_ac_src *s, int edge) {
+    if (!s || edge < 0 || edge >= s->sc->nedge || !s->cost[edge].set) return -1.0;
+    return s->cost[edge].add;
 }
 
 long long cmm_ac_stat(const cmm_ac *ac, int what) {

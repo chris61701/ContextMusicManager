@@ -66,6 +66,34 @@ int main(int argc, char **argv) {
     printf("node edges       %lld\n", cmm_ac_stat(ac, 10));
     printf("segment          %.0f ms\n", ms2);
 
+    /* Routing solve from the first emitter listed alongside the grid, so the parity
+     * check covers the source-dependent half too. */
+    {
+        char epath[1024];
+        snprintf(epath, sizeof(epath), "%s", argv[1]);
+        char *dot = strrchr(epath, '.');
+        if (dot) strcpy(dot, ".emitters.txt");
+        FILE *ef = fopen(epath, "r");
+        int ex, ey, ez;
+        if (ef && fscanf(ef, "%d %d %d", &ex, &ey, &ez) == 3) {
+            clock_t t2 = clock();
+            cmm_ac_src *src = cmm_ac_src_create(ac, (float)ex, (float)ey, (float)ez);
+            double ms3 = 1000.0 * (double)(clock() - t2) / CLOCKS_PER_SEC;
+            if (src) {
+                printf("emitter          (%d,%d,%d)\n", ex, ey, ez);
+                printf("seeded nodes     %lld\n", cmm_ac_src_stat(src, 1));
+                printf("edges reached    %lld / %lld\n", cmm_ac_src_stat(src, 0), cmm_ac_stat(ac, 10));
+                printf("solve            %.1f ms\n", ms3);
+                clock_t t3 = clock();
+                for (int k = 0; k < 20; k++) cmm_ac_src_move(src, (float)ex, (float)ey, (float)ez);
+                double mv = 1000.0 * (double)(clock() - t3) / CLOCKS_PER_SEC;
+                printf("move x20         %.1f ms  (%.2f ms each, allocation-free)\n", mv, mv / 20.0);
+                cmm_ac_src_destroy(src);
+            }
+        }
+        if (ef) fclose(ef);
+    }
+
     /* A few spot values, so a whole-grid statistic that happens to match cannot
      * hide a local divergence. Sampled on a coarse lattice for stability. */
     printf("spot open/thick:");
