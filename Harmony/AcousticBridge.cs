@@ -60,7 +60,8 @@ namespace CMM
         // Reused, never per-call: an allocation here would land on the decision tick every publish.
         static readonly NativeAcoustics.Arrival[] _arrivals = new NativeAcoustics.Arrival[32];
 
-        internal static int SaturatedPoints;   // how many points clamped last publish
+        internal static int SaturatedPoints;   // clamped at the QUIET end last publish
+        internal static int GainPoints;        // clamped at UNITY -- the model reported gain
         internal static long LastBuildMs;
         internal static string LastStatus = "not built";
 
@@ -258,6 +259,7 @@ namespace CMM
             if (span <= 0.01f || fexp <= 0.01f) return false;
 
             SaturatedPoints = 0;
+            GainPoints = 0;
             for (int k = 0; k < ptCount; k++)
             {
                 var sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
@@ -266,7 +268,12 @@ namespace CMM
 
                 double db = src.LevelDb(ear);
                 double amp = Math.Pow(10.0, db / 20.0);          // dB is a power ratio; att is amplitude
-                if (amp > 1.0) amp = 1.0;
+                // COUNT BOTH CLAMPS. Only the quiet side was counted, and the loud side is the one
+                // that mattered: a model above unity has no attenuation that reproduces it, so it
+                // publishes FULLY UNOCCLUDED and no tuning can reach the point. That was happening
+                // at 58% of positions in a store POI and it was invisible, because the counter said
+                // zero. A clamp that changes the physics has to be visible in the readout.
+                if (amp > 1.0) { amp = 1.0; GainPoints++; }
                 if (amp < 1e-6) { amp = 1e-6; SaturatedPoints++; }
 
                 float d = Vector3.Distance(ear, sp);

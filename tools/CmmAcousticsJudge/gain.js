@@ -24,9 +24,10 @@ for (const f of fs.readdirSync(dir).filter(f => f.endsWith(".json"))) {
   for (let x = D.x0 + 2; x < D.x0 + D.sx - 2; x += 2) {
     const i = (x - D.x0) + D.sx * ((z - D.z0) + D.sz * (y - D.y0));
     if (G.open[i] <= 0.02) continue;
-    let p = 0;
-    for (const e of evs) p += Math.pow(10, e(x, y, z).total / 10);
-    const t = p > 1e-12 ? 10 * Math.log10(p) : -120;
+    // PER SPEAKER. Summing them was my own error: 0 dB is one speaker's emitted power, so
+    // eight of them together may legitimately exceed it. One speaker exceeding it cannot.
+    let t = -120;
+    for (const e of evs) { const v = e(x, y, z).total; if (v > t) t = v; }
     n++;
     if (t > 0) over++;
     if (t > worst) { worst = t; worstAt = [x, y, z]; }

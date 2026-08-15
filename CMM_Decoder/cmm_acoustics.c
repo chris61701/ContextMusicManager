@@ -1675,6 +1675,37 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
      * weakest arrival when a louder one arrives, so the cap costs accuracy in the tail
      * instead of wherever the edge numbering happened to fall. */
     const int ap_cap = max_out - 1;          /* one reserved for the diffuse field */
+
+    /* --- AN OPENING IS NOT A SOURCE: THE OPENINGS SHARE ONE SPEAKER ---
+     * Every aperture was given its own near-full copy of the speaker and the copies were then
+     * energy-summed, so a room with many openings delivered several speakers' worth of power.
+     * Measured over the store capture, 58% of standable positions came out ABOVE 0 dB per
+     * speaker -- the listener receiving more energy than the speaker emits. The C# bridge
+     * cannot express gain as an attenuation, so it clamped to fully unoccluded, and occlusion
+     * was switched OFF across most of a POI. That is what the author heard as "on the other
+     * side of a wall it sounds like there's barely anything between me and that wall", and why
+     * no material constant changed it: those points had already been clamped.
+     *
+     * A speaker radiates into 4*pi and each opening intercepts the solid angle it subtends,
+     * area/dist^2. Those patches are disjoint, so the shares can only add up to the whole --
+     * geometry, not a clamp.
+     *
+     * Normalised AMONG the apertures rather than against 4*pi, deliberately: this model charges
+     * spreading through an exponential SLOPE rather than inverse-square, so the absolute form
+     * double-charges it. The relative form fixes the double COUNT, which is the defect, and is
+     * exactly neutral with one aperture -- every single-opening spec scenario is untouched
+     * (verified against the JS model: spec 9/9, all six synthetic routes +0.00). */
+    double omega_sum = 0.0;
+    for (int e = 0; e < ac->nedge; e++) {
+        const struct ac_edge *E = &ac->edge[e];
+        if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;
+        double ex = E->sx / (E->area > 0 ? E->area : 1);
+        double ey = E->sy / (E->area > 0 ? E->area : 1);
+        double ez = E->sz / (E->area > 0 ? E->area : 1);
+        double dd = (ex - sx5) * (ex - sx5) + (ey - sy5) * (ey - sy5) + (ez - sz5) * (ez - sz5);
+        omega_sum += (E->area > 0 ? E->area : 1.0) / (dd > 1.0 ? dd : 1.0);
+    }
+
     for (int e = 0; e < ac->nedge; e++) {
         const struct ac_edge *E = &ac->edge[e];
         if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;   /* a cut is not an aperture */
@@ -1707,6 +1738,11 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
         }
         if (best > 1e29) continue;
         double cost = best - constrict_db(E->open_frac);
+        if (omega_sum > 0.0) {
+            double dd2 = (px - sx5) * (px - sx5) + (py - sy5) * (py - sy5) + (pz - sz5) * (pz - sz5);
+            double omega = (E->area > 0 ? E->area : 1.0) / (dd2 > 1.0 ? dd2 : 1.0);
+            cost -= 10.0 * log10(omega / omega_sum);       /* this opening's share of the sphere */
+        }
         double route_len = best_len;
         double leg = sqrt((px - lx) * (px - lx) + (py - ly) * (py - ly) + (pz - lz) * (pz - lz));
         double legmat = leg_db(ac, px, py, pz, lx, ly, lz);

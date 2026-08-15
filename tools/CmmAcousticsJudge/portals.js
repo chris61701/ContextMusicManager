@@ -795,7 +795,46 @@ function makeNewEvaluator(D, G, src) {
     }
     if (!Number.isFinite(bestDb)) continue;
     cands.push({ cost: bestDb - constrictDb(A.throat), px: A.px, py: A.py, pz: A.pz,
-                 routeLen: bestLen, throat: A.throat });
+                 routeLen: bestLen, throat: A.throat, area: A.area,
+                 srcDist: Math.hypot(A.px - sx5, A.py - sy5, A.pz - sz5) });
+  }
+
+  // ── AN OPENING IS NOT A SOURCE: THE OPENINGS SHARE ONE SPEAKER ───────────────
+  // Every aperture was given its OWN near-full copy of the speaker and the copies were then
+  // energy-summed, so a room with many openings delivered several speakers' worth of power. It
+  // is not a subtle error: measured over the store capture, 99.2% of standable positions came
+  // out ABOVE 0 dB -- the listener receiving more energy than the speaker emits. The bridge
+  // cannot express that as an attenuation, so it clamped to fully unoccluded, and occlusion was
+  // switched off across essentially a whole POI. That is what "on the other side of a wall it
+  // sounds like there's barely anything between me and that wall" was, and why no material
+  // constant changed it: those points had already been clamped.
+  //
+  // No gate caught it because the passivity check tests one TERM against its own room. Nothing
+  // compared the SUM at the listener against the source. gain.js is that measurement.
+  //
+  // A speaker radiates into 4*pi and each opening intercepts the solid angle it subtends,
+  // area/dist^2. Those patches are disjoint, so the shares can only add up to the whole -- that
+  // is the passivity statement, and it is geometry rather than a clamp.
+  //
+  // NORMALISED AMONG THE APERTURES rather than against 4*pi, deliberately. The absolute form
+  // (share = omega/4pi) is the correct one, but this model charges spreading through an
+  // exponential SLOPE rather than inverse-square, so the absolute form double-charges it and
+  // sinks a plain open doorway by ~17 dB. The relative form fixes the double COUNT -- which is
+  // the defect -- while leaving the absolute scale to the distance law, and it is exactly
+  // neutral when there is one aperture, so every single-opening spec scenario is untouched.
+  // When the distance law is settled, this becomes omega/4pi and needs no other change.
+  // CMM_NOSHARE=1 disables it, so the A/B is measured with one instrument rather than by
+  // reverting the code and accidentally reverting the measurement with it (which I did once).
+  if (process.env.CMM_NOSHARE !== "1") {
+    let omegaSum = 0;
+    for (const c of cands) {
+      if (c.isSrc) continue;
+      c.omega = (c.area || 1) / Math.max(1, c.srcDist * c.srcDist);
+      omegaSum += c.omega;
+    }
+    if (omegaSum > 0)
+      for (const c of cands)
+        if (!c.isSrc) c.cost -= 10 * Math.log10(c.omega / omegaSum);
   }
 
   // wx/wy/wz are BLOCK COORDS and may be fractional.
