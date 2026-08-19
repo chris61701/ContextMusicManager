@@ -103,6 +103,8 @@ namespace CMM
         static double _dbgRaw, _dbgFree, _dbgOccl;
         static int _dbgN;
         static readonly double[] _dbgKind = new double[4];
+        static double _dbgDomDb; static int _dbgDomKind;
+        static float _dbgDomX, _dbgDomY, _dbgDomZ, _dbgDomLen;
         static float _dbgExtra;
 
         internal static string DescribeNearest()
@@ -120,7 +122,17 @@ namespace CMM
                 if (_dbgKind[k] > 0)
                     sb.Append(nm[k]).Append(' ')
                       .Append((10.0 * Math.Log10(_dbgKind[k])).ToString("0.0")).Append(' ');
-            return sb.Append(']').ToString();
+            sb.Append(']');
+            if (_dbgDomKind >= 0)
+            {
+                string[] kn = { "direct", "barrier", "opening", "diffuse" };
+                sb.Append("  loudest=").Append(kn[_dbgDomKind < 4 ? _dbgDomKind : 0])
+                  .Append(' ').Append(_dbgDomDb.ToString("0.0")).Append("dB from ")
+                  .Append(_dbgDomX.ToString("0")).Append(',').Append(_dbgDomY.ToString("0"))
+                  .Append(',').Append(_dbgDomZ.ToString("0"))
+                  .Append(" pathlen ").Append(_dbgDomLen.ToString("0"));
+            }
+            return sb.ToString();
         }
         internal static long LastBuildMs;
         internal static string LastStatus = "not built";
@@ -402,6 +414,20 @@ namespace CMM
                     _dbgFree = NativeAcoustics.cmm_ac_freefield_db(d);
                     _dbgOccl = db;
                     _dbgN = src.Evaluate(ear, _arrivals);
+                    // WHERE the loudest arrival radiates from, and which kind it is. The kind totals
+                    // say "an opening is carrying it"; they cannot say WHICH opening, and that is the
+                    // difference between "sound is coming round the doorway as it should" and "the
+                    // graph found a hole in the floor". Guessing between those has cost several
+                    // rounds already.
+                    _dbgDomDb = -999.0; _dbgDomKind = -1;
+                    for (int a = 0; a < _dbgN; a++)
+                        if (_arrivals[a].db > _dbgDomDb)
+                        {
+                            _dbgDomDb = _arrivals[a].db;
+                            _dbgDomKind = _arrivals[a].kind;
+                            _dbgDomX = _arrivals[a].px; _dbgDomY = _arrivals[a].py; _dbgDomZ = _arrivals[a].pz;
+                            _dbgDomLen = _arrivals[a].len;
+                        }
                     _dbgKind[0] = _dbgKind[1] = _dbgKind[2] = _dbgKind[3] = 0.0;
                     for (int a = 0; a < _dbgN; a++)
                     {
