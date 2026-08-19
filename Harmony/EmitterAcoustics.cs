@@ -536,6 +536,18 @@ namespace CMM
             // the first visible damage state breaches the seal back to ordinary material acoustics.
             if (b.shape is BlockShapeModelEntity)
             {
+                // AN OPEN DOOR AT REST IS OPEN. This branch only ever asked about DAMAGE, so a door
+                // standing wide open with nothing in the doorway still returned full solid loss --
+                // sound could not pass an open door unless it happened to be MOVING at the time,
+                // because the mid-swing branch above is the only place openness was consulted.
+                // Reported exactly so: "when doors are animating, air sound travels through them;
+                // when they are not moving, sound doesn't seem to, even when it is open."
+                //
+                // The per-instance movement test is the right question and is already used six lines
+                // up for see-through doors, with the comment "an OPEN door isn't movement-blocking".
+                // A solid wooden door is not see-through, so it never reached that test and fell
+                // through to here. Same test, applied where it was missing.
+                if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return 0f;
                 float dmgOpen = DamageOpenness(b, bv, world, x, y, z);
                 if (dmgOpen <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
                 return SolidLoss(b) * (1f - dmgOpen);
