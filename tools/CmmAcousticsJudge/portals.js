@@ -253,6 +253,11 @@ const MFP_MIN = 0.5 * WAVELEN_BLOCKS;   // below this, no diffuse field of its o
 // Sky exposure separates the two cleanly and with no overlap at all: every enclosed room in every
 // capture measures 0.0% of its boundary open to the world, while the outdoor regions measure
 // 43-57%. Where the boundary is sky, energy leaves instead of reverberating.
+// A boundary this much OPENING still reverberates; past OPEN_SHARE_NONE it does not. Same
+// physics as the sky pair below -- a hole is a hole whether the far side is another room or the
+// weather -- and ramped for the same reason: opening a door must not delete a room's echo.
+const OPEN_SHARE_FULL = process.env.CMM_OSF === undefined ? 0.20 : +process.env.CMM_OSF;
+const OPEN_SHARE_NONE = process.env.CMM_OSN === undefined ? 0.95 : +process.env.CMM_OSN;
 const SKY_FULL = 0.05;   // below this share of open boundary, a full reverberant field
 const SKY_NONE = 0.25;   // above it, none at all
                          // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
@@ -1011,8 +1016,32 @@ function makeNewEvaluator(D, G, src) {
       const R = RM[rm];
       // mean free path 4V/S, in blocks; V is the voxel count, S the counted face area
       const mfp = 4 * Math.max(1, R.n) / Math.max(1, R.surf);
+      // ── AN OPENING IS SKY, ACOUSTICALLY ─────────────────────────────────────────
+      // The sky test above says it exactly right: "where the boundary is sky, energy leaves
+      // instead of reverberating". A DOORWAY is the same statement -- energy crossing it is gone
+      // from this room -- and the test was never applied to it. Openings were counted in the
+      // absorption (correctly), but a space whose boundary is mostly opening was still granted a
+      // FULL reverberant field, and there is no such thing: sound has to bounce many times before
+      // being absorbed for a diffuse field to exist, and if most of the boundary is a hole it
+      // leaves on the first pass.
+      //
+      // Measured on the bunker, rooms that were being given a full field:
+      //     n=5789  surf=976  openArea=2808   -> boundary 74% opening, field -21.9 dB
+      //     n=1603  surf=152  openArea=2309   -> boundary 94% opening, field -20.8 dB
+      //     n=87    surf=20   openArea=175    -> boundary 90% opening, field -22.3 dB
+      // Those passages are what produced the flat reverb floor a speaker in an OPEN FIELD sat
+      // under: their fields radiated back out through the very openings that should have
+      // prevented them existing. Past eight blocks that floor became the level, the level stopped
+      // falling with distance, and occlusion switched off across the whole POI.
+      //
+      // Ramped over the same kind of range as the sky test, so a room does not lose its
+      // reverberation the moment a door opens -- it loses it in proportion to how much of its
+      // boundary is now hole.
+      const bnd = Math.max(1, R.surf) + openArea[rm];
+      const openShare = openArea[rm] / bnd;
       canReverb[rm] = sstep(MFP_MIN, WAVELEN_BLOCKS, mfp)
-                    * (1 - sstep(SKY_FULL, SKY_NONE, R.skyFrac === undefined ? 0 : R.skyFrac));
+                    * (1 - sstep(SKY_FULL, SKY_NONE, R.skyFrac === undefined ? 0 : R.skyFrac))
+                    * (1 - sstep(OPEN_SHARE_FULL, OPEN_SHARE_NONE, openShare));
       direct[rm] = direct[rm] > 0 ? canReverb[rm] * 4 * direct[rm] / absorbOf(rm) : 0;
     }
     // pass 2: power driven through SHARED WALLS by the neighbouring rooms. Power INCIDENT on a

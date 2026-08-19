@@ -159,6 +159,26 @@ double cmm_ac_diffuse_cal = 7.0;
  * from outdoors with no overlap: enclosed rooms measure 0.0% of their boundary open to the
  * world, outdoor ones 43-57%. Gating only the direct term left the wall-coupling pass free
  * to hand the outdoors a field anyway, which is where it does the most damage. */
+/* AN OPENING IS SKY, ACOUSTICALLY. The sky pair below says it exactly right -- where the
+ * boundary is sky, energy leaves instead of reverberating -- and a DOORWAY is the same
+ * statement, never applied to it. Openings were already counted in the absorption, correctly,
+ * but a space whose boundary is mostly opening was still granted a FULL reverberant field, and
+ * there is no such thing: a diffuse field needs sound to bounce many times before it is
+ * absorbed, and if most of the boundary is a hole it leaves on the first pass.
+ *
+ * Measured on the bunker, rooms that were being given a full field:
+ *     n=5789  surf=976  open=2808  -> boundary 74% opening, field -21.9 dB
+ *     n=1603  surf=152  open=2309  -> boundary 94% opening, field -20.8 dB
+ * Those passages produced the flat reverb floor a speaker in an OPEN FIELD sat under: their
+ * fields radiated back out through the very openings that should have stopped them existing.
+ * Past eight blocks that floor became the level, so the level stopped falling with distance and
+ * occlusion switched off across the whole POI -- reported as "a hint quieter when closer", "I
+ * can hear it very far away behind a wall", and "muffling is inconsistent", all three at once.
+ *
+ * Ramped wide (0.20-0.95) rather than tight: a room must not lose its echo the moment a door
+ * opens, and a tighter ramp roughened the store measurably (6.61 vs 6.36 dB/block worst). */
+#define OPEN_SHARE_FULL 0.20
+#define OPEN_SHARE_NONE 0.95
 #define SKY_FULL 0.05
 #define SKY_NONE 0.25
 
@@ -1494,7 +1514,13 @@ static void src_fields(cmm_ac_src *s) {
         double v2 = (sky - SKY_FULL) / (SKY_NONE - SKY_FULL);
         if (v2 < 0) v2 = 0; if (v2 > 1) v2 = 1;
         v2 = v2 * v2 * (3.0 - 2.0 * v2);
-        s->canrev[r] = v1 * (1.0 - v2);
+        /* how much of this room's boundary is opening rather than surface */
+        double bnd = (double)(R->surf > 0 ? R->surf : 1) + R->open_area;
+        double osh = bnd > 0.0 ? R->open_area / bnd : 0.0;
+        double v3 = (osh - OPEN_SHARE_FULL) / (OPEN_SHARE_NONE - OPEN_SHARE_FULL);
+        if (v3 < 0) v3 = 0; if (v3 > 1) v3 = 1;
+        v3 = v3 * v3 * (3.0 - 2.0 * v3);
+        s->canrev[r] = v1 * (1.0 - v2) * (1.0 - v3);
     }
 
     /* pass 1: power arriving at each room's inlets */

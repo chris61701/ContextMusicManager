@@ -185,8 +185,6 @@
        occlusion. Runs off the frame loop (a scene is built in ~1.5 ms slices while you walk) and
        falls back to the previous model automatically while a scene builds and ALWAYS during a door
        swing, so mid-swing door acoustics are unchanged.
-       KNOWN LIMIT: past roughly 8 blocks a speaker behind a wall is currently under-occluded — you
-       hear it more clearly than you should. Near-range behaviour is correct.
        false = the previous occlusion model, exactly as it shipped. Live: `cmm acoustics on|off`.
        OcclusionFullDb = how much occlusion (dB) fully dulls the tone; lower = walls sound duller
        sooner. Both hot-reload. -->
