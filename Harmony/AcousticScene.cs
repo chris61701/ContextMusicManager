@@ -116,8 +116,16 @@ namespace CMM
         internal readonly byte[] Flags;
         internal bool Complete { get; private set; }
 
-        int _cursorY;                     // next y-slab to read; the box is filled slab by slab
-        internal float ProgressPct => Sy == 0 ? 0f : 100f * _cursorY / Sy;
+        // Cursor is (y, z) -- a ROW at a time, not a slab. A slab is Sx*Sz blocks: 9,409 at the old
+        // +/-48 extent and 40,401 at +/-100, so checking the time budget only between slabs made the
+        // budget meaningless and stalled the frame for as long as one slab took. Measured in game:
+        // "STUTTER 3 frame(s) over 654 ms, worst 374.3 ms (10.4x baseline)" in the same frame the
+        // read was running -- and that stall is very likely what stranded a PlayOnce stinger 382 ms
+        // in, since a 374 ms frame is long enough for the scan loop to see a just-started voice as
+        // dead. A row is Sx blocks (201 at the widest), which fits inside any sane budget.
+        int _cursorY, _cursorZ;
+        internal float ProgressPct =>
+            (Sy == 0 || Sz == 0) ? 0f : 100f * (_cursorY * Sz + _cursorZ) / (Sy * Sz);
 
         internal VoxelBox(int sx, int sy, int sz)
         {
@@ -131,7 +139,7 @@ namespace CMM
         internal void Restart(int x0, int y0, int z0)
         {
             X0 = x0; Y0 = y0; Z0 = z0;
-            _cursorY = 0;
+            _cursorY = 0; _cursorZ = 0;
             Complete = false;
         }
 
@@ -152,18 +160,17 @@ namespace CMM
             {
                 while (_cursorY < Sy)
                 {
-                    int y = _cursorY;
-                    for (int z = 0; z < Sz; z++)
-                        for (int x = 0; x < Sx; x++)
-                        {
-                            int wx = X0 + x, wy = Y0 + y, wz = Z0 + z;
-                            long i = x + (long)Sx * (z + (long)Sz * y);
-                            BlockValue bv = world.GetBlock(wx, wy, wz);
-                            if (bv.isair) { Flags[i] = (byte)NativeAcoustics.AIR; Loss[i] = 0f; continue; }
-                            Flags[i] = 0;
-                            Loss[i] = EmitterAcoustics.DebugCellLoss(bv, world, wx, wy, wz);
-                        }
-                    _cursorY++;
+                    int y = _cursorY, z = _cursorZ;
+                    for (int x = 0; x < Sx; x++)
+                    {
+                        int wx = X0 + x, wy = Y0 + y, wz = Z0 + z;
+                        long i = x + (long)Sx * (z + (long)Sz * y);
+                        BlockValue bv = world.GetBlock(wx, wy, wz);
+                        if (bv.isair) { Flags[i] = (byte)NativeAcoustics.AIR; Loss[i] = 0f; continue; }
+                        Flags[i] = 0;
+                        Loss[i] = EmitterAcoustics.DebugCellLoss(bv, world, wx, wy, wz);
+                    }
+                    if (++_cursorZ >= Sz) { _cursorZ = 0; _cursorY++; }
                     if ((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs >= budgetMs) break;
                 }
             }
@@ -171,7 +178,7 @@ namespace CMM
             {
                 CMMConfig.D($"[CMM] acoustics voxel read failed: {e.Message}");
                 Complete = false;
-                _cursorY = 0;
+                _cursorY = 0; _cursorZ = 0;
                 return false;
             }
             if (_cursorY >= Sy) Complete = true;

@@ -538,6 +538,24 @@ namespace CMM
 
                 if (topContext == null)
                 {
+                    // A LIVE PlayOnce STINGER OUTRANKS NOTHING AT ALL. The guard in the branch
+                    // below refuses to interrupt an audible stinger with anything of equal or lower
+                    // priority -- but this branch had no guard, and "nothing playable" is the lowest
+                    // priority there is. So a stinger whose own context had already left the active
+                    // set (Spawn and Death carry stale="0", they go inactive the instant the event
+                    // passes) was faded out from under itself.
+                    //
+                    // Measured from the log: Spawn dispatched at 101.412 and stopped at 101.795 --
+                    // 382 ms, with "Fading to silence (2.0s)" logged the millisecond before. The
+                    // file is far longer than that. This is the same failure a comment in
+                    // AudioPlayer already describes ("a PlayOnce stinger was treated as strandable
+                    // and got interrupted ~0.3s in"), returning by a different route.
+                    if (currentContext != null && currentContext.PlayOnce && !currentAudioDead)
+                    {
+                        // Let it finish. currentAudioDead is what ends this -- the stinger stops
+                        // protecting itself the moment it is genuinely no longer audible.
+                        continue;
+                    }
                     // Nothing is playable and DMS is off — fade to silence rather than
                     // activating vanilla and releasing the Conductor unnecessarily.
                     if (currentContext?.Context != "Silence")
