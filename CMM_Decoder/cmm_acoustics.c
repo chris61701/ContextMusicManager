@@ -175,10 +175,18 @@ double cmm_ac_diffuse_cal = 7.0;
  * occlusion switched off across the whole POI -- reported as "a hint quieter when closer", "I
  * can hear it very far away behind a wall", and "muffling is inconsistent", all three at once.
  *
- * Ramped wide (0.20-0.95) rather than tight: a room must not lose its echo the moment a door
- * opens, and a tighter ramp roughened the store measurably (6.61 vs 6.36 dB/block worst). */
-#define OPEN_SHARE_FULL 0.20
-#define OPEN_SHARE_NONE 0.95
+ * TIGHT (0.10-0.40), and the first attempt at this got it backwards. A wide ramp was chosen to
+ * improve a smoothness number, which meant barely gating anything -- and gating is precisely what
+ * stops sound bleeding through walls. Measured through the store's walls, mean occlusion and the
+ * share of positions where NO occlusion can be expressed at all:
+ *
+ *     ramp 0.20-0.95    8-16 blk  +1.8 dB (77%)   24-32  +6.0 dB (100%)
+ *     ramp 0.10-0.40    8-16 blk  -3.7 dB ( 9%)   24-32  -3.9 dB ( 25%)
+ *
+ * Tighter is better on the smoothness metric too (store 5.45 against 6.36), so the earlier
+ * conclusion came from comparing two values inside the wrong region. */
+#define OPEN_SHARE_FULL 0.10
+#define OPEN_SHARE_NONE 0.40
 #define SKY_FULL 0.05
 #define SKY_NONE 0.25
 

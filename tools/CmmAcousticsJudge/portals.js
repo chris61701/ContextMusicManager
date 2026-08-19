@@ -256,8 +256,8 @@ const MFP_MIN = 0.5 * WAVELEN_BLOCKS;   // below this, no diffuse field of its o
 // A boundary this much OPENING still reverberates; past OPEN_SHARE_NONE it does not. Same
 // physics as the sky pair below -- a hole is a hole whether the far side is another room or the
 // weather -- and ramped for the same reason: opening a door must not delete a room's echo.
-const OPEN_SHARE_FULL = process.env.CMM_OSF === undefined ? 0.20 : +process.env.CMM_OSF;
-const OPEN_SHARE_NONE = process.env.CMM_OSN === undefined ? 0.95 : +process.env.CMM_OSN;
+const OPEN_SHARE_FULL = process.env.CMM_OSF === undefined ? 0.10 : +process.env.CMM_OSF;
+const OPEN_SHARE_NONE = process.env.CMM_OSN === undefined ? 0.40 : +process.env.CMM_OSN;
 const SKY_FULL = 0.05;   // below this share of open boundary, a full reverberant field
 const SKY_NONE = 0.25;   // above it, none at all
                          // indoors, which is what the critical-distance calculation predicts (MODEL.md term 4)
