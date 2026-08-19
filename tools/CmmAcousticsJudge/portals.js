@@ -418,11 +418,25 @@ function barrierMid(D, fx, fy, fz, tx, ty, tz) {
   const tDx = tD(dx), tDy = tD(dy), tDz = tD(dz);
   // Track material RUNS. A run breaks on any gap of air, so the speaker's own block and a wall
   // beyond it are two runs rather than one long smear.
+  // ── A SPEAKER'S OWN BLOCK IS NOT A BARRIER BETWEEN IT AND YOU ────────────────
+  // A speaker sits INSIDE a solid block, so the very first voxel of this walk is always
+  // material and always opens a run. Standing one block away with clear air between, that run is
+  // the ONLY one, so it becomes "the barrier" -- the disc then runs over the speaker's own casing
+  // and whatever it is mounted on, and reports occlusion where there is none. Measured: -1.19 dB
+  // at one block, -0.62 at 1.5, crossing zero around two. Since anything positive clamps to no
+  // attenuation, walking IN from three blocks to one ADDED 1.2 dB of attenuation, heard as "when
+  // standing very close it still gets a hint quieter than when standing a few blocks away".
+  //
+  // segDbAt already refuses to charge the source's own voxel on a source-to-listener ray
+  // (skipFrom defaults true, for exactly this reason). Barrier-FINDING has to agree with it, or
+  // the two disagree about whether a barrier exists at all.
+  const sVx = Math.floor(fx), sVy = Math.floor(fy), sVz = Math.floor(fz);
   let runA = -1, runB = -1, lastA = -1, lastB = -1, tPrev = 0;
   for (let g = 0; g < 1024; g++) {
     const tNext = Math.min(tmx, tmy, tmz, dist);
     if (tNext - tPrev > 1e-6 && y >= 0 && y < 256) {
-      if (D.lossAt(x, y, z) > 0.05) {
+      const isSrcVox = x === sVx && y === sVy && z === sVz;
+      if (!isSrcVox && D.lossAt(x, y, z) > 0.05) {
         if (runA < 0) runA = tPrev;                    // a run opens
         runB = tNext;
       } else if (runA >= 0) {

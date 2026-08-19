@@ -1297,13 +1297,27 @@ static int barrier_mid(const cmm_ac *ac, double fx, double fy, double fz,
     double tDx = fabs(dx) < 1e-6 ? 1e30 : fabs(1.0 / dx);
     double tDy = fabs(dy) < 1e-6 ? 1e30 : fabs(1.0 / dy);
     double tDz = fabs(dz) < 1e-6 ? 1e30 : fabs(1.0 / dz);
+    /* A SPEAKER'S OWN BLOCK IS NOT A BARRIER BETWEEN IT AND YOU.
+     * A speaker sits inside a solid block, so the first voxel of this walk is always material and
+     * always opens a run. Standing one block away with clear air between, that run is the ONLY one
+     * and becomes "the barrier" -- the disc then runs over the speaker's own casing and whatever it
+     * is mounted on, and reports occlusion where there is none. Measured -1.19 dB at one block,
+     * -0.62 at 1.5, crossing zero near two; and since anything positive clamps to no attenuation,
+     * walking IN from three blocks to one ADDED 1.2 dB. Reported as "when standing very close it
+     * still gets a hint quieter than when standing a few blocks away".
+     *
+     * seg_db_at already refuses to charge the source's own voxel on a source-to-listener ray (its
+     * skip_from argument, for exactly this reason). Barrier-FINDING must agree with it, or the two
+     * disagree about whether a barrier exists at all. */
+    const int sVx = x, sVy = y, sVz = z;
     double runA = -1, runB = -1, lastA = -1, lastB = -1, tPrev = 0;
     for (int g = 0; g < 1024; g++) {
         double tNext = tmx < tmy ? tmx : tmy;
         if (tmz < tNext) tNext = tmz;
         if (dist < tNext) tNext = dist;
         if (tNext - tPrev > 1e-6 && x >= 0 && x < ac->sx && y >= 0 && y < ac->sy && z >= 0 && z < ac->sz) {
-            if (ac->loss[idx_of(ac, x, y, z)] > 0.05) {
+            int isSrcVox = (x == sVx && y == sVy && z == sVz);
+            if (!isSrcVox && ac->loss[idx_of(ac, x, y, z)] > 0.05) {
                 if (runA < 0) runA = tPrev;
                 runB = tNext;
             } else if (runA >= 0) { lastA = runA; lastB = runB; runA = -1; }
