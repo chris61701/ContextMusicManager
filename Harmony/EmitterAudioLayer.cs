@@ -564,7 +564,13 @@ namespace CMM
             if (count <= 0) return;
             float rate = CMMConfig.WorldEmitterOcclusionFadeRate;
             float now = Time.realtimeSinceStartup;
-            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f;
+            // ...and stays bypassed until the acoustic model has actually DELIVERED the change.
+            // The 1 s window is measured from the door toggle, but the native scene needs the swing
+            // to finish (~1 s) plus a rebuild (~0.6 s) before it can publish the new occlusion -- by
+            // which time the exemption had lapsed and the rate cap throttled the very change it
+            // exists to let through. Total lag to a shut door was animation + rebuild + ramp.
+            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f
+                           || (CMMConfig.WorldEmitterNativeAcoustics && AcousticBridge.GeometrySettling);
             for (int i = 0; i < count; i++)
             {
                 Vector3i key = SlotKey(pts, i);

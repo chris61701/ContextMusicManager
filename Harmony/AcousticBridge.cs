@@ -320,6 +320,7 @@ namespace CMM
                 // Cleared by the swap, not by the request -- and left SET if the world moved under
                 // this pass, so another one starts immediately.
                 _stale = wasStale;
+                if (!wasStale) _geomLiveAt = Time.realtimeSinceStartup;   // this scene is current
                 LastStatus = $"rooms {_scene.Rooms}, nodes {_scene.Nodes}, edges {_scene.Edges}, "
                            + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms";
             }
@@ -543,6 +544,7 @@ namespace CMM
                 }
             }
             _doorPositions.Clear();
+            _geomChangeAt = Time.realtimeSinceStartup;
             if (patched)
             {
                 LastStatus = "door patched, rebuilding";
@@ -558,6 +560,26 @@ namespace CMM
             }
         }
         static bool _stale;
+
+        // When geometry last changed, and when a scene reflecting it last went live. The rise
+        // limiter needs both: it exempts door-driven changes from its rate cap, but its own window
+        // is measured from the door TOGGLE -- which expires about a second later, before this model
+        // has even finished rebuilding. So the one change the exemption exists for was the one it
+        // throttled. Reported as "with the door opening and closing, there is a huge delay in when
+        // sound changes".
+        static float _geomChangeAt = -999f, _geomLiveAt = -999f;
+
+        // True while a geometry change is still working its way out to the audio: from the change
+        // itself until shortly after a scene containing it went live.
+        internal static bool GeometrySettling
+        {
+            get
+            {
+                float now = Time.realtimeSinceStartup;
+                if (now - _geomChangeAt < 0.25f) return true;
+                return _geomLiveAt >= _geomChangeAt && now - _geomLiveAt < 0.75f;
+            }
+        }
 
         // Drop it outright. Only for teardown, where there IS no correct answer to keep serving.
         internal static void DropScene()
