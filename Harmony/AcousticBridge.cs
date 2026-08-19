@@ -53,12 +53,30 @@ namespace CMM
         // voxels (~39 MB, ~650 ms). 72 covers the great majority of audible speakers at 1.03M
         // (~22 MB), and anything still outside now falls back to the shipped model instead of being
         // published as unoccluded -- see the bounds check in ComputeOcclusion.
-        const int HalfX = 72, HalfZ = 72, Below = 16, Above = 32;
+        // SIZED FROM THE EMITTER RANGE, not from a guess. +/-48 then +/-72 were both guesses, and
+        // both left speakers outside the scene -- at which point the bounds check below correctly
+        // declines and the station falls back to the shipped model, so the new model simply never
+        // runs for a distant speaker. Caught from the log: "ac nearest: no point" on every line
+        // while pts=4, i.e. points were being published, by the OTHER model.
+        //
+        // The box has to cover what the audio layer will ask about, and that is the configured
+        // range. At the default 100 that is 201 x 49 x 201 = 1.98M voxels: ~42 MB of native arena,
+        // ~10 MB of managed read buffer, ~0.8 s to build on the scheduler and ~4 s to read at
+        // 1.5 ms/frame -- during which the PREVIOUS scene keeps serving, so the cost is latency and
+        // never a gap. Capped at 100 so a user who sets a huge range gets a large-but-bounded scene
+        // rather than a gigabyte.
+        static int HalfX => Mathf.Clamp(Mathf.CeilToInt(CMMConfig.WorldEmitterRange) + 4, 48, 100);
+        static int HalfZ => HalfX;
+        const int Below = 16, Above = 32;
 
         // Rebuild once the listener has walked this far from the scene's centre. The scene is
         // source-independent, so it does NOT need rebuilding when a speaker moves -- only when
         // the listener leaves the box the geometry was captured over.
-        const float RecentreDist = 24f;
+        // Scaled to the box. At +/-48 a 24-block walk was a sensible third of the extent; at +/-100
+        // it would rebuild a 1.98M-voxel scene every 24 blocks for no benefit, since the box still
+        // covers everything the audio layer can ask about. A speaker that does fall outside between
+        // rebuilds is handled by the bounds check, not by rebuilding pre-emptively.
+        static float RecentreDist => HalfX * 0.45f;
 
         // The scene is built on the SCHEDULER thread and read on the decision thread, so the swap
         // and every read are serialised. Reads are microseconds (a graph solve per speaker), so
