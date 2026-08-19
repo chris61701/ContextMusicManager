@@ -198,7 +198,7 @@ namespace CMM
         // Route occlusion through the NATIVE acoustic model (cmm_acoustics) instead of the
         // shipped ear-anchored flood. Off by default until it has been heard in game: the old
         // path stays reachable so the two can be A/B'd without a rebuild.
-        public static bool   WorldEmitterNativeAcoustics   = false;
+        public static bool   WorldEmitterNativeAcoustics   = true;
         // Occlusion (dB) at which the emitter tone reaches full dullness, when the native acoustic
         // model is driving. 8 dB is about what the shipped model's virtual distance produced for a
         // wall at mid range, so a wall keeps sounding like a wall.

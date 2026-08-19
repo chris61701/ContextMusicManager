@@ -177,6 +177,21 @@
   <WorldEmitterFieldCache>true</WorldEmitterFieldCache>
   <WorldEmitterFieldRadius>48</WorldEmitterFieldRadius>
   <WorldEmitterFieldRefresh>60</WorldEmitterFieldRefresh>
+  <!-- NATIVE ACOUSTICS: the occlusion model that decides how much a wall, floor or door takes away
+       and which direction the sound reaches you from. Works in DECIBELS rather than in "extra
+       distance", which is what lets a wall be worth the same amount of quiet wherever you stand —
+       the older model priced it in blocks, so the same wall cost a different amount at every range
+       and could not be tuned. Distance falloff stays the game's own curve; this only supplies the
+       occlusion. Runs off the frame loop (a scene is built in ~1.5 ms slices while you walk) and
+       falls back to the previous model automatically while a scene builds and ALWAYS during a door
+       swing, so mid-swing door acoustics are unchanged.
+       KNOWN LIMIT: past roughly 8 blocks a speaker behind a wall is currently under-occluded — you
+       hear it more clearly than you should. Near-range behaviour is correct.
+       false = the previous occlusion model, exactly as it shipped. Live: `cmm acoustics on|off`.
+       OcclusionFullDb = how much occlusion (dB) fully dulls the tone; lower = walls sound duller
+       sooner. Both hot-reload. -->
+  <WorldEmitterNativeAcoustics>true</WorldEmitterNativeAcoustics>
+  <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>
   <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's
        wall bounces (reflective caves ring around corner after corner until the sound truly runs out
        of energy; absorptive wood rooms still eat it fast) instead of by raw route meters. Hot;

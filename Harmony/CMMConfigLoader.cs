@@ -137,6 +137,8 @@ namespace CMM
                 CMMConfig.WorldEmitterPathRouting       = ReadBool (root, "WorldEmitterPathRouting",       CMMConfig.WorldEmitterPathRouting);
                 CMMConfig.WorldEmitterFloodRadius       = ReadInt  (root, "WorldEmitterFloodRadius",       CMMConfig.WorldEmitterFloodRadius);
                 CMMConfig.WorldEmitterFieldCache        = ReadBool (root, "WorldEmitterFieldCache",        CMMConfig.WorldEmitterFieldCache);
+                CMMConfig.WorldEmitterNativeAcoustics   = ReadBool (root, "WorldEmitterNativeAcoustics",   CMMConfig.WorldEmitterNativeAcoustics);
+                CMMConfig.WorldEmitterOcclusionFullDb   = ReadFloat(root, "WorldEmitterOcclusionFullDb",   CMMConfig.WorldEmitterOcclusionFullDb);
                 CMMConfig.WorldEmitterFieldRadius       = ReadInt  (root, "WorldEmitterFieldRadius",       CMMConfig.WorldEmitterFieldRadius);
                 CMMConfig.WorldEmitterFieldRefresh      = ReadFloat(root, "WorldEmitterFieldRefresh",      CMMConfig.WorldEmitterFieldRefresh);
                 CMMConfig.WorldEmitterReverbBounce      = ReadBool (root, "WorldEmitterReverbBounce",      CMMConfig.WorldEmitterReverbBounce);
