@@ -37,7 +37,23 @@ namespace CMM
         // How far around the listener a scene covers. Big enough to hold a POI and the ground
         // under it; small enough that a rebuild stays affordable. The largest real capture is
         // 112x87x112 and costs ~310 ms, which is why this runs off the frame loop.
-        const int HalfX = 48, HalfZ = 48, Below = 12, Above = 28;
+        // MUST COVER WHAT IT IS ASKED ABOUT. This was +/-48 blocks around the listener while the
+        // emitter range is 100, so any speaker past 48 blocks sat OUTSIDE the scene entirely -- and
+        // nothing checked. The native solve happily returns a bare free-field arrival for a source
+        // it has no geometry for, which reads as ZERO OCCLUSION, so up to half the audible speakers
+        // were unoccludable purely on distance regardless of what stood between. Caught from the
+        // in-game log, every line identical:
+        //
+        //     ac nearest: d=87.8 model=-38.9 free=-38.9 OCCL=0.0 extra=0.0 [dir -38.9]
+        //
+        // One lone arrival, model exactly equal to free field. That is the shape of a scene that
+        // does not contain the speaker, and it is what "the occlusion is all wonky" was.
+        //
+        // +/-72 rather than the full 100: the cost is voxel-cubed and a full-range box is 1.66M
+        // voxels (~39 MB, ~650 ms). 72 covers the great majority of audible speakers at 1.03M
+        // (~22 MB), and anything still outside now falls back to the shipped model instead of being
+        // published as unoccluded -- see the bounds check in ComputeOcclusion.
+        const int HalfX = 72, HalfZ = 72, Below = 16, Above = 32;
 
         // Rebuild once the listener has walked this far from the scene's centre. The scene is
         // source-independent, so it does NOT need rebuilding when a speaker moves -- only when
@@ -292,6 +308,11 @@ namespace CMM
             for (int k = 0; k < ptCount; k++)
             {
                 var sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
+                // A speaker outside the scene has no geometry to be occluded BY, and the native
+                // solve does not refuse it -- it returns free field, which publishes as "nothing in
+                // the way". Declining the whole station instead hands it to the shipped model, which
+                // does attenuate at range. Never publish an answer about geometry we do not hold.
+                if (!_scene.Contains(sp, 2f)) return false;
                 var src = SourceAt(sp);
                 if (src == null) { ptGain[k] = 0f; continue; }
 

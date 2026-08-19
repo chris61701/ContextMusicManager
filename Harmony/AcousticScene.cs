@@ -66,6 +66,16 @@ namespace CMM
         internal float OpenAt(int wx, int wy, int wz) =>
             _h == IntPtr.Zero ? 0f : NativeAcoustics.cmm_ac_open_at(_h, wx, wy, wz);
 
+        // Is this world position inside the box this scene was built over, with `margin` blocks to
+        // spare? The margin matters: a source right on the face has no geometry on one side of it,
+        // so its solve is as meaningless as one fully outside.
+        internal bool Contains(Vector3 p, float margin)
+        {
+            return p.x >= _x0 + margin && p.x <= _x0 + _sx - 1 - margin
+                && p.y >= _y0 + margin && p.y <= _y0 + _sy - 1 - margin
+                && p.z >= _z0 + margin && p.z <= _z0 + _sz - 1 - margin;
+        }
+
         internal AcousticSource CreateSource(Vector3 pos)
         {
             if (_h == IntPtr.Zero) return null;
@@ -93,9 +103,11 @@ namespace CMM
     // frames under a millisecond budget, exactly like the shipped flood and the field cache.
     // Only the native half runs on the scheduler, where it touches nothing but its own arena.
     //
-    // The buffers are allocated ONCE and reused for every rebuild. A 97x41x97 box is 1.5 MB of
-    // float plus 386 KB of byte; re-allocating that per door swing on Unity's non-generational
-    // GC is exactly the kind of churn this whole subsystem exists to avoid.
+    // The buffers are allocated ONCE and reused for every rebuild. A 145x49x145 box is 4.1 MB of
+    // float plus 1 MB of byte; re-allocating that per door swing on Unity's non-generational GC is
+    // exactly the kind of churn this whole subsystem exists to avoid. The read is ~49 slabs at
+    // 1.5 ms, so about two seconds of walking -- during which the PREVIOUS scene keeps serving, so
+    // the only cost is latency, never a gap.
     internal sealed class VoxelBox
     {
         internal readonly int Sx, Sy, Sz;
