@@ -198,8 +198,25 @@ namespace CMM
 
             // Geometry changed under an in-flight read: what has been read already describes a
             // world that no longer exists, so start over rather than build from a mixture.
-            lock (_gate)
-                if (_boxGen != _geomGen) { _box = null; return; }
+            // NEVER DISCARD AN IN-FLIGHT READ. This used to restart from scratch whenever the world
+            // changed under it, which is correct in spirit and catastrophic in practice: the read is
+            // ~2M voxels and takes about seven seconds, and every door swing bumps the generation.
+            // In a house with doors the read therefore NEVER FINISHED again after the first one --
+            // straight from the log:
+            //
+            //     reading world 17% .. 93% -> read complete -> scene live (7 ticks)
+            //     reading world 5% -> 12% -> 19% -> 31% -> 5% -> 0% -> 8% -> 3% -> 5% -> 3% ...
+            //
+            // so the scene stayed frozen at the FIRST build for the rest of the session. Reported
+            // as "it sounded like it was working initially, but after moving around it ceased
+            // functioning as it did", which is exactly what a frozen scene sounds like.
+            //
+            // Let it finish instead. A read that spans a door swing has ONE voxel from the old
+            // world in it -- a door -- and a scene that is one door stale is incomparably better
+            // than a scene that is minutes stale. The generation is still tracked, so if it moved
+            // while we were reading, the swap notices and immediately starts another pass: forward
+            // progress is guaranteed because completing is no longer conditional on the world
+            // holding still.
 
             if (!_box.Step(world, ReadBudgetMs))
             {
@@ -217,9 +234,19 @@ namespace CMM
         // final. Watching the edge rather than the flag means one rebuild per swing instead of one
         // per frame of it, and the shipped model covers the ~0.5 s until the rebuild lands.
         static bool _doorSeen;
+        static readonly List<Vector3i> _doorPositions = new List<Vector3i>();   // reused, never per-frame
         internal static void WatchDoors(bool animating)
         {
-            if (animating) { _doorSeen = true; return; }
+            if (animating)
+            {
+                _doorSeen = true;
+                // Remember WHERE, while it is still animating: on the falling edge the door is gone
+                // from the animating set and its position is no longer available. A door is one
+                // block, and knowing which one turns a ~2M-voxel re-read into a 125-voxel patch.
+                EmitterAcoustics.CollectAnimatingDoors(_doorPositions);
+                if (_doorPositions.Count > 64) _doorPositions.RemoveRange(0, _doorPositions.Count - 64);
+                return;
+            }
             if (!_doorSeen) return;
             _doorSeen = false;
             InvalidateGeometry();
@@ -266,12 +293,11 @@ namespace CMM
                 // just built already describes a world that no longer exists. Throw it away rather
                 // than install it: a stale scene is silent and permanent, where a discarded one
                 // costs 310 ms and is rebuilt on the very next tick.
-                if (gen != _geomGen)
-                {
-                    built.Dispose();
-                    LastStatus = $"discarded stale build ({LastBuildMs} ms)";
-                    return;
-                }
+                // Geometry moved while this was being read or built. INSTALL IT ANYWAY -- it is at
+                // most a door out of date and it is the best answer available -- then leave _stale
+                // set so the next FrameStep starts a fresh pass. Discarding here was the other half
+                // of the never-finishes trap: the read completed and the result was thrown away.
+                bool wasStale = gen != _geomGen;
                 // Re-centring invalidates every source: they were solved against geometry this
                 // scene no longer describes.
                 foreach (var s in _sources.Values) s?.Dispose();
@@ -279,7 +305,9 @@ namespace CMM
                 _scene?.Dispose();
                 _scene = built;
                 _sceneCentre = want;
-                _stale = false;          // the swap is what clears it, never the request
+                // Cleared by the swap, not by the request -- and left SET if the world moved under
+                // this pass, so another one starts immediately.
+                _stale = wasStale;
                 LastStatus = $"rooms {_scene.Rooms}, nodes {_scene.Nodes}, edges {_scene.Edges}, "
                            + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms";
             }
@@ -463,6 +491,38 @@ namespace CMM
         // started, the old scene keeps serving until the new one is ready, and the swap is silent.
         internal static void InvalidateGeometry()
         {
+            // ── A DOOR IS ONE BLOCK: PATCH IT, DO NOT RE-READ THE WORLD ──────────────────────
+            // A full re-read is ~2M GetBlock calls and about seven seconds, so a door took seven
+            // seconds to be heard -- and while any door kept swinging inside that window the read
+            // never finished at all. If we know which blocks changed, the retained buffer can be
+            // corrected in place and only the native build (~0.7 s, off the frame loop) repeats.
+            // Falls back to a full re-read whenever the positions are unknown or the patch misses
+            // the box, so a wall coming down still works.
+            bool patched = false;
+            if (_doorPositions.Count > 0 && _box == null && _reusable != null && _reusable.Complete)
+            {
+                World w = GameManager.Instance?.World;
+                if (w != null)
+                {
+                    bool any = false;
+                    for (int i = 0; i < _doorPositions.Count; i++)
+                        if (_reusable.Patch(w, _doorPositions[i], 2)) any = true;
+                    if (any)
+                    {
+                        lock (_gate)
+                        {
+                            if (!_consuming) { _filled = _reusable; _stale = false; patched = true; }
+                        }
+                    }
+                }
+            }
+            _doorPositions.Clear();
+            if (patched)
+            {
+                LastStatus = "door patched, rebuilding";
+                return;
+            }
+
             lock (_gate)
             {
                 _geomGen++;       // in-flight reads and filled boxes describe the pre-change world

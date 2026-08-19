@@ -143,6 +143,42 @@ namespace CMM
             Complete = false;
         }
 
+        // Re-read a small cube of the world into the ALREADY-FILLED buffer. For a door settling,
+        // which is one block: re-reading the whole box costs ~2M GetBlock calls and about seven
+        // seconds, and a door that takes seven seconds to be heard is not a door. Returns false if
+        // the box has never been filled (nothing to patch) or the cube misses it entirely.
+        internal bool Patch(World world, Vector3i centre, int radius)
+        {
+            if (!Complete || world == null) return false;
+            int x0 = centre.x - radius, x1 = centre.x + radius;
+            int y0 = centre.y - radius, y1 = centre.y + radius;
+            int z0 = centre.z - radius, z1 = centre.z + radius;
+            if (x1 < X0 || x0 >= X0 + Sx || y1 < Y0 || y0 >= Y0 + Sy || z1 < Z0 || z0 >= Z0 + Sz)
+                return false;
+            if (x0 < X0) x0 = X0; if (x1 >= X0 + Sx) x1 = X0 + Sx - 1;
+            if (y0 < Y0) y0 = Y0; if (y1 >= Y0 + Sy) y1 = Y0 + Sy - 1;
+            if (z0 < Z0) z0 = Z0; if (z1 >= Z0 + Sz) z1 = Z0 + Sz - 1;
+            try
+            {
+                for (int wy = y0; wy <= y1; wy++)
+                    for (int wz = z0; wz <= z1; wz++)
+                        for (int wx = x0; wx <= x1; wx++)
+                        {
+                            long i = (wx - X0) + (long)Sx * ((wz - Z0) + (long)Sz * (wy - Y0));
+                            BlockValue bv = world.GetBlock(wx, wy, wz);
+                            if (bv.isair) { Flags[i] = (byte)NativeAcoustics.AIR; Loss[i] = 0f; continue; }
+                            Flags[i] = 0;
+                            Loss[i] = EmitterAcoustics.DebugCellLoss(bv, world, wx, wy, wz);
+                        }
+            }
+            catch (Exception e)
+            {
+                CMMConfig.D($"[CMM] acoustics voxel patch failed: {e.Message}");
+                return false;
+            }
+            return true;
+        }
+
         // Read up to budgetMs worth of slabs. Returns true once the whole box is filled. Whole
         // slabs only: the cost of one is bounded and predictable, and a partial slab would need a
         // second cursor for no benefit.

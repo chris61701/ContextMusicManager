@@ -839,6 +839,18 @@ namespace CMM
         // sampled tightly (fade starts promptly, close timing is precise) instead of in 250 ms 4 Hz steps.
         internal static bool AnyDoorAnimating => _doors.Count > 0 || _doorPending.Count > 0;
 
+        // The parent positions of the doors currently animating, appended to the caller's list.
+        // Exists so a listener of the door edge can re-read just those blocks instead of the whole
+        // scene: the native acoustic scene is ~2M voxels and about seven seconds to read, and a door
+        // is one block. Main-thread only, like every other reader of _doors.
+        internal static void CollectAnimatingDoors(List<Vector3i> into)
+        {
+            if (into == null) return;
+            foreach (var kv in _doors) into.Add(kv.Key);
+            lock (_doorLock)
+                for (int i = 0; i < _doorPending.Count; i++) into.Add(_doorPending[i].Pos);
+        }
+
         // Called by the door hook (Patch_DoorAcousticChange) the instant a door toggles. `opening` is the
         // SetOpen target (the swing DIRECTION) — state-NAME-agnostic. Openness starts at the PRE-toggle
         // position so the door reads right until its clip actually begins (opening ⇒ shut 0; closing ⇒ open 1).
