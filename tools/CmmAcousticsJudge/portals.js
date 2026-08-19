@@ -1067,6 +1067,62 @@ function makeNewEvaluator(D, G, src) {
       fieldOf[rm] = canReverb[rm] * (direct[rm] + (pWall > 0 ? 4 * pWall / absorbOf(rm) : 0))
                   * dbToPow(DIFFUSE_CAL);
     }
+
+    // ── PASS 3: APERTURE COUPLING, SOLVED TO CONVERGENCE ─────────────────────────────
+    // This is the fix the comment further down has been asking for. Rooms exchange energy through
+    // their OPENINGS as well as through their walls, and that exchange belongs here -- in the room
+    // fields, where it is a small linear system over 13-55 rooms -- not at the listener, where it
+    // was 47 separate ray-cast terms per position.
+    //
+    // Why it matters beyond tidiness: a ray bundle from the listener to an opening 50 blocks away
+    // goes from blocked to clear in ONE block of movement, so the sum of 47 of them lurches. All
+    // eight speakers in the store jumped 3-5.6 dB together across a single step, with the
+    // reverberant term moving a consistent +5.5 dB -- the signature of a shared, listener-cast
+    // term rather than anything about the speakers. Room ambience does not change 5 dB when you
+    // take one step, and it cannot be made not to while it is computed that way.
+    //
+    // Solved here it is a property of the ROOMS, so it is uniform inside each one and cannot
+    // lurch. Power leaving room j through an opening of area a is (field_j / 4) * a; it arrives in
+    // room i and joins i's field as 4*P/absorb, the same relation the wall pass uses. Jacobi to
+    // convergence rather than the wall pass's single iteration, because an OPENING is not a large
+    // loss -- energy can cross it repeatedly, so one pass badly under-counts a suite of connected
+    // rooms.
+    {
+      const nbr = Array.from({ length: nRooms }, () => []);
+      for (const A of G.apertures) {
+        const a = Math.max(1e-6, (A.area || 0) * Math.min(1, A.throat || 1));
+        if (A.roomA === undefined || A.roomB === undefined) continue;
+        if (A.roomA < 0 || A.roomB < 0 || A.roomA === A.roomB) continue;
+        if (A.roomA >= nRooms || A.roomB >= nRooms) continue;
+        nbr[A.roomA].push({ other: A.roomB, area: a });
+        nbr[A.roomB].push({ other: A.roomA, area: a });
+      }
+      // Seeded from the direct+wall field above; each sweep adds one more room-crossing of
+      // aperture-borne energy. Converges geometrically because every crossing pays the receiving
+      // room's absorption, which INCLUDES its openings -- so the loop is a contraction and cannot
+      // run away. 24 sweeps is far past convergence at these room counts and costs nothing.
+      const cur = Float64Array.from(fieldOf);
+      const nxt = new Float64Array(nRooms);
+      for (let it = 0; it < 24; it++) {
+        for (let rm = 0; rm < nRooms; rm++) {
+          let pAp = 0;
+          for (const e of nbr[rm]) {
+            const fj = cur[e.other];
+            if (fj <= 0) continue;
+            pAp += (fj / 4) * e.area;          // power leaving j through this opening
+          }
+          const add = pAp > 0 ? canReverb[rm] * 4 * pAp / absorbOf(rm) : 0;
+          nxt[rm] = fieldOf[rm] + add;
+        }
+        let moved = 0;
+        for (let rm = 0; rm < nRooms; rm++) {
+          moved = Math.max(moved, Math.abs(nxt[rm] - cur[rm]));
+          cur[rm] = nxt[rm];
+        }
+        if (moved < 1e-12) break;
+      }
+      for (let rm = 0; rm < nRooms; rm++) fieldOf[rm] = cur[rm];
+    }
     if (process.env.CMM_ROOMS === "1") {
       // Per-room terms, to diff against the native port term by term. Sorted lists cannot
       // say WHICH room diverged, and that is the only question once totals are close.
@@ -1456,6 +1512,26 @@ function makeNewEvaluator(D, G, src) {
         // (+10.1 -> +2.2 dB at 32-40 blocks) and triples the roughness (store 4.50 -> 16.18
         // dB/block), because a hard clamp steps wherever it engages. The bound has to act on what
         // the rooms exchange, not on what the listener receives.
+        // ── ONLY YOUR OWN ROOM'S OPENINGS, NOW THAT THE ROOMS TALK TO EACH OTHER ────────
+        // This loop used to run over EVERY aperture in the POI -- 47 of them in the store -- each
+        // one a ray bundle cast from the listener to an opening up to 60 blocks away. A bundle
+        // like that flips from blocked to clear in a single block, so their sum lurched: all eight
+        // store speakers moved 3-5.6 dB together across one step, the reverberant term jumping a
+        // consistent +5.5 dB.
+        //
+        // The membership gate was tried before and correctly reverted, because without pass 3 it
+        // stepped 10.1 dB at a room boundary: each side drew on a different set of THIRD-PARTY
+        // rooms, and those contributions had nowhere else to come from. Pass 3 is where they come
+        // from now -- the fields already contain the energy that reached each room through every
+        // opening in the building -- so what is left here is only the NEAR-FIELD correction for
+        // standing beside your own doorway, which is a handful of terms, all close, and smooth
+        // because proximity is smooth.
+        // MEASURED AGAIN WITH PASS 3 IN PLACE, AND IT IS STILL WRONG: store roughness 5.45 ->
+        // 10.30 dB/block, bunker 1.89 -> 2.38. Pass 3 brings connected rooms' fields closer but
+        // does not make them equal, so crossing a boundary still swaps both the opening set AND
+        // the own-room field at once. The prediction in the comment below -- that pass 3 would
+        // make this gate safe -- is therefore wrong, and worth leaving recorded as such.
+        //   if (A.roomA !== myRoom && A.roomB !== myRoom) continue;
         let pf = 0;
         if (A.roomA !== undefined && A.roomA >= 0 && A.roomA !== myRoom) pf += fieldOf[A.roomA] || 0;
         if (A.roomB !== undefined && A.roomB >= 0 && A.roomB !== myRoom) pf += fieldOf[A.roomB] || 0;

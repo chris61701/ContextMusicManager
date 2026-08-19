@@ -1344,6 +1344,7 @@ struct cmm_ac_src {
     struct ac_cost *cost;    /* per node-edge */
     double *seed;            /* per node: cost to reach it from the source, or -1 */
     double *field, *absorb, *canrev, *pin, *direct;   /* per room */
+    double *apcur, *apnxt;   /* pass-3 aperture-coupling Jacobi scratch, per room */
     int    *node_room;       /* per node -> its room */
     int    *heap;            /* edge ids */
     double *hkey;
@@ -1582,6 +1583,49 @@ static void src_fields(cmm_ac_src *s) {
         s->field[r] = s->canrev[r] * (direct[r] + (pwall > 0 ? 4.0 * pwall / s->absorb[r] : 0.0))
                     * pow(10.0, DIFFUSE_CAL / 10.0);
     }
+
+    /* --- PASS 3: APERTURE COUPLING, SOLVED TO CONVERGENCE ---
+     * Rooms exchange energy through their OPENINGS as well as their walls, and that exchange
+     * belongs here -- a small linear system over 13-55 rooms -- not at the listener, where it was
+     * 47 separate ray-cast terms per position. A bundle cast from the listener to an opening 50
+     * blocks away flips from blocked to clear in ONE block, so the sum of 47 of them lurches: all
+     * eight store speakers moved 3-5.6 dB together across a single step, the reverberant term
+     * jumping a consistent +5.5 dB. Room ambience does not change 5 dB when you take one step, and
+     * it cannot be made not to while it is computed that way. Solved here it is a property of the
+     * ROOMS, uniform inside each, and cannot lurch.
+     *
+     * Power leaving room j through an opening of area a is (field_j / 4) * a; it arrives in room i
+     * and joins i's field as 4*P/absorb -- the same relation the wall pass uses. Jacobi to
+     * convergence rather than the wall pass's single iteration, because an opening is NOT a large
+     * loss: energy crosses it repeatedly, and one pass badly under-counts a suite of connected
+     * rooms. It contracts because every crossing pays the receiving room's absorption, which
+     * includes its own openings. */
+    {
+        double *cur = s->apcur, *nxt = s->apnxt;
+        for (int r = 0; r < nr; r++) cur[r] = s->field[r];
+        for (int it = 0; it < 24; it++) {
+            for (int r = 0; r < nr; r++) nxt[r] = s->field[r];
+            for (int e = 0; e < ac->nedge; e++) {
+                const struct ac_edge *E = &ac->edge[e];
+                if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;
+                if (E->ra >= nr || E->rb >= nr) continue;
+                double of = E->open_frac; if (of > 1.0) of = 1.0; if (of < 0.0) of = 0.0;
+                double a = E->area * of; if (a < 1e-6) a = 1e-6;
+                if (cur[E->rb] > 0.0)
+                    nxt[E->ra] += s->canrev[E->ra] * 4.0 * ((cur[E->rb] / 4.0) * a) / s->absorb[E->ra];
+                if (cur[E->ra] > 0.0)
+                    nxt[E->rb] += s->canrev[E->rb] * 4.0 * ((cur[E->ra] / 4.0) * a) / s->absorb[E->rb];
+            }
+            double moved = 0.0;
+            for (int r = 0; r < nr; r++) {
+                double d = nxt[r] - cur[r]; if (d < 0) d = -d;
+                if (d > moved) moved = d;
+                cur[r] = nxt[r];
+            }
+            if (moved < 1e-12) break;
+        }
+        for (int r = 0; r < nr; r++) s->field[r] = cur[r];
+    }
 }
 
 cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z) {
@@ -1597,7 +1641,7 @@ cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z) {
                  + (size_t)nn * sizeof(double)
                  + (size_t)hc * sizeof(int)
                  + (size_t)hc * sizeof(double)
-                 + (size_t)nrm * 5 * sizeof(double)
+                 + (size_t)nrm * 7 * sizeof(double)   /* +2: pass-3 Jacobi scratch */
                  + (size_t)nn * sizeof(int);
     s->arena = malloc(bytes);
     if (!s->arena) { free(s); return NULL; }
@@ -1613,6 +1657,8 @@ cmm_ac_src *cmm_ac_src_create(cmm_ac *scene, float x, float y, float z) {
     s->canrev = (double *)p;       p += (size_t)nrm * sizeof(double);
     s->pin    = (double *)p;       p += (size_t)nrm * sizeof(double);
     s->direct = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->apcur  = (double *)p;       p += (size_t)nrm * sizeof(double);
+    s->apnxt  = (double *)p;       p += (size_t)nrm * sizeof(double);
     s->node_room = (int *)p;
     s->heap_cap = hc;
     s->nedge_cap = ne; s->nnode_cap = nn; s->nroom_cap = nrm;
