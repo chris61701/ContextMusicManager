@@ -232,8 +232,17 @@ typedef struct {
      * detent's spring release then the stop landing — what reads as "mechanical"). */
     float pingInit, thumpInit; /* re-kick levels for the second strike */
     float body;                /* resonator mix 0..1 (0 = the pre-v39 click) */
-    float rc1, rc2;            /* resonator coefficients (ring pitch + decay) */
-    float ry1, ry2;            /* resonator state */
+    /* v41 — THREE damped modes, not one, and none of them DC. The old click summed a decaying
+     * DC offset for its "thump", which is not a sound a switch makes: a decaying step is a
+     * speaker pop, always the same polarity, with all of its energy below the pitch of anything
+     * mechanical. Between that and a single 1 kHz ring it read as "tss-pop-beep" rather than as
+     * a switch, which is what "wrong sound" was. A real toggle is a broadband snap plus a
+     * SHELL that rings in a couple of inharmonic modes and dies fast. */
+    float rc1[3], rc2[3];      /* per-mode two-pole coefficients (pitch + decay) */
+    float ry1[3], ry2[3];      /* per-mode state */
+    float mLev[3];             /* per-mode excitation level */
+    float snapHp;              /* one-pole HP state: keeps the noise snap out of the mud */
+    float kSnapHp;
     int   strike2At;           /* frame of the second micro-impact (0 = single strike) */
     float strike2Lvl;          /* its level relative to the first */
     /* v37 — static CRACKLE: a sample-and-hold amplitude sputter (random level held for a random
@@ -244,6 +253,7 @@ typedef struct {
     float modLev;          /* slewed applied level (anti-click) */
 } sfx_voice;
 static sfx_voice g_sfx[SFX_MAX];
+static float sfx_click_sample(sfx_voice* v, float noise);   /* defined with the tone capture */
 static unsigned  g_sfxSeed = 0x9E3779B9u;
 /* v37 — live static TONE (from settings.xml via cmm_mix_set_static_tone; captured onto the voice
  * at every ping, so keepalive extension follows a hot-reloaded config mid-hash). Defaults mirror
@@ -540,20 +550,7 @@ static void render_sfx_add(int n) {
                  * thump, and a knock into the BODY RESONATOR (damped two-pole ring at BodyHz,
                  * the dial's shell). Everything tone-capped by one LPF. Body/Double at 0 = the
                  * plain ping+thump click. */
-                float excite = 0.0f;
-                if (v->pos == 0) excite = 1.0f;
-                else if (v->strike2At && v->pos == v->strike2At) {
-                    excite = v->strike2Lvl;
-                    v->ping  += v->pingInit  * v->strike2Lvl;
-                    v->thump += v->thumpInit * v->strike2Lvl;
-                }
-                float ry = v->rc1 * v->ry1 + v->rc2 * v->ry2 + excite;
-                v->ry2 = v->ry1; v->ry1 = ry;
-                x = noise * v->ping + v->thump + ry * v->body;
-                v->ping  *= v->pingK;
-                v->thump *= v->thumpK;
-                v->hi += v->kHi * (x - v->hi);
-                x = v->hi;
+                x = sfx_click_sample(v, noise);
             }
             x *= v->gain;
             g_bus[f * 2]     += x;
@@ -1160,6 +1157,35 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
  * sane. Snap maps to the ping/thump pair so its extremes stay musical (never fully silent):
  * ping = 0.4 + 0.7·snap, thump = 1.0 − 0.55·snap — the v35 hardcoded clicks sit at snap
  * 0.7 (on) and 0.45 (off). Length is the thump decay; the ping decays 4× faster. */
+/* One frame of a click. Shared by the live mixer and the offline preview render so what gets
+ * tuned and what gets heard cannot drift apart -- the single most expensive recurring mistake in
+ * this project has been two implementations of "the same" thing. */
+static float sfx_click_sample(sfx_voice* v, float noise) {
+    float excite = 0.0f;
+    if (v->pos == 0) excite = 1.0f;
+    else if (v->strike2At && v->pos == v->strike2At) {
+        excite = v->strike2Lvl;
+        v->ping += v->pingInit * v->strike2Lvl;
+    }
+    /* The snap: noise, high-passed so it is a crack rather than a rumble, decaying in a couple
+     * of milliseconds. This is the contact breaking. */
+    v->snapHp += v->kSnapHp * (noise - v->snapHp);
+    float snap = (noise - v->snapHp) * v->ping;
+    v->ping *= v->pingK;
+
+    /* The shell: three damped modes, deliberately inharmonic so it reads as a lump of plastic
+     * being knocked rather than as a note. */
+    float body = 0.0f;
+    for (int m = 0; m < 3; m++) {
+        float ry = v->rc1[m] * v->ry1[m] + v->rc2[m] * v->ry2[m] + excite * v->mLev[m];
+        v->ry2[m] = v->ry1[m]; v->ry1[m] = ry;
+        body += ry;
+    }
+    float x = snap + body * v->thump;
+    v->hi += v->kHi * (x - v->hi);      /* one tone cap over the lot */
+    return v->hi;
+}
+
 static void sfx_capture_click_tone(sfx_voice* v, int which) {
     float rate = (float)g_busRate;
     float hz = g_sfxClickHz[which], snap = g_sfxClickSnap[which], ms = g_sfxClickLenMs[which];
@@ -1172,24 +1198,79 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     if (dbl < 0.0f) dbl = 0.0f; else if (dbl > 1.0f) dbl = 1.0f;
     float sec = ms * 0.001f;
     v->kHi   = 1.0f - expf(-6.2831853f * hz / rate);
-    v->ping  = 0.4f + 0.7f * snap;   v->pingK  = expf(-1.0f / (0.25f * sec * rate));
-    v->thump = 1.0f - 0.55f * snap;  v->thumpK = expf(-1.0f / (sec * rate));
-    v->pingInit = v->ping; v->thumpInit = v->thump;
-    /* Body resonator: damped two-pole ring at BodyHz, decaying at half the thump's constant —
-     * the knock rings the shell briefly, it doesn't hum. */
-    v->body = body;
+    /* The snap is SHORT -- a couple of milliseconds, not a quarter of the click. Decaying noise
+     * over tens of milliseconds is a hiss; a switch is a crack. */
+    v->ping  = 0.4f + 0.7f * snap;
+    v->pingK = expf(-1.0f / ((0.0006f + 0.0022f * (1.0f - snap)) * rate));
+    v->pingInit = v->ping;
+    /* High-pass the noise well below the tone cap so the snap has bite without mud. */
     {
-        float w = 6.2831853f * bodyHz / rate;
-        float R = expf(-1.0f / (0.5f * sec * rate));
-        v->rc1 = 2.0f * R * cosf(w);
-        v->rc2 = -(R * R);
+        float hp = hz * 0.25f; if (hp < 400.0f) hp = 400.0f; else if (hp > 3000.0f) hp = 3000.0f;
+        v->kSnapHp = 1.0f - expf(-6.2831853f * hp / rate);
     }
-    v->ry1 = v->ry2 = 0.0f;
+    /* `thump` is now the SHELL's level rather than a decaying DC term -- same knob, same
+     * direction (more snap = less shell), but it drives something that oscillates. */
+    v->thump = 1.0f - 0.55f * snap;
+    v->thumpInit = v->thump;
+    v->body = body;
+    /* Three inharmonic modes around BodyHz. The ratios are deliberately not simple: 1, 1.71 and
+     * 2.63 land nowhere near a harmonic series, so the ear hears a knock instead of a pitch.
+     * Higher modes are quieter and die faster, which is what small stiff objects do. Body mixes
+     * the two upper modes in, so Body = 0 leaves the fundamental alone and still sounds like a
+     * switch -- where before it left a bare DC pop. */
+    {
+        const float ratio[3] = { 1.0f, 1.71f, 2.63f };
+        const float lev[3]   = { 1.0f, 0.45f, 0.22f };
+        const float damp[3]  = { 0.55f, 0.34f, 0.22f };
+        for (int m = 0; m < 3; m++) {
+            float fq = bodyHz * ratio[m];
+            if (fq > rate * 0.45f) fq = rate * 0.45f;
+            float w = 6.2831853f * fq / rate;
+            float R = expf(-1.0f / (damp[m] * sec * rate));
+            v->rc1[m] = 2.0f * R * cosf(w);
+            v->rc2[m] = -(R * R);
+            /* NORMALISE THE MODE. This resonator's impulse response is R^n * sin((n+1)w)/sin(w),
+             * so a unit impulse peaks at about 1/sin(w) -- roughly 7.7x at 1 kHz, and worse the
+             * lower the mode. Summing three of them unnormalised rendered the click at +16.6 dBFS:
+             * it would have shipped as "now it is distorted" and been heard as another wrong sound
+             * rather than as a gain bug. Caught by printing the peak in the preview render, which
+             * is exactly what the preview is for. */
+            float sw = sinf(w); if (sw < 1e-4f) sw = 1e-4f;
+            v->mLev[m] = lev[m] * (m == 0 ? 1.0f : body) * sw;
+            v->ry1[m] = v->ry2[m] = 0.0f;
+        }
+    }
+    v->snapHp = 0.0f;
     /* Second micro-impact ~12ms after the first — the detent's "cl-ick". */
     v->strike2At  = dbl > 0.001f ? (int)(rate * 0.012f) : 0;
     v->strike2Lvl = dbl;
     v->len = (int)(rate * (sec * 3.3f + (v->strike2At ? 0.012f : 0.0f)));
     if (v->len < 1) v->len = 1;
+}
+
+/* v41 — render ONE click in isolation, no device, no bus: `kind` 2 = power-on, 3 = power-off, at
+ * the CURRENT tone settings. Exists so a click can be listened to without launching the game --
+ * "wrong sound" is a judgement only ears can make, and making that judgement should not cost a
+ * world load. It runs the same sfx_click_sample the mixer runs, so what is auditioned and what
+ * ships cannot drift apart. Returns frames written (mono). */
+CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames) {
+    if (!out || maxFrames <= 0 || rate <= 0) return 0;
+    if (kind != SFX_KIND_CLICK_ON && kind != SFX_KIND_CLICK_OFF) return 0;
+    int savedRate = g_busRate;
+    g_busRate = rate;
+    sfx_voice v;
+    memset(&v, 0, sizeof v);
+    v.kind = kind; v.pos = 0; v.gain = 1.0f; v.rng = 0x1234567u;
+    sfx_capture_click_tone(&v, kind == SFX_KIND_CLICK_ON ? 0 : 1);
+    g_busRate = savedRate;
+    int n = v.len < maxFrames ? v.len : maxFrames;
+    for (int i = 0; i < n; i++) {
+        v.rng = v.rng * 1664525u + 1013904223u;
+        float noise = (float)((int)(v.rng >> 9) - 0x400000) * (1.0f / 0x400000);
+        out[i] = sfx_click_sample(&v, noise);
+        v.pos++;
+    }
+    return n;
 }
 
 /* v38/v39 — set the live click TONE from config, both kinds at once (see the globals above).

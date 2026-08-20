@@ -392,3 +392,7 @@ tools/CmmAcousticsJudge/.music-cache.wav
 # regenerable with  node tools/CmmAcousticsJudge/export-grid.js --all
 CMM_Decoder/grids/
 CMM_Decoder/test_acoustics.exe
+
+# Click audition renders + its harness (regenerate: gcc test_click.c dist/CMM_Decoder.dll)
+CMM_Decoder/*.wav
+CMM_Decoder/CMM_Decoder.dll
