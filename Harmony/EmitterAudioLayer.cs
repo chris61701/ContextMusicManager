@@ -117,6 +117,29 @@ namespace CMM
         // (as measured) versus published (after the rise limiter, which can mask it).
         private static int   _statFieldTicks, _statLegacyTicks;
         private static string _statWhy = "-";          // why the field path was refused, latest
+
+        // ── MODEL PIN (`cmm acoustics model auto|native|legacy`) ──────────────────────────────
+        // Occlusion is computed three different ways — native scene, per-speaker field cache,
+        // listener flood — and the selection changes LIVE, per tick, on conditions like "a door is
+        // animating" and "the scene is still settling". Nothing has ever checked that the three
+        // AGREE, so every switch is a potential step in the player's ear, and a switch happens on
+        // events the player is not thinking about. That is a prime suspect for "the level is all
+        // over the place" and for "one fix breaks something else", and it cannot be settled by
+        // reading code: it is settled by hearing each model alone.
+        //
+        // auto   = ship behaviour, all three, switched as before
+        // native = the native scene model only; never hands back, even mid-swing (a door WILL sound
+        //          wrong for a moment — that is the cost of the isolation, not a defect)
+        // legacy = the shipped flood only; native and the field cache are both skipped
+        //
+        // Diagnostic only, never persisted: it resets to auto on every launch.
+        internal static bool PinNative, PinLegacy;
+        internal static string PinName => PinNative ? "native" : PinLegacy ? "legacy" : "auto";
+        internal static void SetPin(string mode)
+        {
+            PinNative = mode == "native";
+            PinLegacy = mode == "legacy";
+        }
         private static float _statPubSum, _statPubMax;
         private static int   _statPubN;
         private static float _nextPathLog;
@@ -316,6 +339,7 @@ namespace CMM
             // successor. Anything it declines (warming up, door mid-swing, native DLL missing) falls
             // through to the shipped paths below unchanged, so the A/B is a live config flip.
             if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterNativeAcoustics && world != null
+                && !PinLegacy
                 && TryNativeOcclusion(player, world, audibleR))
             {
                 // Keep the listener-anchored ROOM flood running underneath, exactly as the field
@@ -338,7 +362,8 @@ namespace CMM
                 // during a door swing — the tuned mid-swing acoustics live on the legacy path;
                 // fields drop + rebuild once the swing settles (see EmitterFieldCache.Maintain).
                 bool fieldOk;
-                if (!CMMConfig.WorldEmitterFieldCache) { _statWhy = "disabled"; fieldOk = false; }
+                if (PinLegacy) { _statWhy = "pin-legacy"; fieldOk = false; }
+                else if (!CMMConfig.WorldEmitterFieldCache) { _statWhy = "disabled"; fieldOk = false; }
                 else if (EmitterAcoustics.AnyDoorAnimating) { _statWhy = "doorswing"; fieldOk = false; }
                 else fieldOk = TryFieldOcclusion(player, world, audibleR);
                 if (fieldOk) _statFieldTicks++; else _statLegacyTicks++;
@@ -471,8 +496,19 @@ namespace CMM
             //
             // The boundary was drawn where the ANIMATION ends rather than where this model becomes
             // able to answer, and those are 0.6 s apart.
-            if (EmitterAcoustics.AnyDoorAnimating) { _statWhy = "doorswing"; return false; }
-            if (AcousticBridge.GeometrySettling) { _statWhy = "geom-settling"; return false; }
+            //
+            // ...UNLESS THE MODEL IS PINNED. `cmm acoustics model native` makes this path refuse to
+            // hand back, so the ear hears ONE model and nothing else. It exists because three
+            // mutually uncalibrated models switching live is itself a candidate cause of "the level
+            // is all over the place", and no amount of reading the code settles whether it is --
+            // whereas pinning each one in turn and listening settles it in two minutes. Pinned to
+            // native, a door mid-swing WILL sound wrong (the scene still holds its old state); that
+            // is the point. The question the pin answers is whether each model is stable on its own.
+            if (!PinNative)
+            {
+                if (EmitterAcoustics.AnyDoorAnimating) { _statWhy = "doorswing"; return false; }
+                if (AcousticBridge.GeometrySettling) { _statWhy = "geom-settling"; return false; }
+            }
 
             Vector3 ear = ListenerWorldPos(player);
             if (!AcousticBridge.EnsureScene(world, ear)) { _statWhy = "ac-warming"; return false; }

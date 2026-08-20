@@ -222,6 +222,24 @@ namespace CMM
                 return "scene invalidated; the scheduler rebuilds it within ~0.5 s";
             }
 
+            // ── cmm acoustics model auto|native|legacy ────────────────────────────────────
+            // Hear ONE occlusion model instead of three switching under you. See the comment on
+            // EmitterAudioLayer.PinNative for why this exists.
+            if (arg == "model")
+            {
+                string m = p.Count > 2 ? p[2].ToLowerInvariant() : "";
+                if (m == "auto" || m == "native" || m == "legacy")
+                {
+                    EmitterAudioLayer.SetPin(m);
+                    return "occlusion model pinned to " + m.ToUpperInvariant()
+                         + (m == "native" ? "  (never hands back — a door mid-swing will sound wrong for a moment; that is expected)"
+                          : m == "legacy" ? "  (native + field cache both skipped)"
+                          : "  (ship behaviour: all three, switched live)");
+                }
+                return "occlusion model: " + EmitterAudioLayer.PinName
+                     + "\n  usage: cmm acoustics model auto|native|legacy";
+            }
+
             if (arg == "here")
             {
                 var pl = GameManager.Instance?.World?.GetPrimaryPlayer();
@@ -234,7 +252,9 @@ namespace CMM
                  + (NativeAcoustics.Available ? "" : "  [native unavailable]")
                  + "\n  scene:     " + AcousticBridge.LastStatus
                  + "\n  saturated: " + AcousticBridge.SaturatedPoints + " point(s) clamped at last publish"
-                 + "\n  usage:     cmm acoustics on|off|rebuild|here";
+                 + "\n  model:     " + EmitterAudioLayer.PinName
+                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column"
+                 + "\n             cmm acoustics wall <n> | verb <n>|off | model auto|native|legacy";
 #else
             return "native acoustics: not built into this game version";
 #endif
