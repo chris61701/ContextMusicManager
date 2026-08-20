@@ -1,3 +1,5 @@
+// Gated to 3.0+ (GV_V3): it reads geometry through EmitterAcoustics and publishes to EmitterAudioLayer, both on the same gate.
+#if GV_V3
 using System;
 using System.Collections.Generic;
 using UnityEngine;
@@ -616,3 +618,4 @@ namespace CMM
         }
     }
 }
+#endif

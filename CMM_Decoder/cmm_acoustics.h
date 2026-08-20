@@ -79,11 +79,16 @@ typedef struct cmm_ac_src cmm_ac_src;
 /* ABI for the acoustics surface, independent of the decoder's. Bumped on any
  * breaking change; the managed side checks it on load.
  *   v1: scene create/destroy, voxel upload, openness + thickness. */
-#define CMM_AC_ABI 3
+#define CMM_AC_ABI 4
 CMM_AC_API int cmm_ac_abi(void);
 
-/* Live tuning (ABI 2). Scene inputs: rebuild for a change to take full effect. A
- * non-positive argument leaves that parameter unchanged, so one can be turned alone. */
+/* "Leave this parameter as it is" (ABI 4). db_mat and mat_pow are scale factors, so any
+ * non-positive value also means keep; diffuse_cal is a dB OFFSET whose whole useful range
+ * includes zero and negatives, so it needs a sentinel outside that range. */
+#define CMM_AC_KEEP (-1.0e6)
+
+/* Live tuning (ABI 2). Scene inputs: rebuild for a change to take full effect. Pass
+ * CMM_AC_KEEP (or, for the two scales, any non-positive value) to turn one knob alone. */
 CMM_AC_API void cmm_ac_set_tuning(double db_mat, double mat_pow, double diffuse_cal);
 CMM_AC_API void cmm_ac_get_tuning(double *db_mat, double *mat_pow, double *diffuse_cal);
 

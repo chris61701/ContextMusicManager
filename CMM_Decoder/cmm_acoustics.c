@@ -350,12 +350,19 @@ double cmm_ac_freefield_db(double dist)
  * existing scene describing the old material until it is rebuilt. diffuse_cal is applied
  * where the room fields are computed, which is also scene time. So: all three are scene
  * inputs, and the caller must rebuild for a change to take full effect. Passing a
- * non-positive value leaves that parameter alone, so one knob can be turned at a time. */
+ * non-positive value leaves that parameter alone, so one knob can be turned at a time.
+ *
+ * EXCEPT diffuse_cal, WHICH IS A dB OFFSET AND MAY LEGITIMATELY BE NEGATIVE OR ZERO. Sharing the
+ * "non-positive means leave alone" rule with the two scale factors made `verb 0` mean "apply 0 dB",
+ * i.e. a 7 dB reduction and nothing more -- so the one knob built to answer "is the reverberant
+ * field what is bleeding through this wall?" could not turn the field OFF, and a test run to settle
+ * exactly that came back inconclusive because the field was still there at full strength minus 7 dB.
+ * Its sentinel is CMM_AC_KEEP instead, leaving every real dB value reachable. */
 void cmm_ac_set_tuning(double db_mat, double mat_pow, double diffuse_cal)
 {
     if (db_mat > 0.0) cmm_ac_db_mat = db_mat;
     if (mat_pow > 0.0) cmm_ac_mat_pow = mat_pow;
-    if (diffuse_cal >= 0.0) cmm_ac_diffuse_cal = diffuse_cal;
+    if (diffuse_cal > CMM_AC_KEEP + 1.0) cmm_ac_diffuse_cal = diffuse_cal;
 }
 
 void cmm_ac_get_tuning(double *db_mat, double *mat_pow, double *diffuse_cal)

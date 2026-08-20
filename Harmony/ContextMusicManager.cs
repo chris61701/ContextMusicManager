@@ -168,7 +168,9 @@ namespace CMM
                 // The acoustic scene is a ~310 ms voxel walk. It belongs here and never on the
                 // frame loop: a door swinging must not be able to stutter the game. The decision
                 // tick only records where the listener is; this notices and rebuilds.
+#if GV_V3
                 CmmScheduler.Every(0.5, AcousticBridge.SchedulerTick, "acoustics-scene");
+#endif
                 // Music-folder watch, off the frame loop: the directory-signature probe +
                 // active-track ping run on the scheduler thread and only an actual change
                 // marshals its reaction (hot-swap / re-resolve) back to the main thread, so

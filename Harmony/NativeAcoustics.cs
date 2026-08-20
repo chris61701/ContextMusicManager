@@ -41,15 +41,21 @@ namespace CMM
 
         // The ABI this build expects. Checked on first use so a stale DLL fails loudly with a
         // number rather than crashing somewhere inside the solve.
-        internal const int ExpectedAbi = 3;
+        internal const int ExpectedAbi = 4;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_ac_abi();
 
+        // "Leave this parameter alone" (CMM_AC_KEEP, ABI 4). dbMat and matPow are scale factors,
+        // so any non-positive value also means keep -- but diffuseCal is a dB OFFSET whose useful
+        // range includes zero and negatives, and sharing the non-positive rule with the scales made
+        // `verb 0` unable to mean "no reverberant field". It needs a sentinel outside the range.
+        internal const double Keep = -1.0e6;
+
         // Live tuning (ABI 2). These are SCENE inputs -- material loss feeds the room coupling
         // and the calibration feeds the room fields, both computed at build time -- so a change
-        // only takes full effect after a rebuild. A non-positive argument leaves that parameter
-        // alone, so one knob can be turned without disturbing the others.
+        // only takes full effect after a rebuild. Pass Keep (or, for the two scales, any
+        // non-positive value) to turn one knob without disturbing the others.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_ac_set_tuning(double dbMat, double matPow, double diffuseCal);
 

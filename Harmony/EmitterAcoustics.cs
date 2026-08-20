@@ -488,6 +488,37 @@ namespace CMM
                 }
             }
 
+            // A MODEL-ENTITY BLOCK THAT STOPS LIGHT IS MATTER, WHATEVER `Collide` SAYS.
+            // Furniture, shelves, closets, appliances and containers are BlockShapeModelEntity: their real
+            // geometry and real collision live in a Unity PREFAB, so blocks.xml only lists the raycast
+            // channels the voxel takes part in. cntModularClosetOpen declares Collide="melee,rocket" — no
+            // "sight", no "movement" — which makes Block.IsSeeThrough (== !IsCollideSight) answer TRUE for a
+            // solid wooden wardrobe, and IsMovementBlocked answer FALSE. The see-through branch below then
+            // returned 0f: FREE AIR. Straight from `cmm acoustics column`, standing behind a wall of them:
+            //
+            //     -251, 45, -567   cntModularClosetOpen   loss 0.000   open 1.00   BlockShapeModelEntity
+            //
+            // Every wall of shelving in the game was a hole, which is "the shelves enclose the room and it
+            // bleeds through like I'm standing next to it" (user report 2026-08-20). Those two flags are
+            // statements about bullets and pathing; lightOpacity is the one that is about the OBJECT, and a
+            // model entity that stops light is a lump of its material. Blocks that genuinely pass light
+            // (railings, bars, fence doors, chain-link — lightOpacity 0) fall through to the branches below
+            // unchanged, and so do ladders, whose whole point is that you travel through their cells.
+            if (b.shape is BlockShapeModelEntity && b.lightOpacity != 0 && !b.IsElevator())
+            {
+                // A DOOR IS THE ONE MODEL ENTITY WHOSE MATTER LEAVES THE VOXEL. Its leaf swings out, so
+                // "not movement-blocked" really does mean the cell is now air — that is the at-rest open-door
+                // fix, and it must stay scoped to things that open. Furniture never moves, so the same test
+                // applied to a closet was reading decoration as a doorway. Asked of the game's own placement
+                // helper (Place="Door"/"DrawBridge" in blocks.xml), which covers doors, hatches, garage doors
+                // and drawbridges in every supported version without naming any of them.
+                if (IsSwingingLeaf(b, bv.type)
+                    && !b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return 0f;
+                float mdmg = DamageOpenness(b, bv, world, x, y, z);
+                if (mdmg <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
+                return SolidLoss(b, bv) * (1f - mdmg);
+            }
+
             if (b.IsSeeThrough(world, new Vector3i(x, y, z), bv))
             {
                 // CLIMBABLES (ladders, any material) are open FRAMES, not walls — and you travel THROUGH
@@ -558,6 +589,10 @@ namespace CMM
             // damage-state mesh actually shows (the game swaps meshes at per-block health thresholds).
             // An undamaged SEAL-class door (vault) at rest is AIRTIGHT — gate-class solid, true silence;
             // the first visible damage state breaches the seal back to ordinary material acoustics.
+            // Only LIGHT-PASSING model entities (lightOpacity 0 — bar gates, fence doors, chain-link) and
+            // climbables still arrive here; the opaque ones are handled far above, before IsSeeThrough gets
+            // a chance to call a wooden closet a window. The unqualified movement test is right for what is
+            // left: these ARE open frames, so a leaf out of the way really does leave air.
             if (b.shape is BlockShapeModelEntity)
             {
                 // AN OPEN DOOR AT REST IS OPEN. This branch only ever asked about DAMAGE, so a door
@@ -666,6 +701,26 @@ namespace CMM
             return full;
         }
 
+        // Does this block's geometry SWING OUT of its voxel when it opens? Doors, hatches, garage doors
+        // and drawbridges do; a closet, a shelf, a fridge and a bookcase do not. That distinction is what
+        // licenses the "not movement-blocked ⇒ free air" shortcut, and applying it to every model entity
+        // turned furniture into doorways (see CellLoss).
+        //
+        // Asked of BlockPlacementHelper rather than a class or a name: doors are Class=CompositeTileEntity
+        // in 3.x and BlockDoor in A20/A21, so no single Block subclass identifies them across versions --
+        // but blocks.xml has said Place="Door" for all 78 of them (plus everything that Extends one) since
+        // A20, and BlockPlacementDoor/BlockPlacementDrawBridge exist in every supported assembly.
+        private static readonly Dictionary<int, bool> _swingCache = new Dictionary<int, bool>();
+        private static bool IsSwingingLeaf(Block b, int type)
+        {
+            if (_swingCache.TryGetValue(type, out bool s)) return s;
+            BlockPlacement p = null;
+            try { p = b.BlockPlacementHelper; } catch { /* modded block without one ⇒ not a door */ }
+            s = p is BlockPlacementDoor || p is BlockPlacementDrawBridge;
+            _swingCache[type] = s;
+            return s;
+        }
+
         private static float SolidLoss(Block b, BlockValue bv)
         {
             float m = MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null);
@@ -679,7 +734,26 @@ namespace CMM
             // Walls and floors built from shapes.xml were therefore half-transparent everywhere, which
             // is the bleeding through both -- and it applies to the SHIPPED model too, since this is
             // the shared block reader.
-            if (b.shape != null && !IsFullCube(b, bv))
+            // ...AND A MODEL ENTITY'S BOUNDS ARE NOT ITS GEOMETRY, so it can never earn this discount.
+            // BlockShapeModelEntity.GetBounds falls straight through to BlockShape's default boundsArr
+            // unless the block sets isCustomBounds, which almost none do -- the real shape of a closet, a
+            // fridge, a bookcase or a door leaf lives in a Unity PREFAB the block layer cannot see. So
+            // IsFullCube answers "partial" for all of them from a DEFAULT rather than from evidence, and
+            // every door and every stick of furniture in the game was charged half its material.
+            //
+            // How far off that is, measured against this project's own spec: synth.js builds the scenario
+            // scenes that define what a shut wood door should sound like and writes that door as wood 0.5 --
+            // full material. In game the same door was 0.25. The acceptance gate could not see the gap
+            // because the dumps bake CellLoss (see [[acoustics-parity-blind-spot]]), so the spec passed
+            // 9/9 while the game ran every door at half strength.
+            //
+            // Charging furniture its full material is safe precisely because the disc exists: the Fresnel
+            // integral already prices PARTIAL obstruction geometrically, patch by patch, so a path that
+            // clips the corner of a chair pays for the fraction it clips. A blanket ×0.5 was doing that
+            // job badly and twice. Light-passing model entities (bar gates, chain-link, fence doors --
+            // lightOpacity 0) are genuinely open frames and keep their discount.
+            if (b.shape != null && !IsFullCube(b, bv)
+                && !(b.shape is BlockShapeModelEntity && b.lightOpacity != 0))
             {
                 // Partial shapes split by the artists' LightOpacity marker (shapes.xml, 0|255):
                 // 0 = marked as passing light — plates/trim, poles, frames, holed cubes, "destroyed"

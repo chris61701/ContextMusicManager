@@ -1,3 +1,5 @@
+// Gated to 3.0+ (GV_V3): the voxel box it fills comes from EmitterAcoustics.DebugCellLoss, both on the same gate.
+#if GV_V3
 using System;
 using UnityEngine;
 
@@ -257,3 +259,4 @@ namespace CMM
         }
     }
 }
+#endif

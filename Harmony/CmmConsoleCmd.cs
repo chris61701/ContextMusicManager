@@ -114,8 +114,15 @@ namespace CMM
         //   cmm acoustics on|off     switch models live, no rebuild, no relog
         //   cmm acoustics rebuild    force a scene rebuild (after changing geometry)
         //   cmm acoustics here       the model's level at the player, broken down by arrival
+        //
+        // GATED TO GV_V3, like the model it drives. EmitterAcoustics / AcousticBridge / EmitterAudioLayer
+        // are all `#if GV_V3` (they need world APIs the Alphas and 2.6 don't have), and this command was
+        // the last caller of them left outside a gate — so `-t:DeployAll` compiled 3.1 and then failed the
+        // other three with five CS0103s. Caught only because a full four-version build was run; a 3.1-only
+        // build is green either way, which is how it went unnoticed.
         static string AcousticsCommand(List<string> p)
         {
+#if GV_V3
             string arg = p.Count > 1 ? p[1].ToLowerInvariant() : "";
 
             if (arg == "on" || arg == "off")
@@ -136,20 +143,32 @@ namespace CMM
                 if (!NativeAcoustics.Available) return "native unavailable";
                 double mat, pow, cal;
                 NativeAcoustics.cmm_ac_get_tuning(out mat, out pow, out cal);
-                if (p.Count > 2 && double.TryParse(p[2], System.Globalization.NumberStyles.Float,
-                                                   System.Globalization.CultureInfo.InvariantCulture, out double v))
+                // `verb off` IS NOT `verb 0`. The reverb knob is a dB OFFSET, so zero means "no offset" —
+                // a 7 dB reduction and nothing more — not "no room sound". The one experiment this knob
+                // exists for ("is the reverberant field what bleeds through this wall?") needs the field
+                // genuinely gone, and asking for it by the obvious name came back inconclusive because the
+                // field was still there at nearly full strength. -120 dB is gone.
+                string tok = p.Count > 2 ? p[2] : null;
+                bool off = arg == "verb" && tok != null && tok.ToLowerInvariant() == "off";
+                if (off || (tok != null && double.TryParse(tok, System.Globalization.NumberStyles.Float,
+                                                   System.Globalization.CultureInfo.InvariantCulture, out _)))
                 {
-                    if (arg == "wall") NativeAcoustics.cmm_ac_set_tuning(v, -1, -1);
+                    double v = off ? -120.0
+                                   : double.Parse(tok, System.Globalization.NumberStyles.Float,
+                                                  System.Globalization.CultureInfo.InvariantCulture);
+                    if (arg == "wall") NativeAcoustics.cmm_ac_set_tuning(v, -1, NativeAcoustics.Keep);
                     else               NativeAcoustics.cmm_ac_set_tuning(-1, -1, v);
                     double was = (arg == "wall") ? mat : cal;   // captured BEFORE the set
                     AcousticBridge.InvalidateGeometry();
-                    return (arg == "wall" ? "material scale " : "reverb level ") + v.ToString("0.##")
-                         + "  (was " + was.ToString("0.##") + ")"
+                    return (arg == "wall" ? "material scale " : "reverb level ")
+                         + (off ? "OFF" : v.ToString("0.##"))
+                         + "  (was " + (was <= -100 ? "OFF" : was.ToString("0.##")) + ")"
                          + "; rebuilding, live in ~0.5 s";
                 }
                 return "material scale " + mat.ToString("0.##") + " (default 40.1 -- higher = walls block more)"
-                     + "\n  reverb level " + cal.ToString("0.##") + " (default 7 -- lower = less room sound behind walls)"
-                     + "\n  usage: cmm acoustics wall <n> | cmm acoustics verb <n>";
+                     + "\n  reverb level " + (cal <= -100 ? "OFF" : cal.ToString("0.##"))
+                     + " (default 7 -- dB, lower = less room sound behind walls; 'off' = none at all)"
+                     + "\n  usage: cmm acoustics wall <n> | cmm acoustics verb <n>|off";
             }
 
             // ── cmm acoustics column ──────────────────────────────────────────────────────
@@ -216,6 +235,9 @@ namespace CMM
                  + "\n  scene:     " + AcousticBridge.LastStatus
                  + "\n  saturated: " + AcousticBridge.SaturatedPoints + " point(s) clamped at last publish"
                  + "\n  usage:     cmm acoustics on|off|rebuild|here";
+#else
+            return "native acoustics: not built into this game version";
+#endif
         }
 
         static void Out(string s)
