@@ -257,8 +257,16 @@ typedef struct {
     float exLev, exK;
     float snapHp;              /* one-pole HP state: keeps the noise snap out of the mud */
     float kSnapHp;
-    int   strike2At;           /* frame of the second micro-impact (0 = single strike) */
-    float strike2Lvl;          /* its level relative to the first */
+    float hi2;                 /* second pole of the tone cap (see sfx_click_sample) */
+    /* v43 — A CLUSTER OF MICRO-IMPACTS, NOT A TIDY PAIR. Two cleanly spaced strikes is a
+     * synthesizer patch; a mechanism CHATTERS. A detent ball does not drop into its groove once,
+     * it lands and rebounds and the spring plate buzzes against the stop, and that ragged handful
+     * of collisions inside the first few milliseconds is what the ear reads as "mechanical". With
+     * exactly two you hear a designed sound, however good each one is -- which is why nothing
+     * sounded gritty. */
+    int   strikeAt[6];         /* frames of each impact (index 0 is always 0) */
+    float strikeLvl[6];        /* their levels relative to the first */
+    int   strikeN, strikeNext; /* how many, and the cursor into them */
     /* v37 — static CRACKLE: a sample-and-hold amplitude sputter (random level held for a random
      * 3..30ms, slewed) that turns the smooth hiss into radio-tuning sputter. Depth 0 = smooth. */
     float crackle;         /* modulation depth 0..1 (captured from the tone globals per ping) */
@@ -1184,20 +1192,30 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
  * in, and the first render after the change clipped at +11.9 dBFS. Worth stating plainly because
  * a clipped click is not merely loud -- clipping generates harmonics, which are periodic, so the
  * tonality measurement came back barely changed and would have read as "the fix did not work". */
-#define CLICK_TRIM 0.20f
+#define CLICK_TRIM 0.32f
 /* How hard the contact hits, relative to the noise around it. This is the difference between a
  * click and a rustle; it is not a config knob because it is what makes a click a click -- Snap
  * already controls how much of the sound is crack versus shell. */
 #define SNAP_IMPULSE 5.0f
+/* Saturation drive and its make-up gain (the shaper's slope at zero is 1, so unity in = ~unity
+ * out once divided back down). Enough to round the peak and generate harmonics, not enough to
+ * turn the click into a buzz. */
+/* Make-up is set from the shaper's CEILING, not its slope at zero. d/(1+0.75|d|) asymptotes to
+ * 1/0.75 = 1.333, so 0.62 puts a hard strike near full scale while leaving headroom. Normalising
+ * by 1/drive instead -- the small-signal gain -- is right only for signals that never approach
+ * the knee, and a click is nothing but knee: it cost 11 dB. */
+#define CLICK_DRIVE      3.2f
+#define CLICK_DRIVE_NORM 0.62f
 
 /* One frame of a click. Shared by the live mixer and the offline preview render so what gets
  * tuned and what gets heard cannot drift apart -- the single most expensive recurring mistake in
  * this project has been two implementations of "the same" thing. */
 static float sfx_click_sample(sfx_voice* v, float noise) {
-    if (v->pos == 0) v->exLev = 1.0f;
-    else if (v->strike2At && v->pos == v->strike2At) {
-        v->exLev += v->strike2Lvl;
-        v->ping  += v->pingInit * v->strike2Lvl;
+    float hit = 0.0f;
+    if (v->strikeNext < v->strikeN && v->pos == v->strikeAt[v->strikeNext]) {
+        hit = v->strikeLvl[v->strikeNext++];
+        v->exLev += hit;
+        v->ping  += v->pingInit * hit;
     }
     float excite = noise * v->exLev;
     v->exLev *= v->exK;
@@ -1209,9 +1227,7 @@ static float sfx_click_sample(sfx_voice* v, float noise) {
      * is a different height every time and is often near zero. A deterministic impulse rides ON
      * TOP of the noise -- the strike is always the same hard event, the character around it is
      * always different. High-passed with the noise so it stays a crack instead of a thud. */
-    float drive = noise;
-    if (v->pos == 0) drive += SNAP_IMPULSE;
-    else if (v->strike2At && v->pos == v->strike2At) drive += SNAP_IMPULSE * v->strike2Lvl;
+    float drive = noise + SNAP_IMPULSE * hit;
     v->snapHp += v->kSnapHp * (drive - v->snapHp);
     float snap = (drive - v->snapHp) * v->ping;
     v->ping *= v->pingK;
@@ -1225,8 +1241,29 @@ static float sfx_click_sample(sfx_voice* v, float noise) {
         body += ry;
     }
     float x = snap + body * v->thump;
-    v->hi += v->kHi * (x - v->hi);      /* one tone cap over the lot */
-    return v->hi;
+    /* SOFT SATURATION -- the other half of "gritty". Two surfaces colliding is not a linear
+     * process: they deform, the contact area changes under load, and the result is harmonic
+     * distortion concentrated in the transient. A sum of linear resonators, however well tuned,
+     * comes out CLEAN, and clean is the one thing an impact never is. This shapes hardest exactly
+     * where the energy is -- at the strike -- and does nothing to the tail. */
+    /* SATURATE FIRST, THEN FILTER -- and give the filter two poles.
+     *
+     * I moved the shaper AFTER the tone cap so its harmonics would survive, and that was wrong in
+     * a way worth recording: a hard nonlinearity on a fifth-of-a-millisecond transient generates
+     * energy all the way past Nyquist, and with nothing downstream of it that energy both stays
+     * and ALIASES. Measured in octave bands, two thirds of the click ended up above 7 kHz. That
+     * is not grit, it is fizz, and the folded-back part is the harsh digital kind that no amount
+     * of tuning removes.
+     *
+     * So the nonlinearity goes back where it physically belongs -- at the contact, upstream of
+     * the radiating shell -- and the answer to "the harmonics get filtered away" is to put the
+     * cap somewhere they survive rather than to remove the cap. Two poles instead of one, because
+     * 6 dB/oct leaves the strike's ultrasonic tail only ~12 dB down an octave up. */
+    { float d = x * CLICK_DRIVE;
+      x = (d / (1.0f + fabsf(d) * 0.75f)) * CLICK_DRIVE_NORM; }
+    v->hi  += v->kHi * (x - v->hi);
+    v->hi2 += v->kHi * (v->hi - v->hi2);
+    return v->hi2;
 }
 
 static void sfx_capture_click_tone(sfx_voice* v, int which) {
@@ -1328,13 +1365,21 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
             float R = expf(-1.0f / (damp[m] * sec * rate));
             v->rc1[m] = 2.0f * R * cosf(w);
             v->rc2[m] = -(R * R);
-            /* NORMALISE THE MODE. This resonator's impulse response is R^n * sin((n+1)w)/sin(w),
+            /* NORMALISE THE MODE FOR NOISE DRIVE, NOT FOR AN IMPULSE. This resonator's impulse response is R^n * sin((n+1)w)/sin(w),
              * so a unit impulse peaks at about 1/sin(w) -- roughly 7.7x at 1 kHz, and worse the
              * lower the mode. Summing three of them unnormalised rendered the click at +16.6 dBFS:
              * it would have shipped as "now it is distorted" and been heard as another wrong sound
              * rather than as a gain bug. Caught by printing the peak in the preview render, which
              * is exactly what the preview is for. */
-            float sw = sinf(w); if (sw < 1e-4f) sw = 1e-4f;
+            /* sin(w) equalises the IMPULSE PEAK of each mode. Under a noise burst what matters
+             * is energy, and a resonator's noise gain goes as 1/sqrt(1-R^2) -- so the slow low
+             * mode accumulates far more than the fast high ones. With sin(w) the fundamental
+             * swamped the rest: measured on the shipped dial, 98% of the click's energy sat in a
+             * single band at 953 Hz with NOTHING above 1.2 kHz. A narrowband thump, which is why
+             * no amount of tuning made it read as metal -- the band the ear listens to for
+             * "small hard object" was empty. sqrt(1-R^2) equalises ENERGY instead, so the upper
+             * modes actually arrive and the shell has a spectrum rather than a pitch. */
+            float sw = sqrtf(1.0f - R * R); if (sw < 1e-4f) sw = 1e-4f;
             /* Body scales the WHOLE shell now, not just the upper modes. Leaving the fundamental
              * at full level regardless meant the one knob named after the tonal part could not
              * remove it — "too tonal" had no dial to turn. Body 0 is now a bare tick. */
@@ -1346,11 +1391,30 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     /* Second micro-impact after the first — the lever hitting its stop, or the detent's
      * "cl-ick". Its SPACING jitters hardest: on a real mechanism that gap is exactly what varies
      * throw to throw, and it is the cue the ear uses to tell a mechanism from a recording. */
-    float gap = 0.012f * (1.0f + 0.45f * vary * j4);
-    if (gap < 0.004f) gap = 0.004f;
-    v->strike2At  = dbl > 0.001f ? (int)(rate * gap) : 0;
-    v->strike2Lvl = dbl;
-    v->len = (int)(rate * (sec * 3.3f + (v->strike2At ? gap : 0.0f)));
+    /* Build the impact cluster. `Double` now buys COUNT as well as level: at 0 it is a single
+     * clean strike, and as it rises the mechanism chatters more. Spacings are irregular and drawn
+     * fresh every firing -- evenly spaced repeats read as a flam or a delay, and the ear is very
+     * good at spotting a rhythm. Levels fall away but not monotonically, because a rebound can
+     * land harder than the one before it. */
+    v->strikeAt[0] = 0; v->strikeLvl[0] = 1.0f;
+    v->strikeN = 1; v->strikeNext = 0;
+    if (dbl > 0.001f) {
+        int n = 2 + (int)(dbl * 3.4f); if (n > 6) n = 6;
+        float t = 0.0f;
+        for (int k = 1; k < n; k++) {
+            g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+            float u1 = (float)((g_sfxSeed >> 9) & 0xffff) / 65536.0f;
+            g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+            float u2 = (float)((g_sfxSeed >> 9) & 0xffff) / 65536.0f;
+            t += (0.0011f + 0.0068f * u1) * (1.0f + 0.5f * vary * (u2 - 0.5f));
+            if (t > sec * 2.0f) break;
+            v->strikeAt[v->strikeN]  = (int)(rate * t);
+            v->strikeLvl[v->strikeN] = dbl * (0.9f - 0.12f * k) * (0.55f + 0.75f * u2);
+            v->strikeN++;
+        }
+    }
+    float gap = v->strikeN > 1 ? (float)v->strikeAt[v->strikeN - 1] / rate : 0.0f;
+    v->len = (int)(rate * (sec * 3.3f + gap));
     if (v->len < 1) v->len = 1;
 }
 
