@@ -483,7 +483,7 @@ namespace CMM
                     // leaf is still visibly closing — the slam lands early, not after the animation.
                     float dmgO = DamageOpenness(b, bv, world, x, y, z);
                     float open = Mathf.Max(da.Openness, dmgO);
-                    float shutLoss = (dmgO <= 0f && IsSealDoor(b, bv.type)) ? AirtightLoss : SolidLoss(b);
+                    float shutLoss = (dmgO <= 0f && IsSealDoor(b, bv.type)) ? AirtightLoss : SolidLoss(b, bv);
                     return shutLoss * (1f - open);   // open ⇒ 0 (air), shut ⇒ full, mid ⇒ proportional
                 }
             }
@@ -574,9 +574,9 @@ namespace CMM
                 if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return 0f;
                 float dmgOpen = DamageOpenness(b, bv, world, x, y, z);
                 if (dmgOpen <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
-                return SolidLoss(b) * (1f - dmgOpen);
+                return SolidLoss(b, bv) * (1f - dmgOpen);
             }
-            return SolidLoss(b);
+            return SolidLoss(b, bv);
         }
 
         // ── Seal-class doors (airtight when shut+undamaged; config name-prefix list) ─────────────────
@@ -636,10 +636,50 @@ namespace CMM
 
         // Transmission loss of an opaque solid (a wall, or a fully-shut door): its material, halved for a
         // partial (non-cube) shape. Factored out so the door-openness blend and the plain-solid path agree.
-        private static float SolidLoss(Block b)
+        // Does this block's VARIANT actually fill its voxel? b.shape.IsSolidCube answers for the shape
+        // CLASS, and every shapes.xml block shares the generic BlockShapeNew class -- so it returns
+        // false for woodShapes:cube, a block literally named "cube". The variant's real geometry is in
+        // GetBounds(bv), which HasOpenCenter already reads for the same reason.
+        //
+        // This is the identical trap the lightOpacity comment below describes ("BlockShapeNew never
+        // receives the shapes.xml value"), one line further on: ask the CLASS and you get the default,
+        // ask the BLOCK and you get the truth.
+        private static readonly Dictionary<int, bool> _fullCubeCache = new Dictionary<int, bool>();
+        private static bool IsFullCube(Block b, BlockValue bv)
+        {
+            if (b.shape == null) return true;
+            if (b.shape.IsSolidCube) return true;
+            int key = (bv.type << 6) | (bv.rotation & 63);
+            if (_fullCubeCache.TryGetValue(key, out bool full)) return full;
+            Bounds[] arr = null;
+            try { arr = b.shape.GetBounds(bv); } catch { /* modded shape misbehaving ⇒ treat as partial */ }
+            full = false;
+            if (arr != null)
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    Vector3 mn = arr[i].min, mx = arr[i].max;
+                    const float E = 0.02f;
+                    if (mn.x <= E && mn.y <= E && mn.z <= E
+                        && mx.x >= 1f - E && mx.y >= 1f - E && mx.z >= 1f - E) { full = true; break; }
+                }
+            _fullCubeCache[key] = full;
+            return full;
+        }
+
+        private static float SolidLoss(Block b, BlockValue bv)
         {
             float m = MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null);
-            if (b.shape != null && !b.shape.IsSolidCube)
+            // A VARIANT THAT FILLS ITS VOXEL IS A WALL, whatever the shape class says. Gating this on
+            // shape.IsSolidCube charged woodShapes:cube -- the commonest structural block in the game --
+            // HALF a wall: 0.5 material became 0.25, which the router reads as 56% OPEN. Straight from
+            // `cmm acoustics column`, standing under a speaker with a floor between:
+            //
+            //     -250,43,-565  woodShapes:cube  loss 0.250  open 0.56  BlockShapeNew partial
+            //
+            // Walls and floors built from shapes.xml were therefore half-transparent everywhere, which
+            // is the bleeding through both -- and it applies to the SHIPPED model too, since this is
+            // the shared block reader.
+            if (b.shape != null && !IsFullCube(b, bv))
             {
                 // Partial shapes split by the artists' LightOpacity marker (shapes.xml, 0|255):
                 // 0 = marked as passing light — plates/trim, poles, frames, holed cubes, "destroyed"
