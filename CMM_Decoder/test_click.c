@@ -9,10 +9,8 @@
 #include <math.h>
 
 extern int  cmm_mix_render_click(int kind, int rate, float* out, int maxFrames);
-extern void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
-                                   float onBody, float onBodyHz, float onDouble,
-                                   float offHz, float offSnap, float offLenMs,
-                                   float offBody, float offBodyHz, float offDouble);
+extern void cmm_mix_set_click_tone_kind(int which, float hz, float snap, float lenMs,
+                                        float body, float bodyHz, float dbl, float vary);
 
 #define RATE 48000
 static void wr16(FILE* f, int v){ fputc(v & 255, f); fputc((v >> 8) & 255, f); }
@@ -45,9 +43,12 @@ static int put(float* dst, int cap, double at, int kind, float gain) {
 }
 
 int main(void) {
-    /* The shipped defaults, straight out of Config/radio.xml. */
-    cmm_mix_set_click_tone(3200, 0.7f, 18, 0.4f, 1000, 0.35f,
-                           1300, 0.45f, 28, 0.4f,  750, 0.20f);
+    /* The shipped defaults, straight out of Config/radio.xml. Toggle for power, detent for the
+     * dial -- different objects, different sounds. */
+    const float VARY = 0.5f;
+    cmm_mix_set_click_tone_kind(0, 2600, 0.50f, 28, 0.55f, 320, 0.55f, VARY);   /* toggle over  */
+    cmm_mix_set_click_tone_kind(1, 2000, 0.42f, 34, 0.60f, 260, 0.50f, VARY);   /* toggle back  */
+    cmm_mix_set_click_tone_kind(2, 4200, 0.80f, 12, 0.30f, 950, 0.15f, VARY);   /* dial detent  */
 
     int n;
     memset(buf, 0, sizeof buf);
@@ -58,13 +59,24 @@ int main(void) {
     n = put(buf, RATE * 8, 0.05, 3, 1.0f);
     wav("click_off.wav", buf, n + RATE / 10);
 
-    /* The sequence you actually hear: power on, three detents, power off. */
+    memset(buf, 0, sizeof buf);
+    n = put(buf, RATE * 8, 0.05, 4, 1.0f);
+    wav("click_dial.wav", buf, n + RATE / 10);
+
+    /* EIGHT DETENTS IN A ROW. The point of the per-fire variation is that this should sound like
+     * a knob being spun, not like one sample retriggered eight times -- so this is the file that
+     * actually tests it. */
+    memset(buf, 0, sizeof buf);
+    for (int i = 0; i < 8; i++) put(buf, RATE * 8, 0.10 + i * 0.16, 4, 1.0f);
+    wav("click_dial_spin.wav", buf, (int)(1.6 * RATE));
+
+    /* The sequence you actually hear: power on, three station changes, power off. */
     memset(buf, 0, sizeof buf);
     put(buf, RATE * 8, 0.10, 2, 1.0f);
-    put(buf, RATE * 8, 0.70, 2, 1.0f);
-    put(buf, RATE * 8, 1.10, 2, 1.0f);
-    put(buf, RATE * 8, 1.50, 2, 1.0f);
-    put(buf, RATE * 8, 2.20, 3, 1.0f);
+    put(buf, RATE * 8, 0.70, 4, 1.0f);
+    put(buf, RATE * 8, 1.05, 4, 1.0f);
+    put(buf, RATE * 8, 1.40, 4, 1.0f);
+    put(buf, RATE * 8, 2.10, 3, 1.0f);
     wav("click_sequence.wav", buf, (int)(2.7 * RATE));
 
     /* Peak, so a "wrong sound" complaint is never actually a clipping complaint. */

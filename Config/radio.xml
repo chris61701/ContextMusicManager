@@ -85,20 +85,43 @@
          Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
                     release then the stop landing — the mechanical "cl-ick"). 0 = single.
          Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. -->
-  <RadioClickOnHz>3200</RadioClickOnHz>
-  <RadioClickOnSnap>0.7</RadioClickOnSnap>
-  <RadioClickOnLengthMs>18</RadioClickOnLengthMs>
-  <RadioClickOnBody>0.4</RadioClickOnBody>
-  <RadioClickOnBodyHz>1000</RadioClickOnBodyHz>
-  <RadioClickOnDouble>0.35</RadioClickOnDouble>
+  <RadioClickOnHz>2600</RadioClickOnHz>
+  <RadioClickOnSnap>0.5</RadioClickOnSnap>
+  <RadioClickOnLengthMs>28</RadioClickOnLengthMs>
+  <RadioClickOnBody>0.55</RadioClickOnBody>
+  <RadioClickOnBodyHz>320</RadioClickOnBodyHz>
+  <RadioClickOnDouble>0.55</RadioClickOnDouble>
   <RadioClickOnVolume>-1</RadioClickOnVolume>
-  <RadioClickOffHz>1300</RadioClickOffHz>
-  <RadioClickOffSnap>0.45</RadioClickOffSnap>
-  <RadioClickOffLengthMs>28</RadioClickOffLengthMs>
-  <RadioClickOffBody>0.4</RadioClickOffBody>
-  <RadioClickOffBodyHz>750</RadioClickOffBodyHz>
-  <RadioClickOffDouble>0.2</RadioClickOffDouble>
+  <RadioClickOffHz>2000</RadioClickOffHz>
+  <RadioClickOffSnap>0.42</RadioClickOffSnap>
+  <RadioClickOffLengthMs>34</RadioClickOffLengthMs>
+  <RadioClickOffBody>0.6</RadioClickOffBody>
+  <RadioClickOffBodyHz>260</RadioClickOffBodyHz>
+  <RadioClickOffDouble>0.5</RadioClickOffDouble>
   <RadioClickOffVolume>-1</RadioClickOffVolume>
+
+  <!-- ── The DIAL DETENT: turning the tuning knob one station ───────────────────────────────
+       A different object from the power switch, so a different sound. Powering the radio on is
+       a TOGGLE — a lever going over centre and then the mechanism hitting its stop: two impacts,
+       a low heavy shell, the RadioClickOn/Off* sets above. Turning the knob one notch is a
+       DETENT — a ball dropping into a groove: one bright tick, a small tight shell, gone in a
+       few milliseconds. Same six controls, aimed somewhere else entirely. -->
+  <RadioClickDialHz>4200</RadioClickDialHz>
+  <RadioClickDialSnap>0.8</RadioClickDialSnap>
+  <RadioClickDialLengthMs>12</RadioClickDialLengthMs>
+  <RadioClickDialBody>0.3</RadioClickDialBody>
+  <RadioClickDialBodyHz>950</RadioClickDialBodyHz>
+  <RadioClickDialDouble>0.15</RadioClickDialDouble>
+  <RadioClickDialVolume>-1</RadioClickDialVolume>
+
+  <!-- How much each firing differs from the last, 0..1, shared by all three clicks. No two
+       detents on a real mechanism are identical, and a fixed waveform repeated on every notch is
+       exactly what gives a UI sound away as a sound EFFECT. It tilts the crack against the shell
+       in opposite directions, so what changes is the CHARACTER — this one caught more of the
+       metal, that one more of the housing — rather than the volume; it also jitters the shell's
+       pitch, the length, and the spacing of the second impact, which is the cue the ear uses to
+       tell a mechanism from a recording. 0 = every click identical. -->
+  <RadioClickVary>0.5</RadioClickVary>
   <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
        MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;
                     beyond it the volume fades to silence at Range.

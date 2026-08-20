@@ -133,13 +133,13 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle);
 
-        // v38/v39 — power-click tones, both kinds: tone cap Hz, snap (ping vs thump), length ms,
-        // body (shell-knock resonator mix), bodyHz (its ring pitch), double (second detent strike).
+        // v41 — one click kind at a time (0 = power-on toggle, 1 = power-off toggle, 2 = dial
+        // detent): tone cap Hz, snap (crack vs shell), length ms, body (upper shell modes), bodyHz
+        // (shell pitch), double (second impact), vary (how much each firing differs — shared).
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
-                                                           float onBody, float onBodyHz, float onDouble,
-                                                           float offHz, float offSnap, float offLenMs,
-                                                           float offBody, float offBodyHz, float offDouble);
+        internal static extern void cmm_mix_set_click_tone_kind(int which, float hz, float snap,
+                                                                float lenMs, float body,
+                                                                float bodyHz, float dbl, float vary);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_stop(float fade, int closeWhenIdle);
@@ -390,6 +390,11 @@ namespace CMM
         public const int SfxTuningStatic = 1;
         public const int SfxClickOn      = 2;
         public const int SfxClickOff     = 3;
+        // The dial detent is its OWN sound, not the power-on click reused: a radio switch is a
+        // toggle (lever over centre, then the stop — two impacts, low heavy shell) and a tuning
+        // knob is a detent (a ball into a groove — one bright tick, small tight shell, gone in
+        // milliseconds). Reusing one for the other is why the dial did not read as a dial.
+        public const int SfxClickDial    = 4;
         public void PlaySfx(int kind, float gain)
         {
             NativeMix.cmm_mix_play_sfx(kind, gain);
@@ -413,13 +418,14 @@ namespace CMM
         // dull thud), snap 0..1 (bright ping vs low thump), length ms, body 0..1 (shell-knock
         // resonator — the dial's "tok"), bodyHz (its ring pitch), double 0..1 (second detent
         // micro-impact ~12ms later). Captured when a click fires.
-        public void SetClickTone(float onHz, float onSnap, float onLenMs,
-                                 float onBody, float onBodyHz, float onDouble,
-                                 float offHz, float offSnap, float offLenMs,
-                                 float offBody, float offBodyHz, float offDouble)
+        // which: 0 = power-on toggle, 1 = power-off toggle, 2 = dial detent. vary 0..1 is shared
+        // by all three — how much each firing differs from the last, so a run of detents sounds
+        // like a mechanism instead of one waveform played repeatedly. Captured when a click fires,
+        // so a hot-reloaded radio.xml edit is heard on the very next dial.
+        public void SetClickToneKind(int which, float hz, float snap, float lenMs,
+                                     float body, float bodyHz, float dbl, float vary)
         {
-            NativeMix.cmm_mix_set_click_tone(onHz, onSnap, onLenMs, onBody, onBodyHz, onDouble,
-                                             offHz, offSnap, offLenMs, offBody, offBodyHz, offDouble);
+            NativeMix.cmm_mix_set_click_tone_kind(which, hz, snap, lenMs, body, bodyHz, dbl, vary);
         }
 
         public bool TryGetState(long id, out double positionSec, out double lengthSec, out bool active)

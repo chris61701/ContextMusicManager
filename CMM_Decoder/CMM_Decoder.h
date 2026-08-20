@@ -660,10 +660,14 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle);
  * resonator (v39), `bodyHz` = its ring pitch (clamped 200..3000; the "tok" of the dial body),
  * `dbl` = 0..1 level of the second detent micro-impact ~12ms after the first (0 = single).
  * Captured when a click fires, so config edits are heard on the next dial. */
-CMM_API void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
-                                    float onBody, float onBodyHz, float onDouble,
-                                    float offHz, float offSnap, float offLenMs,
-                                    float offBody, float offBodyHz, float offDouble);
+/* v41 — one kind at a time: 0 = power-on toggle, 1 = power-off toggle, 2 = dial detent. Replaces
+ * the both-kinds-at-once form, which would have needed eighteen positional floats to gain a third
+ * kind. `vary` (0..1, shared by all kinds) is how much each firing differs from the last. */
+CMM_API void cmm_mix_set_click_tone_kind(int which, float hz, float snap, float lenMs,
+                                         float body, float bodyHz, float dbl, float vary);
+
+/* v41 — render ONE click in isolation for auditioning; see cmm_mix.c. Returns frames (mono). */
+CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames);
 
 /* Fade ALL voices out over `fade`. closeWhenIdle!=0 closes the device once silent;
  * pass 0 to keep it open for a hand-off (e.g. a menu→game fade into the spawn stinger). */

@@ -166,20 +166,36 @@ namespace CMM
         //   Double   = 0..1 level of a second micro-impact ~12ms after the first (the detent's
         //              spring release then the stop landing — the mechanical "cl-ick"; 0 = single).
         //   Volume   = that click's own level; -1 = inherit RadioSfxVolume.
-        public static float  RadioClickOnHz        = 3200f;
-        public static float  RadioClickOnSnap      = 0.7f;
-        public static float  RadioClickOnLengthMs  = 18f;
-        public static float  RadioClickOnBody      = 0.4f;
-        public static float  RadioClickOnBodyHz    = 1000f;
-        public static float  RadioClickOnDouble    = 0.35f;
+        // THREE clicks, because they are three different objects. Power on/off is a TOGGLE: a
+        // lever going over centre and then the mechanism hitting its stop — two impacts, a low
+        // heavy shell. A station change is a DETENT: a ball dropping into a groove — one bright
+        // tick, a small tight shell, over in a few milliseconds. Reusing the toggle for the dial
+        // is why turning the knob did not sound like turning a knob.
+        public static float  RadioClickOnHz        = 2600f;
+        public static float  RadioClickOnSnap      = 0.50f;
+        public static float  RadioClickOnLengthMs  = 28f;
+        public static float  RadioClickOnBody      = 0.55f;
+        public static float  RadioClickOnBodyHz    = 320f;
+        public static float  RadioClickOnDouble    = 0.55f;
         public static float  RadioClickOnVolume    = -1f;
-        public static float  RadioClickOffHz       = 1300f;
-        public static float  RadioClickOffSnap     = 0.45f;
-        public static float  RadioClickOffLengthMs = 28f;
-        public static float  RadioClickOffBody     = 0.4f;
-        public static float  RadioClickOffBodyHz   = 750f;
-        public static float  RadioClickOffDouble   = 0.2f;
+        public static float  RadioClickOffHz       = 2000f;
+        public static float  RadioClickOffSnap     = 0.42f;
+        public static float  RadioClickOffLengthMs = 34f;
+        public static float  RadioClickOffBody     = 0.60f;
+        public static float  RadioClickOffBodyHz   = 260f;
+        public static float  RadioClickOffDouble   = 0.50f;
         public static float  RadioClickOffVolume   = -1f;
+        public static float  RadioClickDialHz       = 4200f;
+        public static float  RadioClickDialSnap     = 0.80f;
+        public static float  RadioClickDialLengthMs = 12f;
+        public static float  RadioClickDialBody     = 0.30f;
+        public static float  RadioClickDialBodyHz   = 950f;
+        public static float  RadioClickDialDouble   = 0.15f;
+        public static float  RadioClickDialVolume   = -1f;
+        // How much each firing differs from the last, 0..1, shared by all three. No two detents
+        // on a real mechanism are identical, and a fixed waveform repeated on every notch is the
+        // thing that gives a UI sound away as a sound EFFECT. 0 = every click identical.
+        public static float  RadioClickVary         = 0.5f;
         // ── Spatial curve (live-tunable; pushed to the native spatializer every tick) ──────────────
         // MinDistance = full-volume plateau radius (move freely inside it, level flat); past it the
         // level fades to silence at Range. Falloff = fade steepness (1 = straight amplitude ramp, >1

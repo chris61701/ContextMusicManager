@@ -147,6 +147,14 @@ namespace CMM
                 CMMConfig.RadioClickOffBody     = ReadFloat(root, "RadioClickOffBody",     CMMConfig.RadioClickOffBody);
                 CMMConfig.RadioClickOffBodyHz   = ReadFloat(root, "RadioClickOffBodyHz",   CMMConfig.RadioClickOffBodyHz);
                 CMMConfig.RadioClickOffDouble   = ReadFloat(root, "RadioClickOffDouble",   CMMConfig.RadioClickOffDouble);
+                CMMConfig.RadioClickDialHz       = ReadFloat(root, "RadioClickDialHz",       CMMConfig.RadioClickDialHz);
+                CMMConfig.RadioClickDialSnap     = ReadFloat(root, "RadioClickDialSnap",     CMMConfig.RadioClickDialSnap);
+                CMMConfig.RadioClickDialLengthMs = ReadFloat(root, "RadioClickDialLengthMs", CMMConfig.RadioClickDialLengthMs);
+                CMMConfig.RadioClickDialBody     = ReadFloat(root, "RadioClickDialBody",     CMMConfig.RadioClickDialBody);
+                CMMConfig.RadioClickDialBodyHz   = ReadFloat(root, "RadioClickDialBodyHz",   CMMConfig.RadioClickDialBodyHz);
+                CMMConfig.RadioClickDialDouble   = ReadFloat(root, "RadioClickDialDouble",   CMMConfig.RadioClickDialDouble);
+                CMMConfig.RadioClickDialVolume   = ReadFloat(root, "RadioClickDialVolume",   CMMConfig.RadioClickDialVolume);
+                CMMConfig.RadioClickVary         = ReadFloat(root, "RadioClickVary",         CMMConfig.RadioClickVary);
                 CMMConfig.RadioClickOffVolume   = ReadFloat(root, "RadioClickOffVolume",   CMMConfig.RadioClickOffVolume);
                 CMMConfig.WorldEmitterBirthFade = ReadFloat(root, "WorldEmitterBirthFade", CMMConfig.WorldEmitterBirthFade);
                 if (CMMConfig.RadioAnchorSeconds < 300f) CMMConfig.RadioAnchorSeconds = 300f;   // tiny windows = constant re-anchoring

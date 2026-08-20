@@ -216,6 +216,13 @@ static volatile float g_emColHamVoice  = 0.0f;
 #define SFX_KIND_STATIC    1
 #define SFX_KIND_CLICK_ON  2
 #define SFX_KIND_CLICK_OFF 3
+/* v41 — the DIAL DETENT is its own sound, not the power-on click reused. Flipping a radio on is
+ * a toggle: a lever going over centre, then the mechanism hitting its stop -- two impacts, a low
+ * heavy shell. Turning the tuning knob one notch is a detent: a ball dropping into a groove --
+ * one bright tick, a small tight shell, over in a few milliseconds. They are different objects
+ * and reusing one for the other is why the dial did not read as a dial. */
+#define SFX_KIND_CLICK_DIAL 4
+#define SFX_CLICK_KINDS 3
 #define SFX_MAX 4
 typedef struct {
     int kind;              /* 0 = idle slot */
@@ -265,13 +272,18 @@ static volatile float g_sfxStaticCrackle = 0.8f;
  * dull thud), SNAP 0..1 (the bright-noise-ping vs low-thump balance: 1 = all snap, 0 = all
  * thud), and length ms (the thump's decay constant; the ping decays 4× faster and the voice
  * runs ~3.3× this). Defaults reproduce the v35 hardcoded clicks. */
-static volatile float g_sfxClickHz[2]    = { 3200.0f, 1300.0f };
-static volatile float g_sfxClickSnap[2]  = { 0.7f, 0.45f };
-static volatile float g_sfxClickLenMs[2] = { 18.0f, 28.0f };
+static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 2600.0f, 2000.0f, 4200.0f };
+static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.50f, 0.42f, 0.80f };
+static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 28.0f, 34.0f, 12.0f };
 /* v39 — detent character: body-knock mix / its ring pitch / second-strike level (0 = single). */
-static volatile float g_sfxClickBody[2]   = { 0.4f, 0.4f };
-static volatile float g_sfxClickBodyHz[2] = { 1000.0f, 750.0f };
-static volatile float g_sfxClickDouble[2] = { 0.35f, 0.2f };
+static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.55f, 0.60f, 0.30f };
+static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 320.0f, 260.0f, 950.0f };
+static volatile float g_sfxClickDouble[SFX_CLICK_KINDS] = { 0.55f, 0.50f, 0.15f };
+/* How much each firing differs from the last, 0..1. A detent is a physical event and no two are
+ * identical; a fixed waveform repeated on every notch is the thing that gives a UI sound away as
+ * a sound EFFECT. Jitters pitch, level, the shell balance and the spacing of the second impact,
+ * so a fast spin down the dial sounds like a mechanism rather than a loop. */
+static volatile float g_sfxClickVary = 0.35f;
 
 /* adaptive ring state (see cmm_out.c / ComputeFillTargetLocked) */
 static int g_tightFill, g_maxFill, g_lowWater, g_targetFill;
@@ -1157,6 +1169,11 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
  * sane. Snap maps to the ping/thump pair so its extremes stay musical (never fully silent):
  * ping = 0.4 + 0.7·snap, thump = 1.0 − 0.55·snap — the v35 hardcoded clicks sit at snap
  * 0.7 (on) and 0.45 (off). Length is the thump decay; the ping decays 4× faster. */
+/* Overall click trim. The three-mode shell sums louder than the old single ring, and at Body
+ * 0.55-0.60 the toggles rendered at 0.98 peak -- fine at the default SFX volume and one bad
+ * setting away from clipping the bus against loud music. Headroom is cheaper than a limiter. */
+#define CLICK_TRIM 0.82f
+
 /* One frame of a click. Shared by the live mixer and the offline preview render so what gets
  * tuned and what gets heard cannot drift apart -- the single most expensive recurring mistake in
  * this project has been two implementations of "the same" thing. */
@@ -1196,11 +1213,33 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     if (body < 0.0f) body = 0.0f; else if (body > 1.0f) body = 1.0f;
     if (bodyHz < 200.0f) bodyHz = 200.0f; else if (bodyHz > 3000.0f) bodyHz = 3000.0f;
     if (dbl < 0.0f) dbl = 0.0f; else if (dbl > 1.0f) dbl = 1.0f;
+    /* PER-FIRE VARIATION. Drawn once, here, so every parameter of one click moves together and
+     * the result is a slightly different object each time rather than a smeared average. */
+    float vary = g_sfxClickVary;
+    if (vary < 0.0f) vary = 0.0f; else if (vary > 1.0f) vary = 1.0f;
+    float j1 = 0.0f, j2 = 0.0f, j3 = 0.0f, j4 = 0.0f, j5 = 0.0f;
+    if (vary > 0.001f) {
+        g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u; j1 = (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;
+        g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u; j2 = (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;
+        g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u; j3 = (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;
+        g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u; j4 = (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;
+        g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u; j5 = (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;
+    }
+    /* TEXTURE, NOT LOUDNESS. j5 tilts the crack against the shell in OPPOSITE directions, so what
+     * changes between one detent and the next is the character -- this one caught more of the
+     * metal, that one more of the housing -- while the level stays put. Varying the level instead
+     * just sounds like an inconsistent volume control, which is a different and worse impression. */
+    float tiltSnap = 1.0f + 0.35f * vary * j5;
+    float tiltBody = 1.0f - 0.35f * vary * j5;
+    bodyHz *= 1.0f + 0.22f * vary * j1;        /* the shell is never struck in quite the same place */
+    ms     *= 1.0f + 0.18f * vary * j2;
+    snap    = snap + 0.15f * vary * j3; if (snap < 0.0f) snap = 0.0f; else if (snap > 1.0f) snap = 1.0f;
+
     float sec = ms * 0.001f;
     v->kHi   = 1.0f - expf(-6.2831853f * hz / rate);
     /* The snap is SHORT -- a couple of milliseconds, not a quarter of the click. Decaying noise
      * over tens of milliseconds is a hiss; a switch is a crack. */
-    v->ping  = 0.4f + 0.7f * snap;
+    v->ping  = (0.4f + 0.7f * snap) * tiltSnap * CLICK_TRIM;
     v->pingK = expf(-1.0f / ((0.0006f + 0.0022f * (1.0f - snap)) * rate));
     v->pingInit = v->ping;
     /* High-pass the noise well below the tone cap so the snap has bite without mud. */
@@ -1210,7 +1249,7 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     }
     /* `thump` is now the SHELL's level rather than a decaying DC term -- same knob, same
      * direction (more snap = less shell), but it drives something that oscillates. */
-    v->thump = 1.0f - 0.55f * snap;
+    v->thump = (1.0f - 0.55f * snap) * tiltBody * CLICK_TRIM;
     v->thumpInit = v->thump;
     v->body = body;
     /* Three inharmonic modes around BodyHz. The ratios are deliberately not simple: 1, 1.71 and
@@ -1241,10 +1280,14 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
         }
     }
     v->snapHp = 0.0f;
-    /* Second micro-impact ~12ms after the first — the detent's "cl-ick". */
-    v->strike2At  = dbl > 0.001f ? (int)(rate * 0.012f) : 0;
+    /* Second micro-impact after the first — the lever hitting its stop, or the detent's
+     * "cl-ick". Its SPACING jitters hardest: on a real mechanism that gap is exactly what varies
+     * throw to throw, and it is the cue the ear uses to tell a mechanism from a recording. */
+    float gap = 0.012f * (1.0f + 0.45f * vary * j4);
+    if (gap < 0.004f) gap = 0.004f;
+    v->strike2At  = dbl > 0.001f ? (int)(rate * gap) : 0;
     v->strike2Lvl = dbl;
-    v->len = (int)(rate * (sec * 3.3f + (v->strike2At ? 0.012f : 0.0f)));
+    v->len = (int)(rate * (sec * 3.3f + (v->strike2At ? gap : 0.0f)));
     if (v->len < 1) v->len = 1;
 }
 
@@ -1255,13 +1298,13 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
  * ships cannot drift apart. Returns frames written (mono). */
 CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames) {
     if (!out || maxFrames <= 0 || rate <= 0) return 0;
-    if (kind != SFX_KIND_CLICK_ON && kind != SFX_KIND_CLICK_OFF) return 0;
+    if (kind < SFX_KIND_CLICK_ON || kind > SFX_KIND_CLICK_DIAL) return 0;
     int savedRate = g_busRate;
     g_busRate = rate;
     sfx_voice v;
     memset(&v, 0, sizeof v);
     v.kind = kind; v.pos = 0; v.gain = 1.0f; v.rng = 0x1234567u;
-    sfx_capture_click_tone(&v, kind == SFX_KIND_CLICK_ON ? 0 : 1);
+    sfx_capture_click_tone(&v, kind - SFX_KIND_CLICK_ON);
     g_busRate = savedRate;
     int n = v.len < maxFrames ? v.len : maxFrames;
     for (int i = 0; i < n; i++) {
@@ -1273,16 +1316,17 @@ CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames) 
     return n;
 }
 
-/* v38/v39 — set the live click TONE from config, both kinds at once (see the globals above).
- * Lock-free volatiles, clamped at capture; the next click plays with the new character. */
-CMM_API void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
-                                    float onBody, float onBodyHz, float onDouble,
-                                    float offHz, float offSnap, float offLenMs,
-                                    float offBody, float offBodyHz, float offDouble) {
-    g_sfxClickHz[0] = onHz;  g_sfxClickSnap[0] = onSnap;  g_sfxClickLenMs[0] = onLenMs;
-    g_sfxClickHz[1] = offHz; g_sfxClickSnap[1] = offSnap; g_sfxClickLenMs[1] = offLenMs;
-    g_sfxClickBody[0] = onBody;  g_sfxClickBodyHz[0] = onBodyHz;  g_sfxClickDouble[0] = onDouble;
-    g_sfxClickBody[1] = offBody; g_sfxClickBodyHz[1] = offBodyHz; g_sfxClickDouble[1] = offDouble;
+/* v41 — set one click kind's TONE from config: 0 = power-on toggle, 1 = power-off toggle,
+ * 2 = dial detent. Replaces the old both-kinds-at-once entry point, which would have needed
+ * eighteen positional floats to gain a third kind -- a signature nobody can call correctly
+ * twice. `vary` is shared by all kinds (see g_sfxClickVary). Lock-free volatiles, clamped at
+ * capture; the next click of that kind plays with the new character. */
+CMM_API void cmm_mix_set_click_tone_kind(int which, float hz, float snap, float lenMs,
+                                         float body, float bodyHz, float dbl, float vary) {
+    if (which < 0 || which >= SFX_CLICK_KINDS) return;
+    g_sfxClickHz[which] = hz;   g_sfxClickSnap[which] = snap;  g_sfxClickLenMs[which] = lenMs;
+    g_sfxClickBody[which] = body; g_sfxClickBodyHz[which] = bodyHz; g_sfxClickDouble[which] = dbl;
+    if (vary >= 0.0f) g_sfxClickVary = vary;
 }
 
 /* v35 — fire one synthesized radio-UI one-shot (SFX_KIND_*: 1 = tuning static burst, 2 = power-on
@@ -1290,7 +1334,7 @@ CMM_API void cmm_mix_set_click_tone(float onHz, float onSnap, float onLenMs,
  * (a power-on click may precede the radio voice's own add). Steals the most-finished slot when all
  * are busy. Does NOT touch the output gain (a click during the SP pause duck stays ducked). */
 CMM_API void cmm_mix_play_sfx(int kind, float gain) {
-    if (kind < SFX_KIND_STATIC || kind > SFX_KIND_CLICK_OFF) return;
+    if (kind < SFX_KIND_STATIC || kind > SFX_KIND_CLICK_DIAL) return;
     if (gain <= 0.0f) return;
     if (gain > 1.0f) gain = 1.0f;
     mix_lock(&g_lock);
@@ -1341,13 +1385,13 @@ CMM_API void cmm_mix_play_sfx(int kind, float gain) {
             sfx_capture_static_tone(v);
             v->modLev = 1.0f;   /* crackle modulator starts open (first draw lands within ~30ms) */
             break;
-        case SFX_KIND_CLICK_ON:
-            /* Power-on click — tone/snap/length from the live globals (cmm_mix_set_click_tone). */
-            sfx_capture_click_tone(v, 0);
-            break;
-        case SFX_KIND_CLICK_OFF:
-            /* Power-off clunk — same, its own parameter set. */
-            sfx_capture_click_tone(v, 1);
+        case SFX_KIND_CLICK_ON:      /* toggle over          */
+        case SFX_KIND_CLICK_OFF:     /* toggle back          */
+        case SFX_KIND_CLICK_DIAL:    /* one notch of the dial */
+            /* Each kind has its own parameter set (cmm_mix_set_click_tone_kind) and draws its own
+             * per-fire variation, so a fast spin down the dial is a run of related-but-different
+             * detents rather than the same waveform repeated. */
+            sfx_capture_click_tone(v, kind - SFX_KIND_CLICK_ON);
             break;
         }
         if (v->len < 1) v->len = 1;

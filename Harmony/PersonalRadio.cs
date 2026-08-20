@@ -234,12 +234,18 @@ namespace CMM
                 {
                     // Clicks likewise: their own levels (-1 = inherit) + the live tone pair,
                     // pushed before every click so a hot-reloaded edit lands on the next dial.
-                    if (kind == CmmMixer.SfxClickOn  && CMMConfig.RadioClickOnVolume  >= 0f) vol = CMMConfig.RadioClickOnVolume;
-                    if (kind == CmmMixer.SfxClickOff && CMMConfig.RadioClickOffVolume >= 0f) vol = CMMConfig.RadioClickOffVolume;
-                    mixer.SetClickTone(CMMConfig.RadioClickOnHz,  CMMConfig.RadioClickOnSnap,  CMMConfig.RadioClickOnLengthMs,
-                                       CMMConfig.RadioClickOnBody,  CMMConfig.RadioClickOnBodyHz,  CMMConfig.RadioClickOnDouble,
-                                       CMMConfig.RadioClickOffHz, CMMConfig.RadioClickOffSnap, CMMConfig.RadioClickOffLengthMs,
-                                       CMMConfig.RadioClickOffBody, CMMConfig.RadioClickOffBodyHz, CMMConfig.RadioClickOffDouble);
+                    if (kind == CmmMixer.SfxClickOn   && CMMConfig.RadioClickOnVolume   >= 0f) vol = CMMConfig.RadioClickOnVolume;
+                    if (kind == CmmMixer.SfxClickOff  && CMMConfig.RadioClickOffVolume  >= 0f) vol = CMMConfig.RadioClickOffVolume;
+                    if (kind == CmmMixer.SfxClickDial && CMMConfig.RadioClickDialVolume >= 0f) vol = CMMConfig.RadioClickDialVolume;
+                    mixer.SetClickToneKind(0, CMMConfig.RadioClickOnHz,   CMMConfig.RadioClickOnSnap,   CMMConfig.RadioClickOnLengthMs,
+                                              CMMConfig.RadioClickOnBody,   CMMConfig.RadioClickOnBodyHz,   CMMConfig.RadioClickOnDouble,
+                                              CMMConfig.RadioClickVary);
+                    mixer.SetClickToneKind(1, CMMConfig.RadioClickOffHz,  CMMConfig.RadioClickOffSnap,  CMMConfig.RadioClickOffLengthMs,
+                                              CMMConfig.RadioClickOffBody,  CMMConfig.RadioClickOffBodyHz,  CMMConfig.RadioClickOffDouble,
+                                              CMMConfig.RadioClickVary);
+                    mixer.SetClickToneKind(2, CMMConfig.RadioClickDialHz, CMMConfig.RadioClickDialSnap, CMMConfig.RadioClickDialLengthMs,
+                                              CMMConfig.RadioClickDialBody, CMMConfig.RadioClickDialBodyHz, CMMConfig.RadioClickDialDouble,
+                                              CMMConfig.RadioClickVary);
                 }
                 if (vol <= 0f) return;
                 mixer.PlaySfx(kind, vol);
@@ -280,13 +286,11 @@ namespace CMM
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
             _nextStartFade = CMMConfig.ManualSkipFadeDuration;   // keypress-fast
             _nextTick = 0f;                                      // dispatch next frame, not in ≤250 ms
-            // A CLICK ON EVERY DIAL MOVE, not only on power-on. Turning the knob while the radio is
-            // already playing is the same physical action as turning it on -- a detent -- and
-            // hearing nothing made a retune feel like the game had swallowed the keypress. It fires
-            // BEFORE _staticWanted below so the order reads the way the device would: click, then
-            // the hash, then the station. Shares the power-on click's voice and its RadioClickOn*
-            // tuning rather than adding a fourth sound with its own set of knobs.
-            Sfx(CmmMixer.SfxClickOn);
+            // A CLICK ON EVERY DIAL MOVE, and the right KIND of click. Powering the radio on is a
+            // toggle going over centre; turning the knob one station is a detent dropping into a
+            // groove. They are different objects and they get different sounds. It fires BEFORE
+            // _staticWanted below so the order reads the way the device would: click, hash, station.
+            Sfx(wasOn ? CmmMixer.SfxClickDial : CmmMixer.SfxClickOn);
             _staticWanted = true;                                // tuning static rolls until the voice lands
             _nextStaticAt = 0f;
             Notify(player, RadioStationCatalog.ByName.ContainsKey(name)
