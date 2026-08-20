@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
+using UnityEngine;
 
 namespace CMM
 {
@@ -149,6 +150,51 @@ namespace CMM
                 return "material scale " + mat.ToString("0.##") + " (default 40.1 -- higher = walls block more)"
                      + "\n  reverb level " + cal.ToString("0.##") + " (default 7 -- lower = less room sound behind walls)"
                      + "\n  usage: cmm acoustics wall <n> | cmm acoustics verb <n>";
+            }
+
+            // ── cmm acoustics column ──────────────────────────────────────────────────────
+            // Every block between the player and the nearest speaker, with what the model thinks
+            // each one IS: the raw loss CellLoss returns, the openness the router derives from it,
+            // and the block's name and shape. Exists because three separate guesses about what a
+            // floor is made of have now been wrong, and the only thing that can settle it is the
+            // actual column in the actual world.
+            if (arg == "column" || arg == "col")
+            {
+                var pl = GameManager.Instance?.World?.GetPrimaryPlayer();
+                var w = GameManager.Instance?.World;
+                if (pl == null || w == null) return "no player";
+                Vector3 ear = pl.getHeadPosition();
+                Vector3 spk;
+                if (!EmitterAudioLayer.TryGetNearestSpeaker(ear, out spk)) return "no speaker in range";
+                var sb = new System.Text.StringBuilder();
+                float dist = Vector3.Distance(ear, spk);
+                sb.Append("ear ").Append(ear.ToCultureInvariantString())
+                  .Append("  ->  speaker ").Append(spk.ToCultureInvariantString())
+                  .Append("   d=").Append(dist.ToString("0.0"));
+                int steps = Mathf.Clamp(Mathf.CeilToInt(dist * 2f), 1, 64);
+                var seen = new HashSet<Vector3i>();
+                for (int i = 0; i <= steps; i++)
+                {
+                    Vector3 sp = Vector3.Lerp(ear, spk, i / (float)steps);
+                    var v = new Vector3i(Mathf.FloorToInt(sp.x), Mathf.FloorToInt(sp.y), Mathf.FloorToInt(sp.z));
+                    if (!seen.Add(v)) continue;
+                    BlockValue bv = w.GetBlock(v.x, v.y, v.z);
+                    float loss = bv.isair ? 0f : EmitterAcoustics.DebugCellLoss(bv, w, v.x, v.y, v.z);
+                    // the same ramp the router uses, so this reports what it actually sees
+                    float open = bv.isair ? 1f
+                               : loss >= 0.5f ? 0f
+                               : loss <= 0.05f ? 1f
+                               : 1f - (loss - 0.05f) / 0.45f;
+                    var b = bv.Block;
+                    sb.Append("\n  ").Append(v.ToString().PadRight(20))
+                      .Append(bv.isair ? "AIR" : (b != null ? b.GetBlockName() : "?"))
+                      .Append("  loss ").Append(loss.ToString("0.000"))
+                      .Append("  open ").Append(open.ToString("0.00"))
+                      .Append(bv.isair || b == null ? "" :
+                              "  shape " + (b.shape != null ? b.shape.GetType().Name : "-")
+                              + (b.shape != null && b.shape.IsSolidCube ? " CUBE" : " partial"));
+                }
+                return sb.ToString();
             }
 
             if (arg == "rebuild")

@@ -424,6 +424,27 @@ namespace CMM
             }
         }
 
+        // The nearest published speaker POINT to a position, across every voiced station. Used by
+        // `cmm acoustics column` to walk the actual blocks between the listener and the speaker the
+        // model is talking about -- rather than the one a human guesses is nearest.
+        internal static bool TryGetNearestSpeaker(Vector3 from, out Vector3 nearest)
+        {
+            nearest = Vector3.zero;
+            float best = float.MaxValue;
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0) continue;
+                for (int k = 0; k < st.PtCount; k++)
+                {
+                    var p = new Vector3(st.Pts[k * 3], st.Pts[k * 3 + 1], st.Pts[k * 3 + 2]);
+                    float d = Vector3.Distance(from, p);
+                    if (d < best) { best = d; nearest = p; }
+                }
+            }
+            return best < float.MaxValue;
+        }
+
         // ── PHASE 3: occlusion from the native acoustic model ───────────────────────────────
         // Publishes every audible station from the native solve, or returns false and lets the
         // shipped paths run this tick. It declines in three cases, all deliberate:
