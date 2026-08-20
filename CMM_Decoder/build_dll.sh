@@ -53,6 +53,7 @@ SRC=(
   cmm_mix.c                    # cmm_mix_* native mixer (producer loop, GC-immune)
   cmm_loudness.c               # cmm_loudness_* native EBU R128 analyzer (GC-immune sweep)
   cmm_acoustics.c              # cmm_ac_* world-emitter acoustic model (own arena, GC-immune)
+  cmm_field.c                  # cmm_fld_* ONE listener-anchored occlusion field, read by every source
   third_party/opusfile/src/info.c
   third_party/opusfile/src/internal.c
   third_party/opusfile/src/opusfile.c
