@@ -396,3 +396,4 @@ CMM_Decoder/test_acoustics.exe
 # Click audition renders + its harness (regenerate: gcc test_click.c dist/CMM_Decoder.dll)
 CMM_Decoder/*.wav
 CMM_Decoder/CMM_Decoder.dll
+CMM_Decoder/clicks.tuned.xml
