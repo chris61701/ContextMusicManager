@@ -125,6 +125,17 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **Radio and speaker settings moved to their own file, `Config/radio.xml`.** They were 64 of
+  the 113 settings and well over half the file, which buried the ordinary music options
+  underneath them. Both files are read as one chain and **a setting found in `settings.xml`
+  still wins**, so an existing install keeps working untouched and nothing you tuned is lost —
+  move them across whenever you feel like it, or never. `radio.xml` hot-reloads exactly like
+  `settings.xml`.
+
+- **`WorldEmitterRange` now defaults to 60 blocks** (was 100). A speaker audible from a hundred
+  blocks away carried much further than it reads on screen, and the range also sets how much
+  world the occlusion has to think about — so this is quieter at a distance *and* cheaper.
+
 - **The game's audio sliders now work on CMM's music.** CMM's audio leaves through its own
   output device rather than Unity's, which meant the **Overall Volume** slider — implemented by
   the game as a Unity-wide setting — never reached any of it. Turning the master to zero

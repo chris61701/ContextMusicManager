@@ -111,7 +111,7 @@ namespace CMM
         // but the advance waits for a frame). See ContextMusicManager.PreStageNextAdvance.
         public static bool NativePreStageAdvance = true;
 
-        // ── World emitters (in-world speakers/radios — Config/settings.xml) ────
+        // ── World emitters (in-world speakers/radios — Config/radio.xml) ────
         // EXPERIMENTAL (3.0 only). When enabled, detected in-world speaker/radio blocks
         // (see EmitterRegistry) play a shared "station" as an independent positional layer
         // ALONGSIDE the normal soundtrack — a diegetic radio you hear when near it. v1 is
@@ -122,7 +122,7 @@ namespace CMM
         //   distance (game units) from the listener.
         public static bool   WorldEmitterEnabled = false;
         public static string WorldEmitterSource  = "";
-        public static float  WorldEmitterRange   = 100f;
+        public static float  WorldEmitterRange   = 60f;
         //   Volume: the world emitters' OWN trim (0..1), multiplied onto the Ambient and Overall
         //   sliders to form the emitter master. DELIBERATELY SEPARATE from the Radio context's
         //   `volume` in contexts.xml, which now trims ONLY the personal radio (Alt+PgUp/PgDn) —

@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ContextMusicManager — RADIO AND WORLD-EMITTER SETTINGS
+     ==========================================================================================
+     Everything about music coming from a radio or speaker BLOCK in the world, and the personal
+     radio: what plays, how loud, how far, how it is coloured, and how walls and doors get in the
+     way. Split out of settings.xml because it was 64 of the 113 settings and well over half the
+     lines, which buried the ordinary music options underneath it.
+
+     Both files are read, and a setting found in settings.xml WINS — so if you are upgrading and
+     your old settings.xml still lists these, they keep working exactly as before and nothing you
+     tuned is lost. Move them here at your leisure, or don't. -->
+<CMMRadioSettings>
+  <!-- The world EMITTERS (speaker/radio blocks playing spatially in the world) require game
+       version 3.0+ — on older versions they are inert and this setting (plus the acoustic
+       WorldEmitter* settings below) is ignored. The RADIO STATIONS themselves and the
+       personal radio dial (KeyRadioNext/KeyRadioPrev) work on EVERY supported version. -->
+  <WorldEmitterEnabled>true</WorldEmitterEnabled>
+  <!-- The Radio source. Names a context (its Source/fadeintime/volume then apply), or is a raw
+       folder / .m3u / absolute path.
+       STATIONS: every SUBFOLDER of that folder is one radio station — the folder name is the
+       station name. A station folder can hold audio files, .m3u/.m3u8 playlists (expanded; their
+       entries may point anywhere), or both. Each POI's radios all tune to ONE station (picked
+       stably per POI); a radio
+       you place yourself gets a station from its position (move it to retune). Stations broadcast
+       on the WORLD CLOCK: everyone in the same world hears the same song at the same point, and
+       rejoining a station resumes wherever its broadcast is now. Songs play whole, back-to-back;
+       stations are ready INSTANTLY at any library size (no scanning — a join reads only a handful
+       of file headers). Up to 3 nearest stations are audible at once. Loose tracks directly in
+       the folder are a FALLBACK single station, used only when no subfolder has playable audio
+       (a flat folder behaves as before).
+       REMOVING a station folder mid-game: radios tuned to it go SILENT (no retune — dead air
+       until the folder returns or you re-enter the world; other stations are unaffected). -->
+  <WorldEmitterSource>Radio</WorldEmitterSource>   <!-- J:\7D2D Custom Music\Radio, or an .m3u, or an absolute path -->
+  <WorldEmitterRange>60</WorldEmitterRange>
+  <!-- Volume 0..1: the world speakers' own level, multiplied onto the game's "Overall" and
+       "Ambient Sound" sliders. The emitters follow AMBIENT, not the music slider — a radio
+       playing out of a block is an environmental sound, so turning the music down leaves it
+       playing. This is SEPARATE from the Radio context's volume="..." in contexts.xml, which
+       now trims only the personal radio (Alt+PgUp/PgDn): a speaker across the room and a radio
+       in your head want different levels. Hot-reloads — edit and save while the game runs.
+       NOTE Ambient defaults to 100% where Music defaults to 60%, so at 0.5 the speakers are
+       ~4.4 dB louder than they used to be; 0.3 reproduces the old level exactly. -->
+  <WorldEmitterVolume>0.5</WorldEmitterVolume>
+  <WorldEmitterFade>1.0</WorldEmitterFade>
+  <!-- Placement ("birth") fade, seconds: how long a just-placed speaker takes to fade in — both
+       when it joins a station that's already playing (per-speaker ramp) and when placing it is
+       what STARTS the station's voice (the placed radio is its first audible speaker nearby).
+       -1 = inherit the station start fade (the Radio context's fadeintime, else WorldEmitterFade).
+       0 = pop in at full volume instantly. Tune this to make placing radios feel snappier without
+       changing station-approach fade-ins or the personal radio's world-entry join. -->
+  <WorldEmitterBirthFade>0</WorldEmitterBirthFade>
+  <!-- Broadcast anchor window, seconds (min 300; default 3600 = 1 h). Station schedules re-anchor
+       at every multiple of this: the song lineup jumps to a fresh deterministic point once per
+       window (a playing song still finishes first — nothing is ever cut). Longer = rarer jumps
+       but slightly more file headers read when joining a station. Everyone in an MP world should
+       use the same value — it shapes the shared broadcast, like the station folders do. -->
+  <RadioAnchorSeconds>3600</RadioAnchorSeconds>
+  <!-- Personal-radio UI sounds (synthesized in the native mixer — no audio files): a static hash
+       while dialing between / joining stations, a click when the radio powers on, a clunk when it
+       powers off (also plays when the radio powers itself off because every station was deleted).
+       Volume is 0..1 before the music master — the sounds scale with the radio itself. Both
+       hot-reload. -->
+  <RadioSfxEnabled>true</RadioSfxEnabled>
+  <RadioSfxVolume>0.5</RadioSfxVolume>
+  <!-- Tuning-static character. ALL hot-reload and take effect on the very next ping — even
+       mid-hash — so dial between stations while editing and hear each change immediately.
+         StaticVolume  : the static's own level 0..1; -1 = inherit RadioSfxVolume (clicks always
+                         use RadioSfxVolume, so you can run quiet static under audible clicks).
+         StaticLowHz   : low cut (50..4000). Lower = fuller/warmer body; higher = thin AM hiss.
+         StaticHighHz  : top cap (400..12000, kept above the low cut). Higher = brighter hiss;
+                         lower = dull rumble.
+         StaticCrackle : 0..1 sputter depth. 0 = smooth "shhh"; 1 = full pops-and-sputter radio
+                         crackle (random dropouts a few ms to ~30 ms long). -->
+  <RadioStaticVolume>-1</RadioStaticVolume>
+  <RadioStaticLowHz>350</RadioStaticLowHz>
+  <RadioStaticHighHz>2000</RadioStaticHighHz>
+  <RadioStaticCrackle>0.8</RadioStaticCrackle>
+  <!-- Power-click character, one set per click (all hot-reload — heard on the next dial):
+         Hz       : tone cap (300..10000) — higher = bright tick, lower = dull thud.
+         Snap     : 0..1 — balance of the bright noise ping vs the low thump. 1 = all snap
+                    (a sharp tick), 0 = all thud (a soft pop).
+         LengthMs : the thump's decay (5..120); the whole click lasts about 3.3× this.
+         Body     : 0..1 — the shell-knock resonator, the "tok" of a real dial body. 0 = off.
+         BodyHz   : the knock's ring pitch (200..3000; plastic ~900-1400, bakelite ~500-800).
+         Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
+                    release then the stop landing — the mechanical "cl-ick"). 0 = single.
+         Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. -->
+  <RadioClickOnHz>3200</RadioClickOnHz>
+  <RadioClickOnSnap>0.7</RadioClickOnSnap>
+  <RadioClickOnLengthMs>18</RadioClickOnLengthMs>
+  <RadioClickOnBody>0.4</RadioClickOnBody>
+  <RadioClickOnBodyHz>1000</RadioClickOnBodyHz>
+  <RadioClickOnDouble>0.35</RadioClickOnDouble>
+  <RadioClickOnVolume>-1</RadioClickOnVolume>
+  <RadioClickOffHz>1300</RadioClickOffHz>
+  <RadioClickOffSnap>0.45</RadioClickOffSnap>
+  <RadioClickOffLengthMs>28</RadioClickOffLengthMs>
+  <RadioClickOffBody>0.4</RadioClickOffBody>
+  <RadioClickOffBodyHz>750</RadioClickOffBodyHz>
+  <RadioClickOffDouble>0.2</RadioClickOffDouble>
+  <RadioClickOffVolume>-1</RadioClickOffVolume>
+  <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
+       MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;
+                    beyond it the volume fades to silence at Range.
+       Falloff:     steepness of the plateau→Range fade. 1 = straight amplitude ramp; >1 steeper
+                    just past the plateau (more change per step / "punchier"); <1 gentler near.
+       Muffle:      how much distance dulls the tone via a low-pass (0 = none, 1 = very muffled far).
+                    The "it's over there" cue, separate from volume. Measured against a FIXED reference
+                    distance (~24 blocks to full dullness), NOT Range — so it stays effective at large
+                    Range, and a wall's virtual distance audibly dulls the tone.
+       Occlusion:   walls make a speaker sound FARTHER (quieter + duller on the same curve), not a hard
+                    cut, so it fades gradually instead of all-or-nothing. Two curves shape it:
+                    WallDistance = virtual blocks a full solid wall adds. MaxDistance = the SOFT-KNEE floor
+                    (tanh): stacking walls muffles with DIMINISHING RETURNS toward this, never silent by
+                    muffle alone (a box you stand behind stays audible). HardStop = virtual blocks of
+                    SOLID actually crossed at which it cuts to TRUE silence (a sealed thick vault goes
+                    dead) — keyed to material only, so an open-air detour never triggers it; denser
+                    material seals in fewer blocks. Occlusion false = off. -->
+  <WorldEmitterMinDistance>1</WorldEmitterMinDistance>
+  <WorldEmitterFalloff>2.5</WorldEmitterFalloff>
+  <WorldEmitterMuffle>0.9</WorldEmitterMuffle>
+  <!-- StereoWidth 0..1: how hard a left/right speaker pans. 1 = full pan (far ear can drop to silence);
+       lower keeps the sound in BOTH ears at different volumes (like a real source at 90°). ~0.8 = natural. -->
+  <WorldEmitterStereoWidth>0.8</WorldEmitterStereoWidth>
+  <WorldEmitterOcclusion>true</WorldEmitterOcclusion>
+  <WorldEmitterOcclusionWallDistance>35</WorldEmitterOcclusionWallDistance>
+  <WorldEmitterOcclusionMaxDistance>30</WorldEmitterOcclusionMaxDistance>
+  <WorldEmitterOcclusionHardStop>68</WorldEmitterOcclusionHardStop>
+  <!-- OcclusionFadeRate: cap (virtual blocks/second) on how fast a speaker's occlusion may RISE from
+       MOVEMENT, so walking out a doorway / behind a thick wall fades the radio out (~a second) instead
+       of hard-cutting it the tick the route flips to blocked. Door open/close events bypass the cap
+       (their timing is tuned separately) and occlusion DROPS are never capped — sound arriving tracks
+       the event. 0 = no cap (old instant behavior). Hot-reloads. -->
+  <WorldEmitterOcclusionFadeRate>50</WorldEmitterOcclusionFadeRate>
+  <!-- Mid-swing door acoustics follow the physical GAP IN METRES (swing fraction × the door's largest
+       dimension), so the same two knobs are right for every door size: a 3 m garage door with a metre
+       still to go is a huge aperture (full sound); a vault leaf the same fraction open is a hand-width
+       crack (nearly shut). DoorGapFull = opening (m) at/above which sound is fully open — big doors come
+       alive almost immediately on open. DoorGapClosed = opening (m) at/below which it's acoustically
+       shut — the final sliver of crack is ignored, so heavy doors read as a slam. Hot-reloads. -->
+  <WorldEmitterDoorGapFull>1.25</WorldEmitterDoorGapFull>
+  <!-- GapFullOpen: the OPENING direction's full-sound threshold (metres of gap). Kept separate from
+       GapFull because the two directions want different feels: closing is tuned for when the shut lands
+       (fade begins early), but sound should FLOOD IN the moment an opening door has a real gap — sharing
+       one threshold made a close-tuned door slow to come alive on open. Hot-reloads. -->
+  <WorldEmitterDoorGapFullOpen>0.7</WorldEmitterDoorGapFullOpen>
+  <WorldEmitterDoorGapClosed>0.15</WorldEmitterDoorGapClosed>
+  <!-- DoorGapOverrides: per-door-type overrides of the three gap thresholds, without touching the rest.
+       Format: "match=full/fullOpen/closed;match=..." — match is a case-insensitive SUBSTRING of the
+       block name ("garageDoor" catches wooden/steel/iron variants), "-" inherits the global, first match
+       wins. Default slows the garage/roll-up OPEN ramp to suit their long lift. Hot-reloads. -->
+  <WorldEmitterDoorGapOverrides>garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1</WorldEmitterDoorGapOverrides>
+  <!-- DoorSealTypes: comma-separated block-name prefixes of doors that are AIRTIGHT when fully shut and
+       undamaged. A closed vault door is a pressure seal — TRUE SILENCE via the hard-stop, landing while
+       the leaf is still visibly closing (the slam) — not just a metal panel's worth of muffle. No volume
+       knob can reach silence for ordinary doors; this list is what does it, per door type. Any visible
+       damage state breaches the seal (back to normal material acoustics). Hot-reloads. -->
+  <WorldEmitterDoorSealTypes>vaultDoor,vaultHatch</WorldEmitterDoorSealTypes>
+  <!-- PathRouting: when the direct line to a speaker is blocked, flood-fill through open air to find
+       whether sound can reach you another way (around a wall, up a stairwell) and how far it travels,
+       so it routes through openings instead of going near-silent. Deterministic (no ray noise).
+       FloodRadius = how many blocks the air search reaches from the ear (bigger = finds longer ways
+       around, more CPU; capped at 32). Set PathRouting false for direct-line only.
+       A speaker beyond FloodRadius blocks routes to the box edge then straight-lines the rest (boundary
+       blend), so there's no volume snap at the edge. Set PathRouting false for direct-line only (A/B).
+       NOTE: a BIG FloodRadius follows a hallway around a corner and keeps the direct sound alive, which
+       masks the reverb; a small one lets the dry fade so reverb blooms. Default 8 is a middle ground —
+       dial toward 1 for reverb-forward, toward 24 for routing-forward. Hot-reloads live. -->
+  <WorldEmitterPathRouting>true</WorldEmitterPathRouting>
+  <WorldEmitterFloodRadius>32</WorldEmitterFloodRadius>
+  <!-- FIELD CACHE ("Phase 2"): occlusion comes from one CACHED sound field per speaker (built once,
+       rebuilt only when doors/blocks change) instead of re-computing around you as you move — walking
+       past walls and floors now fades smoothly instead of stepping. Door swings and the first seconds
+       near a newly-met speaker still use the classic path while its field builds. FieldRadius = how far
+       (blocks) each speaker's field reaches (16-48; bigger = smoother far away, ~3.6 MB per speaker at
+       48). FieldRefresh = seconds between quiet rebuilds (catches world edits). All hot-reload;
+       FieldCache false = exact pre-Phase-2 behavior. -->
+  <WorldEmitterFieldCache>true</WorldEmitterFieldCache>
+  <WorldEmitterFieldRadius>48</WorldEmitterFieldRadius>
+  <WorldEmitterFieldRefresh>60</WorldEmitterFieldRefresh>
+  <!-- NATIVE ACOUSTICS: the occlusion model that decides how much a wall, floor or door takes away
+       and which direction the sound reaches you from. Works in DECIBELS rather than in "extra
+       distance", which is what lets a wall be worth the same amount of quiet wherever you stand —
+       the older model priced it in blocks, so the same wall cost a different amount at every range
+       and could not be tuned. Distance falloff stays the game's own curve; this only supplies the
+       occlusion. Runs off the frame loop (a scene is built in ~1.5 ms slices while you walk) and
+       falls back to the previous model automatically while a scene builds and ALWAYS during a door
+       swing, so mid-swing door acoustics are unchanged.
+       false = the previous occlusion model, exactly as it shipped. Live: `cmm acoustics on|off`.
+
+       DEFAULTED BACK TO false 2026-08-20, ON THE ONLY INSTRUMENT THAT HAS BEEN RIGHT ABOUT THIS
+       ALL ALONG: listening. Verdict, A/B'd in game with `cmm acoustics model native|legacy`:
+       "the occlusion feels completely broken on native, and works on legacy". The native model
+       gets several things the old one cannot (many speakers affordably, geometry-bound rebuilds
+       rather than ear-bound floods), but none of that is worth an occlusion that is wrong, and a
+       week of fixing individual defects in it has not made it right. It stays one command away
+       for development; it is not what a player gets.
+       OcclusionFullDb = how much occlusion (dB) fully dulls the tone; lower = walls sound duller
+       sooner. Both hot-reload. -->
+  <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
+  <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>
+  <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's
+       wall bounces (reflective caves ring around corner after corner until the sound truly runs out
+       of energy; absorptive wood rooms still eat it fast) instead of by raw route meters. Hot;
+       false = the old distance-graded carry. -->
+  <WorldEmitterReverbBounce>true</WorldEmitterReverbBounce>
+  <!-- Directional occlusion: when the straight line to a speaker runs through solid rock, the sound is
+       re-aimed to arrive from the OPEN ROUTE (down the corridor) instead of straight through the wall.
+       Only the direction changes; loudness/muffle are unchanged. Needs PathRouting on. Hot-reloads. -->
+  <WorldEmitterOcclusionDirectional>true</WorldEmitterOcclusionDirectional>
+  <!-- Reverb: a room probe (rays from your ear measuring how far and what material the surfaces around
+       you are) estimates how enclosed/big/reflective the space is and adds room reflections to the
+       station. The reflected (wet) sound is NOT muffled by occlusion, so behind a wall the direct sound
+       drops away but the reverb carries — the "it bounced / it's in the next room" cue. A big reflective
+       room (metal warehouse) rings; a small dead one (cloth/dirt) is nearly dry; open air is dry.
+       ReverbWet = master wet level 0..1 (0 = off). Size/decay/damping are estimated automatically. -->
+  <WorldEmitterReverbEnabled>true</WorldEmitterReverbEnabled>
+  <WorldEmitterReverbWet>0.6</WorldEmitterReverbWet>
+  <!-- ReverbDecay: tail LENGTH 0..1, independent of Wet (level). Lower = shorter/tighter reverb, higher
+       = a longer ring. Wet = how loud the reflections are; Decay = how long they hang. Hot-reloads. -->
+  <WorldEmitterReverbDecay>0.6</WorldEmitterReverbDecay>
+  <!-- ReverbRange: how far (blocks) the room probe reaches before a surface reads as "open sky". Enclosure
+       and room size are measured against this, so a space BIGGER than it reads as outdoors and goes dry
+       (why a large cave lost its reverb). Raise it for big caverns; cost is longer ray marches per reverb
+       tick (cheap at the few-Hz rate). Hot-reloads. -->
+  <WorldEmitterReverbRange>64</WorldEmitterReverbRange>
+  <!-- ReverbCarry 0..1: level of the CARRY reverb — the deliberate "muffled music from the next room /
+       down the tunnel" cue that survives occlusion of the direct sound. Taste knob: your own room's
+       reverb (the LOCAL bus) is fed the arriving occluded signal so it follows walls/water/hard-stop
+       automatically, while the carry responds to real material on its own (fixed physics, not a dial):
+       it halves per half wall-equivalent crossed — a shut wooden door ≈ −3 dB, metal ≈ −6 dB — and is
+       hard-blocked entirely at vault thickness; open-air corners carry at full level. 0 = only your own
+       space reverberates. Replaces the old ReverbOcclusion compromise dial. Hot-reloads. -->
+  <WorldEmitterReverbCarry>0.8</WorldEmitterReverbCarry>
+  <!-- ReverbRangeMult (≥1): the reverb reaches this many times FARTHER than the dry Range, so a brief step
+       past the dry range in a connected cave doesn't drop the tail. Safe outdoors (no enclosure = no wet, so
+       a bigger reach carries nothing). 1 = reverb stops at the dry range; 1.5–2 bridges cave dips. Hot-reloads. -->
+  <WorldEmitterReverbRangeMult>1.5</WorldEmitterReverbRangeMult>
+  <!-- ReverbPan 0..1: how much the reverb is panned toward the source's traced (air-route) bearing. 0 = fully
+       diffuse (surrounds you); 1 = fully located. A middle value keeps the reverb spacious but leans it toward
+       the source, so at distance — where the wet dominates the faded dry — you can still tell which way the
+       sound comes from (in a cave, down the tunnel toward the radio). Hot-reloads. -->
+  <WorldEmitterReverbPan>0.5</WorldEmitterReverbPan>
+  <!-- ReverbDepth 0..1: how much the reverb EVOLVES with your acoustic depth from the station — the
+       air-route distance (real distance + the open-air detour around bends; walls don't count, the seal
+       gate covers those). Deeper = the wet gets quieter, DARKER and more damped, the way reflections
+       really decay down a tunnel: a bright splash near the radio, a sinking dark rumble deep in the
+       cave, no cliff anywhere. 0 = flat wet at any depth (old behaviour). Hot-reloads. -->
+  <WorldEmitterReverbDepth>0.7</WorldEmitterReverbDepth>
+  <!-- Radio coloration: the "through a speaker" voice, applied before the distance muffle / occlusion /
+       reverb (the reflections carry the colored sound). Three independent 0..1 levers; all 0 = clean:
+       ColorDrive  = soft-clip amount — crushes peaks into speaker breakup/grit (level-compensated, so
+                     it adds distortion, not volume).
+       ColorStatic = constant static-hiss bed from the radio (panned + muffled like the music).
+       ColorVoice  = band-pass voicing — strips lows (<~250 Hz) and highs (>~4 kHz), the "small cheap
+                     speaker" body. 0 = full-range hi-fi, 1 = fully boxed-in. All hot-reload.
+       Disabled (all 0) by default — the coloration pass is parked until the acoustics work settles. -->
+  <WorldEmitterColorDrive>0</WorldEmitterColorDrive>
+  <WorldEmitterColorStatic>0</WorldEmitterColorStatic>
+  <WorldEmitterColorVoice>0</WorldEmitterColorVoice>
+  <!-- HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
+       speakers keep the set above). A ham is a small communications speaker, so it defaults ON —
+       voiced narrow, driven slightly, a whisper of static ("slightly distorted" is its character).
+       Set all three to 0 for a clean ham. All hot-reload. -->
+  <WorldEmitterHamColorDrive>0.3</WorldEmitterHamColorDrive>
+  <WorldEmitterHamColorStatic>0.04</WorldEmitterHamColorStatic>
+  <WorldEmitterHamColorVoice>0.65</WorldEmitterHamColorVoice>
+</CMMRadioSettings>

@@ -1331,7 +1331,7 @@ namespace CMM
         // AudioListener.volume, which only reaches Unity AudioSources, and our audio leaves through
         // its own device.
         //
-        // The trim is WorldEmitterVolume (settings.xml), NOT the Radio context's volume in
+        // The trim is WorldEmitterVolume (radio.xml), NOT the Radio context's volume in
         // contexts.xml — that one now trims ONLY the personal radio (PersonalRadio
         // .MasterVolumeOverride). The two share a station catalog but not a level: a speaker across
         // the room and a radio in your head want different trims.

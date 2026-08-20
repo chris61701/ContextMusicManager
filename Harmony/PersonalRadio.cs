@@ -224,7 +224,7 @@ namespace CMM
                 if (kind == CmmMixer.SfxTuningStatic)
                 {
                     // The static has its own level (-1 = inherit) and a live tone: pushing the
-                    // tone on EVERY ping is what makes settings.xml edits audible mid-hash.
+                    // tone on EVERY ping is what makes radio.xml edits audible mid-hash.
                     if (CMMConfig.RadioStaticVolume >= 0f) vol = CMMConfig.RadioStaticVolume;
                     mixer.SetStaticTone(CMMConfig.RadioStaticLowHz,
                                         CMMConfig.RadioStaticHighHz,

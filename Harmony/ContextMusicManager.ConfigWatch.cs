@@ -19,10 +19,12 @@ namespace CMM
         {
             string settingsPath = CMMConfigLoader.SettingsFile(ModPath);
             string contextsPath = CMMConfigLoader.ContextsFile(ModPath);
+            string radioPath    = CMMConfigLoader.RadioSettingsFile(ModPath);   // same reload as settings
 
             // Snapshot timestamps right after init so the first poll doesn't re-fire.
             DateTime settingsTime = File.Exists(settingsPath) ? File.GetLastWriteTimeUtc(settingsPath) : DateTime.MinValue;
             DateTime contextsTime = File.Exists(contextsPath) ? File.GetLastWriteTimeUtc(contextsPath) : DateTime.MinValue;
+            DateTime radioTime    = File.Exists(radioPath)    ? File.GetLastWriteTimeUtc(radioPath)    : DateTime.MinValue;
 
             while (true)
             {
@@ -30,7 +32,7 @@ namespace CMM
                 if (_functionallyDormant) continue;   // A/B dormant arm
 
                 bool settingsChanged = false, contextsChanged = false;
-                DateTime newSettingsTime = settingsTime, newContextsTime = contextsTime;
+                DateTime newSettingsTime = settingsTime, newContextsTime = contextsTime, newRadioTime = radioTime;
                 bool done = false;
 
                 ThreadPool.QueueUserWorkItem(_ =>
@@ -41,6 +43,11 @@ namespace CMM
                         {
                             var t = File.GetLastWriteTimeUtc(settingsPath);
                             if (t != settingsTime) { settingsChanged = true; newSettingsTime = t; }
+                        }
+                        if (File.Exists(radioPath))
+                        {
+                            var t = File.GetLastWriteTimeUtc(radioPath);
+                            if (t != radioTime) { settingsChanged = true; newRadioTime = t; }
                         }
                         if (File.Exists(contextsPath))
                         {
@@ -56,6 +63,7 @@ namespace CMM
                 // Hot-reload the Lua decision script on its own write-time change.
                 // Cheap stamp check on the main thread; only re-parses when it changed.
                 ScriptHost.CheckReload();
+                radioTime = newRadioTime;
                 if (settingsChanged) settingsTime = newSettingsTime;
                 if (contextsChanged) contextsTime = newContextsTime;
                 if (settingsChanged || contextsChanged)
@@ -234,29 +242,43 @@ namespace CMM
         // the reload back to the main thread. So a settings/contexts/script edit is picked up
         // even while Unity's main thread is frozen (world load/unload), and there is no per-
         // frame busy-poll. Mirrors ConfigWatchLoop, which remains the flag-off fallback.
-        private static string   _cfgSettingsPath, _cfgContextsPath;
-        private static DateTime _cfgSettingsTime, _cfgContextsTime;
+        // radio.xml is watched alongside settings.xml and reloads through the SAME path: the
+        // settings load reads both files as one chain, so either changing means "settings changed".
+        // Splitting the file would otherwise have quietly cost hot-reload for two thirds of the
+        // settings, which is exactly the sort of thing nobody notices until they are mid-tuning.
+        private static string   _cfgSettingsPath, _cfgContextsPath, _cfgRadioPath;
+        private static DateTime _cfgSettingsTime, _cfgContextsTime, _cfgRadioTime;
+
+        private static DateTime StampOf(string p) =>
+            !string.IsNullOrEmpty(p) && File.Exists(p) ? File.GetLastWriteTimeUtc(p) : DateTime.MinValue;
 
         internal static void ConfigWatchInit()
         {
             _cfgSettingsPath = CMMConfigLoader.SettingsFile(ModPath);
             _cfgContextsPath = CMMConfigLoader.ContextsFile(ModPath);
+            _cfgRadioPath    = CMMConfigLoader.RadioSettingsFile(ModPath);
             // Snapshot timestamps right after init so the first poll doesn't re-fire.
-            _cfgSettingsTime = File.Exists(_cfgSettingsPath) ? File.GetLastWriteTimeUtc(_cfgSettingsPath) : DateTime.MinValue;
-            _cfgContextsTime = File.Exists(_cfgContextsPath) ? File.GetLastWriteTimeUtc(_cfgContextsPath) : DateTime.MinValue;
+            _cfgSettingsTime = StampOf(_cfgSettingsPath);
+            _cfgContextsTime = StampOf(_cfgContextsPath);
+            _cfgRadioTime    = StampOf(_cfgRadioPath);
         }
 
         internal static void ConfigWatchTick()
         {
             if (_functionallyDormant) return;   // A/B dormant arm
             bool settingsChanged = false, contextsChanged = false;
-            DateTime ns = _cfgSettingsTime, nc = _cfgContextsTime;
+            DateTime ns = _cfgSettingsTime, nc = _cfgContextsTime, nr = _cfgRadioTime;
             try
             {
                 if (File.Exists(_cfgSettingsPath))
                 {
                     var t = File.GetLastWriteTimeUtc(_cfgSettingsPath);
                     if (t != _cfgSettingsTime) { settingsChanged = true; ns = t; }
+                }
+                if (File.Exists(_cfgRadioPath))
+                {
+                    var t = File.GetLastWriteTimeUtc(_cfgRadioPath);
+                    if (t != _cfgRadioTime) { settingsChanged = true; nr = t; }
                 }
                 if (File.Exists(_cfgContextsPath))
                 {
@@ -265,7 +287,7 @@ namespace CMM
                 }
             }
             catch { /* transient IO during an external save — retry next tick */ }
-            _cfgSettingsTime = ns; _cfgContextsTime = nc;
+            _cfgSettingsTime = ns; _cfgContextsTime = nc; _cfgRadioTime = nr;
 
             bool scriptChanged = ScriptHost.ScriptChangedOnDisk();
             if (!settingsChanged && !contextsChanged && !scriptChanged) return;   // nothing changed — no main hop

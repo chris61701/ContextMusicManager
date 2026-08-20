@@ -12,22 +12,47 @@ namespace CMM
         public static string SettingsFile(string modPath) =>
             Path.Combine(modPath, "Config", "settings.xml");
 
+        // The radio and world-emitter settings live in their own file: they were 64 of the 113
+        // entries and well over half the lines, which buried everything else.
+        public static string RadioSettingsFile(string modPath) =>
+            Path.Combine(modPath, "Config", "radio.xml");
+
         public static string ContextsFile(string modPath) =>
             Path.Combine(modPath, "Config", "contexts.xml");
 
-        public static void LoadSettings(string modPath)
+        // Every setting is looked up across a CHAIN of files, first hit wins. That is what lets the
+        // radio settings move to their own file without a migration step and without a flag day:
+        // a settings.xml still carrying them keeps working exactly as before, because it is
+        // searched first. Someone upgrading does not lose values they tuned, and someone starting
+        // fresh gets the tidier layout. The alternative — read radio keys only from radio.xml —
+        // would silently ignore an existing install's customisations, which is the kind of quiet
+        // data loss that is very hard to notice and very annoying to diagnose.
+        private static XmlElement Add(List<XmlElement> into, string path, string label)
         {
-            string path = SettingsFile(modPath);
-            if (!File.Exists(path))
-            {
-                CMMConfig.D("[CMM] Config/settings.xml not found — using defaults.");
-                return;
-            }
+            if (!File.Exists(path)) { CMMConfig.D($"[CMM] Config/{label} not found — using defaults for it."); return null; }
             try
             {
                 var doc = new XmlDocument();
                 doc.Load(path);
-                XmlElement root = doc.DocumentElement;
+                if (doc.DocumentElement != null) { into.Add(doc.DocumentElement); return doc.DocumentElement; }
+            }
+            catch (Exception ex) { Log.Error($"[CMM] Failed to parse Config/{label}: {ex.Message}"); }
+            return null;
+        }
+
+        public static void LoadSettings(string modPath)
+        {
+            var chain = new List<XmlElement>();
+            Add(chain, SettingsFile(modPath), "settings.xml");
+            XmlElement radioRoot = Add(chain, RadioSettingsFile(modPath), "radio.xml");
+            if (chain.Count == 0)
+            {
+                CMMConfig.D("[CMM] no config files found — using defaults.");
+                return;
+            }
+            XmlElement[] root = chain.ToArray();
+            try
+            {
 
                 CMMConfig.VolumeModifier   = ReadFloat(root, "VolumeModifier",   CMMConfig.VolumeModifier);
                 CMMConfig.CrossfadeEnabled   = ReadBool (root, "CrossfadeEnabled",   CMMConfig.CrossfadeEnabled);
@@ -264,11 +289,11 @@ namespace CMM
         // its section. A missing block clears the set (nothing disabled); a child that isn't a
         // known section name is logged and skipped; None is ignored (silence, never disablable);
         // a missing/unparseable value counts as false (enabled).
-        private static void LoadDisabledVanillaSections(XmlElement root)
+        private static void LoadDisabledVanillaSections(XmlElement[] roots)
         {
             CMMConfig.DisabledVanillaSections.Clear();
 
-            if (!(root.SelectSingleNode("DisabledVanillaSections") is XmlElement parent)) return;
+            if (!(Find(roots, "DisabledVanillaSections") is XmlElement parent)) return;
 
             foreach (XmlNode node in parent.ChildNodes)
             {
@@ -290,35 +315,45 @@ namespace CMM
 
         // ── Helpers: child-element readers ────────────────────────────────────
 
-        private static string ReadString(XmlElement root, string tag, string fallback)
+        private static XmlNode Find(XmlElement[] roots, string tag)
         {
-            var n = root.SelectSingleNode(tag);
+            for (int i = 0; i < roots.Length; i++)
+            {
+                var n = roots[i].SelectSingleNode(tag);
+                if (n != null) return n;
+            }
+            return null;
+        }
+
+        private static string ReadString(XmlElement[] roots, string tag, string fallback)
+        {
+            var n = Find(roots, tag);
             return n != null ? n.InnerText : fallback;
         }
 
-        private static float ReadFloat(XmlElement root, string tag, float fallback)
+        private static float ReadFloat(XmlElement[] roots, string tag, float fallback)
         {
-            var n = root.SelectSingleNode(tag);
+            var n = Find(roots, tag);
             return n != null && float.TryParse(n.InnerText, NumberStyles.Float,
                 CultureInfo.InvariantCulture, out float v) ? v : fallback;
         }
 
-        private static int ReadInt(XmlElement root, string tag, int fallback)
+        private static int ReadInt(XmlElement[] roots, string tag, int fallback)
         {
-            var n = root.SelectSingleNode(tag);
+            var n = Find(roots, tag);
             return n != null && int.TryParse(n.InnerText, NumberStyles.Integer,
                 CultureInfo.InvariantCulture, out int v) ? v : fallback;
         }
 
-        private static bool ReadBool(XmlElement root, string tag, bool fallback)
+        private static bool ReadBool(XmlElement[] roots, string tag, bool fallback)
         {
-            var n = root.SelectSingleNode(tag);
+            var n = Find(roots, tag);
             return n != null && bool.TryParse(n.InnerText, out bool v) ? v : fallback;
         }
 
-        private static T ReadEnum<T>(XmlElement root, string tag, T fallback) where T : struct
+        private static T ReadEnum<T>(XmlElement[] roots, string tag, T fallback) where T : struct
         {
-            var n = root.SelectSingleNode(tag);
+            var n = Find(roots, tag);
             if (n == null) return fallback;
             return Enum.TryParse(n.InnerText, true, out T v) ? v : fallback;
         }
