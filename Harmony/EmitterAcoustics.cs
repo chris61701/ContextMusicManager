@@ -513,8 +513,32 @@ namespace CMM
             // wall) keeps its solid share below. Per-instance + orientation-aware: the SAME trim block reads
             // near-open flush to the wall but solid when turned into the doorway — which is why smashing the
             // decor "let more sound through" (we were charging it as half a wall). Full cubes never reach here.
+            // ...BUT A FLOOR IS NOT TRIM, AND MOVEMENT IS THE WRONG QUESTION FOR ONE.
+            // "Does it block the player" is a good proxy for a wall and a useless one for a floor:
+            // you never walk THROUGH a floor, you stand ON it, so every partial-shape floor plate in
+            // the game answered "no" and took the 90% discount. Measured on the captures, floor
+            // voxels that separate two storeys and are acoustically OPEN:
+            //
+            //     store    176 of 721   (24.4%)   -- 21.5% more open than shut
+            //     bunker  2762 of 3217  (85.9%)   -- 36.0% more open than shut
+            //
+            // Concrete at 0.9 discounted to 0.09 reads as 91% open, so a bunker floor barely existed.
+            // That is "it's bleeding through the floor", and standing under the speaker's room the
+            // game measured 3.4 dB of occlusion where the same geometry offline gives 11-13.
+            //
+            // A partial with air both above and below is separating two spaces -- it is structure,
+            // whatever it does to movement. Trim sits flush against something; a floor has room on
+            // both sides. Two extra block reads on a branch that only partial shapes reach.
+            //
+            // The trade this makes, stated so it is not a surprise later: a partial shape genuinely
+            // suspended in mid-air -- a hanging sign, a pipe run -- now falls through to solid and is
+            // over-charged. That is rarer in a POI than floor plates are, and the alternative was a
+            // 90% discount on every floor in the game. A grate or catwalk floor is unaffected: it has
+            // a genuinely open centre and is caught by the branch below, which is the correct answer
+            // for one -- you can see and hear straight through a grate.
             if (b.shape != null && !b.shape.IsSolidCube &&
-                !b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None))
+                !b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)
+                && !(world.GetBlock(x, y + 1, z).isair && world.GetBlock(x, y - 1, z).isair))
                 return MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null) * 0.1f;
 
             // OPEN-CENTRE FRAMES: deco frame/arch/trim pieces are solid at the FACES (they mate with the
