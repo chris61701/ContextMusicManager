@@ -1,3 +1,15 @@
+// PARITY GAP, RECORDED DELIBERATELY (2026-08-20). Two changes live in cmm_acoustics.c and NOT
+// here, because both fix TEMPORAL instability that this reference cannot exhibit -- it evaluates
+// static dumps, where the scene graph never changes and every chunk is resident by construction:
+//   1. `ap_fed_direct`  -- omega_sum normalises only over the openings the speaker radiates INTO,
+//      not over every aperture in the scene. In game the scene-wide sum moved a doorway's level
+//      when chunks loaded 80 blocks away.
+//   2. the my_room nearest-node fallback -- the diffuse term no longer vanishes when the ear's
+//      voxel carries no node.
+// Both are safe to mirror here and SHOULD be, before this file is trusted for anything absolute
+// again. Until then: this reference and the shipped C are the same model only for the terms above
+// the aperture split. Silent divergence between these two files has cost this project a week
+// before; it is written down this time.
 // ───────────────────────────────────────────────────────────────────────────────
 // PORTAL-GRAPH ACOUSTICS — offline prototype (Phase 1)
 // ───────────────────────────────────────────────────────────────────────────────
@@ -1546,6 +1558,13 @@ function makeNewEvaluator(D, G, src) {
         // the own-room field at once. The prediction in the comment below -- that pass 3 would
         // make this gate safe -- is therefore wrong, and worth leaving recorded as such.
         //   if (A.roomA !== myRoom && A.roomB !== myRoom) continue;
+        // TRIED A THIRD TIME 2026-08-20, for a NEW reason -- the all-edges form is GLOBAL and a
+        // global term cannot hold still over a streamed world (in game, standing still, it moved
+        // 7 dB between two rebuilds of unchanged geometry while the local barrier term was
+        // bit-identical). Measured worse again anyway: store 5.45 -> 10.30 dB/block, bunker
+        // 1.89 -> 2.38. Note for whoever tries a fourth time: the roughness metric here measures
+        // SPATIAL smoothness and is blind to the TEMPORAL instability, so neither number alone
+        // decides this. The term has to be made local WITHOUT being made discontinuous.
         let pf = 0;
         if (A.roomA !== undefined && A.roomA >= 0 && A.roomA !== myRoom) pf += fieldOf[A.roomA] || 0;
         if (A.roomB !== undefined && A.roomB >= 0 && A.roomB !== myRoom) pf += fieldOf[A.roomB] || 0;

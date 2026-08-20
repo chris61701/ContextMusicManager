@@ -102,6 +102,7 @@ namespace CMM
 
         // Nearest-point diagnostics, refreshed every publish and read by the 1 Hz log line.
         static float _dbgNearest = 1e9f;
+        static bool _dbgReported = true;   // set by the 1 Hz report; next publish starts a fresh tally
         static double _dbgRaw, _dbgFree, _dbgOccl;
         static int _dbgN;
         static readonly double[] _dbgKind = new double[4];
@@ -135,6 +136,7 @@ namespace CMM
                   .Append(" pathlen ").Append(_dbgDomLen.ToString("0"));
             }
             _dbgNearest = 1e9f;   // consumed: start a fresh minimum for the next reporting interval
+            _dbgReported = true;  // ...and a fresh clamp tally, over ALL stations, not just the last
             return sb.ToString();
         }
         internal static long LastBuildMs;
@@ -373,9 +375,16 @@ namespace CMM
             float span = mx - mn;
             if (span <= 0.01f || fexp <= 0.01f) return false;
 
-            SaturatedPoints = 0;
-            GainPoints = 0;
-            PublishedPoints = ptCount;
+            // ACCUMULATE ACROSS STATIONS, RESET ON REPORT -- the same bug d17b746 fixed for
+            // _dbgNearest, still live in the clamp counters sitting right beside it. Zeroed per
+            // STATION, "ac gain=/sat=/pts=" described only the LAST station published, so a nearest
+            // speaker clamped at unity read as gain=0 and the passivity meter said all-clear through
+            // windows where it was firing. A diagnostic that reports the wrong subject is worse than
+            // none: it is the thing that makes you rule out the actual cause.
+            SaturatedPoints = _dbgReported ? 0 : SaturatedPoints;
+            GainPoints      = _dbgReported ? 0 : GainPoints;
+            PublishedPoints = _dbgReported ? ptCount : PublishedPoints + ptCount;
+            _dbgReported = false;
             // _dbgNearest is deliberately NOT reset here. ComputeOcclusion runs once PER STATION,
             // so resetting per call made the log report whichever station happened to be processed
             // LAST rather than the nearest speaker -- and with several stations live, that was
@@ -544,20 +553,53 @@ namespace CMM
             // corrected in place and only the native build (~0.7 s, off the frame loop) repeats.
             // Falls back to a full re-read whenever the positions are unknown or the patch misses
             // the box, so a wall coming down still works.
+            // DEDUPE FIRST. CollectAnimatingDoors appends once per FRAME for the whole swing, so a
+            // 0.5 s swing at 60 fps queued the same block ~30 times and this loop then re-read the
+            // same 125-voxel cube 30 times -- up to 8,000 unbudgeted GetBlock calls in the single
+            // frame the door lands on. The 64-entry cap also meant one long swing could evict
+            // ANOTHER door's position, so that door silently never got patched at all.
+            _doorPositions.Sort((a, b) => a.x != b.x ? a.x - b.x : a.y != b.y ? a.y - b.y : a.z - b.z);
+            int uniq = 0;
+            for (int i = 0; i < _doorPositions.Count; i++)
+                if (i == 0 || _doorPositions[i] != _doorPositions[i - 1]) _doorPositions[uniq++] = _doorPositions[i];
+            if (uniq < _doorPositions.Count) _doorPositions.RemoveRange(uniq, _doorPositions.Count - uniq);
+
             bool patched = false;
-            if (_doorPositions.Count > 0 && _box == null && _reusable != null && _reusable.Complete)
+            if (_doorPositions.Count > 0 && _reusable != null)
             {
                 World w = GameManager.Instance?.World;
                 if (w != null)
                 {
-                    bool any = false;
-                    for (int i = 0; i < _doorPositions.Count; i++)
-                        if (_reusable.Patch(w, _doorPositions[i], 2)) any = true;
-                    if (any)
+                    // TAKE THE GATE BEFORE TOUCHING THE BUFFER, NOT AFTER. This wrote _reusable's
+                    // Loss/Flags first and only then checked _consuming, so a patch landing while the
+                    // scheduler was inside FromVoxels (a 0.6-0.9 s window) mutated the very arrays
+                    // cmm_ac_set_voxels was reading -- and then, because `patched` stayed false, threw
+                    // the applied patch away and forced a full re-read on top.
+                    bool mine = false;
+                    lock (_gate) { if (!_consuming) { _consuming = true; mine = true; } }
+                    if (mine)
                     {
+                        bool all = true;
+                        for (int i = 0; i < _doorPositions.Count; i++)
+                            if (!_reusable.Patch(w, _doorPositions[i], 2)) all = false;
                         lock (_gate)
                         {
-                            if (!_consuming) { _filled = _reusable; _stale = false; patched = true; }
+                            _consuming = false;
+                            // Only if the box was CURRENT before this change. If it already carried
+                            // an older generation, a full re-read is pending for a reason a
+                            // 125-voxel patch cannot satisfy (a wall came down, a recentre) and
+                            // declaring it current here would install that stale world permanently.
+                            if (all && _boxGen == _geomGen)
+                            {
+                                // The buffer now describes the post-change world whether or not the
+                                // read has finished, so the box's generation catches up. A COMPLETE
+                                // box can be built from immediately; an in-flight one simply carries
+                                // the correction to the build it is already headed for -- which is
+                                // what stops a door during a read from latching another read.
+                                _boxGen = _geomGen;
+                                patched = true;
+                                if (_reusable.Complete && _box == null) { _filled = _reusable; _stale = false; }
+                            }
                         }
                     }
                 }
@@ -566,7 +608,8 @@ namespace CMM
             _geomChangeAt = Time.realtimeSinceStartup;
             if (patched)
             {
-                LastStatus = "door patched, rebuilding";
+                LastStatus = _reusable != null && _reusable.Complete
+                           ? "door patched, rebuilding" : "door patched into the read in flight";
                 return;
             }
 
@@ -604,9 +647,33 @@ namespace CMM
                 // forever: after ANY_REBUILD_GIVEUP the model is trusted again whether or not the
                 // scene arrived. A stale scene is a worse answer than the other model, but an
                 // indefinite handback is a worse bug than either.
-                const float GiveUp = 6f, Tail = 0.35f;
-                if (now - _geomChangeAt > GiveUp) return false;
-                if (_geomLiveAt < _geomChangeAt) return true;      // change not delivered yet
+                // ...AND THE ORDER OF THESE TWO TESTS WAS THE DOOR BUG.
+                // The give-up ran FIRST, so a change that takes longer than GiveUp to deliver was
+                // DECLARED delivered and this model published from pre-swing geometry. GiveUp was
+                // 6 s and a full world re-read is 7.5-10 s, so any door swung while a read was in
+                // flight hit it every single time. Straight from the log, four separate occasions,
+                // the clearest one:
+                //
+                //     351.594  swing ends (door OPEN)
+                //     352-357  why=warming   scene=reading world 4% .. 83%   "ac nearest: no point"
+                //     358.474  why=native    +6.88 s == GiveUp
+                //              extra=33.8  loudest=barrier      <- publishing the SHUT door
+                //     359.544  new scene lands
+                //     360.584  extra=1.5                        <- the truth, two seconds late
+                //
+                // and the mixer's adaptive glide renders that 32-block step in about 40 ms, so it
+                // arrives as a click. "I open the door, it's clear, then it sounds like it is shut."
+                //
+                // Delivery now WINS. The give-up survives only as a wedge-breaker -- the original
+                // reasoning ("an indefinite handback is a worse bug") is right, but it has to be
+                // longer than the slowest legitimate delivery or it fires on the normal case, which
+                // is what happened. A full read is 7.5-10 s, so 30 s is comfortably outside it while
+                // still bounding a genuine wedge. Until then the shipped model covers, and the
+                // shipped model renders a door swing correctly -- that is the whole reason this
+                // handback exists.
+                const float GiveUp = 30f, Tail = 0.35f;
+                if (_geomLiveAt < _geomChangeAt)                    // change not delivered yet
+                    return now - _geomChangeAt < GiveUp;
                 return now - _geomLiveAt < Tail;                   // just delivered; let it settle
             }
         }

@@ -1751,6 +1751,16 @@ static void fresnel_pt(int i, double *rf, double *ca, double *sa, double *w) {
     *rf = RING_R[r]; *ca = cos(ang); *sa = sin(ang); *w = RING_W[r] / RING_N[r];
 }
 
+/* Does this speaker radiate DIRECTLY into this opening? True when the aperture bounds an air
+ * pocket the speaker seeds (src_solve seeds every pocket within SEED_R, paying for the material
+ * in between). This is the "openings of the room the speaker is in" set, expressed in the model's
+ * own terms and costing nothing -- and it is what keeps the solid-angle share LOCAL. */
+static int ap_fed_direct(const cmm_ac *ac, const cmm_ac_src *s, const struct ac_edge *E) {
+    if (E->a >= 0 && E->a < ac->nnodes && s->seed[E->a] >= 0) return 1;
+    if (E->b >= 0 && E->b < ac->nnodes && s->seed[E->b] >= 0) return 1;
+    return 0;
+}
+
 int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
                 cmm_ac_arrival *out, int max_out) {
     if (!s || !out || max_out <= 0) return -1;
@@ -1848,10 +1858,46 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
     if (open_frac < 0) open_frac = 0; if (open_frac > 1) open_frac = 1;
     double center_mat = seg_db_at(ac, sx5, sy5, sz5, lx, ly, lz, 1, 1);
 
+    /* WHICH ROOM THE EAR IS IN -- AND NEVER "NONE".
+     *
+     * node[] is -1 wherever open[] <= OPEN_EPS, i.e. wherever the cell's loss reaches OPEN_FULL
+     * (0.50). The diffuse field -- the LOUDEST arrival at most positions, worth a median 3.9 dB
+     * and up to 22.5 dB of the total on the store capture -- lived entirely inside
+     * `if (my_room >= 0)`, so wherever this lookup missed, the loudest term did not get quieter:
+     * it was NOT ADDED AT ALL. An 8-12 dB on/off switch, thrown by a floor() on the ear position.
+     * Caught in game as a reversible toggle across a single voxel boundary with nothing else
+     * moving -- 0.70 blocks of walking, back and forth:
+     *
+     *     [dir -16.9 bar -25.1 diff -19.0]  OCCL  -2.0     extra  8.5
+     *     [dir -23.6 bar -31.1 ap  -46.7]   OCCL -10.1     extra 35.5      <- diff simply gone
+     *
+     * You cross it by walking past a bookshelf, and it got much easier to cross the same day
+     * furniture stopped being read as air (an opaque model entity is now charged its full
+     * material, which puts a walk-through closet at exactly OPEN_FULL). That is a fix in the
+     * block reader landing as a regression here, and the reason it could is this branch: a model
+     * whose dominant term is OPTIONAL will be knocked out by any change that moves a threshold.
+     *
+     * So the lookup no longer has a failure case. If the ear's own voxel carries no node -- it is
+     * inside furniture, inside a wall, a hair outside the box -- take the nearest one that does.
+     * The field is a property of the ROOM, uniform inside it, so borrowing it from a neighbouring
+     * cell one or two blocks away is the same number, not an approximation. */
     int lxi = (int)floor(lxf) - ac->x0, lyi = (int)floor(lyf) - ac->y0, lzi = (int)floor(lzf) - ac->z0;
     int nd = -1;
     if (lxi >= 0 && lxi < ac->sx && lyi >= 0 && lyi < ac->sy && lzi >= 0 && lzi < ac->sz)
         nd = ac->node[idx_of(ac, lxi, lyi, lzi)];
+    if (nd < 0) {
+        /* expanding shell: nearest first, so the borrowed room is the one you are actually beside */
+        for (int r = 1; r <= 3 && nd < 0; r++)
+        for (int dy = -r; dy <= r && nd < 0; dy++)
+        for (int dz = -r; dz <= r && nd < 0; dz++)
+        for (int dx = -r; dx <= r && nd < 0; dx++) {
+            if (abs(dx) != r && abs(dy) != r && abs(dz) != r) continue;   /* shell only */
+            int qx = lxi + dx, qy = lyi + dy, qz = lzi + dz;
+            if (qx < 0 || qx >= ac->sx || qy < 0 || qy >= ac->sy || qz < 0 || qz >= ac->sz) continue;
+            int q = ac->node[idx_of(ac, qx, qy, qz)];
+            if (q >= 0) nd = q;
+        }
+    }
     int my_room = (nd >= 0 && nd < ac->nnodes) ? s->node_room[nd] : -1;
 
     int n = 0;
@@ -1918,10 +1964,33 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
      * double-charges it. The relative form fixes the double COUNT, which is the defect, and is
      * exactly neutral with one aperture -- every single-opening spec scenario is untouched
      * (verified against the JS model: spec 9/9, all six synthetic routes +0.00). */
+    /* ...OVER THE OPENINGS THAT ACTUALLY SHARE THE SPEAKER, WHICH IS A LOCAL SET.
+     * This sum ran over EVERY edge in the scene -- ~600 apertures across a 200-block box -- and
+     * divided every opening's level by it. So the doorway you are standing in got quieter when a
+     * chunk loaded eighty blocks away and added apertures nobody can hear. Measured, standing
+     * still: the graph went 614 -> 428 edges between two rebuilds of unchanged geometry, which
+     * moves this denominator by a third. Reported as "I open the door, it's clear, then it sounds
+     * like it is shut" -- and no material constant could ever have fixed it, because the door was
+     * not what changed.
+     *
+     * The physical claim the sharing rests on is that the openings intercept DISJOINT patches of
+     * the speaker's radiation, so their shares cannot exceed the whole. That is true of the
+     * openings the speaker radiates INTO -- the ones bounding a pocket it seeds directly. It is
+     * not true of an aperture six rooms away: that one is fed by a ROUTE which has already paid
+     * for every constriction on the way, including the share taken at the first opening. Dividing
+     * it again by a scene-wide sum charges the same split twice and couples it to geometry it has
+     * no physical relationship with.
+     *
+     * `s->seed[node] >= 0` is exactly "a pocket this speaker reaches directly" (see src_solve), so
+     * the local set costs nothing to compute and needs no room bookkeeping. The trade, stated so it
+     * is not a surprise later: apertures at DEPTH now take no share factor, so a multi-hop fan-out
+     * can over-count again. That was never the case that was measured, and the passivity meter
+     * (GainPoints / "ac gain=" in the 1 Hz log line) reports it directly if it returns. */
     double omega_sum = 0.0;
     for (int e = 0; e < ac->nedge; e++) {
         const struct ac_edge *E = &ac->edge[e];
         if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;
+        if (!ap_fed_direct(ac, s, E)) continue;
         double ex = E->sx / (E->area > 0 ? E->area : 1);
         double ey = E->sy / (E->area > 0 ? E->area : 1);
         double ez = E->sz / (E->area > 0 ? E->area : 1);
@@ -1961,7 +2030,7 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
         }
         if (best > 1e29) continue;
         double cost = best - constrict_db(E->open_frac);
-        if (omega_sum > 0.0) {
+        if (omega_sum > 0.0 && ap_fed_direct(ac, s, E)) {
             double dd2 = (px - sx5) * (px - sx5) + (py - sy5) * (py - sy5) + (pz - sz5) * (pz - sz5);
             double omega = (E->area > 0 ? E->area : 1.0) / (dd2 > 1.0 ? dd2 : 1.0);
             cost -= 10.0 * log10(omega / omega_sum);       /* this opening's share of the sphere */
@@ -2011,7 +2080,14 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
         for (int e = 0; e < ac->nedge; e++) {
             const struct ac_edge *E = &ac->edge[e];
             if (E->ra < 0 || E->rb < 0 || E->ra == E->rb) continue;
-            /* NO room-membership gate: topology decides how much arrives, never whether. */
+            /* NO room-membership gate: topology decides how much arrives, never whether.
+             * TRIED A THIRD TIME 2026-08-20 AND MEASURED WORSE AGAIN. The motive was new and good --
+             * this sum is GLOBAL, and a global term cannot hold still over a streamed world -- but
+             * the store capture's worst spatial step went 5.45 -> 10.30 dB/block with the gate on,
+             * because crossing a boundary swaps the own-room field AND the aperture set at once and
+             * pass 3 does not make connected rooms' fields equal. The instability has to be fixed by
+             * making the term LOCAL WITHOUT making it discontinuous; deleting terms does the second
+             * thing only. Recorded so a fourth attempt starts from the measurement. */
             double pf = 0;
             if (E->ra != my_room) pf += s->field[E->ra];
             if (E->rb != my_room) pf += s->field[E->rb];

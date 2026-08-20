@@ -639,8 +639,14 @@ namespace CMM
             // to finish (~1 s) plus a rebuild (~0.6 s) before it can publish the new occlusion -- by
             // which time the exemption had lapsed and the rate cap throttled the very change it
             // exists to let through. Total lag to a shut door was animation + rebuild + ramp.
-            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f
-                           || (CMMConfig.WorldEmitterNativeAcoustics && AcousticBridge.GeometrySettling);
+            // GeometrySettling NO LONGER EXEMPTS. It was added because the door-toggle window expired
+            // before the native rebuild finished, so the one change the exemption existed for was
+            // the one it throttled -- but that was a symptom of native being handed a scene it had
+            // not rebuilt yet, which is fixed at the source now (AcousticBridge.GeometrySettling:
+            // delivery beats the give-up timer). Settling can last 30 s, and an exemption that wide
+            // means the limiter is simply not running in any house with doors in it -- while the
+            // handover back to native, a genuine large step, is exactly the moment it should be.
+            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f;
             for (int i = 0; i < count; i++)
             {
                 Vector3i key = SlotKey(pts, i);
@@ -654,12 +660,18 @@ namespace CMM
                     _statPubSum += dd; _statPubN++;
                     if (dd > _statPubMax) _statPubMax = dd;
                 }
+                // SYMMETRIC. This capped RISES only, so the same non-event -- the reverberant term
+                // blinking on and off across a voxel boundary, extra 33 <-> 5 -- was a 0.6 s fade
+                // getting louder and an instant 8.7 dB jump getting quieter. A rate limit that runs
+                // in one direction does not limit a rate; it just makes noise asymmetric, which is
+                // most of "the volume is all over the place".
                 if (rate > 0f && !doorWindow
                     && _publishedExtra.TryGetValue(key, out PublishedExtra prev)
-                    && now - prev.At < 2f && gains[i] > prev.Value)
+                    && now - prev.At < 2f)
                 {
-                    float cap = prev.Value + rate * Mathf.Clamp(now - prev.At, 0.02f, 1f);
-                    if (gains[i] > cap) gains[i] = cap;
+                    float step = rate * Mathf.Clamp(now - prev.At, 0.02f, 1f);
+                    if (gains[i] > prev.Value + step) gains[i] = prev.Value + step;
+                    else if (gains[i] < prev.Value - step) gains[i] = prev.Value - step;
                 }
                 _publishedExtra[key] = new PublishedExtra { Value = gains[i], At = now };
             }

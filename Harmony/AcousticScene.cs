@@ -199,14 +199,30 @@ namespace CMM
         // which is one block: re-reading the whole box costs ~2M GetBlock calls and about seven
         // seconds, and a door that takes seven seconds to be heard is not a door. Returns false if
         // the box has never been filled (nothing to patch) or the cube misses it entirely.
+        // WORKS ON A BOX THAT IS STILL BEING READ, WHICH IS THE CASE THAT MATTERS.
+        // This used to require Complete, and the caller additionally required that no read was in
+        // flight -- so the fast path was unavailable exactly when it was needed. A full read is
+        // 7.5-10 s and a 45-block walk starts one, so while the player moves through a POI a read
+        // is essentially always in flight; every door taken during one fell back to a full re-read,
+        // which set _stale, which started ANOTHER read, which caught the next door. Measured: sixty
+        // seconds of back-to-back reads with ~1 s gaps, and in the worst case eleven door edges in
+        // 27 s with the native model handed back for 33 seconds straight.
+        //
+        // Patching mid-read is safe, and needs no cursor bookkeeping, because the read walks each
+        // cell exactly once: if the cursor has already passed these cells the patch corrects them,
+        // and if it has not, the cursor will overwrite them with the same current-world values.
+        //
+        // A cube that misses the box entirely reports SUCCESS -- there is nothing in the box to
+        // correct, so the box is already consistent with the change. Returning false there used to
+        // force a full re-read for a door the scene does not even cover.
         internal bool Patch(World world, Vector3i centre, int radius)
         {
-            if (!Complete || world == null) return false;
+            if (world == null) return false;
             int x0 = centre.x - radius, x1 = centre.x + radius;
             int y0 = centre.y - radius, y1 = centre.y + radius;
             int z0 = centre.z - radius, z1 = centre.z + radius;
             if (x1 < X0 || x0 >= X0 + Sx || y1 < Y0 || y0 >= Y0 + Sy || z1 < Z0 || z0 >= Z0 + Sz)
-                return false;
+                return true;
             if (x0 < X0) x0 = X0; if (x1 >= X0 + Sx) x1 = X0 + Sx - 1;
             if (y0 < Y0) y0 = Y0; if (y1 >= Y0 + Sy) y1 = Y0 + Sy - 1;
             if (z0 < Z0) z0 = Z0; if (z1 >= Z0 + Sz) z1 = Z0 + Sz - 1;
