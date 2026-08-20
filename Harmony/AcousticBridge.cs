@@ -132,6 +132,7 @@ namespace CMM
                   .Append(',').Append(_dbgDomZ.ToString("0"))
                   .Append(" pathlen ").Append(_dbgDomLen.ToString("0"));
             }
+            _dbgNearest = 1e9f;   // consumed: start a fresh minimum for the next reporting interval
             return sb.ToString();
         }
         internal static long LastBuildMs;
@@ -363,7 +364,13 @@ namespace CMM
             SaturatedPoints = 0;
             GainPoints = 0;
             PublishedPoints = ptCount;
-            _dbgNearest = 1e9f;
+            // _dbgNearest is deliberately NOT reset here. ComputeOcclusion runs once PER STATION,
+            // so resetting per call made the log report whichever station happened to be processed
+            // LAST rather than the nearest speaker -- and with several stations live, that was
+            // reliably a distant one. Every reading in every log was 85-96 blocks, including sessions
+            // where the author was standing beside a speaker reporting that it sounded wrong. A week
+            // of diagnosis ran on the wrong speaker. It is reset when the line is PRINTED, so it
+            // reports the nearest point seen across all stations since the last report.
             for (int k = 0; k < ptCount; k++)
             {
                 var sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
@@ -576,8 +583,19 @@ namespace CMM
             get
             {
                 float now = Time.realtimeSinceStartup;
-                if (now - _geomChangeAt < 0.25f) return true;
-                return _geomLiveAt >= _geomChangeAt && now - _geomLiveAt < 0.75f;
+                // Settling means: the world changed and this model has not yet published a scene
+                // containing that change. The first version of this was true for a quarter second
+                // after the change and then again briefly after delivery -- with a GAP in between,
+                // which is precisely the interval that matters, because the rebuild takes ~0.6 s.
+                //
+                // Bounded so a rebuild that never lands cannot wedge the audio on the shipped model
+                // forever: after ANY_REBUILD_GIVEUP the model is trusted again whether or not the
+                // scene arrived. A stale scene is a worse answer than the other model, but an
+                // indefinite handback is a worse bug than either.
+                const float GiveUp = 6f, Tail = 0.35f;
+                if (now - _geomChangeAt > GiveUp) return false;
+                if (_geomLiveAt < _geomChangeAt) return true;      // change not delivered yet
+                return now - _geomLiveAt < Tail;                   // just delivered; let it settle
             }
         }
 

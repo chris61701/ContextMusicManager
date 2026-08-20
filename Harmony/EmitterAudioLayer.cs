@@ -438,7 +438,20 @@ namespace CMM
         //     reverb to carry. One legacy tick seeds it, then this path takes over.
         private static bool TryNativeOcclusion(EntityPlayerLocal player, World world, float audibleR)
         {
+            // HAND BACK UNTIL THE SCENE HAS CAUGHT UP, not merely until the swing stops.
+            // The old model runs during a swing and models the opening gap correctly. This model
+            // then took over the INSTANT the swing ended -- using a scene that still held the door's
+            // PREVIOUS state, because the patch and rebuild need ~0.6 s. So the sound went to the
+            // right level during the swing, snapped to the WRONG one for half a second, then
+            // corrected. Reported exactly, and in both directions:
+            //
+            //   opening: "quick unmuffled, muffled, then unmuffled"   (correct, stale-shut, correct)
+            //   closing: "delay before muffle"                        (stale-open, then correct)
+            //
+            // The boundary was drawn where the ANIMATION ends rather than where this model becomes
+            // able to answer, and those are 0.6 s apart.
             if (EmitterAcoustics.AnyDoorAnimating) { _statWhy = "doorswing"; return false; }
+            if (AcousticBridge.GeometrySettling) { _statWhy = "geom-settling"; return false; }
 
             Vector3 ear = ListenerWorldPos(player);
             if (!AcousticBridge.EnsureScene(world, ear)) { _statWhy = "ac-warming"; return false; }
