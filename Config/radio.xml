@@ -108,7 +108,7 @@
        few milliseconds. Same six controls, aimed somewhere else entirely. -->
   <RadioClickDialHz>4200</RadioClickDialHz>
   <RadioClickDialSnap>0.8</RadioClickDialSnap>
-  <RadioClickDialLengthMs>12</RadioClickDialLengthMs>
+  <RadioClickDialLengthMs>18</RadioClickDialLengthMs>
   <RadioClickDialBody>0.3</RadioClickDialBody>
   <RadioClickDialBodyHz>950</RadioClickDialBodyHz>
   <RadioClickDialDouble>0.15</RadioClickDialDouble>
@@ -120,7 +120,12 @@
        in opposite directions, so what changes is the CHARACTER — this one caught more of the
        metal, that one more of the housing — rather than the volume; it also jitters the shell's
        pitch, the length, and the spacing of the second impact, which is the cue the ear uses to
-       tell a mechanism from a recording. 0 = every click identical. -->
+       tell a mechanism from a recording. It also varies HOW LONG each one rings, and does so
+       asymmetrically: most detents land near LengthMs and the occasional one catches and rattles
+       a little longer, which is what real hardware does. A symmetric spread would give as many
+       unnaturally curtailed clicks as long ones, and short outliers read as a dropout rather than
+       as variety. At the default 0.5 the dial rings between about 11 and 18 ms.
+       0 = every click identical. -->
   <RadioClickVary>0.5</RadioClickVary>
   <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
        MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;

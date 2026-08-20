@@ -187,7 +187,7 @@ namespace CMM
         public static float  RadioClickOffVolume   = -1f;
         public static float  RadioClickDialHz       = 4200f;
         public static float  RadioClickDialSnap     = 0.8f;
-        public static float  RadioClickDialLengthMs = 12f;
+        public static float  RadioClickDialLengthMs = 18f;
         public static float  RadioClickDialBody     = 0.3f;
         public static float  RadioClickDialBodyHz   = 950f;
         public static float  RadioClickDialDouble   = 0.15f;

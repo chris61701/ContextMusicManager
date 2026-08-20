@@ -281,7 +281,7 @@ static volatile float g_sfxStaticCrackle = 0.8f;
  * runs ~3.3× this). Defaults reproduce the v35 hardcoded clicks. */
 static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 2600.0f, 2100.0f, 4200.0f };
 static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.55f, 0.50f, 0.80f };
-static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 16.0f, 18.0f, 12.0f };
+static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 16.0f, 18.0f, 18.0f };
 /* v39 — detent character: body-knock mix / its ring pitch / second-strike level (0 = single). */
 static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.42f, 0.42f, 0.30f };
 static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 560.0f, 460.0f, 950.0f };
@@ -1245,7 +1245,14 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     float tiltSnap = 1.0f + 0.35f * vary * j5;
     float tiltBody = 1.0f - 0.35f * vary * j5;
     bodyHz *= 1.0f + 0.22f * vary * j1;        /* the shell is never struck in quite the same place */
-    ms     *= 1.0f + 0.18f * vary * j2;
+    /* HOW LONG IT RINGS VARIES, AND IT VARIES ASYMMETRICALLY. +/-9% was inaudible; a mechanism
+     * does not merely differ in tone from one throw to the next, it differs in how long it goes
+     * on for. The skew is deliberate: most detents are about the nominal length and the occasional
+     * one catches and rattles a little longer, which is what real hardware does. A symmetric
+     * spread gives you as many unnaturally CURTAILED clicks as long ones, and short outliers read
+     * as a dropout rather than as variety. Length drives the mode decay, so this is genuinely how
+     * long the shell rings, not just when the voice is freed. */
+    ms     *= 1.0f + vary * (0.22f * j2 + 0.38f * (j2 > 0.0f ? j2 : 0.0f));
     snap    = snap + 0.15f * vary * j3; if (snap < 0.0f) snap = 0.0f; else if (snap > 1.0f) snap = 1.0f;
 
     float sec = ms * 0.001f;

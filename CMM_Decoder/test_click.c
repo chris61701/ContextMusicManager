@@ -53,6 +53,8 @@ int main(int argc, char** argv) {
                      onBd=atof(argv[4]); onBHz=atof(argv[5]); onDb=atof(argv[6]); }
     if (argc >= 13){ ofHz=atof(argv[7]); ofSn=atof(argv[8]); ofLen=atof(argv[9]);
                      ofBd=atof(argv[10]); ofBHz=atof(argv[11]); ofDb=atof(argv[12]); }
+    if (argc >= 19){ dlHz=atof(argv[13]); dlSn=atof(argv[14]); dlLen=atof(argv[15]);
+                     dlBd=atof(argv[16]); dlBHz=atof(argv[17]); dlDb=atof(argv[18]); }
     cmm_mix_set_click_tone_kind(0, onHz, onSn, onLen, onBd, onBHz, onDb, VARY);
     cmm_mix_set_click_tone_kind(1, ofHz, ofSn, ofLen, ofBd, ofBHz, ofDb, VARY);
     cmm_mix_set_click_tone_kind(2, dlHz, dlSn, dlLen, dlBd, dlBHz, dlDb, VARY);
