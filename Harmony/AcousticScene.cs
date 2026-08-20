@@ -1,6 +1,7 @@
 // Gated to 3.0+ (GV_V3): the voxel box it fills comes from EmitterAcoustics.DebugCellLoss, both on the same gate.
 #if GV_V3
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace CMM
@@ -129,6 +130,54 @@ namespace CMM
         internal float ProgressPct =>
             (Sy == 0 || Sz == 0) ? 0f : 100f * (_cursorY * Sz + _cursorZ) / (Sy * Sz);
 
+        // ── AN UNLOADED CHUNK IS NOT OPEN SKY ────────────────────────────────────────────────
+        // World.GetBlock ends in `return BlockValue.Air` when the chunk isn't resident:
+        //
+        //     IChunk c = GetChunkFromWorldPos(x, y, z);
+        //     if (c != null) return c.GetBlock(...);
+        //     return BlockValue.Air;
+        //
+        // so a region we simply have no data for is indistinguishable from a hole in the world.
+        // This box is 201x48x201 -- ~1.9M voxels, reaching a good way past whatever the streamer
+        // happens to be holding -- and residency changes constantly as the player turns and moves.
+        // Two rebuilds of the SAME, UNCHANGED geometry therefore produced different graphs, and the
+        // room-coupling solve is global, so the reverberant field at the ear moved with them. From
+        // the log, player standing perfectly still, twenty consecutive samples, the barrier path
+        // bit-identical at -30.7 dB throughout:
+        //
+        //     edges 614  ->  diff -14.5   extra 10.6 blocks   (occlusion  -2.5 dB)
+        //     edges 428  ->  diff -21.5   extra 33.1 blocks   (occlusion  -9.2 dB)
+        //
+        // 186 apertures -- a third of the graph -- appeared and vanished with nothing moving but the
+        // chunk streamer, and the mixer's adaptive glide reads a 22-block step as an EVENT and
+        // renders it snappily, because it was tuned for doors. That is "the volume is all over the
+        // place and the muffling changes while I'm standing still", and it is why every fix seemed
+        // to work for a few seconds: the model kept being asked about a different world.
+        //
+        // Unknown space is now OPAQUE, not open. The scene is bounded by the edge of what we
+        // actually know, which is stable, conservative (sound doesn't escape into a void that may
+        // not be there) and, above all, the same answer twice. Residency is asked once per chunk
+        // per read and cached, so the whole box is a consistent SNAPSHOT rather than a smear of
+        // whatever was resident as each row went past.
+        const float UnknownLoss = 1.0f;                      // full opaque wall, in CellLoss units
+        readonly Dictionary<long, bool> _chunkLoaded = new Dictionary<long, bool>();
+        long _lastChunkKey = long.MinValue;
+        bool _lastChunkOk;
+
+        bool ChunkResident(World world, int wx, int wz)
+        {
+            long key = ((long)(wx >> 4) << 32) ^ (uint)(wz >> 4);
+            if (key == _lastChunkKey) return _lastChunkOk;    // rows run along X: changes every 16
+            if (!_chunkLoaded.TryGetValue(key, out bool ok))
+            {
+                try { ok = world.IsChunkAreaLoaded(wx, 0, wz); }
+                catch { ok = false; }
+                _chunkLoaded[key] = ok;
+            }
+            _lastChunkKey = key; _lastChunkOk = ok;
+            return ok;
+        }
+
         internal VoxelBox(int sx, int sy, int sz)
         {
             Sx = sx; Sy = sy; Sz = sz;
@@ -143,6 +192,7 @@ namespace CMM
             X0 = x0; Y0 = y0; Z0 = z0;
             _cursorY = 0; _cursorZ = 0;
             Complete = false;
+            _chunkLoaded.Clear(); _lastChunkKey = long.MinValue;   // one residency snapshot per read
         }
 
         // Re-read a small cube of the world into the ALREADY-FILLED buffer. For a door settling,
@@ -167,6 +217,7 @@ namespace CMM
                         for (int wx = x0; wx <= x1; wx++)
                         {
                             long i = (wx - X0) + (long)Sx * ((wz - Z0) + (long)Sz * (wy - Y0));
+                            if (!ChunkResident(world, wx, wz)) { Flags[i] = 0; Loss[i] = UnknownLoss; continue; }
                             BlockValue bv = world.GetBlock(wx, wy, wz);
                             if (bv.isair) { Flags[i] = (byte)NativeAcoustics.AIR; Loss[i] = 0f; continue; }
                             Flags[i] = 0;
@@ -203,6 +254,7 @@ namespace CMM
                     {
                         int wx = X0 + x, wy = Y0 + y, wz = Z0 + z;
                         long i = x + (long)Sx * (z + (long)Sz * y);
+                        if (!ChunkResident(world, wx, wz)) { Flags[i] = 0; Loss[i] = UnknownLoss; continue; }
                         BlockValue bv = world.GetBlock(wx, wy, wz);
                         if (bv.isair) { Flags[i] = (byte)NativeAcoustics.AIR; Loss[i] = 0f; continue; }
                         Flags[i] = 0;

@@ -139,6 +139,7 @@ namespace CMM
         }
         internal static long LastBuildMs;
         internal static string LastStatus = "not built";
+        static long _prevRooms = -1, _prevEdges = -1;   // previous build, for the reproducibility Δ
 
         internal static bool Ready { get { lock (_gate) return _scene != null && _scene.Valid; } }
 
@@ -324,8 +325,17 @@ namespace CMM
                 // this pass, so another one starts immediately.
                 _stale = wasStale;
                 if (!wasStale) _geomLiveAt = Time.realtimeSinceStartup;   // this scene is current
+                // REPRODUCIBILITY METER. The aperture count is the sharpest summary of whether two
+                // builds saw the same world, and it is what caught the real defect: standing still,
+                // the graph went 614 edges -> 428 edges between rebuilds and the reverberant field
+                // at the ear moved 7 dB with it, because unresident chunks read as open sky. If Δ is
+                // anything but small after a plain rebuild of unchanged geometry, the read is still
+                // unstable and no amount of tuning downstream will hold the level still.
+                long dRooms = _scene.Rooms - _prevRooms, dEdges = _scene.Edges - _prevEdges;
+                string delta = _prevEdges < 0 ? "" : $"  Δrooms {dRooms:+#;-#;0} Δedges {dEdges:+#;-#;0}";
+                _prevRooms = _scene.Rooms; _prevEdges = _scene.Edges;
                 LastStatus = $"rooms {_scene.Rooms}, nodes {_scene.Nodes}, edges {_scene.Edges}, "
-                           + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms";
+                           + $"{_scene.ArenaBytes / (1024 * 1024)} MB, {LastBuildMs} ms{delta}";
             }
         }
 
