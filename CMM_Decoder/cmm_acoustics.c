@@ -1748,7 +1748,29 @@ int cmm_ac_eval(cmm_ac_src *s, float lxf, float lyf, float lzf,
                 cmm_ac_arrival *out, int max_out) {
     if (!s || !out || max_out <= 0) return -1;
     cmm_ac *ac = s->sc;
-    double lx = lxf + 0.5, ly = lyf + 0.5, lz = lzf + 0.5;
+    /* THE LISTENER IS A WORLD POSITION, NOT A VOXEL INDEX.
+     * This added half a block to each axis, because the offline harness and the JS model both feed
+     * INTEGER voxel indices and convert with wx+0.5. The game does not: the bridge passes the
+     * player's actual float ear position, so every listener was displaced by (0.5,0.5,0.5) -- 0.87
+     * blocks diagonally.
+     *
+     * At range that is nothing; at arm's length it is everything. Standing 1.2 blocks from a
+     * speaker the model measured 2.0, which is 20*log10(2.06/1.30) = 4.0 dB of loss out of thin
+     * air. Straight from the game log:
+     *
+     *     d=1.2 model=-6.3 free=-2.2 OCCL=-4.1 extra=17.0 [dir -6.6 ...] pathlen 2
+     *
+     * -- four decibels of "occlusion" and seventeen virtual blocks of it, standing next to a
+     * speaker with nothing in the way. That is the "quieter when standing near the speaker" report,
+     * and it survived a week of investigation because every offline test passes integers, where the
+     * convention is self-consistent and the parity harness agreed to 0.02 dB. The bug lives only at
+     * the boundary between the two, which is the one place nothing was measuring.
+     *
+     * The SOURCE above is convention-agnostic on purpose -- floor(x)+0.5 snaps to the containing
+     * voxel's centre whether it is given 12 or 12.5 -- so only the listener needed correcting. The
+     * listener must NOT be snapped: the model takes float positions precisely so a moving ear does
+     * not produce a staircase. */
+    double lx = lxf, ly = lyf, lz = lzf;
     double sx5 = floor(s->x) + 0.5, sy5 = floor(s->y) + 0.5, sz5 = floor(s->z) + 0.5;
     double d = sqrt((lx - sx5) * (lx - sx5) + (ly - sy5) * (ly - sy5) + (lz - sz5) * (lz - sz5));
 

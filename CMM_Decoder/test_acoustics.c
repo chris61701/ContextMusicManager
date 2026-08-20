@@ -122,9 +122,15 @@ int main(int argc, char **argv) {
                         for (int xx = x0 + 4; xx < x0 + sx - 4; xx += 9) {
                             if (cmm_ac_open_at(ac, xx, em_y, zz) < 0.9f) continue;
                             cmm_ac_arrival ar[32];
-                            int na = cmm_ac_eval(src, (float)xx, (float)em_y, (float)zz, ar, 32);
+                            /* WORLD CENTRES, not voxel indices. cmm_ac_eval takes a world position -- the
+                             * game passes a float ear. Feeding it bare indices is what let a half-block
+                             * listener offset hide behind a parity check that agreed to 0.02 dB: both
+                             * sides shared the wrong convention, and only the C#-to-native boundary
+                             * used the right one. */
+                            float wx = (float)xx + 0.5f, wy = (float)em_y + 0.5f, wz = (float)zz + 0.5f;
+                            int na = cmm_ac_eval(src, wx, wy, wz, ar, 32);
                             printf("EVAL %d %d %d %.3f %d\n", xx, em_y, zz,
-                                   cmm_ac_eval_db(src, (float)xx, (float)em_y, (float)zz), na);
+                                   cmm_ac_eval_db(src, wx, wy, wz), na);
                         }
                 }
                 cmm_ac_src_destroy(src);
