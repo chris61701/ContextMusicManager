@@ -280,7 +280,13 @@ namespace CMM
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
             _nextStartFade = CMMConfig.ManualSkipFadeDuration;   // keypress-fast
             _nextTick = 0f;                                      // dispatch next frame, not in ≤250 ms
-            if (!wasOn) Sfx(CmmMixer.SfxClickOn);                // the power-on click
+            // A CLICK ON EVERY DIAL MOVE, not only on power-on. Turning the knob while the radio is
+            // already playing is the same physical action as turning it on -- a detent -- and
+            // hearing nothing made a retune feel like the game had swallowed the keypress. It fires
+            // BEFORE _staticWanted below so the order reads the way the device would: click, then
+            // the hash, then the station. Shares the power-on click's voice and its RadioClickOn*
+            // tuning rather than adding a fourth sound with its own set of knobs.
+            Sfx(CmmMixer.SfxClickOn);
             _staticWanted = true;                                // tuning static rolls until the voice lands
             _nextStaticAt = 0f;
             Notify(player, RadioStationCatalog.ByName.ContainsKey(name)
@@ -676,6 +682,22 @@ namespace CMM
                         for (int i = 2; i < ps.Length; i++)
                             _tooltipArgs[i] = ps[i].HasDefaultValue ? ps[i].DefaultValue
                                 : (ps[i].ParameterType.IsValueType ? Activator.CreateInstance(ps[i].ParameterType) : null);
+                        // PRE-EMPT, DON'T QUEUE. The game's tooltip is a FIFO: each dial press
+                        // enqueued another line and every one of them served its full dwell, so
+                        // spinning through six stations left the last five reading out one after
+                        // another long after the dial had stopped -- the text lagging the radio.
+                        // _showImmediately replaces what is on screen instead of falling in behind
+                        // it (XUiC_PopupToolTip.QueueTooltipInternal: it sets immediateTip and
+                        // displays at once rather than enqueuing), which is what a dial readout
+                        // should do -- only the CURRENT station is ever worth reading.
+                        //
+                        // Found by NAME rather than by position because the overload shape differs
+                        // across versions, and absent entirely on A20/A21, where the two-parameter
+                        // ShowTooltip is all there is and no public API dismisses the current tip.
+                        // Those two keep the old queueing behaviour; 2.6 and 3.x pre-empt.
+                        for (int i = 2; i < ps.Length; i++)
+                            if (ps[i].ParameterType == typeof(bool) && ps[i].Name == "_showImmediately")
+                                _tooltipArgs[i] = true;
                     }
                 }
                 if (_tooltip == null) return;
