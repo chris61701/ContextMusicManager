@@ -281,7 +281,7 @@ static volatile float g_sfxStaticCrackle = 0.8f;
  * runs ~3.3× this). Defaults reproduce the v35 hardcoded clicks. */
 static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 2600.0f, 2100.0f, 4200.0f };
 static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.55f, 0.50f, 0.80f };
-static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 16.0f, 18.0f, 18.0f };
+static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 16.0f, 18.0f, 24.0f };
 /* v39 — detent character: body-knock mix / its ring pitch / second-strike level (0 = single). */
 static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.42f, 0.42f, 0.30f };
 static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 560.0f, 460.0f, 950.0f };
@@ -1185,6 +1185,10 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
  * a clipped click is not merely loud -- clipping generates harmonics, which are periodic, so the
  * tonality measurement came back barely changed and would have read as "the fix did not work". */
 #define CLICK_TRIM 0.20f
+/* How hard the contact hits, relative to the noise around it. This is the difference between a
+ * click and a rustle; it is not a config knob because it is what makes a click a click -- Snap
+ * already controls how much of the sound is crack versus shell. */
+#define SNAP_IMPULSE 5.0f
 
 /* One frame of a click. Shared by the live mixer and the offline preview render so what gets
  * tuned and what gets heard cannot drift apart -- the single most expensive recurring mistake in
@@ -1197,10 +1201,19 @@ static float sfx_click_sample(sfx_voice* v, float noise) {
     }
     float excite = noise * v->exLev;
     v->exLev *= v->exK;
-    /* The snap: noise, high-passed so it is a crack rather than a rumble, decaying in a couple
-     * of milliseconds. This is the contact breaking. */
-    v->snapHp += v->kSnapHp * (noise - v->snapHp);
-    float snap = (noise - v->snapHp) * v->ping;
+    /* THE CONTACT ITSELF: a definite transient, not a lucky noise sample.
+     * Making the shell exciter a noise burst fixed the tonality but took the hard hit with it --
+     * the energy that used to arrive at t=0 got spread over a millisecond and a half, so the
+     * click gained texture and lost its edge ("the texture is nice, but that initial hit is
+     * missing"). Noise alone cannot supply it: its first sample is a random value, so the attack
+     * is a different height every time and is often near zero. A deterministic impulse rides ON
+     * TOP of the noise -- the strike is always the same hard event, the character around it is
+     * always different. High-passed with the noise so it stays a crack instead of a thud. */
+    float drive = noise;
+    if (v->pos == 0) drive += SNAP_IMPULSE;
+    else if (v->strike2At && v->pos == v->strike2At) drive += SNAP_IMPULSE * v->strike2Lvl;
+    v->snapHp += v->kSnapHp * (drive - v->snapHp);
+    float snap = (drive - v->snapHp) * v->ping;
     v->ping *= v->pingK;
 
     /* The shell: three damped modes, deliberately inharmonic so it reads as a lump of plastic
@@ -1265,7 +1278,9 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
      * apart from each other while being tuned. A knob that moves two things at once cannot be
      * turned deliberately. */
     v->ping  = sqrtf(0.12f + 0.88f * snap) * tiltSnap * CLICK_TRIM;
-    v->pingK = expf(-1.0f / ((0.0006f + 0.0022f * (1.0f - snap)) * rate));
+    /* ...and it has to DIE fast. At a millisecond the crack is a short chirp; a contact is over
+     * in a couple of hundred microseconds and what follows it is the shell, not more crack. */
+    v->pingK = expf(-1.0f / ((0.00012f + 0.00060f * (1.0f - snap)) * rate));
     v->pingInit = v->ping;
     /* High-pass the noise well below the tone cap so the snap has bite without mud. */
     {

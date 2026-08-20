@@ -108,7 +108,7 @@
        few milliseconds. Same six controls, aimed somewhere else entirely. -->
   <RadioClickDialHz>4200</RadioClickDialHz>
   <RadioClickDialSnap>0.8</RadioClickDialSnap>
-  <RadioClickDialLengthMs>18</RadioClickDialLengthMs>
+  <RadioClickDialLengthMs>24</RadioClickDialLengthMs>
   <RadioClickDialBody>0.3</RadioClickDialBody>
   <RadioClickDialBodyHz>950</RadioClickDialBodyHz>
   <RadioClickDialDouble>0.15</RadioClickDialDouble>
@@ -124,7 +124,7 @@
        asymmetrically: most detents land near LengthMs and the occasional one catches and rattles
        a little longer, which is what real hardware does. A symmetric spread would give as many
        unnaturally curtailed clicks as long ones, and short outliers read as a dropout rather than
-       as variety. At the default 0.5 the dial rings between about 11 and 18 ms.
+       as variety. At the default 0.5 the dial rings between about 15 and 22 ms.
        0 = every click identical. -->
   <RadioClickVary>0.5</RadioClickVary>
   <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
