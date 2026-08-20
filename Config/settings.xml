@@ -186,9 +186,17 @@
        falls back to the previous model automatically while a scene builds and ALWAYS during a door
        swing, so mid-swing door acoustics are unchanged.
        false = the previous occlusion model, exactly as it shipped. Live: `cmm acoustics on|off`.
+
+       DEFAULTED BACK TO false 2026-08-20, ON THE ONLY INSTRUMENT THAT HAS BEEN RIGHT ABOUT THIS
+       ALL ALONG: listening. Verdict, A/B'd in game with `cmm acoustics model native|legacy`:
+       "the occlusion feels completely broken on native, and works on legacy". The native model
+       gets several things the old one cannot (many speakers affordably, geometry-bound rebuilds
+       rather than ear-bound floods), but none of that is worth an occlusion that is wrong, and a
+       week of fixing individual defects in it has not made it right. It stays one command away
+       for development; it is not what a player gets.
        OcclusionFullDb = how much occlusion (dB) fully dulls the tone; lower = walls sound duller
        sooner. Both hot-reload. -->
-  <WorldEmitterNativeAcoustics>true</WorldEmitterNativeAcoustics>
+  <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
   <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>
   <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's
        wall bounces (reflective caves ring around corner after corner until the sound truly runs out

@@ -95,7 +95,7 @@ namespace CMM
             // the way this 4 Hz call can — v1 bug: the edge tracker lived here, but Maintain never
             // runs DURING a swing, so the falling edge was never seen and fields kept the
             // pre-swing door state baked in ["spotty" door acoustics, user 2026-07-11]).
-            if (EmitterAcoustics.AnyDoorAnimating) { _doorSeen = true; return; }
+            if (EmitterAcoustics.AnyDoorAnimating) { NoteAnimatingDoors(); return; }
             DrainDoorInvalidation();
 
             float now = Time.realtimeSinceStartup;
@@ -184,21 +184,75 @@ namespace CMM
         // A door swing settled since we last looked ⇒ every field may bake a stale door state:
         // drop them all (not-ready ⇒ the layer stays on the legacy path until rebuilds land,
         // so the post-swing acoustics are always live, never a snapshot of the old leaf).
+        // ── ONLY THE FIELDS THE DOOR IS ACTUALLY IN ──────────────────────────────────────────
+        // This dropped EVERY field for ANY door, anywhere. A field is a per-speaker Dijkstra over
+        // radius^3 cells built in 3 ms slices, and only one builds at a time, so a full set is many
+        // seconds of work -- while a POI with the player and zombies in it settles doors constantly.
+        // The set could therefore never converge, and the caller requires ALL of them ready, so it
+        // never served a single tick. Measured across four sessions and 1063 ticks:
+        //
+        //     field-serving = 0        built = 0        fields = 0/5 .. 4/5, never 5/5
+        //
+        // The whole purpose of this cache is that a static per-speaker field sampled by a moving
+        // listener CANNOT lurch. It has never once been used, which is why the shipped path is
+        // heard as "works, but the volume changes are jarring" -- that is the raw ear flood, with
+        // its continuity layer starved.
+        //
+        // A door outside a field's box cannot have changed anything that field baked, so it does
+        // not invalidate it. Positions come from the same collector the native scene's patch uses.
+        private static readonly List<Vector3i> _doorCells = new List<Vector3i>();
+        private static void NoteAnimatingDoors()
+        {
+            _doorSeen = true;
+            int before = _doorCells.Count;
+            EmitterAcoustics.CollectAnimatingDoors(_doorCells);
+            for (int i = _doorCells.Count - 1; i >= before; i--)         // dedup against what we hold
+                for (int j = 0; j < before; j++)
+                    if (_doorCells[i] == _doorCells[j]) { _doorCells.RemoveAt(i); break; }
+            if (_doorCells.Count > 64) _doorCells.RemoveRange(0, _doorCells.Count - 64);
+        }
+
         private static void DrainDoorInvalidation()
         {
             if (!_doorSeen) return;
             _doorSeen = false;
-            foreach (Field f in _fields.Values) f.Ready = false;
-            _building = null;
+            int dropped = 0;
+            foreach (Field f in _fields.Values)
+            {
+                if (!f.Ready && !ReferenceEquals(f, _building)) continue;
+                int r = f.EffR > 0 ? f.EffR : Radius();
+                bool hit = false;
+                for (int i = 0; i < _doorCells.Count && !hit; i++)
+                {
+                    Vector3i d = _doorCells[i];
+                    hit = d.x >= f.Pos.x - r && d.x <= f.Pos.x + r
+                       && d.y >= f.Pos.y - r && d.y <= f.Pos.y + r
+                       && d.z >= f.Pos.z - r && d.z <= f.Pos.z + r;
+                }
+                if (!hit) continue;
+                f.Ready = false;
+                dropped++;
+                if (ReferenceEquals(f, _building)) _building = null;
+            }
+            // No positions collected (a swing seen with nothing to collect) ⇒ we cannot tell which
+            // fields it touched, so fall back to the old blanket drop rather than keep a stale door.
+            if (_doorCells.Count == 0)
+            {
+                foreach (Field f in _fields.Values) f.Ready = false;
+                _building = null;
+                dropped = _fields.Count;
+            }
+            _doorCells.Clear();
+            if (dropped == 0) return;
             StatDoorDrops++;
-            CMMConfig.D($"[CMM] FieldCache: door settled — all {_fields.Count} fields invalidated for rebuild.");
+            CMMConfig.D($"[CMM] FieldCache: door settled — {dropped} of {_fields.Count} fields invalidated for rebuild.");
         }
 
         internal static void BuildStep(World world, float budgetMs = BuildBudgetMs)
         {
             // Per-FRAME door watch: a swing can start and settle entirely between the 4 Hz
             // Maintain calls; this is the reliable edge observer.
-            if (EmitterAcoustics.AnyDoorAnimating) { _doorSeen = true; return; }
+            if (EmitterAcoustics.AnyDoorAnimating) { NoteAnimatingDoors(); return; }
             DrainDoorInvalidation();
             if (_building == null) return;
             Field f = _building;
