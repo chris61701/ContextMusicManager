@@ -86,17 +86,17 @@
                     release then the stop landing — the mechanical "cl-ick"). 0 = single.
          Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. -->
   <RadioClickOnHz>2600</RadioClickOnHz>
-  <RadioClickOnSnap>0.5</RadioClickOnSnap>
-  <RadioClickOnLengthMs>28</RadioClickOnLengthMs>
-  <RadioClickOnBody>0.55</RadioClickOnBody>
-  <RadioClickOnBodyHz>320</RadioClickOnBodyHz>
+  <RadioClickOnSnap>0.55</RadioClickOnSnap>
+  <RadioClickOnLengthMs>16</RadioClickOnLengthMs>
+  <RadioClickOnBody>0.42</RadioClickOnBody>
+  <RadioClickOnBodyHz>560</RadioClickOnBodyHz>
   <RadioClickOnDouble>0.55</RadioClickOnDouble>
   <RadioClickOnVolume>-1</RadioClickOnVolume>
-  <RadioClickOffHz>2000</RadioClickOffHz>
-  <RadioClickOffSnap>0.42</RadioClickOffSnap>
-  <RadioClickOffLengthMs>34</RadioClickOffLengthMs>
-  <RadioClickOffBody>0.6</RadioClickOffBody>
-  <RadioClickOffBodyHz>260</RadioClickOffBodyHz>
+  <RadioClickOffHz>2100</RadioClickOffHz>
+  <RadioClickOffSnap>0.5</RadioClickOffSnap>
+  <RadioClickOffLengthMs>18</RadioClickOffLengthMs>
+  <RadioClickOffBody>0.42</RadioClickOffBody>
+  <RadioClickOffBodyHz>460</RadioClickOffBodyHz>
   <RadioClickOffDouble>0.5</RadioClickOffDouble>
   <RadioClickOffVolume>-1</RadioClickOffVolume>
 

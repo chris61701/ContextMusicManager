@@ -172,23 +172,23 @@ namespace CMM
         // tick, a small tight shell, over in a few milliseconds. Reusing the toggle for the dial
         // is why turning the knob did not sound like turning a knob.
         public static float  RadioClickOnHz        = 2600f;
-        public static float  RadioClickOnSnap      = 0.50f;
-        public static float  RadioClickOnLengthMs  = 28f;
-        public static float  RadioClickOnBody      = 0.55f;
-        public static float  RadioClickOnBodyHz    = 320f;
+        public static float  RadioClickOnSnap      = 0.55f;
+        public static float  RadioClickOnLengthMs  = 16f;
+        public static float  RadioClickOnBody      = 0.42f;
+        public static float  RadioClickOnBodyHz    = 560f;
         public static float  RadioClickOnDouble    = 0.55f;
         public static float  RadioClickOnVolume    = -1f;
-        public static float  RadioClickOffHz       = 2000f;
-        public static float  RadioClickOffSnap     = 0.42f;
-        public static float  RadioClickOffLengthMs = 34f;
-        public static float  RadioClickOffBody     = 0.60f;
-        public static float  RadioClickOffBodyHz   = 260f;
-        public static float  RadioClickOffDouble   = 0.50f;
+        public static float  RadioClickOffHz       = 2100f;
+        public static float  RadioClickOffSnap     = 0.5f;
+        public static float  RadioClickOffLengthMs = 18f;
+        public static float  RadioClickOffBody     = 0.42f;
+        public static float  RadioClickOffBodyHz   = 460f;
+        public static float  RadioClickOffDouble   = 0.5f;
         public static float  RadioClickOffVolume   = -1f;
         public static float  RadioClickDialHz       = 4200f;
-        public static float  RadioClickDialSnap     = 0.80f;
+        public static float  RadioClickDialSnap     = 0.8f;
         public static float  RadioClickDialLengthMs = 12f;
-        public static float  RadioClickDialBody     = 0.30f;
+        public static float  RadioClickDialBody     = 0.3f;
         public static float  RadioClickDialBodyHz   = 950f;
         public static float  RadioClickDialDouble   = 0.15f;
         public static float  RadioClickDialVolume   = -1f;

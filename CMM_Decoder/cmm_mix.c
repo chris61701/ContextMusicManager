@@ -245,9 +245,16 @@ typedef struct {
      * mechanical. Between that and a single 1 kHz ring it read as "tss-pop-beep" rather than as
      * a switch, which is what "wrong sound" was. A real toggle is a broadband snap plus a
      * SHELL that rings in a couple of inharmonic modes and dies fast. */
-    float rc1[3], rc2[3];      /* per-mode two-pole coefficients (pitch + decay) */
-    float ry1[3], ry2[3];      /* per-mode state */
-    float mLev[3];             /* per-mode excitation level */
+    float rc1[5], rc2[5];      /* per-mode two-pole coefficients (pitch + decay) */
+    float ry1[5], ry2[5];      /* per-mode state */
+    float mLev[5];             /* per-mode excitation level */
+    /* v42 — THE EXCITER IS A NOISE BURST, NOT AN IMPULSE. Hitting a resonator with a single
+     * impulse produces a decaying SINE: that is a note, and it is why the clicks came back as
+     * "too tonal" (measured autocorrelation 0.84-0.92 out of 1.0 — essentially pitched). A real
+     * impact drives the shell with a couple of milliseconds of broadband energy, which comes out
+     * as a band of noise around each mode rather than a tone at it. Same modes, same pitches,
+     * completely different character: a knock instead of a chime. */
+    float exLev, exK;
     float snapHp;              /* one-pole HP state: keeps the noise snap out of the mud */
     float kSnapHp;
     int   strike2At;           /* frame of the second micro-impact (0 = single strike) */
@@ -272,12 +279,12 @@ static volatile float g_sfxStaticCrackle = 0.8f;
  * dull thud), SNAP 0..1 (the bright-noise-ping vs low-thump balance: 1 = all snap, 0 = all
  * thud), and length ms (the thump's decay constant; the ping decays 4× faster and the voice
  * runs ~3.3× this). Defaults reproduce the v35 hardcoded clicks. */
-static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 2600.0f, 2000.0f, 4200.0f };
-static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.50f, 0.42f, 0.80f };
-static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 28.0f, 34.0f, 12.0f };
+static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 2600.0f, 2100.0f, 4200.0f };
+static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.55f, 0.50f, 0.80f };
+static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 16.0f, 18.0f, 12.0f };
 /* v39 — detent character: body-knock mix / its ring pitch / second-strike level (0 = single). */
-static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.55f, 0.60f, 0.30f };
-static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 320.0f, 260.0f, 950.0f };
+static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.42f, 0.42f, 0.30f };
+static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 560.0f, 460.0f, 950.0f };
 static volatile float g_sfxClickDouble[SFX_CLICK_KINDS] = { 0.55f, 0.50f, 0.15f };
 /* How much each firing differs from the last, 0..1. A detent is a physical event and no two are
  * identical; a fixed waveform repeated on every notch is the thing that gives a UI sound away as
@@ -1172,18 +1179,24 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
 /* Overall click trim. The three-mode shell sums louder than the old single ring, and at Body
  * 0.55-0.60 the toggles rendered at 0.98 peak -- fine at the default SFX volume and one bad
  * setting away from clipping the bus against loud music. Headroom is cheaper than a limiter. */
-#define CLICK_TRIM 0.82f
+/* Retrimmed for the noise exciter (v42). The sin(w) mode normalisation is derived for an
+ * IMPULSE; driving the same modes with a millisecond and a half of noise pours far more energy
+ * in, and the first render after the change clipped at +11.9 dBFS. Worth stating plainly because
+ * a clipped click is not merely loud -- clipping generates harmonics, which are periodic, so the
+ * tonality measurement came back barely changed and would have read as "the fix did not work". */
+#define CLICK_TRIM 0.20f
 
 /* One frame of a click. Shared by the live mixer and the offline preview render so what gets
  * tuned and what gets heard cannot drift apart -- the single most expensive recurring mistake in
  * this project has been two implementations of "the same" thing. */
 static float sfx_click_sample(sfx_voice* v, float noise) {
-    float excite = 0.0f;
-    if (v->pos == 0) excite = 1.0f;
+    if (v->pos == 0) v->exLev = 1.0f;
     else if (v->strike2At && v->pos == v->strike2At) {
-        excite = v->strike2Lvl;
-        v->ping += v->pingInit * v->strike2Lvl;
+        v->exLev += v->strike2Lvl;
+        v->ping  += v->pingInit * v->strike2Lvl;
     }
+    float excite = noise * v->exLev;
+    v->exLev *= v->exK;
     /* The snap: noise, high-passed so it is a crack rather than a rumble, decaying in a couple
      * of milliseconds. This is the contact breaking. */
     v->snapHp += v->kSnapHp * (noise - v->snapHp);
@@ -1193,7 +1206,7 @@ static float sfx_click_sample(sfx_voice* v, float noise) {
     /* The shell: three damped modes, deliberately inharmonic so it reads as a lump of plastic
      * being knocked rather than as a note. */
     float body = 0.0f;
-    for (int m = 0; m < 3; m++) {
+    for (int m = 0; m < 5; m++) {
         float ry = v->rc1[m] * v->ry1[m] + v->rc2[m] * v->ry2[m] + excite * v->mLev[m];
         v->ry2[m] = v->ry1[m]; v->ry1[m] = ry;
         body += ry;
@@ -1239,7 +1252,12 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     v->kHi   = 1.0f - expf(-6.2831853f * hz / rate);
     /* The snap is SHORT -- a couple of milliseconds, not a quarter of the click. Decaying noise
      * over tens of milliseconds is a hiss; a switch is a crack. */
-    v->ping  = (0.4f + 0.7f * snap) * tiltSnap * CLICK_TRIM;
+    /* EQUAL-POWER between the crack and the shell, so Snap changes the CHARACTER and not the
+     * volume. The old pair (0.4 + 0.7*snap against 1 - 0.55*snap) did not hold power constant, so
+     * every tonal adjustment was also a loudness adjustment and the three clicks drifted 7 dB
+     * apart from each other while being tuned. A knob that moves two things at once cannot be
+     * turned deliberately. */
+    v->ping  = sqrtf(0.12f + 0.88f * snap) * tiltSnap * CLICK_TRIM;
     v->pingK = expf(-1.0f / ((0.0006f + 0.0022f * (1.0f - snap)) * rate));
     v->pingInit = v->ping;
     /* High-pass the noise well below the tone cap so the snap has bite without mud. */
@@ -1249,7 +1267,7 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     }
     /* `thump` is now the SHELL's level rather than a decaying DC term -- same knob, same
      * direction (more snap = less shell), but it drives something that oscillates. */
-    v->thump = (1.0f - 0.55f * snap) * tiltBody * CLICK_TRIM;
+    v->thump = sqrtf(1.0f - 0.88f * snap) * tiltBody * CLICK_TRIM;
     v->thumpInit = v->thump;
     v->body = body;
     /* Three inharmonic modes around BodyHz. The ratios are deliberately not simple: 1, 1.71 and
@@ -1257,12 +1275,32 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
      * Higher modes are quieter and die faster, which is what small stiff objects do. Body mixes
      * the two upper modes in, so Body = 0 leaves the fundamental alone and still sounds like a
      * switch -- where before it left a bare DC pop. */
+    /* The exciter's own decay: about a millisecond and a half of broadband drive. Long enough to
+     * spread each mode into a BAND rather than a line, short enough to still be an impact. */
+    v->exLev = 0.0f;
+    v->exK = expf(-1.0f / (0.0015f * rate));
     {
-        const float ratio[3] = { 1.0f, 1.71f, 2.63f };
-        const float lev[3]   = { 1.0f, 0.45f, 0.22f };
-        const float damp[3]  = { 0.55f, 0.34f, 0.22f };
-        for (int m = 0; m < 3; m++) {
-            float fq = bodyHz * ratio[m];
+        /* FIVE modes, at ratios that are not merely inharmonic but IRREGULARLY spaced, so the ear
+         * cannot fuse them into one pitch the way it does with a tidy series. Damping is now a
+         * small fraction of the click length rather than half of it: a shell knocked with a
+         * fingernail rings for a handful of cycles, not fifty. Between this and the noise
+         * exciter, tonality drops from ~0.9 to the region where the ear stops hearing a note. */
+        const float ratio[5] = { 1.0f, 1.38f, 1.93f, 2.61f, 3.47f };
+        const float lev[5]   = { 1.0f, 0.62f, 0.44f, 0.28f, 0.17f };
+        const float damp[5]  = { 0.11f, 0.08f, 0.06f, 0.045f, 0.035f };
+        /* ...and normalise the mode set, so Body is a timbre control rather than a second volume
+         * control. Without this, richer settings were simply louder settings. */
+        float msum = 0.0f;
+        for (int m = 0; m < 5; m++) { float L = lev[m] * (0.35f + 0.65f * body); msum += L * L; }
+        float mnorm = msum > 1e-9f ? 1.0f / sqrtf(msum) : 1.0f;
+        for (int m = 0; m < 5; m++) {
+            /* Detune each mode independently per firing. A shell struck twice never rings the
+             * same set of frequencies, and detuning as a GROUP (which a single bodyHz jitter
+             * does) just transposes the same chord — it is the ratios drifting that stops it
+             * being recognisable as one sound repeated. */
+            g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+            float dt = ((float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f) * 0.09f * vary;
+            float fq = bodyHz * ratio[m] * (1.0f + dt);
             if (fq > rate * 0.45f) fq = rate * 0.45f;
             float w = 6.2831853f * fq / rate;
             float R = expf(-1.0f / (damp[m] * sec * rate));
@@ -1275,7 +1313,10 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
              * rather than as a gain bug. Caught by printing the peak in the preview render, which
              * is exactly what the preview is for. */
             float sw = sinf(w); if (sw < 1e-4f) sw = 1e-4f;
-            v->mLev[m] = lev[m] * (m == 0 ? 1.0f : body) * sw;
+            /* Body scales the WHOLE shell now, not just the upper modes. Leaving the fundamental
+             * at full level regardless meant the one knob named after the tonal part could not
+             * remove it — "too tonal" had no dial to turn. Body 0 is now a bare tick. */
+            v->mLev[m] = lev[m] * (0.35f + 0.65f * body) * mnorm * sw;
             v->ry1[m] = v->ry2[m] = 0.0f;
         }
     }

@@ -42,13 +42,20 @@ static int put(float* dst, int cap, double at, int kind, float gain) {
     return off + n;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     /* The shipped defaults, straight out of Config/radio.xml. Toggle for power, detent for the
      * dial -- different objects, different sounds. */
     const float VARY = 0.5f;
-    cmm_mix_set_click_tone_kind(0, 2600, 0.50f, 28, 0.55f, 320, 0.55f, VARY);   /* toggle over  */
-    cmm_mix_set_click_tone_kind(1, 2000, 0.42f, 34, 0.60f, 260, 0.50f, VARY);   /* toggle back  */
-    cmm_mix_set_click_tone_kind(2, 4200, 0.80f, 12, 0.30f, 950, 0.15f, VARY);   /* dial detent  */
+    float onHz=2600, onSn=0.55f, onLen=18, onBd=0.45f, onBHz=520, onDb=0.55f;
+    float ofHz=2100, ofSn=0.48f, ofLen=22, ofBd=0.50f, ofBHz=420, ofDb=0.50f;
+    float dlHz=4200, dlSn=0.80f, dlLen=12, dlBd=0.30f, dlBHz=950, dlDb=0.15f;
+    if (argc >= 7) { onHz=atof(argv[1]); onSn=atof(argv[2]); onLen=atof(argv[3]);
+                     onBd=atof(argv[4]); onBHz=atof(argv[5]); onDb=atof(argv[6]); }
+    if (argc >= 13){ ofHz=atof(argv[7]); ofSn=atof(argv[8]); ofLen=atof(argv[9]);
+                     ofBd=atof(argv[10]); ofBHz=atof(argv[11]); ofDb=atof(argv[12]); }
+    cmm_mix_set_click_tone_kind(0, onHz, onSn, onLen, onBd, onBHz, onDb, VARY);
+    cmm_mix_set_click_tone_kind(1, ofHz, ofSn, ofLen, ofBd, ofBHz, ofDb, VARY);
+    cmm_mix_set_click_tone_kind(2, dlHz, dlSn, dlLen, dlBd, dlBHz, dlDb, VARY);
 
     int n;
     memset(buf, 0, sizeof buf);
