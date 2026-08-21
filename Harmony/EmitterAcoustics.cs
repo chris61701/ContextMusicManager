@@ -482,7 +482,17 @@ namespace CMM
                     // (vault) blends toward AIRTIGHT density, so the hard-stop gate engages while the
                     // leaf is still visibly closing — the slam lands early, not after the animation.
                     float dmgO = DamageOpenness(b, bv, world, x, y, z);
-                    float open = Mathf.Max(da.Openness, dmgO);
+                    // REMAP THE SWING so the sound arrives with the act rather than with the
+                    // animation. Openness is scaled up and clamped, so a door is acoustically shut
+                    // once its leaf is WorldEmitterDoorSwingFrac of the way closed and acoustically
+                    // open once it is that far open. Measured latch-to-field is 33-79 ms, so what
+                    // reads as delay is this ramp, not the pipeline. Damage openness is a static
+                    // hole and is not remapped -- there is no swing to be early for.
+                    float frac = CMMConfig.WorldEmitterDoorSwingFrac;
+                    float swing = da.Openness;
+                    if (frac > 0.001f && frac < 0.999f) swing = Mathf.Clamp01(swing / frac);
+                    else if (frac <= 0.001f) swing = da.Openness > 0.5f ? 1f : 0f;
+                    float open = Mathf.Max(swing, dmgO);
                     float shutLoss = (dmgO <= 0f && IsSealDoor(b, bv.type)) ? AirtightLoss : SolidLoss(b, bv);
                     return shutLoss * (1f - open);   // open ⇒ 0 (air), shut ⇒ full, mid ⇒ proportional
                 }

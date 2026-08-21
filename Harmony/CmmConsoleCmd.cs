@@ -169,7 +169,7 @@ namespace CMM
                      + ".\n  If a dip survives OFF, the cause is not occlusion.";
             }
 
-            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew" || a == "aperture") && p.Count > 2
+            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew" || a == "aperture" || a == "swing") && p.Count > 2
                 && float.TryParse(p[2], System.Globalization.NumberStyles.Float,
                                   System.Globalization.CultureInfo.InvariantCulture, out float v))
             {
@@ -178,7 +178,8 @@ namespace CMM
                 else if (a == "wall") { was = CMMConfig.WorldEmitterFieldWallDb.ToString("0.0"); CMMConfig.WorldEmitterFieldWallDb = v; }
                 else if (a == "pow") { was = CMMConfig.WorldEmitterFieldWallPow.ToString("0.00"); CMMConfig.WorldEmitterFieldWallPow = v; }
                 else if (a == "slew") { was = CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0"); CMMConfig.WorldEmitterFieldSlewDb = v; }
-                else { was = CMMConfig.WorldEmitterFieldAperturePow.ToString("0.00"); CMMConfig.WorldEmitterFieldAperturePow = v; }
+                else if (a == "aperture") { was = CMMConfig.WorldEmitterFieldAperturePow.ToString("0.00"); CMMConfig.WorldEmitterFieldAperturePow = v; }
+                else { was = CMMConfig.WorldEmitterDoorSwingFrac.ToString("0.00"); CMMConfig.WorldEmitterDoorSwingFrac = v; }
                 // wall/pow change what each BLOCK is worth, so the stored geometry is now wrong and
                 // has to be read again; detour is used by the flood alone and lands by itself.
                 if (a == "wall" || a == "pow" || a == "aperture") FieldOcclusion.RereadAll();
@@ -202,7 +203,9 @@ namespace CMM
                  + "\n  " + FieldOcclusion.DescribeNearest()
                  + "\n  occl   " + (CMMConfig.WorldEmitterOcclusion ? "ON" : "OFF")
                  + "      master bypass — off = clear line for every speaker (the bisect)"
-                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew|aperture <n>"
+                 + "\n  swing  " + CMMConfig.WorldEmitterDoorSwingFrac.ToString("0.00")
+                 + "   how much of a door's swing the sound waits for. 0 = snap at the latch, 1 = the whole animation."
+                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew|aperture|swing <n>"
                  + "\n         cmm acoustics ray";
 #else
             return "field occlusion: not built into this game version";

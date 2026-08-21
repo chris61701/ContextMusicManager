@@ -181,6 +181,7 @@ namespace CMM
                 CMMConfig.WorldEmitterFieldOcclusion = ReadBool (root, "WorldEmitterFieldOcclusion", CMMConfig.WorldEmitterFieldOcclusion);
                 CMMConfig.WorldEmitterFieldDetourDb  = ReadFloat(root, "WorldEmitterFieldDetourDb",  CMMConfig.WorldEmitterFieldDetourDb);
                 CMMConfig.WorldEmitterFieldSlewDb    = ReadFloat(root, "WorldEmitterFieldSlewDb",    CMMConfig.WorldEmitterFieldSlewDb);
+                CMMConfig.WorldEmitterDoorSwingFrac  = ReadFloat(root, "WorldEmitterDoorSwingFrac",  CMMConfig.WorldEmitterDoorSwingFrac);
                 CMMConfig.WorldEmitterFieldAperturePow = ReadFloat(root, "WorldEmitterFieldAperturePow", CMMConfig.WorldEmitterFieldAperturePow);
                 CMMConfig.WorldEmitterFieldWallDb    = ReadFloat(root, "WorldEmitterFieldWallDb",    CMMConfig.WorldEmitterFieldWallDb);
                 CMMConfig.WorldEmitterFieldWallPow   = ReadFloat(root, "WorldEmitterFieldWallPow",   CMMConfig.WorldEmitterFieldWallPow);

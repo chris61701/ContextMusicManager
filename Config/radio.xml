@@ -305,6 +305,15 @@
        change is the model or the smoothing. Live: cmm field slew <n> -->
   <WorldEmitterFieldSlewDb>40</WorldEmitterFieldSlewDb>
 
+  <!-- HOW MUCH OF A DOOR'S SWING THE SOUND WAITS FOR (0..1). Occlusion tracks a door's
+       ANIMATION, so the seal only completes when the leaf stops moving - half a second to a
+       second after you press. That is physically right and it reads as lag. Measured latch to
+       published field is 33-79 ms, so the pipeline is not the delay; this ramp is.
+       0.35 = the door sounds shut about a third of the way through closing, which is close
+       enough to the click to feel caused by it. 1 = track the whole swing. 0 = snap at the
+       latch and ignore the animation. -->
+  <WorldEmitterDoorSwingFrac>0.35</WorldEmitterDoorSwingFrac>
+
   <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
   <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>
   <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's

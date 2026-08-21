@@ -272,6 +272,20 @@ namespace CMM
         // act, and the sound should land with the latch. The limiter is for the model changing its
         // mind, not for the world changing.
         public static float  WorldEmitterFieldSlewDb   = 40f;
+        // HOW MUCH OF A DOOR'S SWING THE SOUND WAITS FOR, 0..1. The occlusion tracks a door's
+        // ANIMATION -- a leaf half open is half a door -- which is physically right and reads as
+        // lag, because the seal only completes when the leaf stops moving, half a second to a
+        // second after the click.
+        //
+        // Measured, latch to published field: 33-79 ms. The pipeline is not the delay; the ramp
+        // is. So the swing is remapped rather than removed: the sound reaches full seal by the
+        // time the leaf is this far through its travel, and holds. 0.35 means the door sounds shut
+        // about a third of the way through closing, which is roughly when a real door's gap stops
+        // mattering, and it lands close enough to the click to feel like the click caused it.
+        //
+        // 1 restores tracking the whole swing exactly; 0 snaps at the latch and ignores the
+        // animation entirely.
+        public static float  WorldEmitterDoorSwingFrac  = 0.35f;
         // HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.
         //
         // The other two material knobs set what a SOLID block is worth, and a solid block is
