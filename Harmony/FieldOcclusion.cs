@@ -400,6 +400,8 @@ namespace CMM
             bool door = EmitterAudioLayer.DoorMovingOrJustMoved;
             if (!door && nowF - _lastFloodAt < FloodSec) return;
             _lastFloodAt = nowF;
+            // `door` is read once here and reused below, so a swing ending mid-flood cannot make
+            // this tick forget it was the one somebody was waiting on.
             if (!EmitterAudioLayer.FieldActive || !_earValid) return;
             IntPtr f = System.Threading.Volatile.Read(ref _f);
             if (f == IntPtr.Zero) return;
@@ -413,6 +415,8 @@ namespace CMM
                 NativeField.cmm_fld_set_tuning(f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
                 Vector3 e = _ear;
                 if (NativeField.cmm_fld_solve(f, e.x, e.y, e.z) < 0) Discarded++;
+                // A door is waiting on this result. Do not let it sit for the next 4 Hz tick.
+                else if (door) EmitterAudioLayer.RequestImmediatePublish();
             }
             catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }
             finally { System.Threading.Interlocked.Exchange(ref _flooding, 0); }

@@ -112,6 +112,13 @@ namespace CMM
         private static Vector3 _occlEar;               // the ear the flood was anchored at
         private static readonly List<Station> _occlStations = new List<Station>();   // stations culled for this flood
         private static bool  _forceRefresh;            // door toggled → run the next tick a frame early
+        // Publish on the next frame rather than waiting for the 4 Hz tick. Called from the field's
+        // flood when it lands during a door window: _forceRefresh is set at the LATCH, which
+        // collapses the wait for a publish of the field as it was BEFORE the flood ran. The new
+        // field then arrives ~100 ms later and, without this, sat until the next scheduled tick --
+        // up to 250 ms of the door already being shut before it could be heard. Thread-safe by
+        // being a bool the main thread clears; a missed write costs one tick, never correctness.
+        internal static void RequestImmediatePublish() { _forceRefresh = true; }
         private static float _nextReverbLog;           // throttle for the reverb diagnostic (DebugLogging only)
 
         // ── Path / stability summary (DebugLogging only) ────────────────────────────────────────

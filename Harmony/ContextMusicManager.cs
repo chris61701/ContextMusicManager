@@ -172,10 +172,12 @@ namespace CMM
                 CmmScheduler.Every(0.5, AcousticBridge.SchedulerTick, "acoustics-scene");
                 // The one field's flood: pure arithmetic over a native arena, so it is safe here
                 // and must be here -- 7 ms on the frame loop three times a second is a stutter.
-                // Polled at 0.10 s, not 0.30: the tick itself decides whether to flood (see
-                // FieldOcclusion.SchedulerTick). Steady state is unchanged at one flood every
-                // 0.30 s; a door in play gets one straight away instead of waiting up to 300 ms.
-                CmmScheduler.Every(0.10, FieldOcclusion.SchedulerTick, "occlusion-field");
+                // Polled at 0.02 s; the tick itself decides whether to FLOOD (see
+                // FieldOcclusion.SchedulerTick), so steady state is unchanged at one flood every
+                // 0.30 s and the poll is a clock comparison the other 14 times out of 15.
+                // The poll rate is the granularity of a door's response: at 0.10 it cost up to
+                // 100 ms of the remaining delay, which is precisely what was still audible.
+                CmmScheduler.Every(0.02, FieldOcclusion.SchedulerTick, "occlusion-field");
 #endif
                 // Music-folder watch, off the frame loop: the directory-signature probe +
                 // active-track ping run on the scheduler thread and only an actual change
