@@ -726,7 +726,14 @@ namespace CMM
             if (_swingCache.TryGetValue(type, out bool s)) return s;
             BlockPlacement p = null;
             try { p = b.BlockPlacementHelper; } catch { /* modded block without one ⇒ not a door */ }
-            s = p is BlockPlacementDoor || p is BlockPlacementDrawBridge;
+            // The placement helper catches ordinary doors and drawbridges -- the only two door
+            // helpers the game has -- but not every openable declares one. BlockPoweredDoor and
+            // BlockTrapDoor are their own classes and can carry a different Place, and without
+            // them a trapdoor standing open read as SOLID: its matter has plainly left the voxel
+            // and the model insisted otherwise. The class test is the backstop for exactly the
+            // things the helper test cannot see.
+            s = p is BlockPlacementDoor || p is BlockPlacementDrawBridge
+                || b is BlockPoweredDoor || b is BlockTrapDoor;
             _swingCache[type] = s;
             return s;
         }
