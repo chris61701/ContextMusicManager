@@ -64,6 +64,9 @@ namespace CMM
         private static int _nx, _ny, _nz, _range;
         private static Vector3 _ear;              // captured on the main thread, read by the flood
         private static bool _earValid;
+        private static Vector3i _centre;          // block position the window was last centred on
+        private static bool _centreValid;
+        internal static int Recentres;            // how often the window actually had to move
 
         internal static long CellsPending => _f == IntPtr.Zero ? -1 : NativeField.cmm_fld_stat(_f, 1);
         internal static long CellsTotal   => _f == IntPtr.Zero ? -1 : NativeField.cmm_fld_stat(_f, 0);
@@ -78,7 +81,8 @@ namespace CMM
             long pend = CellsPending, tot = CellsTotal;
             return $"cells {tot} ({StepXZ}x{StepY}x{StepXZ}-block, {_nx}x{_ny}x{_nz}), "
                  + (pend > 0 ? $"reading {100.0 * (tot - pend) / Math.Max(tot, 1):0}%, " : "read complete, ")
-                 + $"reached {Reached}, flood {LastSolveUs / 1000.0:0.0} ms, {Discarded} discarded";
+                 + $"reached {Reached}, flood {LastSolveUs / 1000.0:0.0} ms, "
+                 + $"{Discarded} discarded, {Recentres} recentres";
         }
 
         // ── Lifetime ────────────────────────────────────────────────────────────────────────────
@@ -104,7 +108,7 @@ namespace CMM
         internal static void Reset()
         {
             if (_f != IntPtr.Zero) { NativeField.cmm_fld_destroy(_f); _f = IntPtr.Zero; }
-            _earValid = false; Discarded = 0;
+            _earValid = false; Discarded = 0; _centreValid = false; Recentres = 0;
         }
 
         // ── Main thread: keep the window on the player and read the world into it ───────────────
@@ -118,8 +122,28 @@ namespace CMM
 
             _ear = EmitterAudioLayer.ListenerWorldPos(player);
             _earValid = true;
-            NativeField.cmm_fld_recentre(_f, Mathf.FloorToInt(_ear.x),
-                                             Mathf.FloorToInt(_ear.y), Mathf.FloorToInt(_ear.z));
+
+            // RECENTRE ON A DRIFT, NOT ON EVERY STEP. A recentre changes what every index means,
+            // so a flood in progress when one lands is thrown away — and with one-block-tall cells
+            // ANY single block of vertical movement used to trigger one. Walking up a slope, or a
+            // staircase, or simply jumping, re-centred the window over and over; the log showed
+            // floods being discarded and the audio dropping to another model each time.
+            //
+            // The window is bigger than the audible range on purpose, so the listener is allowed
+            // to wander a few blocks off centre before it has to move. Slack is smaller in Y
+            // because the window is shallower there (+/-24 blocks against +/-64).
+            const int SlackXZ = 6, SlackYb = 4;
+            int ebx = Mathf.FloorToInt(_ear.x), eby = Mathf.FloorToInt(_ear.y), ebz = Mathf.FloorToInt(_ear.z);
+            if (!_centreValid
+                || Math.Abs(ebx - _centre.x) > SlackXZ
+                || Math.Abs(eby - _centre.y) > SlackYb
+                || Math.Abs(ebz - _centre.z) > SlackXZ)
+            {
+                NativeField.cmm_fld_recentre(_f, ebx, eby, ebz);
+                _centre = new Vector3i(ebx, eby, ebz);
+                _centreValid = true;
+                Recentres++;
+            }
 
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -296,7 +320,14 @@ namespace CMM
                 float extra = head > 0f ? (float)(head * (1.0 - Math.Pow(amp, 1.0 / fexp))) : 0f;
                 ptGain[k] = extra > 0f ? extra : 0f;
 
-                if (k == 0 || d < _dbgDist)
+                // NOT `k == 0 || d < _dbgDist`. ComputeOcclusion is called once PER STATION, so
+                // forcing an update on each station's first point meant the last station processed
+                // always won and the line described an arbitrary speaker rather than the nearest.
+                // With three stations playing it reported one 39 blocks away while the listener
+                // stood beside two others — and since `ray` follows this point, the route dump was
+                // aimed at the wrong speaker too. Resetting on report is what makes a plain
+                // minimum correct here.
+                if (d < _dbgDist)
                 {
                     _dbgDist = d; _dbgExcess = excessDb; _dbgExtra = ptGain[k];
                     // Split it. A speaker quiet because of walls and one quiet because the route

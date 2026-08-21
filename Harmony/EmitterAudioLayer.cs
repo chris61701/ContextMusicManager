@@ -372,6 +372,17 @@ namespace CMM
                 }
                 _floodRoomOnly = true;      // keep the reverb's room measure running underneath
             }
+            // THE COMMENT ABOVE WAS NOT TRUE OF THE CODE. "It never hands back ... if a flood has
+            // not landed yet it simply publishes nothing" — but a false return fell through this
+            // else-if chain into the native path or the field CACHE, which is exactly the handover
+            // the design exists to delete, and every one of them is an audible step because the two
+            // models do not agree on a number. Now a declined tick with the field pinned publishes
+            // nothing and the speakers hold, which is what was written on the tin.
+            else if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterFieldOcclusion
+                && world != null && PinField)
+            {
+                _statLegacyTicks++;      // counted as a miss so the rate is visible in the log
+            }
             else if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterNativeAcoustics && world != null
                 && !PinLegacy && !PinField
                 && TryNativeOcclusion(player, world, audibleR))
@@ -538,8 +549,12 @@ namespace CMM
                     RecordPtPush(st, 0);
                     continue;
                 }
+                // SKIP, don't abandon. Returning here left the stations already pushed this tick
+                // holding new gains while the rest kept old ones, and then handed the whole tick to
+                // another model — two inconsistent pictures and an audible step. A station the
+                // field cannot answer for simply keeps the gains it already has.
                 if (!FieldOcclusion.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain))
-                { _statWhy = "field-declined"; return false; }
+                { _statWhy = "field-declined"; continue; }
                 PostProcessGains(st);
                 CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
@@ -547,6 +562,8 @@ namespace CMM
             }
             if (!any) { _statWhy = "field-nopoints"; return false; }
             _statWhy = "field";
+            _statFieldTicks++;      // this path returned before ever reaching the counter below,
+                                    // so the log has been reading "field=0" while the field ran
             PushReverb(player);
             return true;
         }

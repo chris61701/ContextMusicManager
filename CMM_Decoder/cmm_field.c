@@ -428,7 +428,17 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     }
 
     f->lastUs = now_us() - t0;
-    if (f->gen != gen0) { f->reached = 0; return -1; }   /* the window moved under us: discard */
+    /* THE WINDOW MOVED UNDER US: throw away THIS flood, not the last good one.
+     *
+     * Zeroing `reached` here also marked the field unavailable, and the caller reads that as "no
+     * field yet" and falls back to a different occlusion model for the next 300 ms -- an audible
+     * volume step every time the listener happened to cross a cell boundary mid-flood. That is
+     * pure loss: `cur` is exactly as valid as it was a moment ago. A recentre keeps every cell
+     * still inside the window in the same toroidal slot, so the published field remains correct
+     * for all of them; only the thin slab that just scrolled in carries its previous occupant's
+     * value, and that slab is at the far edge of the window, past anything audible. Stale at the
+     * rim for one flood interval beats silent everywhere. */
+    if (f->gen != gen0) return -1;
     /* Publish: the field just solved becomes current, the previous one stays available for the
      * caller's crossfade, and the oldest buffer is recycled for the next flood. */
     { int *old = f->prev; f->prev = f->cur; f->cur = f->nxt; f->nxt = old; }
