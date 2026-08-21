@@ -1578,6 +1578,32 @@ CMM_API void cmm_mix_play_sfx(int kind, float gain) {
      * voice arms immediately and renders when the device arrives a few ms later — a click no
      * longer drops during the open window (it only stays silent if no endpoint ever opens). */
     g_deviceWanted = 1;
+
+    /* v45 — A BUTTON DOES NOT QUEUE. The producer runs ahead of the speaker by the output cushion
+     * (200 ms in calm play, more while it is banking against a freeze), so a click armed the normal
+     * way is heard a fifth of a second after the key. That is invisible on music and is the whole
+     * difference between a device and a delay on a button -- reported as "the clicks feel delayed"
+     * the first time one was pressed.
+     *
+     * So a click is rendered here, whole, and mixed straight into the audio already waiting. It is
+     * a few thousand multiply-adds; the tuning static is left on the normal path because it is a
+     * sustained keepalive rather than an event, and its onset being a cushion late is inaudible.
+     *
+     * Falls back to arming a voice if the ring wraps mid-click or no device is open yet. A late
+     * click is a blemish; half a click is a defect. */
+    if (kind >= SFX_KIND_CLICK_ON && kind <= SFX_KIND_CLICK_DIAL && g_out) {
+        static float clickBuf[48000];          /* under the lock; a click is at most ~250 ms */
+        int cap = (int)(sizeof clickBuf / sizeof *clickBuf);
+        int n = cmm_mix_render_click(kind, g_busRate, clickBuf, cap);
+        if (n > 0) {
+            int skip = g_busRate / 200;        /* ~5 ms clear of whatever the callback is reading */
+            if (cmm_out_inject(g_out, clickBuf, n, gain, skip) == n) {
+                mix_unlock(&g_lock);
+                return;
+            }
+        }
+    }
+
     /* v36 — the STATIC is KEEPALIVE, not one-shot: a ping while a static is already live EXTENDS
      * the live hash (env stays flat until pings stop, then the release runs) instead of layering
      * a second burst on top — retriggered bursts audibly double-fired whenever a station join

@@ -381,15 +381,30 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
     int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
     float tx = gx - ix, ty = gy - iy, tz = gz - iz;
 
-    float acc = 0.0f;
+    /* BLEND ONLY WHAT THE FLOOD ACTUALLY REACHED, and renormalise.
+     *
+     * An unreached cell does not mean "very quiet here" -- it means no route was found to it, and
+     * it carries maxDb as a placeholder. Blending that placeholder with real neighbours by plain
+     * trilinear weights produces a number that is a route to nowhere: measured in game, a speaker
+     * 6.7 blocks away flipped between 6 dB and 55 dB of excess at a FIXED listener position,
+     * because a speaker is itself a solid block and the cells hugging it are frequently unreached.
+     * A 50 dB step from a rounding boundary is exactly the class of defect this rebuild exists to
+     * remove, so the interpolation now weighs only cells with an answer. If none of the eight has
+     * one, the position really is unreachable and maxDb is the honest reply. */
+    float acc = 0.0f, wsum = 0.0f;
     for (int dy = 0; dy <= 1; dy++)
     for (int dz = 0; dz <= 1; dz++)
     for (int dx = 0; dx <= 1; dx++) {
         float w = (dx ? tx : 1.0f - tx) * (dy ? ty : 1.0f - ty) * (dz ? tz : 1.0f - tz);
         if (w <= 0.0f) continue;
-        acc += w * cell_db(f, fld, ix + dx, iy + dy, iz + dz);
+        int cx = ix + dx, cy = iy + dy, cz = iz + dz;
+        if (!in_win(f, cx, cy, cz)) continue;
+        int v = fld[widx(f, cx, cy, cz)];
+        if (v == UNREACHED) continue;
+        acc += w * ((float)v / Q_PER_DB);
+        wsum += w;
     }
-    return acc;
+    return wsum > 1e-6f ? acc / wsum : f->maxDb;
 }
 
 /* The routed cost includes the detour charge for the whole path, so a source in clear air still

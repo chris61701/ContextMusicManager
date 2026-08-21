@@ -676,6 +676,11 @@ CMM_API void cmm_mix_set_sfx_rate_jitter(float hz);
 /* v41 — render ONE click in isolation for auditioning; see cmm_mix.c. Returns frames (mono). */
 CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames);
 
+/* v45 — mix a mono sound into ALREADY-QUEUED output, `skip` frames past the play head, so a UI
+ * sound is not delayed by the output cushion. Returns 0 if it will not fit contiguously (the ring
+ * wrapped); the caller should then arm it normally rather than play a truncated one. */
+CMM_API int cmm_out_inject(cmm_out* o, const float* mono, int frames, float gain, int skip);
+
 /* Fade ALL voices out over `fade`. closeWhenIdle!=0 closes the device once silent;
  * pass 0 to keep it open for a hand-off (e.g. a menu→game fade into the spawn stinger). */
 CMM_API void cmm_mix_stop(float fade, int closeWhenIdle);

@@ -975,6 +975,44 @@ CMM_API int cmm_out_drain(cmm_out* o, int frames)
  * fits in the ring right now and returns the number of frames accepted (may be
  * 0 or < frames when the ring is full — the producer should retry the remainder
  * after a short sleep). */
+/* v45 — MIX A SOUND INTO AUDIO THAT IS ALREADY QUEUED.
+ *
+ * The producer runs ahead of the speaker by the output cushion -- 200 ms in calm play, more while
+ * it is banking against a main-thread freeze. That cushion is exactly what makes the music
+ * survive a stutter, and it is also, unavoidably, the latency of anything armed normally: a click
+ * fired now goes in BEHIND 200 ms of already-decided audio. For music that is invisible. For a
+ * button it is the difference between a device and a delay, and it was reported as "the clicks
+ * feel delayed" the first time anyone pressed one.
+ *
+ * So a UI sound does not queue. It is mixed straight into the frames already waiting, starting a
+ * few milliseconds past the play head. The ring holds PRE-master audio -- the output gain, the
+ * volume sliders and the pause duck are all applied in the callback on the way out -- so injected
+ * audio is treated exactly like everything else and needs no gain of its own.
+ *
+ * `skip` is a safety margin: the callback may be reading the frames closest to the play head right
+ * now, and adding to those would land half a click in one block and half in the next. Past the
+ * margin the frames are queued but untouched.
+ *
+ * Returns frames injected, or 0 if the sound does not fit contiguously -- the ring wraps, and the
+ * caller is expected to fall back to arming it normally rather than accept a truncated one. A late
+ * click is a blemish; half a click is a defect. */
+CMM_API int cmm_out_inject(cmm_out* o, const float* mono, int frames, float gain, int skip)
+{
+    if (!o || !mono || frames <= 0) return 0;
+    if (skip < 0) skip = 0;
+    ma_uint32 n = (ma_uint32)(frames + skip);
+    void* p = NULL;
+    if (ma_pcm_rb_acquire_read(&o->rb, &n, &p) != MA_SUCCESS || p == NULL) return 0;
+    if ((int)n < frames + skip) { ma_pcm_rb_commit_read(&o->rb, 0); return 0; }   /* wrapped: decline */
+    float* f = (float*)p + (size_t)skip * o->channels;
+    for (int i = 0; i < frames; i++) {
+        float v = mono[i] * gain;
+        for (int c = 0; c < o->channels; c++) f[(size_t)i * o->channels + c] += v;
+    }
+    ma_pcm_rb_commit_read(&o->rb, 0);          /* nothing consumed: we only added to it */
+    return frames;
+}
+
 CMM_API int cmm_out_write(cmm_out* o, const float* data, int frames)
 {
     if (!o || !data || frames <= 0) return 0;
