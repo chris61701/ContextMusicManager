@@ -168,7 +168,7 @@ namespace CMM
             }
             return "field occlusion knobs — dial these by ear while the music plays:"
                  + "\n  detour " + CMMConfig.WorldEmitterFieldDetourDb.ToString("0.00")
-                 + "   dB per block of going the long way round (diffraction round a corner)"
+                 + "   dB per block of detour. 1-3 is the sensible band: a corner adds a few blocks of path, and diffraction round an edge is 10-15 dB."
                  + "\n  wall   " + CMMConfig.WorldEmitterFieldWallDb.ToString("0.0")
                  + "     dB for a fully solid block"
                  + "\n  pow    " + CMMConfig.WorldEmitterFieldWallPow.ToString("0.00")

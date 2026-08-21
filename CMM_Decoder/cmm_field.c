@@ -19,7 +19,22 @@ static long long now_us(void) { return (long long)clock() * (1000000LL / CLOCKS_
 #ifndef CMM_SEED_R
 #define CMM_SEED_R 6.0f
 #endif
-#define MAX_Q      (120 * Q_PER_DB)      /* past this a cell is silent; the flood stops growing */
+/* Ceiling on the ROUTED cost a cell can carry, in quarter-dB buckets. This is not "how much
+ * occlusion is silence" -- that is maxDb -- because the routed cost also carries the straight-line
+ * distance charge, and the two share one number.
+ *
+ * At 120 dB with the shipped 0.35 dB/block that was invisible: a 3-block step costs 1.05 dB, so
+ * the budget stretched 170 blocks and the flood always covered the whole window. Raise the detour
+ * rate to anything physically sensible and it stops being invisible -- at 2 dB/block the budget
+ * runs out after 30 blocks, and at 12 after ONE STEP. The field then reports every cell past that
+ * as unreachable, which reads as maxDb, which is silence. Observed in game as `reached 17` out of
+ * 99225 cells with `flood 0.0 ms`, after the detour knob was turned up to a value the model had no
+ * way to honour and no way to complain about.
+ *
+ * 1000 dB of headroom costs 16 KB for the bucket heads and an empty-bucket scan that does not
+ * register. The real limit is now set per flood from the window size (see maxQ in cmm_fld_solve),
+ * so the reach is what the window is, whatever the detour rate. */
+#define MAX_Q      (1000 * Q_PER_DB)
 #define UNREACHED  0x7fffffff
 
 struct cmm_fld {
@@ -493,7 +508,20 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
         float len = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
         qmove[ax + 1][ay + 1][az + 1] = (int)(len * f->dbPerBlock * Q_PER_DB + 0.5f);
     }
-    const int   maxQ    = (int)(f->maxDb * Q_PER_DB + 0.5f);
+    /* SILENCE, PLUS THE PRICE OF GETTING THERE. maxDb is what the caller means by "this cell is
+     * silent", but the cost being compared also contains the straight-line distance charge, so
+     * budgeting maxDb alone silently shrinks the field as the detour rate rises. Allow the whole
+     * window's worth of distance on top, so the flood's reach is the window and the detour rate is
+     * free to be whatever sounds right. */
+    float diag;
+    {
+        float hx = (float)(f->nx / 2) * f->stepX;
+        float hy = (float)(f->ny / 2) * f->stepY;
+        float hz = (float)(f->nz / 2) * f->stepZ;
+        diag = sqrtf(hx * hx + hy * hy + hz * hz);
+    }
+    int maxQ = (int)((f->maxDb + diag * f->dbPerBlock) * Q_PER_DB + 0.5f);
+    if (maxQ > MAX_Q) maxQ = MAX_Q;
     long long reached = 0;
 
     /* The window's minimum corner, in SLOT space. Slot 0 is not the window edge -- the window
