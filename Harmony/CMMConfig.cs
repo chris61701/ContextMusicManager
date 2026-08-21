@@ -228,7 +228,13 @@ namespace CMM
         // it has been judged by ear; `cmm acoustics model field` switches to it live.
         // DetourDb is what a block of going-the-long-way costs, and it is the ONLY tuning constant
         // the model has beyond the shared material curve -- everything else comes from the blocks.
-        public static bool   WorldEmitterFieldOcclusion = false;
+        // THE DEFAULT OCCLUSION MODEL (2026-08-20). One listener-anchored field, flooded a few
+        // times a second and read by every source, replacing the per-source ear floods and the
+        // field cache. Off until tonight because it had not been judged by ear; the two defects
+        // that made that judgement impossible were not in the model at all -- one of its three
+        // buffers was never flooded, and the emitter audio lanes had no ring cushion.
+        // `cmm acoustics model native|legacy` still pins the old paths for an A/B.
+        public static bool   WorldEmitterFieldOcclusion = true;
         public static float  WorldEmitterFieldDetourDb  = 0.35f;
         // HOW FAST OCCLUSION IS ALLOWED TO CHANGE, in dB per second, per speaker point.
         //

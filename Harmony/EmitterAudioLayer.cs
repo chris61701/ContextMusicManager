@@ -141,11 +141,19 @@ namespace CMM
             PinNative = mode == "native";
             PinLegacy = mode == "legacy";
             PinField  = mode == "field";
-            // The field model is the rebuild: ONE listener-anchored field, read by every source.
-            // Selecting it also switches it on, because a pin nobody can hear is not a test.
-            CMMConfig.WorldEmitterFieldOcclusion = PinField;
-            if (!PinField) FieldOcclusion.Reset();
+            // NOTE what this no longer does: it used to write PinField straight into
+            // CMMConfig.WorldEmitterFieldOcclusion, which was fine while the field was an opt-in
+            // experiment and a trap the moment it became the default -- `model auto` would have
+            // switched the shipped model OFF and left it off. The config flag now means "the field
+            // is the model"; a pin overrides it for as long as the pin is set. See FieldActive.
+            if (!FieldActive) FieldOcclusion.Reset();
         }
+
+        // IS THE FIELD THE MODEL RIGHT NOW? The config flag says what ships; an explicit pin wins
+        // over it in both directions, so `model field` still forces it on for a config that has it
+        // off, and `model native` / `model legacy` still force it off for one that has it on.
+        internal static bool FieldActive =>
+            PinField || (!PinNative && !PinLegacy && CMMConfig.WorldEmitterFieldOcclusion);
         private static float _statPubSum, _statPubMax;
         private static int   _statPubN;
         private static float _nextPathLog;
@@ -309,7 +317,7 @@ namespace CMM
                             // The field model's own line. Deliberately separate from the native
                             // model's: one readout serving two models is how "ac nearest" came to
                             // describe a speaker ninety blocks away for a week.
-                            + (CMMConfig.WorldEmitterFieldOcclusion
+                            + (FieldActive
                                 ? $"\n[CMM]   field: {FieldOcclusion.Status()}"
                                   + $"\n[CMM]   field nearest: {FieldOcclusion.DescribeNearest()}"
                                 : ""));
@@ -368,7 +376,7 @@ namespace CMM
             // flood has not landed yet it simply publishes nothing and the speakers stay where they
             // were, which is honest; a fallback that computes the same quantity differently is a
             // second model wearing a disguise.
-            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterFieldOcclusion && world != null
+            if (CMMConfig.WorldEmitterOcclusion && FieldActive && world != null
                 && TryFieldModel(player, world, audibleR))
             {
                 if (!_occlPending)
@@ -385,8 +393,7 @@ namespace CMM
             // the design exists to delete, and every one of them is an audible step because the two
             // models do not agree on a number. Now a declined tick with the field pinned publishes
             // nothing and the speakers hold, which is what was written on the tin.
-            else if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterFieldOcclusion
-                && world != null && PinField)
+            else if (CMMConfig.WorldEmitterOcclusion && FieldActive && world != null)
             {
                 _statLegacyTicks++;      // counted as a miss so the rate is visible in the log
             }

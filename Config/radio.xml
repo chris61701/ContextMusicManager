@@ -258,13 +258,13 @@
        fall back to - the class of bug that produced "I open the door, it's clear, then it sounds
        shut" cannot occur here rather than being fixed here.
 
-       Off by default until it has been judged by ear. Live: `cmm acoustics model field`
-       (and `model auto` to go back). Give it a few seconds after switching to read the world in;
+       ON by default since 2026-08-20. `cmm acoustics model native|legacy` pins an old path
+       for an A/B; `model auto` returns to whatever this says. Give it a few seconds after switching to read the world in;
        it is quiet-but-correct close to you while it does, because unread space counts as solid.
 
        DetourDb is what one block of going-the-long-way costs. It is the only tuning constant the
        model has beyond the shared material curve - everything else comes from the blocks. -->
-  <WorldEmitterFieldOcclusion>false</WorldEmitterFieldOcclusion>
+  <WorldEmitterFieldOcclusion>true</WorldEmitterFieldOcclusion>
   <WorldEmitterFieldDetourDb>0.35</WorldEmitterFieldDetourDb>
 
   <!-- What one block of material is worth to the field model: dB = WallDb * loss^WallPow, where

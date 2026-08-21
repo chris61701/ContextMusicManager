@@ -139,7 +139,7 @@ namespace CMM
         // never lags the player.
         internal static void FrameStep(EntityPlayerLocal player, World world, float budgetMs)
         {
-            if (!CMMConfig.WorldEmitterFieldOcclusion || player == null || world == null) return;
+            if (!EmitterAudioLayer.FieldActive || player == null || world == null) return;
             if (!Ensure()) return;
 
             _ear = EmitterAudioLayer.ListenerWorldPos(player);
@@ -290,7 +290,7 @@ namespace CMM
         // simply repeats on the next tick.
         internal static void SchedulerTick()
         {
-            if (!CMMConfig.WorldEmitterFieldOcclusion || !_earValid) return;
+            if (!EmitterAudioLayer.FieldActive || !_earValid) return;
             IntPtr f = System.Threading.Volatile.Read(ref _f);
             if (f == IntPtr.Zero) return;
             System.Threading.Interlocked.Exchange(ref _flooding, 1);

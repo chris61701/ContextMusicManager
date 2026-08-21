@@ -125,6 +125,15 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **The rebuilt world-emitter occlusion is now the default.** One acoustic field is flooded
+  outward from the listener a few times a second and read by every speaker, replacing the
+  per-speaker fields and the older ear-flood path. Because it is anchored to you rather than
+  to each source, a moving sound source costs nothing extra — which is what will let this
+  apply to zombies later — and because it is rebuilt whole rather than patched, a door that
+  opens is simply in the next one: there is no stale state and no handover between models to
+  get wrong. `cmm acoustics model native|legacy` still pins an older path for comparison, and
+  `cmm field` turns its two remaining tuning knobs live while you listen.
+
 - **The radio's clicks are now recorded sounds**, in the mod's new `Sounds/` folder —
   `radio_dial.wav` for a station change and `radio_power.wav` for the power switch. Swap them
   for anything you like (mono or stereo, 8/16/24/32-bit PCM or float WAV); they reload when
@@ -213,6 +222,60 @@ All notable changes to Context Music Manager are documented here.
   room it still dies quickly. New hot-reloaded `WorldEmitterReverbBounce` (default on).
 
 ### Fixed
+
+- **World-emitter music no longer ducks and wavers for no reason.** Two separate faults, each
+  capable of producing it on its own, and both invisible to every counter the mod had — which
+  is why this took so long to place and why it kept reading like the occlusion model being
+  slightly wrong.
+
+  The first was in the occlusion field. It keeps three buffers — one being sampled, one being
+  built, one held for the crossfade — and rotated them twice per flood instead of once. The
+  arithmetic works out so that one of the three was *never* a flood target: it was the
+  sampled buffer for the whole duration of every flood, and it still held the empty fill from
+  startup. So any speaker sampled while a flood was running came back at the model's silence
+  ceiling. The flood runs a few times a second and takes 20–40 ms, so that landed on roughly
+  one update in ten, in clusters rather than evenly.
+
+  The second was in the audio pipeline, and had nothing to do with occlusion. The mixer sizes
+  each render pass from the *music* buffer's shortfall and writes that same amount into every
+  speaker lane, while playback drains them all equally — so a lane that started empty stayed
+  empty. Music ran with a fifth of a second of protection against a late producer; the radios
+  ran with almost none, and every track change re-armed it. A stutter anywhere — a garbage
+  collection, a decode off a slow drive, three stations wanting audio in the same tick — was a
+  hole in the radio and nothing at all in the music. Short reads were filled with silence and
+  never counted: the underrun counter watched the music buffer only, so it read zero
+  throughout. Speaker lanes now carry the same cushion the music does and refill it themselves
+  if they ever run dry, and every lane's queue depth and lost frames are reported.
+
+  Neither one ever silenced anything outright, which is what made them so hard to find: the
+  occlusion rate limiter caught most of each bad value before it landed, and the reverb send
+  is deliberately not occluded, so there was always sound left underneath. Two total-silence
+  bugs arrived as a gentle duck. Native ABI 43.
+
+- **Sound no longer travels worse near the ground.** The occlusion field divided the world into
+  cells three blocks on a side, which cannot represent a storey: a floor is one block thick
+  with a room of air above it, so a speaker standing on the floor sat in a cell that was
+  two-thirds solid, and reaching it counted as going *through* the floor. In flat open air with
+  nothing in the way, the result swung between nothing and 29 dB of muffling depending purely
+  on where the ground happened to fall relative to the grid — three surface heights in every
+  eight were affected. Cells are now three blocks wide and one block tall, which costs nothing
+  in reading the world (the same blocks are read either way) and only more time in the flood.
+
+- **A door opening no longer briefly walls you in.** Anything that changes the world — a door
+  swinging, a block breaking — marks the cells around it to be read again, and the model treats
+  cells it has no reading for as solid. Marking them threw the previous reading away, so for
+  as long as it took to re-read them those cells *were* solid: a door two blocks away could
+  route the sound thirty blocks around the building and drop it by 54 dB until the next
+  update. Cells being re-read now keep answering with what they last knew.
+
+- **Turning on the spot no longer changes the volume.** Two causes. The occlusion field started
+  its search from the single cell containing your ears, so a fraction of a block of movement
+  could restart it somewhere else and shift every speaker at once — and the ear follows the
+  camera, which moves when you turn. It now starts from the cells around you in proportion,
+  the same way it already read speaker positions. Separately, two speakers playing one station
+  were combined as raw amplitudes, which always exceeded the anti-clipping ceiling, so the
+  ceiling was permanently active and its strength depended on the angle between them as you
+  turned. They are combined by power now, which does not depend on facing at all.
 
 - **Installing the mod on a dedicated server no longer freezes joining players.** CMM is
   client-side only, but server admins sometimes install it server-side anyway — and the full
