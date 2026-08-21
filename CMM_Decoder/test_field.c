@@ -279,6 +279,29 @@ int main(int argc, char** argv) {
     ckf("a 1-block hole: between doorway and sealed", pin > door + 1.0f && pin < thru * 0.2f,
         "%.2f dB (doorway %.1f, sealed %.1f)", pin, door, thru);
 
+    /* ── EVERY BUFFER MUST ACTUALLY GET FLOODED ────────────────────────────────────────
+     * There are three field buffers: the one being sampled, the one being built, and the previous
+     * one kept for the crossfade. A redundant swap on entry to cmm_fld_solve meant one of the
+     * three was NEVER a flood target -- it was `cur` for the whole duration of every flood and
+     * `prev` after every publish, holding the all-UNREACHED fill from create() forever. Every
+     * sample that landed WHILE a flood was running therefore read a field where nothing was
+     * reachable and came back maxDb: 58 dB, silence. Roughly one publish in ten, with the listener
+     * standing still, and immune to every occlusion setting because the number being sampled was
+     * not an occlusion answer at all.
+     *
+     * Single-threaded, `prev` is the one buffer a test can see from outside: sample_db_blended at
+     * mix = 0 reads it. After two solves from the same place it must agree with the current field,
+     * because it IS the previous flood of an unchanged scene. With the bug it reads maxDb. */
+    {
+        cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+        cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+        float now  = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
+        float back = cmm_fld_sample_db_blended(f, 44.5f, 2.5f, 30.5f, 0.0f);   /* reads prev */
+        ckf("every buffer gets flooded (prev is real)", fabsf(back - now) < 0.5f,
+            "cur %.2f dB vs prev %.2f dB — prev is the crossfade source and must be a real field",
+            now, back);
+    }
+
     /* ── AND THE SAME PROPERTY AT THE OTHER END: THE LISTENER MOVING IS SMOOTH ──────────
      * The test below walks the SOURCE and was passing throughout, because the source end has
      * always been interpolated across eight cells. The LISTENER end was a nearest-neighbour

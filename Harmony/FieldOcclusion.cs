@@ -105,9 +105,30 @@ namespace CMM
             return true;
         }
 
+        // 1 while the scheduler thread is inside cmm_fld_solve. Reset() runs on the MAIN thread
+        // (Ensure() calls it whenever WorldEmitterRange changes, and so does `cmm acoustics model`)
+        // and frees all sixteen native arrays — straight into a flood that may be 20-50 ms from
+        // finishing, writing its queue and buffers into freed heap. Never seen as a dip; seen as a
+        // crash, eventually, on someone else's machine.
+        private static int _flooding;
+
         internal static void Reset()
         {
-            if (_f != IntPtr.Zero) { NativeField.cmm_fld_destroy(_f); _f = IntPtr.Zero; }
+            IntPtr f = System.Threading.Volatile.Read(ref _f);
+            System.Threading.Volatile.Write(ref _f, IntPtr.Zero);   // no NEW flood can start
+            if (f != IntPtr.Zero)
+            {
+                // Let one already in flight finish. It re-checks _f after taking the flag, so a
+                // flood that started before the store above will bail on its own; this only waits
+                // for one that got past that point. Bounded so a wedged scheduler cannot hang the
+                // game — leaking the arena is the better failure.
+                for (int i = 0; i < 400 && System.Threading.Volatile.Read(ref _flooding) != 0; i++)
+                    System.Threading.Thread.Sleep(1);
+                if (System.Threading.Volatile.Read(ref _flooding) == 0)
+                    NativeField.cmm_fld_destroy(f);
+                else
+                    Log.Warning("[CMM] field: flood still running at reset — arena leaked rather than freed under it.");
+            }
             _earValid = false; Discarded = 0; _centreValid = false; Recentres = 0;
             _slew.Clear();
         }
@@ -269,14 +290,22 @@ namespace CMM
         // simply repeats on the next tick.
         internal static void SchedulerTick()
         {
-            if (!CMMConfig.WorldEmitterFieldOcclusion || _f == IntPtr.Zero || !_earValid) return;
+            if (!CMMConfig.WorldEmitterFieldOcclusion || !_earValid) return;
+            IntPtr f = System.Threading.Volatile.Read(ref _f);
+            if (f == IntPtr.Zero) return;
+            System.Threading.Interlocked.Exchange(ref _flooding, 1);
             try
             {
-                NativeField.cmm_fld_set_tuning(_f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
+                // Re-read AFTER taking the flag: Reset() clears _f first and only then waits on
+                // the flag, so this is the check that makes the pair safe rather than merely
+                // narrow. Without it the pointer could be freed between the read above and here.
+                if (System.Threading.Volatile.Read(ref _f) != f) return;
+                NativeField.cmm_fld_set_tuning(f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
                 Vector3 e = _ear;
-                if (NativeField.cmm_fld_solve(_f, e.x, e.y, e.z) < 0) Discarded++;
+                if (NativeField.cmm_fld_solve(f, e.x, e.y, e.z) < 0) Discarded++;
             }
             catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }
+            finally { System.Threading.Interlocked.Exchange(ref _flooding, 0); }
         }
 
         // Every cell needs reading again: a knob that changes what a BLOCK is worth invalidates

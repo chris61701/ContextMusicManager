@@ -348,9 +348,24 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
      * published — see the buffer note on the struct. */
     unsigned gen0 = f->gen;
 
-    /* The field just solved becomes the one to crossfade FROM. */
-    { int *sw = f->prev; f->prev = f->cur; f->cur = sw; }
-    /* Clear the buffer being BUILT, not the one being sampled. `cur` is live: the audio layer
+    /* NO SWAP HERE. There used to be one -- prev <-> cur on entry, "the field just solved becomes
+     * the one to crossfade FROM" -- and the rotation on publish below already does exactly that.
+     * Doing both meant one of the three buffers was NEVER a flood target: it was `cur` for the
+     * whole duration of every flood and `prev` after every publish, and it held the all-UNREACHED
+     * fill from create() forever. So every sample that landed while a flood was running read a
+     * field where nothing was reachable, took sample_field's wsum == 0 path, and came back maxDb:
+     * 58 dB of occlusion, which is silence. At 3.3 Hz with a 22-37 ms flood that is ~10% of
+     * publishes, arriving in clusters as the 4 Hz publish phase-walks against the 3.3 Hz flood --
+     * intermittent dips with the listener standing still, immune to every occlusion setting
+     * because the value being sampled was not an occlusion answer at all.
+     *
+     * Two things made it worse. `prev` being permanently empty made the documented crossfade path
+     * (sample_db_blended) pure garbage. And the discard branch returns BEFORE the publish
+     * rotation, so a discarded flood left `cur` parked on the empty buffer for a full interval --
+     * while the "keep the last good field on discard" fix kept the caller confident enough to
+     * sample it.
+     *
+     * Clear the buffer being BUILT, not the one being sampled. `cur` is live: the audio layer
      * reads it while this runs. And binb must be reset every flood -- it is the "which bucket is
      * this cell in" index, and stale entries make bq_set unlink from lists that no longer exist,
      * which corrupts the queue and silently strands the flood one cell from its seed. */
