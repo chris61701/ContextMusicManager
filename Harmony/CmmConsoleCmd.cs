@@ -88,6 +88,9 @@ namespace CMM
                 // so they reconcile within ~2 s on their own. This just makes presence
                 // re-evaluate every context rather than only the ones being watched.
                 ContextMusicManager.InvalidateAllPresence();
+                // The radio decides by signature too, and a manual command should not
+                // rely on that noticing. Reset it so the next tick rebuilds outright.
+                RadioStationCatalog.ForceRebuild();
                 string msg = $"music folders: 1 primary + {n} add-on"
                            + (n == before ? " (unchanged)" : $" (was {before})")
                            + ". Flat contexts reconcile within ~2 s.";

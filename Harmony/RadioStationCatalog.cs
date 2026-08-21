@@ -105,6 +105,21 @@ namespace CMM
 
         // Catalog bookkeeping: the resolved source the catalog was built from + its disk signature,
         // re-checked on a modest cadence (a recursive signature walks every subdir — not at 4 Hz).
+        // Forget everything the catalog watch remembers, so the next EnsureCatalog
+        // rebuilds unconditionally. For `cmm scan`: the watch normally decides by
+        // comparing a signature, and a manual command should not depend on that
+        // comparison noticing -- a root added and another removed in the same breath
+        // can leave the folder count and the newest timestamp both unchanged.
+        // Deliberately does NOT rebuild here: RebuildCatalog migrates live native
+        // voices, so it stays on its own main-thread tick where it always ran.
+        internal static void ForceRebuild()
+        {
+            _catalogSrc = null;
+            _catalogSig = DateTime.MinValue;
+            _catalogHash = 0;
+            _nextCatalogCheck = 0f;
+        }
+
         private static string   _catalogSrc;
         private static DateTime _catalogSig;
         private static float    _nextCatalogCheck;
