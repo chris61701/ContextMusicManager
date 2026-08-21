@@ -1,4 +1,4 @@
-﻿// Gated to 3.0+ (GV_V3): reads the world through EmitterAcoustics.CellLoss and publishes through
+// Gated to 3.0+ (GV_V3): reads the world through EmitterAcoustics.CellLoss and publishes through
 // EmitterAudioLayer, both on the same gate.
 #if GV_V3
 using System;
@@ -242,7 +242,7 @@ namespace CMM
             // standing next to. Both ride the same per-frame budget as every other read; marking
             // cells dirty is cheap and they keep answering with what they last knew until the
             // reader gets to them.
-            float nowRr = Time.realtimeSinceStartup;
+            float nowRr = CmmClock.Now;
             if (nowRr - _nearRefreshAt >= NearRefreshSec)
             {
                 _nearRefreshAt = nowRr;
@@ -396,7 +396,7 @@ namespace CMM
 
         internal static void SchedulerTick()
         {
-            float nowF = Time.realtimeSinceStartup;
+            float nowF = CmmClock.Now;
             bool door = EmitterAudioLayer.DoorMovingOrJustMoved;
             if (!door && nowF - _lastFloodAt < FloodSec) return;
             _lastFloodAt = nowF;
@@ -461,7 +461,7 @@ namespace CMM
             if (_f == IntPtr.Zero || pts == null || ptGain == null || ptCount <= 0) return false;
             if (Reached <= 0) return false;                      // no flood has landed yet
 
-            SweepSlew(Time.realtimeSinceStartup);
+            SweepSlew(CmmClock.Now);
             float mn = CMMConfig.WorldEmitterMinDistance;
             float mx = CMMConfig.WorldEmitterRange;
             float fexp = CMMConfig.WorldEmitterFalloff;
@@ -493,7 +493,7 @@ namespace CMM
                     // and is listening for the result, so it goes through at full rate.
                     float slew = EmitterAudioLayer.DoorMovingOrJustMoved
                                ? 0f : CMMConfig.WorldEmitterFieldSlewDb;
-                    float now = Time.realtimeSinceStartup;
+                    float now = CmmClock.Now;
                     if (slew > 0f && _slew.TryGetValue(key, out Slewed s) && now - s.At < 2f)
                     {
                         // A gap longer than a flood interval is a speaker that went out of range

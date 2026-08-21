@@ -92,7 +92,7 @@ namespace CMM
         // door is a discrete act the player performed and watched, and the sound belongs with the
         // latch rather than a second and a half later.
         internal static bool DoorMovingOrJustMoved =>
-            EmitterAcoustics.AnyDoorAnimating || Time.realtimeSinceStartup - _doorEventAt < 1.5f;
+            EmitterAcoustics.AnyDoorAnimating || CmmClock.Now - _doorEventAt < 1.5f;
 
         // Decision + point-set refresh cadence (4 Hz). The listener itself is pushed every frame; this
         // only governs how fast start/stop and the in-range speaker SET react as you move.
@@ -127,7 +127,7 @@ namespace CMM
         internal static void ReportDoorLatency()
         {
             if (_doorEventAt < 0f) return;
-            float ms = (Time.realtimeSinceStartup - _doorEventAt) * 1000f;
+            float ms = (CmmClock.Now - _doorEventAt) * 1000f;
             _doorEventAt = -999f;                       // once per door, not once per flood
             if (ms >= 0f && ms < 5000f)
                 Log.Out($"[CMM] door -> occlusion: {ms:0} ms (latch to published field, "
@@ -210,7 +210,7 @@ namespace CMM
         internal static void NotifyAcousticChange()
         {
             _forceRefresh = true;
-            _doorEventAt = Time.realtimeSinceStartup;
+            _doorEventAt = CmmClock.Now;
         }
 
         // ── Shared catalog forwarders ───────────────────────────────────────────────────────────
@@ -304,8 +304,8 @@ namespace CMM
             // A door toggled since the last tick → collapse the wait; an in-flight flood was built
             // from the PRE-toggle door state — abandon it so the restart samples the swing fresh.
             if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; _floodRoomOnly = false; }
-            if (Time.realtimeSinceStartup < _nextTick) return;
-            _nextTick = Time.realtimeSinceStartup + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
+            if (CmmClock.Now < _nextTick) return;
+            _nextTick = CmmClock.Now + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
 
             // ── 1 Hz path/stability summary ─────────────────────────────────────────────────────
             // path=  which occlusion path landed, in ticks over the last second (field = cached
@@ -317,9 +317,9 @@ namespace CMM
             //        consecutive measurements, in BLOCKS, before/after the rise limiter. Big numbers
             //        on B are the smoking gun for "volume changes when it shouldn't".
             // fields=ready/wanted — the field path needs ALL of them; builds run one at a time.
-            if (CMMConfig.DebugLogging && Time.realtimeSinceStartup >= _nextPathLog)
+            if (CMMConfig.DebugLogging && CmmClock.Now >= _nextPathLog)
             {
-                _nextPathLog = Time.realtimeSinceStartup + 1f;
+                _nextPathLog = CmmClock.Now + 1f;
                 int n = EmitterAcoustics.StatSamples;
                 float rawAvg = n > 0 ? EmitterAcoustics.StatJitterSum / n : 0f;
                 float pubAvg = _statPubN > 0 ? _statPubSum / _statPubN : 0f;
@@ -782,7 +782,7 @@ namespace CMM
         {
             if (count <= 0) return;
             float rate = CMMConfig.WorldEmitterOcclusionFadeRate;
-            float now = Time.realtimeSinceStartup;
+            float now = CmmClock.Now;
             // ...and stays bypassed until the acoustic model has actually DELIVERED the change.
             // The 1 s window is measured from the door toggle, but the native scene needs the swing
             // to finish (~1 s) plus a rebuild (~0.6 s) before it can publish the new occlusion -- by
@@ -835,14 +835,14 @@ namespace CMM
         private static void RecordPtPush(Station st, int count)
         {
             st.LastPtPushCount = count;
-            st.LastPtPushAt = Time.realtimeSinceStartup;
+            st.LastPtPushAt = CmmClock.Now;
         }
 
         // Stamp speakers newly appeared in the registry snapshot and prune ones that left, so
         // ApplyBirthFades can grade a just-placed radio in instead of popping it.
         private static void MaintainBirths()
         {
-            float now = Time.realtimeSinceStartup;
+            float now = CmmClock.Now;
             var snap = EmitterRegistry.Snapshot;
             for (int i = 0; i < snap.Count; i++)
                 if (!_speakerFirstSeen.ContainsKey(snap[i].Pos)) _speakerFirstSeen.Add(snap[i].Pos, now);
@@ -871,7 +871,7 @@ namespace CMM
             if (count <= 0 || _speakerFirstSeen.Count == 0) return;
             float dur = CMMConfig.WorldEmitterBirthFade >= 0f ? CMMConfig.WorldEmitterBirthFade : StartFade();
             if (dur <= 0f) return;
-            float now = Time.realtimeSinceStartup;
+            float now = CmmClock.Now;
             float range = CMMConfig.WorldEmitterRange;
             for (int i = 0; i < count; i++)
             {
@@ -891,7 +891,7 @@ namespace CMM
             if (_speakerFirstSeen.Count == 0) return;
             _birthScratch.Clear();
             foreach (var kv in _speakerFirstSeen) _birthScratch.Add(kv.Key);
-            float expired = Time.realtimeSinceStartup - 3600f;
+            float expired = CmmClock.Now - 3600f;
             for (int i = 0; i < _birthScratch.Count; i++) _speakerFirstSeen[_birthScratch[i]] = expired;
         }
 
@@ -913,7 +913,7 @@ namespace CMM
                 st.PtCount = 0;
             }
             float range = CMMConfig.WorldEmitterRange;
-            float now = Time.realtimeSinceStartup;
+            float now = CmmClock.Now;
             var snap = EmitterRegistry.Snapshot;
             for (int i = 0; i < snap.Count; i++)
             {
@@ -968,8 +968,8 @@ namespace CMM
             // Sync audit: periodic voice-vs-paper delta per voiced station, same cadence and
             // format as the personal radio's (RadioStationCatalog.AuditVoice) so one grep
             // ("CMM SYNC") lines both consumers up against the same paper schedule.
-            bool audit = CMMConfig.DebugLogging && Time.realtimeSinceStartup >= _nextAuditAt;
-            if (audit) _nextAuditAt = Time.realtimeSinceStartup + RadioStationCatalog.AuditInterval;
+            bool audit = CMMConfig.DebugLogging && CmmClock.Now >= _nextAuditAt;
+            if (audit) _nextAuditAt = CmmClock.Now + RadioStationCatalog.AuditInterval;
 
             for (int i = 0; i < _stations.Count; i++)
             {
@@ -987,7 +987,7 @@ namespace CMM
                     // which zeroes the native gains (a destroyed radio still cuts within a tick).
                     // Truly gone (grace expired) → release. A track that ENDS while unseen just
                     // releases quietly — the schedule rejoins mid-song when the speakers return.
-                    if (Time.realtimeSinceStartup - st.LastSeenAt > UnseenGrace)
+                    if (CmmClock.Now - st.LastSeenAt > UnseenGrace)
                         StopStation(st);
                     else if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(st.VoiceId, out _, out _, out _))
                     {
@@ -1126,7 +1126,7 @@ namespace CMM
             // at the range fringe also matches, but out there distance falloff hides the fade.
             if (CMMConfig.WorldEmitterBirthFade >= 0f
                 && _speakerFirstSeen.TryGetValue(st.NearestPos, out float bornAt)
-                && Time.realtimeSinceStartup - bornAt < 2f)
+                && CmmClock.Now - bornAt < 2f)
             {
                 CMMConfig.D($"[CMM] Station '{st.Name}': just-born nearest speaker — birth fade {CMMConfig.WorldEmitterBirthFade:0.##}s.");
                 fadeIn = CMMConfig.WorldEmitterBirthFade;
@@ -1192,7 +1192,7 @@ namespace CMM
             // silent — and let the first flood glide the true value in (the start fade masks it).
             if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting)
             {
-                if (!fresh && st.LastPtPushCount > 0 && Time.realtimeSinceStartup - st.LastPtPushAt < 1f)
+                if (!fresh && st.LastPtPushCount > 0 && CmmClock.Now - st.LastPtPushAt < 1f)
                 {
                     CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.PtFlags, st.LastPtPushCount);
                 }
@@ -1334,7 +1334,7 @@ namespace CMM
             // Asymmetric inertia (the 2026-07-08 blip fix): slow RISE (~4 s) crushes the enclosure
             // transients of walking under an overhang; the FALL keeps the ~1.3 s glide so stepping
             // out dries promptly. dt-based so a stalled push cadence can't turn one tick into a jump.
-            float nowRev = Time.realtimeSinceStartup;
+            float nowRev = CmmClock.Now;
             float dtRev = Mathf.Clamp(nowRev - _lastRevPush, 0.05f, 1f);
             _lastRevPush = nowRev;
             float aUp = 1f - Mathf.Exp(-dtRev / 4f);
@@ -1388,9 +1388,9 @@ namespace CMM
             _revLocSmooth  += (local - _revLocSmooth) * (local > _revLocSmooth ? aUp : aDn);
             _revRoomSmooth += (room - _revRoomSmooth) * aDn;   // tail length: symmetric, size isn't a level blip
 
-            if (Time.realtimeSinceStartup >= _nextReverbLog)
+            if (CmmClock.Now >= _nextReverbLog)
             {
-                _nextReverbLog = Time.realtimeSinceStartup + 1.5f;
+                _nextReverbLog = CmmClock.Now + 1.5f;
                 Station dom = null;
                 for (int s = 0; s < MaxSlots; s++)
                     if (_slotOwner[s] != null && (dom == null || _revWetSmooth[s] > 0f)) dom = _slotOwner[s];

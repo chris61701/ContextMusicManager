@@ -326,7 +326,7 @@ namespace CMM
                 // Cleared by the swap, not by the request -- and left SET if the world moved under
                 // this pass, so another one starts immediately.
                 _stale = wasStale;
-                if (!wasStale) _geomLiveAt = Time.realtimeSinceStartup;   // this scene is current
+                if (!wasStale) _geomLiveAt = CmmClock.Now;   // this scene is current
                 // REPRODUCIBILITY METER. The aperture count is the sharpest summary of whether two
                 // builds saw the same world, and it is what caught the real defect: standing still,
                 // the graph went 614 edges -> 428 edges between rebuilds and the reverberant field
@@ -609,7 +609,7 @@ namespace CMM
                 }
             }
             _doorPositions.Clear();
-            _geomChangeAt = Time.realtimeSinceStartup;
+            _geomChangeAt = CmmClock.Now;
             if (patched)
             {
                 LastStatus = _reusable != null && _reusable.Complete
@@ -641,7 +641,7 @@ namespace CMM
         {
             get
             {
-                float now = Time.realtimeSinceStartup;
+                float now = CmmClock.Now;
                 // Settling means: the world changed and this model has not yet published a scene
                 // containing that change. The first version of this was true for a quarter second
                 // after the change and then again briefly after delivery -- with a GAP in between,
