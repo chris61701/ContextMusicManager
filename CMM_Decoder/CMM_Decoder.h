@@ -666,6 +666,13 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle);
 CMM_API void cmm_mix_set_click_tone_kind(int which, float hz, float snap, float lenMs,
                                          float body, float bodyHz, float dbl, float vary);
 
+/* v44 — give a click kind a RECORDED sound (0 = power on, 1 = power off, 2 = dial); mono float
+ * PCM, copied. NULL/0 frames reverts that kind to synthesis. The rate jitter is how far playback
+ * speed wanders per firing, in Hz either side of the file's own rate — repeating one recording
+ * verbatim is what gives a UI sound away. */
+CMM_API int  cmm_mix_set_sfx_sample(int which, const float* pcm, int frames, int rate);
+CMM_API void cmm_mix_set_sfx_rate_jitter(float hz);
+
 /* v41 — render ONE click in isolation for auditioning; see cmm_mix.c. Returns frames (mono). */
 CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames);
 

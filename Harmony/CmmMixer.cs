@@ -136,6 +136,15 @@ namespace CMM
         // v41 — one click kind at a time (0 = power-on toggle, 1 = power-off toggle, 2 = dial
         // detent): tone cap Hz, snap (crack vs shell), length ms, body (upper shell modes), bodyHz
         // (shell pitch), double (second impact), vary (how much each firing differs — shared).
+        // v44 — a RECORDED click for a kind (0 = on, 1 = off, 2 = dial), mono float PCM, copied
+        // native-side. rateJitter is how far playback speed wanders per firing, Hz either side of
+        // the file's own rate.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_mix_set_sfx_sample(int which, float[] pcm, int frames, int rate);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_sfx_rate_jitter(float hz);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_click_tone_kind(int which, float hz, float snap,
                                                                 float lenMs, float body,
@@ -422,6 +431,15 @@ namespace CMM
         // by all three — how much each firing differs from the last, so a run of detents sounds
         // like a mechanism instead of one waveform played repeatedly. Captured when a click fires,
         // so a hot-reloaded radio.xml edit is heard on the very next dial.
+        // Hand a kind its recorded sound; pcm == null reverts it to the synthesized click, which
+        // stays the fallback so a missing file is a quieter mod rather than a broken one.
+        public bool SetSfxSample(int which, float[] pcm, int rate)
+        {
+            return NativeMix.cmm_mix_set_sfx_sample(which, pcm, pcm != null ? pcm.Length : 0, rate) != 0;
+        }
+
+        public void SetSfxRateJitter(float hz) => NativeMix.cmm_mix_set_sfx_rate_jitter(hz);
+
         public void SetClickToneKind(int which, float hz, float snap, float lenMs,
                                      float body, float bodyHz, float dbl, float vary)
         {

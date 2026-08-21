@@ -264,6 +264,12 @@ typedef struct {
      * of collisions inside the first few milliseconds is what the ear reads as "mechanical". With
      * exactly two you hear a designed sound, however good each one is -- which is why nothing
      * sounded gritty. */
+    /* v44 — SAMPLE PLAYBACK. When a click kind has a recorded sound loaded, the voice plays that
+     * instead of synthesizing, at a slightly different RATE every firing. Repeating one recording
+     * verbatim is exactly what gives a UI sound away, and a small pitch/speed shift per fire is
+     * the oldest fix in game audio because it is what actually happens: no two throws of a switch
+     * are identical, and the ear reads the difference as a mechanism rather than a playback. */
+    const float *pcm; int pcmLen; double pcmPos, pcmStep;
     int   strikeAt[6];         /* frames of each impact (index 0 is always 0) */
     float strikeLvl[6];        /* their levels relative to the first */
     int   strikeN, strikeNext; /* how many, and the cursor into them */
@@ -276,7 +282,40 @@ typedef struct {
 } sfx_voice;
 static sfx_voice g_sfx[SFX_MAX];
 static float sfx_click_sample(sfx_voice* v, float noise);   /* defined with the tone capture */
+
+
+/* One recorded sound per click kind (0 = power on, 1 = power off, 2 = dial). NULL = synthesize,
+ * which stays the fallback so a missing or unreadable file is a quieter mod, never a broken one. */
+static float *g_sfxPcm[SFX_CLICK_KINDS];
+static int    g_sfxPcmLen[SFX_CLICK_KINDS];
+static int    g_sfxPcmRate[SFX_CLICK_KINDS];
+static volatile float g_sfxRateJitter = 2000.0f;   /* +/- Hz around the file's own rate */
+
 static unsigned  g_sfxSeed = 0x9E3779B9u;
+
+/* Point a voice at a kind's recorded sound, at a rate drawn fresh for this firing. Returns 0 if
+ * that kind has no sample, in which case the caller synthesizes. Shared by the live mixer and the
+ * offline preview so an audition cannot differ from what the game plays -- every time this
+ * project has kept two copies of the same decision they have drifted. */
+static int sfx_arm_sample(sfx_voice* v, int ki) {
+    if (ki < 0 || ki >= SFX_CLICK_KINDS) return 0;
+    if (!g_sfxPcm[ki] || g_sfxPcmLen[ki] <= 1) return 0;
+    /* A DIFFERENT RATE EVERY FIRING, drawn once so the whole click shifts together. +/-2000 Hz on
+     * a 48 kHz file is about 4% -- a couple of semitones at most, heard as "another one of those"
+     * rather than as a different sound, which is the whole trick. Varying it DURING a click would
+     * be a wobble; varying it between clicks is a mechanism. */
+    float j = g_sfxRateJitter; if (j < 0.0f) j = 0.0f;
+    g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+    float u = (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;   /* -1..1 */
+    float rate2 = (float)g_sfxPcmRate[ki] + j * u;
+    if (rate2 < 1000.0f) rate2 = 1000.0f;
+    v->pcm = g_sfxPcm[ki];
+    v->pcmLen = g_sfxPcmLen[ki];
+    v->pcmPos = 0.0;
+    v->pcmStep = (double)rate2 / (double)(g_busRate > 0 ? g_busRate : 48000);
+    v->len = (int)((double)v->pcmLen / v->pcmStep) + 1;
+    return 1;
+}
 /* v37 — live static TONE (from settings.xml via cmm_mix_set_static_tone; captured onto the voice
  * at every ping, so keepalive extension follows a hot-reloaded config mid-hash). Defaults mirror
  * the managed defaults so the first pings before a push are sane. */
@@ -571,6 +610,18 @@ static void render_sfx_add(int n) {
                 int rem = v->len - v->pos;
                 if (rem < v->relLen) { float e = (float)rem / (float)v->relLen; if (e < env) env = e; }
                 x *= env;
+            } else if (v->pcm) {
+                /* Recorded click, resampled by linear interpolation. The step is fixed when the
+                 * voice starts, so one firing is a consistent pitch -- it is the NEXT one that
+                 * differs. Varying it within a single click would be a wobble, not a variation. */
+                double pp = v->pcmPos;
+                int i0 = (int)pp;
+                if (i0 >= v->pcmLen - 1) { x = 0.0f; v->pos = v->len; }
+                else {
+                    float fr = (float)(pp - i0);
+                    x = v->pcm[i0] * (1.0f - fr) + v->pcm[i0 + 1] * fr;
+                }
+                v->pcmPos = pp + v->pcmStep;
             } else {
                 /* Power click (v39: a dial detent): up to TWO micro-impacts — the spring release
                  * and, ~12ms later, the stop landing — each firing a bright noise ping, a low
@@ -1423,6 +1474,46 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     if (v->len < 1) v->len = 1;
 }
 
+/* v44 — hand a recorded sound to a click kind (0 = power on, 1 = power off, 2 = dial). The PCM is
+ * COPIED, so the caller's array can be a managed temporary and needs no pinning beyond the call.
+ * frames <= 0 or pcm == NULL clears the kind back to synthesis, which stays the fallback: a
+ * missing or unreadable file makes the mod quieter, never broken. */
+CMM_API int cmm_mix_set_sfx_sample(int which, const float* pcm, int frames, int rate) {
+    if (which < 0 || which >= SFX_CLICK_KINDS) return 0;
+    float* copy = NULL;
+    if (pcm && frames > 1 && rate > 0) {
+        copy = (float*)malloc(sizeof(float) * (size_t)frames);
+        if (!copy) return 0;
+        memcpy(copy, pcm, sizeof(float) * (size_t)frames);
+    }
+    /* LOCK ONLY IF THE MIXER IS RUNNING. g_lock is a CRITICAL_SECTION initialised inside
+     * cmm_mix_start, so entering it beforehand is undefined behaviour -- it segfaults, which a
+     * game mod must never do on a configuration path. Before start there is no producer thread
+     * and no audio callback, so nothing can be reading these pointers and the swap is safe
+     * unlocked. (The same hazard exists in every other exported setter that locks; this one is
+     * reachable earlier than most, because loading a sound file has nothing to do with whether
+     * any music is playing yet.) */
+    int locked = g_started;
+    if (locked) mix_lock(&g_lock);
+    /* Any voice still playing the old buffer must stop before it is freed -- a click is at most a
+     * couple of hundred milliseconds, but "at most" is not "never", and this frees memory the
+     * audio callback reads. */
+    for (int i = 0; i < SFX_MAX; i++)
+        if (g_sfx[i].pcm == g_sfxPcm[which]) { g_sfx[i].pcm = NULL; g_sfx[i].kind = 0; }
+    free(g_sfxPcm[which]);
+    g_sfxPcm[which] = copy;
+    g_sfxPcmLen[which] = copy ? frames : 0;
+    g_sfxPcmRate[which] = copy ? rate : 0;
+    if (locked) mix_unlock(&g_lock);
+    return 1;
+}
+
+/* v44 — how far the playback rate wanders from one firing to the next, in Hz either side of the
+ * file's own rate. 0 = every firing identical. */
+CMM_API void cmm_mix_set_sfx_rate_jitter(float hz) {
+    g_sfxRateJitter = hz < 0.0f ? 0.0f : hz;
+}
+
 /* v41 — render ONE click in isolation, no device, no bus: `kind` 2 = power-on, 3 = power-off, at
  * the CURRENT tone settings. Exists so a click can be listened to without launching the game --
  * "wrong sound" is a judgement only ears can make, and making that judgement should not cost a
@@ -1436,13 +1527,25 @@ CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames) 
     sfx_voice v;
     memset(&v, 0, sizeof v);
     v.kind = kind; v.pos = 0; v.gain = 1.0f; v.rng = 0x1234567u;
-    sfx_capture_click_tone(&v, kind - SFX_KIND_CLICK_ON);
+    /* Same decision the live mixer makes, through the same function: recorded sound if the kind
+     * has one, synthesis otherwise. An audition that could differ from what ships would be the
+     * fifth copy-of-the-same-thing in this project to start lying. */
+    if (!sfx_arm_sample(&v, kind - SFX_KIND_CLICK_ON))
+        sfx_capture_click_tone(&v, kind - SFX_KIND_CLICK_ON);
     g_busRate = savedRate;
     int n = v.len < maxFrames ? v.len : maxFrames;
     for (int i = 0; i < n; i++) {
-        v.rng = v.rng * 1664525u + 1013904223u;
-        float noise = (float)((int)(v.rng >> 9) - 0x400000) * (1.0f / 0x400000);
-        out[i] = sfx_click_sample(&v, noise);
+        if (v.pcm) {
+            int i0 = (int)v.pcmPos;
+            if (i0 >= v.pcmLen - 1) { n = i; break; }
+            float fr = (float)(v.pcmPos - i0);
+            out[i] = v.pcm[i0] * (1.0f - fr) + v.pcm[i0 + 1] * fr;
+            v.pcmPos += v.pcmStep;
+        } else {
+            v.rng = v.rng * 1664525u + 1013904223u;
+            float noise = (float)((int)(v.rng >> 9) - 0x400000) * (1.0f / 0x400000);
+            out[i] = sfx_click_sample(&v, noise);
+        }
         v.pos++;
     }
     return n;
@@ -1519,12 +1622,14 @@ CMM_API void cmm_mix_play_sfx(int kind, float gain) {
             break;
         case SFX_KIND_CLICK_ON:      /* toggle over          */
         case SFX_KIND_CLICK_OFF:     /* toggle back          */
-        case SFX_KIND_CLICK_DIAL:    /* one notch of the dial */
+        case SFX_KIND_CLICK_DIAL: {  /* one notch of the dial */
+            if (sfx_arm_sample(v, kind - SFX_KIND_CLICK_ON)) break;
             /* Each kind has its own parameter set (cmm_mix_set_click_tone_kind) and draws its own
              * per-fire variation, so a fast spin down the dial is a run of related-but-different
              * detents rather than the same waveform repeated. */
             sfx_capture_click_tone(v, kind - SFX_KIND_CLICK_ON);
             break;
+        }
         }
         if (v->len < 1) v->len = 1;
         if (v->atkLen < 1) v->atkLen = 1;

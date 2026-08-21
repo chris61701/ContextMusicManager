@@ -196,6 +196,15 @@ namespace CMM
         // on a real mechanism are identical, and a fixed waveform repeated on every notch is the
         // thing that gives a UI sound away as a sound EFFECT. 0 = every click identical.
         public static float  RadioClickVary         = 0.5f;
+        // Play the RECORDED clicks from Sounds/ instead of synthesizing them. The synth stays in
+        // the build as the fallback: a missing or unreadable file makes the radio quieter, never
+        // broken, and it is still what a user gets if they delete the folder.
+        public static bool   RadioClickSamples      = true;
+        // How far the playback rate wanders from one firing to the next, in Hz either side of the
+        // file's own rate. One recording repeated verbatim is exactly what gives a UI sound away;
+        // 2000 Hz on a 48 kHz file is about 4%, heard as "another one of those" rather than as a
+        // different sound. 0 = every firing identical.
+        public static float  RadioClickSampleJitterHz = 2000f;
         // ── Spatial curve (live-tunable; pushed to the native spatializer every tick) ──────────────
         // MinDistance = full-volume plateau radius (move freely inside it, level flat); past it the
         // level fades to silence at Range. Falloff = fade steepness (1 = straight amplitude ramp, >1

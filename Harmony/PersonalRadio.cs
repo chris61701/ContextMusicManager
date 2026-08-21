@@ -211,6 +211,114 @@ namespace CMM
             ContextMusicManager.ReResolveNow();
         }
 
+        // ── Recorded click sounds (Sounds/radio_dial.wav, Sounds/radio_power.wav) ───────────────
+        // The synthesized clicks stay in the build and stay the FALLBACK: if a file is missing,
+        // unreadable, or an exotic WAV variant, the radio still clicks. A cosmetic asset must
+        // never be able to make the mod look broken.
+        //
+        // Loaded once and re-loaded whenever settings reload, so a replaced file is heard without
+        // a restart -- same contract as every other tunable here.
+        private static bool _sfxSamplesLoaded;
+        private static string _sfxSamplesFrom;
+
+        internal static void LoadClickSamples(bool force = false)
+        {
+            string dir = ContextMusicManager.ModPath;
+            if (string.IsNullOrEmpty(dir)) return;
+            if (_sfxSamplesLoaded && !force && _sfxSamplesFrom == dir
+                && CMMConfig.RadioClickSamples) return;
+            try
+            {
+                CmmMixer mixer = CmmMixer.GetOrCreate();
+                mixer.SetSfxRateJitter(CMMConfig.RadioClickSampleJitterHz);
+                if (!CMMConfig.RadioClickSamples)
+                {
+                    for (int k = 0; k < 3; k++) mixer.SetSfxSample(k, null, 0);
+                    _sfxSamplesLoaded = true; _sfxSamplesFrom = dir;
+                    CMMConfig.D("[CMM] radio clicks: synthesized (samples switched off).");
+                    return;
+                }
+                string sounds = Path.Combine(dir, "Sounds");
+                // One file serves both throws of the toggle; the per-kind Volume settings still
+                // separate them, and a switch does not sound meaningfully different on and off.
+                LoadOne(mixer, 0, Path.Combine(sounds, "radio_power.wav"));
+                LoadOne(mixer, 1, Path.Combine(sounds, "radio_power.wav"));
+                LoadOne(mixer, 2, Path.Combine(sounds, "radio_dial.wav"));
+                _sfxSamplesLoaded = true; _sfxSamplesFrom = dir;
+            }
+            catch (Exception e) { CMMConfig.D($"[CMM] radio click samples failed: {e.Message}"); }
+        }
+
+        private static void LoadOne(CmmMixer mixer, int kind, string path)
+        {
+            if (!File.Exists(path))
+            {
+                mixer.SetSfxSample(kind, null, 0);
+                CMMConfig.D($"[CMM] radio click sample missing, synthesizing kind {kind}: {path}");
+                return;
+            }
+            if (!ReadWav(path, out float[] pcm, out int rate) || pcm.Length < 2)
+            {
+                mixer.SetSfxSample(kind, null, 0);
+                Log.Warning($"[CMM] radio click sample unreadable, synthesizing kind {kind}: {path}");
+                return;
+            }
+            mixer.SetSfxSample(kind, pcm, rate);
+            CMMConfig.D($"[CMM] radio click kind {kind}: {Path.GetFileName(path)} "
+                      + $"({pcm.Length} frames @ {rate} Hz, {1000.0 * pcm.Length / rate:0} ms)");
+        }
+
+        // Minimal RIFF/WAVE reader: 8/16/24/32-bit PCM and 32/64-bit float, any channel count,
+        // mixed down to mono. Deliberately hand-rolled rather than routed through the decoder --
+        // these are two tiny files read once, and the decoder is built around streaming a track
+        // off disk with its own thread and lifetime. Chunks are walked rather than assumed, since
+        // plenty of editors write LIST/fact chunks ahead of `data`.
+        private static bool ReadWav(string path, out float[] mono, out int rate)
+        {
+            mono = null; rate = 0;
+            byte[] b = File.ReadAllBytes(path);
+            if (b.Length < 44 || b[0] != 'R' || b[1] != 'I' || b[2] != 'F' || b[3] != 'F') return false;
+            if (b[8] != 'W' || b[9] != 'A' || b[10] != 'V' || b[11] != 'E') return false;
+            int ch = 0, bits = 0, fmt = 0, pos = 12, dataAt = -1, dataLen = 0;
+            while (pos + 8 <= b.Length)
+            {
+                string id = "" + (char)b[pos] + (char)b[pos + 1] + (char)b[pos + 2] + (char)b[pos + 3];
+                int len = BitConverter.ToInt32(b, pos + 4);
+                if (len < 0 || pos + 8 + len > b.Length) len = b.Length - pos - 8;
+                if (id == "fmt ")
+                {
+                    fmt  = BitConverter.ToUInt16(b, pos + 8);
+                    ch   = BitConverter.ToUInt16(b, pos + 10);
+                    rate = BitConverter.ToInt32 (b, pos + 12);
+                    bits = BitConverter.ToUInt16(b, pos + 22);
+                    if (fmt == 0xFFFE && len >= 40) fmt = BitConverter.ToUInt16(b, pos + 32);  // EXTENSIBLE
+                }
+                else if (id == "data") { dataAt = pos + 8; dataLen = len; }
+                pos += 8 + len + (len & 1);        // chunks are word-aligned
+            }
+            if (dataAt < 0 || ch <= 0 || rate <= 0) return false;
+            int bytes = bits / 8;
+            if (bytes <= 0) return false;
+            int frames = dataLen / (bytes * ch);
+            if (frames < 2) return false;
+            mono = new float[frames];
+            for (int f = 0; f < frames; f++)
+            {
+                double acc = 0;
+                for (int c = 0; c < ch; c++)
+                {
+                    int o = dataAt + (f * ch + c) * bytes;
+                    if (fmt == 3) acc += bytes == 8 ? BitConverter.ToDouble(b, o) : BitConverter.ToSingle(b, o);
+                    else if (bits == 8)  acc += (b[o] - 128) / 128.0;
+                    else if (bits == 16) acc += BitConverter.ToInt16(b, o) / 32768.0;
+                    else if (bits == 24) acc += ((b[o] | (b[o + 1] << 8) | ((sbyte)b[o + 2] << 16))) / 8388608.0;
+                    else if (bits == 32) acc += BitConverter.ToInt32(b, o) / 2147483648.0;
+                }
+                mono[f] = (float)(acc / ch);
+            }
+            return true;
+        }
+
         // Fire one radio-UI one-shot (native synth; no asset files). Config-gated + hot-tunable;
         // the native side ensures the output device, so a power-on click can precede the radio
         // voice's own add, and it never touches the output gain (pause duck stays ducked).
@@ -221,6 +329,7 @@ namespace CMM
             try
             {
                 CmmMixer mixer = CmmMixer.GetOrCreate();
+                LoadClickSamples();   // no-op once loaded; picks up a config reload
                 if (kind == CmmMixer.SfxTuningStatic)
                 {
                     // The static has its own level (-1 = inherit) and a live tone: pushing the

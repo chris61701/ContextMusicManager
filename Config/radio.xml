@@ -127,6 +127,23 @@
        as variety. At the default 0.5 the dial rings between about 15 and 22 ms.
        0 = every click identical. -->
   <RadioClickVary>0.5</RadioClickVary>
+
+  <!-- ── Recorded clicks ────────────────────────────────────────────────────────────────────
+       true plays the files in the mod's Sounds/ folder instead of synthesizing:
+         Sounds/radio_dial.wav    one notch of the tuning dial
+         Sounds/radio_power.wav   the power switch (both throws)
+       Replace them with anything you like — mono or stereo, 8/16/24/32-bit PCM or float WAV.
+       They reload when this file does, so you can swap a file and hear it without restarting.
+       false goes back to the synthesized clicks, which are also what you get automatically if a
+       file is missing or unreadable: no sound file can break the radio, only quieten it.
+
+       JitterHz is how far the playback RATE wanders from one firing to the next, either side of
+       the file's own rate. One recording repeated verbatim is exactly what gives a UI sound away
+       as a sound effect, and the dial is the worst case because you hear eight of them in two
+       seconds. 2000 Hz against a 48 kHz file is about 4% — a couple of semitones at most, heard
+       as "another one of those" rather than as a different sound. 0 = every firing identical. -->
+  <RadioClickSamples>true</RadioClickSamples>
+  <RadioClickSampleJitterHz>2000</RadioClickSampleJitterHz>
   <!-- ── World-emitter spatial tuning (all hot-reloaded — edit while the game runs) ──
        MinDistance: full-volume plateau radius (blocks). Move inside it and the level stays flat;
                     beyond it the volume fades to silence at Range.

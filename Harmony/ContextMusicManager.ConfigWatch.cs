@@ -82,8 +82,11 @@ namespace CMM
         {
             if (settingsChanged)
             {
-                CMMConfig.D("[CMM] Config/settings.xml changed — reloading.");
+                CMMConfig.D("[CMM] settings changed — reloading.");
                 CMMConfigLoader.LoadSettings(ModPath);
+                // Re-read Sounds/ too: a swapped click file is heard without a restart, same
+                // contract as every other tunable in there.
+                PersonalRadio.LoadClickSamples(force: true);
                 ScriptHost.MarkConfigDirty();   // re-marshal cfg into Lua on the next scan tick
             }
 

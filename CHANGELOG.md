@@ -125,6 +125,16 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **The radio's clicks are now recorded sounds**, in the mod's new `Sounds/` folder —
+  `radio_dial.wav` for a station change and `radio_power.wav` for the power switch. Swap them
+  for anything you like (mono or stereo, 8/16/24/32-bit PCM or float WAV); they reload when
+  `radio.xml` does, so you can change a file and hear it without restarting. **Every firing plays
+  at a slightly different rate** (`RadioClickSampleJitterHz`, ±2000 Hz by default — about 4%), so
+  spinning the dial sounds like a mechanism rather than one recording retriggered eight times.
+  The synthesized clicks are still in the build and are still what you get if a file is missing or
+  unreadable, or if you set `RadioClickSamples` to false: a sound file can quieten the radio, never
+  break it.
+
 - **Radio and speaker settings moved to their own file, `Config/radio.xml`.** They were 64 of
   the 113 settings and well over half the file, which buried the ordinary music options
   underneath them. Both files are read as one chain and **a setting found in `settings.xml`

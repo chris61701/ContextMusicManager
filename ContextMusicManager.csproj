@@ -127,6 +127,7 @@
   <ItemGroup>
     <!-- Localization.txt is excluded: it was leftover template junk from another mod
          (crosshair/weapons keys) and 7DTD auto-loads it, so it must not ship. -->
+    <Content Include="Sounds\**\*" />
     <Content Include="Config\**\*" Exclude="Config\Localization.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -392,9 +393,13 @@
     <RemoveDir Directories="$(OutputPath)Config" />
     <ItemGroup>
       <_DebugCfg Include="Config\**\*" Exclude="Config\Localization.txt" />
+      <_DebugSnd Include="Sounds\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(_DebugCfg)"
           DestinationFiles="@(_DebugCfg->'$(OutputPath)Config\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(_DebugSnd)"
+          DestinationFiles="@(_DebugSnd->'$(OutputPath)Sounds\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="false" />
     <!-- Then point at the personal library and enable verbose logging + perf timing for
          testing. The committed settings.xml keeps the release values (Music /

@@ -155,6 +155,8 @@ namespace CMM
                 CMMConfig.RadioClickDialDouble   = ReadFloat(root, "RadioClickDialDouble",   CMMConfig.RadioClickDialDouble);
                 CMMConfig.RadioClickDialVolume   = ReadFloat(root, "RadioClickDialVolume",   CMMConfig.RadioClickDialVolume);
                 CMMConfig.RadioClickVary         = ReadFloat(root, "RadioClickVary",         CMMConfig.RadioClickVary);
+                CMMConfig.RadioClickSamples        = ReadBool (root, "RadioClickSamples",        CMMConfig.RadioClickSamples);
+                CMMConfig.RadioClickSampleJitterHz = ReadFloat(root, "RadioClickSampleJitterHz", CMMConfig.RadioClickSampleJitterHz);
                 CMMConfig.RadioClickOffVolume   = ReadFloat(root, "RadioClickOffVolume",   CMMConfig.RadioClickOffVolume);
                 CMMConfig.WorldEmitterBirthFade = ReadFloat(root, "WorldEmitterBirthFade", CMMConfig.WorldEmitterBirthFade);
                 if (CMMConfig.RadioAnchorSeconds < 300f) CMMConfig.RadioAnchorSeconds = 300f;   // tiny windows = constant re-anchoring
