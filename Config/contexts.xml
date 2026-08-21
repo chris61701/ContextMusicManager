@@ -27,6 +27,11 @@
                   VanillaIfDMS      = vanilla when Dynamic Music is on, else Stack
                   VanillaIfPanicked = vanilla when threat=Panicked, else Stack
                   Vanilla / Silence / <another context name>
+    combat    - true = this is FIGHT music, so the combat-music toggle (Alt+Home) silences it
+                along with the Combat_* tiers  (default: false). The toggle otherwise covers
+                any context whose NAME contains "combat", which is a naming convention and
+                misses themes that are combat music without saying so (Low_Health_Panic is
+                one). Mark your own that way and the toggle will honour them too.
     resume    - continue from where we left off when re-entering  (default: true)
     stale     - seconds before an abandoned resume position is forgotten  (0 = never resume)
     loop      - loop the clip rather than picking a new track on end
@@ -58,7 +63,7 @@
 
   <!-- ── Events ────────────────────────────────── -->
   <Context name="Death"                      source="events/death"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="0.1" warmup="0"  warmgroup=""     bypass="true"  priority="100" once="true"  volume="-1" />
-  <Context name="Low_Health_Panic"           source="events/low_health"           subfolders="false" fallback="Stack"             resume="true"  stale="30"  loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="90"  once="false" volume="-1" />
+  <Context name="Low_Health_Panic"           source="events/low_health"           subfolders="false" fallback="Stack"             combat="true"  resume="true"  stale="30"  loop="false" cool="5" fadeintime="2" warmup="0"  warmgroup=""     bypass="true"  priority="90"  once="false" volume="-1" />
   <Context name="Spawn"                      source="events/spawn"                subfolders="false" fallback="Stack"             resume="false" stale="0"   loop="false" cool="3" fadeintime="0.1" warmup="0"  warmgroup=""     bypass="true"  priority="45"  once="true"  volume="-1" />
 
   <!-- ── Vehicles ─────────────────────────────── -->

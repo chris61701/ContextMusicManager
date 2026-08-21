@@ -224,6 +224,9 @@ namespace CMM
 
         public static void LoadContexts(string modPath)
         {
+            // Marks are re-derived from the file every load, so removing combat="true" by hand
+            // takes effect on hot-reload instead of persisting until a restart.
+            ContextMusicManager.ClearCombatMarks();
             string path = ContextsFile(modPath);
             if (!File.Exists(path))
             {
@@ -247,6 +250,12 @@ namespace CMM
                     // `source` is the current attribute (folder OR .m3u playlist). `path`
                     // is the pre-playlist name kept as a deprecated alias so existing
                     // configs keep loading; source wins when both are present.
+                    // Explicitly-marked FIGHT music, for the combat-music toggle. Carried in its
+                    // own set rather than on Contexts because adding a constructor parameter
+                    // means touching all nine construction sites including the offline harness,
+                    // and this is one boolean the resolver reads by name anyway.
+                    if (BoolAttr(el, "combat", false)) ContextMusicManager.MarkCombatContext(name);
+
                     string source = el.GetAttribute("source");
                     if (string.IsNullOrEmpty(source) && el.HasAttribute("path"))
                     {

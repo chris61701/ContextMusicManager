@@ -255,11 +255,27 @@ namespace CMM
             _combatContexts.Clear();
             foreach (Contexts ctx in contexts.Values)
             {
-                if (ctx.Context != null &&
-                    ctx.Context.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (ctx.Context == null) continue;
+                // The naming convention, plus anything that declared itself. The convention
+                // alone missed Low_Health_Panic, which is a fight sting in everything but its
+                // name: with combat music off you still got the panic cue mid-fight, which is
+                // the one thing the toggle exists to stop.
+                if (ctx.Context.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0
+                    || _combatMarked.Contains(ctx.Context))
                     _combatContexts.Add(ctx.Context);
             }
         }
+
+        // Contexts that carry combat="true" in contexts.xml. Filled by the loader as it parses,
+        // BEFORE RebuildCombatContextSet runs over the finished table, and cleared at the start
+        // of every (re)load so a marker removed by hand actually goes away on hot-reload.
+        private static readonly HashSet<string> _combatMarked =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public static void MarkCombatContext(string name)
+        {
+            if (!string.IsNullOrEmpty(name)) _combatMarked.Add(name);
+        }
+        public static void ClearCombatMarks() => _combatMarked.Clear();
 
         // Walks the fallback chain to find the nearest playable context.
         // Returns "Vanilla" when the chain terminates at a Vanilla fallback.

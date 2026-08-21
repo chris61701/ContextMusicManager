@@ -206,8 +206,20 @@ function resolve(gameState, cfg)
 
   -- ── Tension / low-health ──────────────────────────────────────────────────
   if inCombat and gameState.healthPct < cfg.healthDangerPct then add(active, "Low_Health_Panic") end
-  if not inCombat
-     and cmm.count(gameState, FILTER_ANY) >= 1
+  -- TENSION IS NOT CANCELLED BY COMBAT. It used to carry `not inCombat`, on the reading that
+  -- tension is a state you LEAVE when the fight starts. Priority already says that better:
+  -- Tension is 30 and the combat tiers are 50+, so a real fight outranks it wherever both are
+  -- active, and nothing about what you hear changes while combat music is on.
+  --
+  -- What the exclusion cost was the case where combat music is switched OFF (Alt+Home). The
+  -- combat contexts then resolve as if empty and the stack walk continues downward -- but
+  -- Tension had never been added, so a fight fell all the way past Online_Stranger (29) to POI
+  -- (16-22) or ambient. Being hunted had music; being caught did not.
+  --
+  -- Keeping both on the stack also keeps Tension's resume position alive across a fight. It is
+  -- resume="true" stale="30", so previously any fight longer than thirty seconds went stale and
+  -- Tension restarted afterwards instead of picking up.
+  if cmm.count(gameState, FILTER_ANY) >= 1
      and cmm.count(gameState, FILTER_ALERT) >= 1 then
     add(active, "Tension")
   end
