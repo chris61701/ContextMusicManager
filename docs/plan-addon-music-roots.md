@@ -521,13 +521,11 @@ Throwaway mod: `<Mods>\ZZ_CMM_TestPack\ModInfo.xml` + `Music\<context>\*.ogg`.
 
 ## 5. Open questions
 
-1. **The hard-disable is destroyed by mod updates.** `Config/` is overwritten wholesale by the
-   release zip, and the Debug deploy does `RemoveDir $(OutputPath)Config` on every build. A user
-   who sets `false` gets `true` back on the next update, silently — and unlike every other
-   clobbered setting, this one **changes what music plays**. Options: (a) accept it, consistent
-   with everything else; (b) keep the disable in `Cache/`, which survives updates but is
-   invisible; (c) accept it but log the root list at startup so the state is discoverable.
-   **Recommend (c).**
+1. ~~**The hard-disable is destroyed by mod updates.**~~ **RESOLVED 2026-08-21** — future
+   versions ship no `Config/*.xml` at all; CMM generates them at first run and backfills keys
+   added since, with version-stamped migration for changed defaults. A hard `false` now
+   survives updates. See `plan-config-generation.md`. Still log the root list at startup
+   (Phase 3) — that was worth doing on its own.
 2. **Should add-on roots extend an *absolute* context source?** Plan says no. Cheap to reverse.
 3. **Should add-on roots extend a *playlist* source?** Plan says no.
 4. **Precedence when both roots hold a same-named file** — plan plays both. The alternative
