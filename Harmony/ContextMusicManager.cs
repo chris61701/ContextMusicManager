@@ -114,6 +114,10 @@ namespace CMM
             Instance.InitContexts();
 
             // Override built-in defaults with external config files if present.
+            // Create the config files if they are not there and write in anything added
+            // since this file was stamped, BEFORE reading them. CMM no longer ships
+            // Config/*.xml -- see CMMSettingsFile for the backfill/migrate rules.
+            CMMSettingsFile.EnsureAll(modPath);
             CMMConfigLoader.LoadSettings(modPath);
             CMMConfigLoader.LoadContexts(modPath);
             LoudnessStore.Load(modPath);

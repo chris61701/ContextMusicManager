@@ -275,7 +275,12 @@ namespace CMM
         // idempotent — which is why the older coroutine fallback is left alone.
         internal static void NoteConfigWritten()
         {
+            // BOTH files: CMMSettingsFile writes radio.xml as well (create / backfill /
+            // migrate), and settings and radio share one "settings changed" flag, so
+            // re-stamping only settings.xml would leave our own radio write looking like
+            // a hand edit and trigger a pointless full reload a moment later.
             try { _cfgSettingsTime = StampOf(_cfgSettingsPath); } catch { }
+            try { _cfgRadioTime    = StampOf(_cfgRadioPath);    } catch { }
         }
 
         internal static void ConfigWatchTick()

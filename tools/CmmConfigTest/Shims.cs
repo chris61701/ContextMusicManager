@@ -12,6 +12,18 @@ namespace CMM
         internal static void Error(string s)   => Console.WriteLine("ERROR " + s);
     }
 
+    // CMMSettingsFile re-stamps the config watcher after its own write.
+    internal static class ContextMusicManager
+    {
+        internal static void NoteConfigWritten() { }
+    }
+
+    internal static class CMMConfigLoader
+    {
+        internal static string SettingsFile(string modPath)      => System.IO.Path.Combine(modPath, "Config", "settings.xml");
+        internal static string RadioSettingsFile(string modPath) => System.IO.Path.Combine(modPath, "Config", "radio.xml");
+    }
+
     internal static class CMMConfig
     {
         internal static bool DebugLogging = false;

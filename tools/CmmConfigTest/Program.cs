@@ -32,6 +32,9 @@ namespace CMM
                   Path.Combine(cfg, "radio.xml"), "CMMRadioSettings", CMMSettingsSchema.Radio);
 
             Console.WriteLine();
+            _fail += FileTests.Run();
+
+            Console.WriteLine();
             if (args.Contains("--dump"))
             {
                 string outDir = Path.Combine(Path.GetTempPath(), "cmmconfigtest");

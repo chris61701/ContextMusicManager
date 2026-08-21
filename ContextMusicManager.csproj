@@ -159,6 +159,8 @@
     <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\CMMSettingsSchema.cs" />
     <Compile Include="Harmony\CMMSettingsIO.cs" />
+    <Compile Include="Harmony\CMMSettingsWriter.cs" />
+    <Compile Include="Harmony\CMMSettingsFile.cs" />
     <Compile Include="Harmony\CmmGuard.cs" />
     <Compile Include="Harmony\NativeAcoustics.cs" />
     <Compile Include="Harmony\AcousticScene.cs" />
