@@ -222,7 +222,13 @@ namespace CMM
                                         Mathf.FloorToInt(_ear.z)), NearRefreshBlocks);
                 NearRefreshes++;
             }
-            if (nowRr - _farRefreshAt >= FarRefreshSec)
+            // ONLY START A FULL SWEEP ONCE THE LAST ONE FINISHED. A full window is ~560k block
+            // reads and takes about eleven seconds at the per-frame budget, so a ten-second timer
+            // re-dirtied everything before the reader had got round it: the field spent the entire
+            // session in "reading N%" and never once completed. Harmless to correctness -- a dirty
+            // cell keeps answering with what it last knew -- but it is a treadmill, and it made the
+            // status line useless for telling a warm-up from a stall.
+            if (nowRr - _farRefreshAt >= FarRefreshSec && CellsPending <= 0)
             {
                 _farRefreshAt = nowRr;
                 Invalidate(new Vector3i(Mathf.FloorToInt(_ear.x), Mathf.FloorToInt(_ear.y),
