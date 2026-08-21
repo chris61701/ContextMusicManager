@@ -40,7 +40,13 @@ namespace CMM
 
         public string Name;              // subfolder name (or the root/playlist for the fallback)
         public string[] Order;           // deterministic broadcast order (sorted, then seeded shuffle)
-        public uint Seed;                // FNV-1a of the lowercased name (PRE-shuffle) — anchor mixing
+        public uint Seed;
+        // Last time we said out loud that this station has nothing playable. A station
+        // whose whole pool fails to decode is retried at emitter TICK rate, so the
+        // complaint arrived three or four times a second -- ~700 lines in one session
+        // from a single mislabelled file. Throttled per station; the condition is real
+        // and worth reporting, just not that often.
+        public float NoTracksLoggedAt = -999f;                // FNV-1a of the lowercased name (PRE-shuffle) — anchor mixing
         public bool Ready => Order != null && Order.Length > 0;   // instant — no probing gate
 
         // Background chain-walk state: which anchor window's chain the worker has covered (or is

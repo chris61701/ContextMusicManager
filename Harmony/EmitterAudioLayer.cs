@@ -1114,7 +1114,16 @@ namespace CMM
             if (st.OnAir == null) ResolveOnAir(st, BroadcastSeconds());
             if (st.OnAir == null)
             {
-                CMMConfig.D($"[CMM] Station '{st.Name}': no playable tracks.");
+                // Throttled: this path is retried every tick for as long as a speaker is in
+                // range, so an undecodable pool used to flood the log. One line every 30 s
+                // still says what is wrong without burying everything else.
+                if (CmmClock.Now - st.NoTracksLoggedAt > 30f)
+                {
+                    st.NoTracksLoggedAt = CmmClock.Now;
+                    Log.Warning($"[CMM] Station '{st.Name}': no playable tracks "
+                              + $"({st.Order?.Length ?? 0} file(s) in the pool, none decodable). "
+                              + "Check the format, or `cmm roots` for where they came from.");
+                }
                 return;
             }
 
