@@ -55,6 +55,49 @@ Still on v1.0.5 — no release until these are worked out (list set 2026-07-11):
 De-prioritized for this release: multiplayer testing, and cross-version (A20/A21/2.6)
 verification — emitters are excluded there anyway.
 
+## Audio engine — the remaining list (set 2026-08-21)
+
+- [ ] **Port the occlusion output shaping into the field.** THE LAST THING the audio engine
+  needs. The per-door gap tuning (`WorldEmitterDoorGapOverrides`, hand-tuned per door type
+  2026-07-08) was calibrated through `EmitterAcoustics.ShapeOcclusion`, and the field replaced
+  that stage with a straight line. The gap model still produces the same `Openness`; what
+  changed is everything downstream of `CellLoss`. Two bends are missing:
+  - **soft knee (tanh)** toward a ceiling, so detour/gaps can never fully silence a speaker —
+    there is always an audible floor (stand behind a crate, still hear it).
+  - **hard-stop gate on the SOLID part only**, smoothstepped in from 55%, so enough material
+    drives true silence (a sealed vault). Detour can never do this; material can.
+  - Together they give a long shallow middle and a decisive slam at the end, and that shape is
+    what the per-door numbers were placing. Linear vs tanh diverge most in the MIDDLE, which is
+    exactly where the doors now feel wrong while the endpoints feel right.
+  - **Do it in dB, not in virtual-distance units.** ShapeOcclusion works in virtual blocks and
+    scales walls by `range/30`; the field's whole contract is that occlusion is a dB value
+    reproduced exactly and independent of range (which was the fix for "high Range almost
+    ignores occlusion"). Same two curves, applied where the field already works.
+  - The field already computes the two terms separately — that is the `(wall X, detour Y)` split
+    in the diagnostic — so the inputs are there. Ship behind a flag so the current linear
+    behaviour is one setting away.
+  - Note `ShapeOcclusion` is already `internal` "so EmitterFieldCache shapes its field-sampled
+    occlusion through the SAME curves" — the precedent exists.
+
+- [ ] **Tuning INTO a frequency, like an FM dial.** Dialling a station should sweep in rather
+  than cut in: the signal rises out of the noise as you approach it and falls back as you pass,
+  the way a real analogue dial behaves. Today `Alt+PgUp/PgDn` steps discretely and the static
+  burst is a fixed "searching" sound between stations. Wants a notion of being BETWEEN two
+  frequencies — partial signal, partial noise, and the mix following how close you are.
+  Relates to the static work below; probably the same feature.
+
+- [ ] **Static on emitters does not sound right.** Needs "some type of cut off" for world
+  radios — a band limit / squelch so a distant or weak world radio degrades like a radio rather
+  than just getting quieter. Currently the ham coloration is always-on per render class
+  (`WorldEmitterHamColor*`) and there is no distance- or signal-dependent breakup.
+
+- [ ] **Stereo pairs.** Lone speakers are ALREADY mono — the mixer downmixes each station into a
+  mono slot lane (`g_emitterMono`), so a single speaker is not playing a stereo image. What is
+  not built is the PAIR split: two speakers of the same station close together each taking one
+  channel. Design was settled 2026-07-13 (render flags bits 1-2, `WorldEmitterPairRadius`,
+  L/R by lexicographic world position so it is stable across ticks and MP clients). See the
+  1.0.5 blocker entry above — this is the same item.
+
 ## Radio / world-emitter
 
 - [ ] **In-game item/mod to play radio stations** — a placeable/equippable radio the player
