@@ -31,6 +31,7 @@
     <Compile Include="Program.cs" />
     <Compile Include="Shims.cs" />
     <Compile Include="FileTests.cs" />
+    <Compile Include="SchemaGuard.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsSchema.cs" Link="linked\CMMSettingsSchema.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsIO.cs"     Link="linked\CMMSettingsIO.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsWriter.cs" Link="linked\CMMSettingsWriter.cs" />

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     DEVELOPER OVERRIDES — Debug builds only. Never shipped, never generated,
+     never written to by CMM.
+
+     CMM reads its settings from a CHAIN of files and the first one holding a key
+     wins. This file sits at the FRONT of that chain, so anything in it overrides
+     the real settings.xml without touching it.
+
+     That matters now that CMM generates settings.xml itself: the Debug deploy used
+     to wipe the deployed Config folder and poke these four values into the copy,
+     which also destroyed anything the mod had persisted (the Alt+Home combat-music
+     toggle, most visibly) on every single build. Now the generated file is left
+     alone and the dev values live here instead.
+
+     MusicPath is rewritten at deploy time from the DebugMusicPath build property,
+     so this copy keeps the harmless release value and the repo can never ship a
+     machine-specific path.
+
+     Only put things here that should differ for LOCAL TESTING. In particular do
+     not override a setting a keybind persists — the keybind writes settings.xml,
+     which this file would then shadow, and the toggle would look broken.
+═══════════════════════════════════════════════════════════════════════════ -->
+<CMMSettings>
+
+  <!-- Rewritten by the Debug deploy to $(DebugMusicPath). -->
+  <MusicPath>Music</MusicPath>
+
+  <!-- Verbose logging and per-frame timing while testing. -->
+  <DebugLogging>true</DebugLogging>
+  <PerfTiming>true</PerfTiming>
+
+  <!-- Drop the Ctrl modifier gate so the bare skip/volume keys work for quick testing. -->
+  <KeybindRequireCtrl>false</KeybindRequireCtrl>
+
+</CMMSettings>

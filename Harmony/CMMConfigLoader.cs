@@ -13,6 +13,12 @@ namespace CMM
         public static string SettingsFile(string modPath) =>
             Path.Combine(modPath, "Config", "settings.xml");
 
+        // DEVELOPER OVERRIDES, Debug deploys only. Sits at the FRONT of the chain so it
+        // shadows the generated settings.xml without modifying it. Absent in every release,
+        // and CMM never creates or writes it. See build/settings.dev.xml.
+        public static string DevSettingsFile(string modPath) =>
+            Path.Combine(modPath, "Config", "settings.dev.xml");
+
         // The radio and world-emitter settings live in their own file: they were 64 of the 113
         // entries and well over half the lines, which buried everything else.
         public static string RadioSettingsFile(string modPath) =>
@@ -44,6 +50,7 @@ namespace CMM
         public static void LoadSettings(string modPath)
         {
             var chain = new List<XmlElement>();
+            Add(chain, DevSettingsFile(modPath), "settings.dev.xml");   // Debug only; usually absent
             Add(chain, SettingsFile(modPath), "settings.xml");
             XmlElement radioRoot = Add(chain, RadioSettingsFile(modPath), "radio.xml");
             if (chain.Count == 0)

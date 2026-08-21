@@ -128,7 +128,10 @@
     <!-- Localization.txt is excluded: it was leftover template junk from another mod
          (crosshair/weapons keys) and 7DTD auto-loads it, so it must not ship. -->
     <Content Include="Sounds\**\*" />
-    <Content Include="Config\**\*" Exclude="Config\Localization.txt">
+    <!-- settings.xml and radio.xml are NOT shipped: CMM writes them at first run and
+         backfills what later versions add (see Harmony/CMMSettingsFile.cs). Shipping them
+         is what used to reset every user setting on update. -->
+    <Content Include="Config\**\*" Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- Embed the canonical default context.lua so a missing or corrupt on-disk copy
@@ -390,15 +393,15 @@
        repo can never accidentally ship a machine-specific path. -->
   <Target Name="SetDebugSettings" AfterTargets="Build"
           Condition="'$(Configuration)' == 'Debug'">
-    <!-- Guarantee the deployed Config is an EXACT mirror of the repo on every Debug build:
-         wipe it (dropping any renamed/removed files) then re-copy with an explicit Copy.
-         This bypasses the normal CopyToOutputDirectory path, which MSBuild can skip as
-         "up-to-date" on incremental builds and which never removes orphaned files — so
-         structural changes to settings.xml/contexts.xml always propagate. Config holds
-         only repo XML; the music library lives at MusicPath, not here, so wiping is safe. -->
-    <RemoveDir Directories="$(OutputPath)Config" />
+    <!-- NO RemoveDir here any more. The deployed Config now contains files CMM OWNS —
+         settings.xml and radio.xml, which it generates and backfills — and wiping the
+         folder every build destroyed them along with anything the mod had persisted
+         (the Alt+Home combat-music toggle, most visibly). The repo files below are still
+         force-copied so structural changes propagate; only orphan cleanup is lost, which
+         is worth it. -->
     <ItemGroup>
-      <_DebugCfg Include="Config\**\*" Exclude="Config\Localization.txt" />
+      <_DebugCfg Include="Config\**\*"
+                 Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml" />
       <_DebugSnd Include="Sounds\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(_DebugCfg)"
@@ -407,21 +410,16 @@
     <Copy SourceFiles="@(_DebugSnd)"
           DestinationFiles="@(_DebugSnd->'$(OutputPath)Sounds\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="false" />
-    <!-- Then point at the personal library and enable verbose logging + perf timing for
-         testing. The committed settings.xml keeps the release values (Music /
-         DebugLogging=false / PerfTiming=false). -->
-    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
+    <!-- Dev overrides go in their OWN file at the front of CMM's settings chain, instead
+         of being poked into the deployed settings.xml. That file is CMM's to write now,
+         and editing it here would fight the generator and clobber persisted settings. -->
+    <Copy SourceFiles="build\settings.dev.xml"
+          DestinationFiles="$(OutputPath)Config\settings.dev.xml"
+          SkipUnchangedFiles="false" />
+    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.dev.xml"
              Query="/CMMSettings/MusicPath" Value="$(DebugMusicPath)" />
-    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
-             Query="/CMMSettings/DebugLogging" Value="true" />
-    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
-             Query="/CMMSettings/PerfTiming" Value="true" />
-    <!-- Drop the Ctrl/Alt modifier gate so the bare skip/volume keys work for quick
-         testing. The committed settings.xml keeps the release values (Ctrl off / Alt on). -->
-    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.xml"
-             Query="/CMMSettings/KeybindRequireCtrl" Value="false" />
     <Message Importance="high"
-             Text="[CMM] Debug deploy — Config mirrored; MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true, keybind modifiers off" />
+             Text="[CMM] Debug deploy — settings.dev.xml overrides: MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true, Ctrl gate off" />
   </Target>
 
   <!-- Release only: zip the staged mod as
@@ -509,7 +507,8 @@
   <Target Name="CopyDeploy" Condition="'$(_CMMCopyFrom)' != ''">
     <Error Condition="!Exists('$(_CMMCopyFrom)')" Text="CopyDeploy: source payload not found at '$(_CMMCopyFrom)'." />
     <MakeDir Directories="$(GameModsDir)" />
-    <RemoveDir Directories="$(OutputPath)Config" />
+<!-- Config is NOT wiped: settings.xml / radio.xml are generated and owned by
+         CMM at runtime, and the fan-out must not destroy each install's copy. -->
     <ItemGroup>
       <_StaleDeployed Include="$(OutputPath)*.dll;$(OutputPath)*.pdb;$(OutputPath)*.dll.config" />
       <_CopyPayload Include="$(_CMMCopyFrom)**\*" />

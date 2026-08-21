@@ -35,6 +35,10 @@ namespace CMM
             _fail += FileTests.Run();
 
             Console.WriteLine();
+            _fail += SchemaGuard.Run(Path.Combine(repo, "tools", "CmmConfigTest"),
+                                     args.Contains("--accept"));
+
+            Console.WriteLine();
             if (args.Contains("--dump"))
             {
                 string outDir = Path.Combine(Path.GetTempPath(), "cmmconfigtest");
