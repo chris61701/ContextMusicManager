@@ -265,7 +265,7 @@
        DetourDb is what one block of going-the-long-way costs. It is the only tuning constant the
        model has beyond the shared material curve - everything else comes from the blocks. -->
   <WorldEmitterFieldOcclusion>true</WorldEmitterFieldOcclusion>
-  <WorldEmitterFieldDetourDb>0.35</WorldEmitterFieldDetourDb>
+  <WorldEmitterFieldDetourDb>1.5</WorldEmitterFieldDetourDb>
 
   <!-- What one block of material is worth to the field model: dB = WallDb * loss^WallPow, where
        loss is the shared block reader's answer (0 = air, 0.5 = wood, 0.9 = concrete, 1 = metal).
@@ -303,7 +303,7 @@
 
        0 turns it off and publishes raw floods, which is the honest way to hear whether a
        change is the model or the smoothing. Live: cmm field slew <n> -->
-  <WorldEmitterFieldSlewDb>12</WorldEmitterFieldSlewDb>
+  <WorldEmitterFieldSlewDb>40</WorldEmitterFieldSlewDb>
 
   <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
   <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>

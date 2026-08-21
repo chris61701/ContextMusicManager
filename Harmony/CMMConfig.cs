@@ -235,7 +235,20 @@ namespace CMM
         // buffers was never flooded, and the emitter audio lanes had no ring cushion.
         // `cmm acoustics model native|legacy` still pins the old paths for an A/B.
         public static bool   WorldEmitterFieldOcclusion = true;
-        public static float  WorldEmitterFieldDetourDb  = 0.35f;
+        // 1.5, up from 0.35. This is the model's stand-in for DIFFRACTION -- what a block of
+        // going the long way round costs -- and it is the dominant term in a real building, where
+        // rooms connect and the sound routes through a doorway two rooms over rather than through
+        // a wall. At 0.35 a twenty-block detour was 7 dB; sound bending round a single edge loses
+        // 10-15 dB in reality, so the model was charging almost nothing for the journey.
+        //
+        // It could not safely be raised before: the flood's cutoff budget included the
+        // straight-line distance charge, so turning this up silently shrank the field (at 2 dB a
+        // block it stopped after 30 blocks, at 12 after one step). That is fixed -- the budget now
+        // scales with the window -- so this is free to be a real number.
+        //
+        // Open air is unaffected at any value: excess is material + (pathLength - straightLine) x
+        // this, and the straight-line term cancels against the free-space reference.
+        public static float  WorldEmitterFieldDetourDb  = 1.5f;
         // HOW FAST OCCLUSION IS ALLOWED TO CHANGE, in dB per second, per speaker point.
         //
         // The field re-floods a few times a second and each flood is an independent answer, so
@@ -249,7 +262,16 @@ namespace CMM
         // 10 -> 24 blocks is 8 dB, while at 50 blocks the same 14 blocks is a fraction of one. The
         // existing blocks-per-second limiter downstream could not tell those apart, which is why
         // it was set fast enough (50 blk/s = 12.5 blocks per publish) to pass nearly everything.
-        public static float  WorldEmitterFieldSlewDb   = 12f;
+        // 40, not 12. This is a rate limit on a change of up to 60 dB, so 12 dB/s meant a door
+        // shutting took FIVE SECONDS to arrive: 57 / 12 = 4.75, plus the re-read and the flood on
+        // top. Reported, fairly, as "the delay is awful when the door is closed". The number was
+        // picked when the model's answers were noise and needed damping; now that they are real
+        // events it was throttling the events themselves.
+        //
+        // A door is exempt entirely (see ComputeOcclusion): it is a discrete, visible, deliberate
+        // act, and the sound should land with the latch. The limiter is for the model changing its
+        // mind, not for the world changing.
+        public static float  WorldEmitterFieldSlewDb   = 40f;
         // HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.
         //
         // The other two material knobs set what a SOLID block is worth, and a solid block is

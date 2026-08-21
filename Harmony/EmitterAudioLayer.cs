@@ -88,6 +88,11 @@ namespace CMM
         private struct PublishedExtra { public float Value; public float At; }
         private static readonly Dictionary<Vector3i, PublishedExtra> _publishedExtra = new Dictionary<Vector3i, PublishedExtra>();
         private static float _doorEventAt = -999f;   // last door toggle (see NotifyAcousticChange)
+        // A door moved just now, or is still moving. The field's slew stands aside for this: a
+        // door is a discrete act the player performed and watched, and the sound belongs with the
+        // latch rather than a second and a half later.
+        internal static bool DoorMovingOrJustMoved =>
+            EmitterAcoustics.AnyDoorAnimating || Time.realtimeSinceStartup - _doorEventAt < 1.5f;
 
         // Decision + point-set refresh cadence (4 Hz). The listener itself is pushed every frame; this
         // only governs how fast start/stop and the in-range speaker SET react as you move.

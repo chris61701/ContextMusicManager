@@ -104,7 +104,11 @@ namespace CMM
         private static bool _earValid;
         // How often the world is re-read even when nothing said it changed. See the rolling
         // re-read in FrameStep for why this exists at all.
-        private const float NearRefreshSec = 1.0f, FarRefreshSec = 10f;
+        // 0.4 s, down from 1.0. Geometry reads got about four times cheaper when cells went to
+        // one block (they track BLOCKS, not cells), so the ring that catches a door the hook
+        // missed can run more than twice as often for less than half the budget it used to take.
+        // Worst-case latency for a door is now this plus one flood interval.
+        private const float NearRefreshSec = 0.4f, FarRefreshSec = 10f;
         private const int   NearRefreshBlocks = 12;
         private static float _nearRefreshAt, _farRefreshAt;
         internal static int NearRefreshes, FarRefreshes;
@@ -466,7 +470,11 @@ namespace CMM
                 {
                     var key = new Vector3i(Mathf.FloorToInt(sp.x), Mathf.FloorToInt(sp.y),
                                            Mathf.FloorToInt(sp.z));
-                    float slew = CMMConfig.WorldEmitterFieldSlewDb;
+                    // A DOOR IS NOT NOISE. The limiter exists for the model changing its mind
+                    // between floods; a door is the world changing, the player did it on purpose
+                    // and is listening for the result, so it goes through at full rate.
+                    float slew = EmitterAudioLayer.DoorMovingOrJustMoved
+                               ? 0f : CMMConfig.WorldEmitterFieldSlewDb;
                     float now = Time.realtimeSinceStartup;
                     if (slew > 0f && _slew.TryGetValue(key, out Slewed s) && now - s.At < 2f)
                     {
