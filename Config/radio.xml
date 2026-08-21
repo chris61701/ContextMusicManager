@@ -309,10 +309,13 @@
        ANIMATION, so the seal only completes when the leaf stops moving - half a second to a
        second after you press. That is physically right and it reads as lag. Measured latch to
        published field is 33-79 ms, so the pipeline is not the delay; this ramp is.
-       0.35 = the door sounds shut about a third of the way through closing, which is close
-       enough to the click to feel caused by it. 1 = track the whole swing. 0 = snap at the
-       latch and ignore the animation. -->
-  <WorldEmitterDoorSwingFrac>0.35</WorldEmitterDoorSwingFrac>
+       LEAVE THIS AT 1. Openness is already the output of the per-door GAP model below (physical
+       opening in metres, per-type overrides, asymmetric for opening vs closing, tuned by hand),
+       and scaling it squashes all of that with one global number.
+       If a door seals too late, raise WorldEmitterDoorGapClosed instead - globally, or for that
+       one door type via WorldEmitterDoorGapOverrides. 0 here ignores the animation entirely and
+       snaps at the latch, which is the only thing this is still good for. -->
+  <WorldEmitterDoorSwingFrac>1.0</WorldEmitterDoorSwingFrac>
 
   <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
   <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>

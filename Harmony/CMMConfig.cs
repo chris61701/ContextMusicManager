@@ -285,7 +285,22 @@ namespace CMM
         //
         // 1 restores tracking the whole swing exactly; 0 snaps at the latch and ignores the
         // animation entirely.
-        public static float  WorldEmitterDoorSwingFrac  = 0.35f;
+        // DEFAULT 1 = INERT, and it should stay that way. This scales da.Openness, and Openness is
+        // not a raw animation fraction: it is already the output of the GAP MODEL below -- physical
+        // opening in metres, per-door-type overrides, different thresholds for opening than for
+        // closing, hand-tuned in game per door type. Scaling that squashes all of it with one
+        // blunt global number, which is what I did before noticing it existed.
+        //
+        // If a door's shut lands too late, the right knob is WorldEmitterDoorGapClosed -- the
+        // opening at or below which a door counts as sealed. Raising it seals earlier, while the
+        // leaf is still visibly moving, and it can be set PER DOOR TYPE through
+        // WorldEmitterDoorGapOverrides. That is the control that already knows a 3 m garage door
+        // half open is a huge aperture and a vault leaf half open is a crack.
+        //
+        // Kept only as a blunt override for someone who wants the animation ignored outright
+        // (0 = snap at the latch). Measured latch-to-published-field is 33-79 ms, so nothing here
+        // is latency; it is all the shape of the ramp.
+        public static float  WorldEmitterDoorSwingFrac  = 1f;
         // HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.
         //
         // The other two material knobs set what a SOLID block is worth, and a solid block is
