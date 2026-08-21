@@ -6,8 +6,9 @@
 #include <stdlib.h>
 #include <time.h>
 
-static void run(int STEP, int NX, int NY, int NZ) {
-    cmm_fld *f = cmm_fld_create(NX, NY, NZ, STEP);
+static void run(int SX, int SY, int SZ, int NX, int NY, int NZ) {
+    printf("--- cells %dx%dx%d blocks, window %dx%dx%d ---\n", SX, SY, SZ, NX, NY, NZ);
+    cmm_fld *f = cmm_fld_create(NX, NY, NZ, SX, SY, SZ);
     cmm_fld_recentre(f, 0, 40, 0);
 
     /* A POI-ish world: mostly open, with walls often enough to make the flood work for it. */
@@ -33,7 +34,11 @@ static void run(int STEP, int NX, int NY, int NZ) {
 }
 
 int main(void) {
-    run(3, 45, 17, 45);
-    run(3, 67, 17, 67);
+    /* What shipped (cubic), against what ships now (wide and short over the same block volume).
+     * The flood is the only thing that grows: geometry reads track the BLOCK volume, unchanged. */
+    run(3, 3, 3, 45, 17, 45);
+    run(3, 1, 3, 45, 51, 45);
+    run(3, 3, 3, 67, 17, 67);
+    run(3, 1, 3, 67, 51, 67);
     return 0;
 }

@@ -13,7 +13,12 @@
 
 #define W 64                 /* blocks per side of the toy world */
 #define H 16
-#define STEP 2
+/* Cells are WIDE and SHORT, the shipped shape. A wall spans a cell's full height so coarse is
+ * fine; a floor is one block thick with a storey of air above it, and a tall cell cannot
+ * represent that -- see the ground-alignment case below, which is the reason for the shape. */
+#define SX 3
+#define SY 1
+#define SZ 3
 static unsigned char solid[W][H][W];      /* 1 = a full opaque block */
 
 static int fails = 0, checks = 0;
@@ -43,16 +48,33 @@ static int isSolid(int x, int y, int z) {
  *   2 = BLEND (geometric mean of the two)
  * This is the last real physics choice in the model and it is decided by measurement below, not
  * by argument -- a path model wants MAX, but MAX also means one gap in an otherwise solid face
- * reads as wide open, which is how a wall becomes a rumour. */
-static int FACE_RULE = 2;
+ * reads as wide open, which is how a wall becomes a rumour.
+ *
+ * It was BLEND while cells were cubes, because MEAN then cost 4.2 dB on a doorway that straddled a
+ * cell boundary. Re-measured once cells became one block tall, that penalty is GONE -- it came
+ * from a tall cell splitting an opening VERTICALLY, which a one-block cell cannot do -- and MEAN
+ * wins on the case that decides this:
+ *
+ *              doorway   1-block hole   gap    straddle penalty
+ *     MEAN       1.41        2.91      +1.50        none
+ *     MAX        0.30        0.30       0.00        none      <- wall becomes a rumour
+ *     BLEND      0.91        1.66      +0.75        none
+ *
+ * So: MEAN. Noting what the shape change COST, honestly, rather than only what it bought -- a face
+ * is now 1x3 sub-blocks instead of 3x3, so a single-block hole is a third of it rather than a
+ * ninth, and the model can no longer separate a pinhole from a doorway as sharply. The ordering
+ * holds and a sealed wall is still 41 dB; the resolution is coarser. That is the trade. */
+static int FACE_RULE = 0;
 static float faceT(int cx, int cy, int cz, int axis) {
+    int bx = cx*SX, by = cy*SY, bz = cz*SZ;
+    int ea = axis == 0 ? SY : SX, eb = axis == 2 ? SY : SZ;
     float acc = 0, best = 0; int n = 0;
-    for (int a = 0; a < STEP; a++)
-    for (int b = 0; b < STEP; b++) {
+    for (int a = 0; a < ea; a++)
+    for (int b = 0; b < eb; b++) {
         int x, y, z, px, py, pz;
-        if (axis == 0) { x = cx*STEP;     y = cy*STEP + a; z = cz*STEP + b; px = x-1; py = y; pz = z; }
-        else if (axis == 1) { x = cx*STEP + a; y = cy*STEP; z = cz*STEP + b; px = x; py = y-1; pz = z; }
-        else { x = cx*STEP + a; y = cy*STEP + b; z = cz*STEP; px = x; py = y; pz = z-1; }
+        if (axis == 0)      { x = bx;     y = by + a; z = bz + b; px = x-1; py = y; pz = z; }
+        else if (axis == 1) { x = bx + a; y = by;     z = bz + b; px = x; py = y-1; pz = z; }
+        else                { x = bx + a; y = by + b; z = bz;     px = x; py = y; pz = z-1; }
         int blocked = isSolid(x, y, z) || isSolid(px, py, pz);
         float t = blocked ? 0.0f : 1.0f;
         acc += t; if (t > best) best = t;
@@ -68,14 +90,19 @@ static float faceT(int cx, int cy, int cz, int axis) {
  * route passing through the cell. Directional, because a floor blocks vertical travel through a
  * cell and not horizontal, and charging it for both is what made the open air outdoors quiet. */
 static float midT(int cx, int cy, int cz, int axis) {
-    int h = STEP / 2;
+    int step = axis == 0 ? SX : axis == 1 ? SY : SZ;
+    /* At depth 1 the cell IS its own face: there is nothing between the two faces for a middle
+     * plane to catch, and charging one would double every move along that axis. */
+    if (step < 2) return 1.0f;
+    int bx = cx*SX, by = cy*SY, bz = cz*SZ, h = step / 2;
+    int ea = axis == 0 ? SY : SX, eb = axis == 2 ? SY : SZ;
     float acc = 0, best = 0; int n = 0;
-    for (int a = 0; a < STEP; a++)
-    for (int b = 0; b < STEP; b++) {
+    for (int a = 0; a < ea; a++)
+    for (int b = 0; b < eb; b++) {
         int x, y, z;
-        if (axis == 0)      { x = cx*STEP + h; y = cy*STEP + a; z = cz*STEP + b; }
-        else if (axis == 1) { x = cx*STEP + a; y = cy*STEP + h; z = cz*STEP + b; }
-        else                { x = cx*STEP + a; y = cy*STEP + b; z = cz*STEP + h; }
+        if (axis == 0)      { x = bx + h; y = by + a; z = bz + b; }
+        else if (axis == 1) { x = bx + a; y = by + h; z = bz + b; }
+        else                { x = bx + a; y = by + b; z = bz + h; }
         float t = isSolid(x, y, z) ? 0.0f : 1.0f;
         acc += t; if (t > best) best = t;
         n++;
@@ -103,7 +130,7 @@ int main(int argc, char** argv) {
     /* ── an open field: nothing between anything ─────────────────────────────────────── */
     memset(solid, 0, sizeof solid);
     for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;   /* ground */
-    cmm_fld *f = cmm_fld_create(W/STEP, H/STEP, W/STEP, STEP);
+    cmm_fld *f = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
     cmm_fld_recentre(f, 32, 4, 32);
     fill_all(f);
     cmm_fld_solve(f, 32.5f, 4.5f, 32.5f);
@@ -122,6 +149,51 @@ int main(int argc, char** argv) {
     cmm_fld_solve(f, 32.5f, 1.5f, 32.5f);
     ground = cmm_fld_sample_db(f, 44.5f, 1.5f, 32.5f);
     ckf("on the ground, open air, 12 blocks", ground < 1.5f, "%.2f dB (want ~0)", ground);
+
+    /* ── THE GROUND CAN BE AT ANY HEIGHT ─────────────────────────────────────────────────
+     * The single most expensive defect this model has had, and the one the cell shape exists to
+     * fix. Flat open ground, nothing between listener and source, and the ONLY thing varied is
+     * where the ground's top block falls relative to the cell grid. With 3-block-tall cells the
+     * answer swung between 0.00 and 29.69 dB on that alone: a source standing on a floor landed in
+     * a cell whose Y middle plane WAS the floor, so reaching it from above was charged as going
+     * through the floor. Three ground heights in every eight were 29 dB down in open air.
+     *
+     * It survived for so long because the probe that was supposed to catch it tested ONE ground
+     * height, got 0.00, and reported the model clean. So this sweeps every alignment. Real terrain
+     * is not flat and never aligns to anything; if this can be made to fail by moving the world up
+     * one block, it is broken for most of the world. */
+    {
+        float worstOpen = 0; int worstY = 0;
+        for (int gy = 2; gy <= 9; gy++) {
+            memset(solid, 0, sizeof solid);
+            for (int x = 0; x < W; x++) for (int z = 0; z < W; z++)
+                for (int yy = 0; yy <= gy; yy++) solid[x][yy][z] = 1;
+            cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+            cmm_fld_recentre(g, 32, gy + 2, 32);
+            { int cx, cy, cz, guard = 0;
+              while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
+                cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
+                                                midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+            cmm_fld_solve(g, 32.5f, gy + 1 + 1.7f, 32.5f);
+            for (int d = 6; d <= 24; d += 6) {
+                float v = cmm_fld_sample_db(g, 32.5f + d, gy + 1.5f, 32.5f);
+                if (v > worstOpen) { worstOpen = v; worstY = gy; }
+            }
+            cmm_fld_destroy(g);
+        }
+        ckf("open air is open at EVERY ground height", worstOpen < 1.5f,
+            "worst %.2f dB (ground top y=%d) — was 29.69 with cubic cells", worstOpen, worstY);
+
+        /* Put the shared scene back. This block builds its own fields, but it rewrote `solid`,
+         * and everything below works by DIRTYING a small region of `f` and re-reading only that —
+         * so leaving eight blocks of ground behind would silently hand the doorway tests a
+         * different world than the one they describe. */
+        memset(solid, 0, sizeof solid);
+        for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+        cmm_fld_dirty(f, 32, 8, 32, 4 * W);
+        fill_all(f);
+        cmm_fld_solve(f, 32.5f, 4.5f, 32.5f);
+    }
 
     /* ── a wall right across, no way round: must be a lot ────────────────────────────── */
     for (int y = 1; y < H; y++) for (int z = 0; z < W; z++) solid[40][y][z] = 1;
@@ -177,7 +249,11 @@ int main(int argc, char** argv) {
     fill_all(f);
     cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
     float pin = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
-    ckf("a 1-block hole: between doorway and sealed", pin > door + 2.0f && pin < thru - 8.0f,
+    // Stated as the PROPERTY rather than as a number carried over from the old cell shape: a hole
+    // must be audibly worse than an open doorway and nothing like a sealed wall. The margin here
+    // is genuinely narrower than it was with 3x3 faces (see the face-rule note above) -- that is
+    // recorded, not hidden behind a threshold quietly widened to fit.
+    ckf("a 1-block hole: between doorway and sealed", pin > door + 1.0f && pin < thru * 0.2f,
         "%.2f dB (doorway %.1f, sealed %.1f)", pin, door, thru);
 
     /* ── THE PROPERTY THE WHOLE DESIGN IS FOR: a source moving is smooth ─────────────── */

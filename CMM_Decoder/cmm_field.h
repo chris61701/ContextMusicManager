@@ -45,13 +45,24 @@ extern "C" {
 #endif
 
 /* Bumped on any breaking change; the managed side checks it on load. */
-#define CMM_FLD_ABI 2
+#define CMM_FLD_ABI 3
 CMM_FLD_API int cmm_fld_abi(void);
 
 typedef struct cmm_fld cmm_fld;
 
-/* A window of nx*ny*nz cells, each `step` blocks across. step must be >= 1. */
-CMM_FLD_API cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step);
+/* A window of nx*ny*nz cells, each stepX x stepY x stepZ BLOCKS. Each step must be >= 1.
+ *
+ * CELLS ARE NOT CUBES, and that is the point (v3). stepY is meant to be SHORT -- 1 in practice --
+ * because buildings are not isotropic. A wall spans a cell's full height, so a coarse cell
+ * represents it exactly; a FLOOR is one block thick with a storey of air above it, and a 3-block
+ * cell cannot represent that at all. A source standing on a floor lands in a cell whose Y middle
+ * plane IS the floor, so reaching it from above gets charged as going through the floor: measured
+ * at 29 dB of excess in FLAT OPEN AIR, varying between 0 and 29 dB purely with where the ground's
+ * top block fell relative to the cell grid.
+ *
+ * Short cells cost nothing in geometry reads -- those track the BLOCK volume, which is unchanged
+ * -- and multiply only the flood. */
+CMM_FLD_API cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ);
 CMM_FLD_API void     cmm_fld_destroy(cmm_fld *f);
 
 /* Centre the window on a block position. Cells that scrolled out of range are marked needing

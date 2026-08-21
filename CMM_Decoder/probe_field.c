@@ -1,6 +1,10 @@
-/* probe_field — where does the outdoors floor come from?
- * The game reports ~5.8 dB of "wall" and 3-7 dB of "detour" with a clear view of a speaker.
- * This reproduces the game's geometry (STEP 3, 0.35 dB/block detour) and takes the two apart. */
+/* probe_field — does the field answer 0 dB in open air, wherever the ground happens to sit?
+ *
+ * This is the probe that found the defect the 1-block-tall cell exists to fix. The whole point is
+ * the GY sweep: with cubic 3-block cells the answer in FLAT OPEN AIR swung between 0.00 and 29.42
+ * dB purely with where the ground's top block fell relative to the cell grid. An earlier version
+ * of this probe tested one ground height, got 0.00, and pronounced the model clean.
+ */
 #include "cmm_field.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +13,7 @@
 
 #define W 128
 #define H 48
-#define STEP 3
+static int SX = 3, SY = 1, SZ = 3;
 static unsigned char solid[W][H][W];
 static int FACE_RULE = 2;
 
@@ -18,78 +22,136 @@ static int isSolid(int x,int y,int z){
     return solid[x][y][z];
 }
 static float rule(float mean,float best){
-    if(FACE_RULE==0) return mean; if(FACE_RULE==1) return best; return sqrtf(mean*best);
+    if(FACE_RULE==0) return mean;
+    if(FACE_RULE==1) return best;
+    return sqrtf(mean*best);
 }
+
+/* A cell's NEGATIVE face on `axis`: the slab of blocks at offset 0 along that axis, spanning the
+ * cell's full extent on the other two. Anisotropic, so the counts differ per axis. */
 static float faceT(int cx,int cy,int cz,int axis){
+    int bx=cx*SX, by=cy*SY, bz=cz*SZ;
     float acc=0,best=0; int n=0;
-    for(int a=0;a<STEP;a++) for(int b=0;b<STEP;b++){
+    int ea = axis==0?SY:SX, eb = axis==2?SY:SZ;   /* extents of the face */
+    for(int a=0;a<ea;a++) for(int b=0;b<eb;b++){
         int x,y,z,px,py,pz;
-        if(axis==0){x=cx*STEP;y=cy*STEP+a;z=cz*STEP+b;px=x-1;py=y;pz=z;}
-        else if(axis==1){x=cx*STEP+a;y=cy*STEP;z=cz*STEP+b;px=x;py=y-1;pz=z;}
-        else{x=cx*STEP+a;y=cy*STEP+b;z=cz*STEP;px=x;py=y;pz=z-1;}
+        if(axis==0){ x=bx;      y=by+a; z=bz+b; px=x-1; py=y; pz=z; }
+        else if(axis==1){ x=bx+a; y=by;  z=bz+b; px=x; py=y-1; pz=z; }
+        else { x=bx+a; y=by+b; z=bz;            px=x; py=y; pz=z-1; }
         float t=(isSolid(x,y,z)||isSolid(px,py,pz))?0.f:1.f;
         acc+=t; if(t>best)best=t; n++;
     }
     return n?rule(acc/n,best):0.f;
 }
+
+/* The cell's MIDDLE plane perpendicular to `axis` — what stands across a route passing through.
+ * Only meaningful when the cell is at least 2 blocks deep on that axis: at depth 1 the cell IS its
+ * own face, there is nothing between the two faces to catch, and charging it would double every
+ * move along that axis. */
 static float midT(int cx,int cy,int cz,int axis){
-    int h=STEP/2; float acc=0,best=0; int n=0;
-    for(int a=0;a<STEP;a++) for(int b=0;b<STEP;b++){
+    int step = axis==0?SX:axis==1?SY:SZ;
+    if(step<2) return 1.f;
+    int bx=cx*SX, by=cy*SY, bz=cz*SZ, h=step/2;
+    float acc=0,best=0; int n=0;
+    int ea = axis==0?SY:SX, eb = axis==2?SY:SZ;
+    for(int a=0;a<ea;a++) for(int b=0;b<eb;b++){
         int x,y,z;
-        if(axis==0){x=cx*STEP+h;y=cy*STEP+a;z=cz*STEP+b;}
-        else if(axis==1){x=cx*STEP+a;y=cy*STEP+h;z=cz*STEP+b;}
-        else{x=cx*STEP+a;y=cy*STEP+b;z=cz*STEP+h;}
+        if(axis==0){ x=bx+h; y=by+a; z=bz+b; }
+        else if(axis==1){ x=bx+a; y=by+h; z=bz+b; }
+        else { x=bx+a; y=by+b; z=bz+h; }
         float t=isSolid(x,y,z)?0.f:1.f;
         acc+=t; if(t>best)best=t; n++;
     }
     return n?rule(acc/n,best):0.f;
 }
+
 static void fill_all(cmm_fld*f){
     int cx,cy,cz,g=0;
-    while(cmm_fld_next_pending(f,&cx,&cy,&cz)&&g++<4000000)
+    while(cmm_fld_next_pending(f,&cx,&cy,&cz)&&g++<8000000)
         cmm_fld_set_cell(f,cx,cy,cz,faceT(cx,cy,cz,0),faceT(cx,cy,cz,1),faceT(cx,cy,cz,2),
                                     midT(cx,cy,cz,0), midT(cx,cy,cz,1), midT(cx,cy,cz,2));
 }
 
-static const int GY = 20;                 /* ground surface: blocks 0..GY solid */
+static int GY = 20;
 
 static void scene_flat(void){
     memset(solid,0,sizeof solid);
     for(int x=0;x<W;x++) for(int z=0;z<W;z++) for(int y=0;y<=GY;y++) solid[x][y][z]=1;
 }
 
-static void run(const char*name,int speakerBlock,float earOff){
-    cmm_fld*f=cmm_fld_create(W/STEP,H/STEP,W/STEP,STEP);
+/* Worst open-air excess over a sweep of distances — one number per scene, so the GY sweep fits
+ * on a screen and a regression is obvious rather than buried in a table. */
+static float open_air_worst(float *wallOut){
+    scene_flat();
+    cmm_fld *f=cmm_fld_create(W/SX,H/SY,W/SZ,SX,SY,SZ);
     cmm_fld_set_tuning(f,0.35f,60.f);
     cmm_fld_recentre(f,64,GY+2,64);
     fill_all(f);
-    float ex=64.5f, ey=GY+1+earOff, ez=64.5f;
+    float ex=64.5f, ey=GY+1+1.7f, ez=64.5f;
     cmm_fld_solve(f,ex,ey,ez);
-    printf("\n%s (ear y=%.1f, ground top y=%d)\n",name,ey,GY);
-    printf("   dist    excess     wall    detour   dB/blk\n");
+    float worst=0, worstMat=0;
     for(int d=6; d<=48; d+=6){
         float sx=64.5f+d, sy=GY+1.5f, sz=64.5f;
-        if(speakerBlock){ /* the speaker is itself a solid block */
-            solid[(int)sx][(int)sy][(int)sz]=1;
-            cmm_fld_dirty(f,(int)sx,(int)sy,(int)sz,4);
-            fill_all(f); cmm_fld_solve(f,ex,ey,ez);
-        }
         float e=cmm_fld_sample_db(f,sx,sy,sz);
-        float m=cmm_fld_sample_mat_db(f,sx,sy,sz);
-        printf("  %5.1f   %6.2f   %6.2f   %6.2f   %6.3f\n",(float)d,e,m,e-m>0?e-m:0,e/d);
-        if(speakerBlock){ solid[(int)sx][(int)sy][(int)sz]=0; cmm_fld_dirty(f,(int)sx,(int)sy,(int)sz,4); fill_all(f); }
+        if(e>worst){ worst=e; worstMat=cmm_fld_sample_mat_db(f,sx,sy,sz); }
     }
     cmm_fld_destroy(f);
+    if(wallOut) *wallOut=worstMat;
+    return worst;
+}
+
+/* A STOREY: floor, three blocks of headroom, ceiling, with listener and source both inside it and
+ * clear line of sight. This is where the music actually is, and it is the case the open-air sweep
+ * cannot see. A cell tall enough to hold both floor and air reports the whole layer as part-solid,
+ * so every horizontal step through the room pays for the floor under your feet -- a fog with no
+ * visible cause, and the reason a room and the far side of its wall sound the same. */
+static float storey_worst(int fy, float *wallOut){
+    memset(solid,0,sizeof solid);
+    for(int x=0;x<W;x++) for(int z=0;z<W;z++){
+        for(int y=0;y<=fy;y++) solid[x][y][z]=1;      /* ground up to and including the floor */
+        solid[x][fy+4][z]=1;                          /* ceiling, three blocks of headroom */
+    }
+    cmm_fld *f=cmm_fld_create(W/SX,H/SY,W/SZ,SX,SY,SZ);
+    cmm_fld_set_tuning(f,0.35f,60.f);
+    cmm_fld_recentre(f,64,fy+2,64);
+    fill_all(f);
+    cmm_fld_solve(f,64.5f,fy+1+1.7f,64.5f);
+    float worst=0,worstMat=0;
+    for(int d=6; d<=36; d+=6){
+        float e=cmm_fld_sample_db(f,64.5f+d,fy+1.5f,64.5f);
+        if(e>worst){ worst=e; worstMat=cmm_fld_sample_mat_db(f,64.5f+d,fy+1.5f,64.5f); }
+    }
+    cmm_fld_destroy(f);
+    if(wallOut)*wallOut=worstMat;
+    return worst;
 }
 
 int main(int argc,char**argv){
     if(argc>1) FACE_RULE=atoi(argv[1]);
-    printf("cmm_field ABI %d  STEP %d  face rule %s\n",cmm_fld_abi(),STEP,
-           FACE_RULE==0?"MEAN":FACE_RULE==1?"MAX":"BLEND");
-    scene_flat();
-    run("A. flat ground, ear 1.7 above surface, source 1.5 above surface",0,1.7f);
-    run("B. same, but the source cell contains a solid speaker block",1,1.7f);
-    scene_flat();
-    run("C. floating in the air, 8 above the ground (nothing near)",0,8.0f);
-    return 0;
+    if(argc>2){ SY=atoi(argv[2]); }
+    printf("cmm_field ABI %d   cells %dx%dx%d blocks   face rule %s\n",
+           cmm_fld_abi(), SX,SY,SZ, FACE_RULE==0?"MEAN":FACE_RULE==1?"MAX":"BLEND");
+    printf("\nFLAT OPEN AIR, nothing between listener and source. Want 0.00 at every ground height:\n");
+    printf("  ground top y | worst excess over d=6..48 |  of which wall\n");
+    float worstAll=0;
+    for(GY=18; GY<=25; GY++){
+        float wall=0, e=open_air_worst(&wall);
+        printf("      %2d       |        %7.2f dB        |    %6.2f dB %s\n",
+               GY, e, wall, e>1.0f?"   <-- WRONG":"");
+        if(e>worstAll) worstAll=e;
+    }
+    printf("\nworst across all ground heights: %.2f dB  => %s\n",
+           worstAll, worstAll<=1.0f ? "PASS" : "FAIL");
+
+    printf("\nINSIDE A STOREY (floor + 3 headroom + ceiling), clear line of sight. Want 0.00:\n");
+    printf("  floor top y  | worst excess over d=6..36 |  of which wall\n");
+    float worstRoom=0;
+    for(int fy=18; fy<=25; fy++){
+        float wall=0, ee=storey_worst(fy,&wall);
+        printf("      %2d       |        %7.2f dB        |    %6.2f dB %s\n",
+               fy, ee, wall, ee>1.0f?"   <-- WRONG":"");
+        if(ee>worstRoom) worstRoom=ee;
+    }
+    printf("\nworst indoors: %.2f dB  => %s\n", worstRoom, worstRoom<=1.0f?"PASS":"FAIL");
+    return (worstAll<=1.0f && worstRoom<=1.0f) ? 0 : 1;
 }

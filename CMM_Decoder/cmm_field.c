@@ -17,7 +17,31 @@ static long long now_us(void) { return (long long)clock() * (1000000LL / CLOCKS_
 #define UNREACHED  0x7fffffff
 
 struct cmm_fld {
-    int nx, ny, nz, step;
+    int nx, ny, nz;
+    /* CELLS ARE NOT CUBES (v3). They are stepX x stepY x stepZ BLOCKS, and stepY is meant to be
+     * smaller than the other two -- 1, in practice. Buildings are not isotropic: a wall spans a
+     * cell's full height, so a coarse cell represents it perfectly, but a FLOOR is one block thick
+     * with a storey of air above it, and a 3-block-tall cell cannot represent that at all. Worse
+     * than reporting "one third solid" for the layer you stand in: a source standing on a floor
+     * lands in a cell whose Y MIDDLE PLANE IS THE FLOOR, so reaching it from above is charged as
+     * going through the floor.
+     *
+     * Measured before the fix, in FLAT OPEN AIR with nothing between listener and source. The only
+     * variable is where the ground's top block fell relative to the cell grid:
+     *
+     *     ground top y=20  ->   0.00 dB excess
+     *     ground top y=21  ->   1.09 dB
+     *     ground top y=22  ->  29.42 dB       <-- open air, 29 dB down
+     *     ground top y=23  ->   0.00 dB
+     *
+     * The same for every face rule (MAX gave 26.67), so it was never the face rule, the wall curve
+     * or the detour cost. It was the cell being taller than the thing it had to represent. An
+     * earlier probe read 0.00 across the board because it happened to pick an aligned ground
+     * height; real terrain aligns to nothing.
+     *
+     * One-block-tall cells cost NOTHING in geometry reads -- those are proportional to the BLOCK
+     * volume, which is unchanged -- and triple only the flood, which was 7 ms. */
+    int stepX, stepY, stepZ;
     long long n;
     int ox, oy, oz;                 /* world CELL coords of the window's minimum corner */
 
@@ -96,13 +120,18 @@ static inline float t_db(float t) {
     return d > (float)MAX_Q / Q_PER_DB ? (float)MAX_Q / Q_PER_DB : d;
 }
 
+/* Block coordinate -> cell index on one axis. Floor division, because block -1 belongs to cell -1
+ * and C's / truncates toward zero. */
+static inline int b2c(int b, int s) { return (b >= 0 ? b : b - s + 1) / s; }
+
 int cmm_fld_abi(void) { return CMM_FLD_ABI; }
 
-cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
-    if (nx <= 0 || ny <= 0 || nz <= 0 || step < 1) return NULL;
+cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ) {
+    if (nx <= 0 || ny <= 0 || nz <= 0 || stepX < 1 || stepY < 1 || stepZ < 1) return NULL;
     cmm_fld *f = (cmm_fld *)calloc(1, sizeof(cmm_fld));
     if (!f) return NULL;
-    f->nx = nx; f->ny = ny; f->nz = nz; f->step = step;
+    f->nx = nx; f->ny = ny; f->nz = nz;
+    f->stepX = stepX; f->stepY = stepY; f->stepZ = stepZ;
     f->n = (long long)nx * ny * nz;
     f->dbPerBlock = 0.35f;                     /* what a block of DETOUR costs */
     f->maxDb = 60.0f;
@@ -133,13 +162,18 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
          * a one-off, but an O(n log n) sort of a quarter-million entries at scene creation is a
          * visible hitch and a counting sort is three passes of arithmetic. */
         int mx = nx / 2, my = ny / 2, mz = nz / 2;
-        int maxd2 = mx * mx + my * my + mz * mz + 1;
+        /* Nearest-first has to mean nearest in BLOCKS, not in cells. With a short stepY a cell one
+         * step up is much closer than one step sideways, and ordering by cell index would read a
+         * tall thin column before the ground the player is standing on. */
+        int rx = mx * stepX, ry = my * stepY, rz = mz * stepZ;
+        int maxd2 = rx * rx + ry * ry + rz * rz + 1;
         int *cnt = (int *)calloc(maxd2 + 1, sizeof(int));
         if (!cnt) { cmm_fld_destroy(f); return NULL; }
         for (int y = -my; y < ny - my; y++)
         for (int z = -mz; z < nz - mz; z++)
         for (int x = -mx; x < nx - mx; x++) {
-            int d2 = x * x + y * y + z * z; if (d2 > maxd2) d2 = maxd2;
+            int bxx = x * stepX, byy = y * stepY, bzz = z * stepZ;
+            int d2 = bxx * bxx + byy * byy + bzz * bzz; if (d2 > maxd2) d2 = maxd2;
             cnt[d2]++;
         }
         for (int i = 1; i <= maxd2; i++) cnt[i] += cnt[i - 1];
@@ -148,7 +182,8 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
         for (int y = -my; y < ny - my; y++)
         for (int z = -mz; z < nz - mz; z++)
         for (int x = -mx; x < nx - mx; x++) {
-            int d2 = x * x + y * y + z * z; if (d2 > maxd2) d2 = maxd2;
+            int bxx = x * stepX, byy = y * stepY, bzz = z * stepZ;
+            int d2 = bxx * bxx + byy * byy + bzz * bzz; if (d2 > maxd2) d2 = maxd2;
             long long slot = cnt[d2]++;
             f->order[slot * 3 + 0] = (short)x;
             f->order[slot * 3 + 1] = (short)y;
@@ -179,9 +214,7 @@ void cmm_fld_set_tuning(cmm_fld *f, float dbPerBlock, float maxDb) {
 
 int cmm_fld_recentre(cmm_fld *f, int bx, int by, int bz) {
     if (!f) return 0;
-    int cx = (bx >= 0 ? bx : bx - f->step + 1) / f->step;
-    int cy = (by >= 0 ? by : by - f->step + 1) / f->step;
-    int cz = (bz >= 0 ? bz : bz - f->step + 1) / f->step;
+    int cx = b2c(bx, f->stepX), cy = b2c(by, f->stepY), cz = b2c(bz, f->stepZ);
     int nox = cx - f->nx / 2, noy = cy - f->ny / 2, noz = cz - f->nz / 2;
     if (nox == f->ox && noy == f->oy && noz == f->oz) return (int)f->pending;
 
@@ -245,14 +278,13 @@ void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
 void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
     if (!f) return;
     if (radiusBlocks < 0) radiusBlocks = 0;
-    int lo = radiusBlocks + f->step, x0 = bx - lo, x1 = bx + lo;
-    int y0 = by - lo, y1 = by + lo, z0 = bz - lo, z1 = bz + lo;
-    for (int by2 = y0; by2 <= y1; by2 += f->step)
-    for (int bz2 = z0; bz2 <= z1; bz2 += f->step)
-    for (int bx2 = x0; bx2 <= x1; bx2 += f->step) {
-        int cx = (bx2 >= 0 ? bx2 : bx2 - f->step + 1) / f->step;
-        int cy = (by2 >= 0 ? by2 : by2 - f->step + 1) / f->step;
-        int cz = (bz2 >= 0 ? bz2 : bz2 - f->step + 1) / f->step;
+    int x0 = bx - (radiusBlocks + f->stepX), x1 = bx + (radiusBlocks + f->stepX);
+    int y0 = by - (radiusBlocks + f->stepY), y1 = by + (radiusBlocks + f->stepY);
+    int z0 = bz - (radiusBlocks + f->stepZ), z1 = bz + (radiusBlocks + f->stepZ);
+    for (int by2 = y0; by2 <= y1; by2 += f->stepY)
+    for (int bz2 = z0; bz2 <= z1; bz2 += f->stepZ)
+    for (int bx2 = x0; bx2 <= x1; bx2 += f->stepX) {
+        int cx = b2c(bx2, f->stepX), cy = b2c(by2, f->stepY), cz = b2c(bz2, f->stepZ);
         if (!in_win(f, cx, cy, cz)) continue;
         long long i = widx(f, cx, cy, cz);
         if (f->have[i]) { f->have[i] = 0; f->pending++; }
@@ -294,20 +326,28 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
 
     f->nlx = lx; f->nly = ly; f->nlz = lz;
     int bx = (int)floorf(lx), by = (int)floorf(ly), bz = (int)floorf(lz);
-    int scx = (bx >= 0 ? bx : bx - f->step + 1) / f->step;
-    int scy = (by >= 0 ? by : by - f->step + 1) / f->step;
-    int scz = (bz >= 0 ? bz : bz - f->step + 1) / f->step;
+    int scx = b2c(bx, f->stepX), scy = b2c(by, f->stepY), scz = b2c(bz, f->stepZ);
     if (!in_win(f, scx, scy, scz)) { f->reached = 0; return 0; }
 
     long long si = widx(f, scx, scy, scz);
     f->nxt[si] = 0; f->nxtMat[si] = 0; bq_set(f, si, 0);
 
-    /* A step between cell centres is `step` blocks of detour; a diagonal is longer, and charging
-     * the true length is what stops the flood from preferring staircase routes through corners. */
-    const float stepDb  = f->dbPerBlock * (float)f->step;
-    const int   qStep   = (int)(stepDb * Q_PER_DB + 0.5f);
-    const int   qStep2  = (int)(stepDb * 1.41421356f * Q_PER_DB + 0.5f);
-    const int   qStep3  = (int)(stepDb * 1.73205081f * Q_PER_DB + 0.5f);
+    /* THE COST OF EACH OF THE 26 MOVES, in quarter-dB, precomputed. With cubic cells there were
+     * only three distinct lengths (1, sqrt2, sqrt3 steps). With stepY != stepX the length depends
+     * on WHICH axes a move uses, so going up costs stepY blocks of detour where going sideways
+     * costs stepX. Charging the true Euclidean length is what stops the flood preferring staircase
+     * routes through corners -- and with short cells, getting it wrong would make vertical travel
+     * look nearly free and send every route climbing. */
+    int qmove[3][3][3];
+    for (int ax = -1; ax <= 1; ax++)
+    for (int ay = -1; ay <= 1; ay++)
+    for (int az = -1; az <= 1; az++) {
+        float ddx = (float)(ax * f->stepX);
+        float ddy = (float)(ay * f->stepY);
+        float ddz = (float)(az * f->stepZ);
+        float len = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
+        qmove[ax + 1][ay + 1][az + 1] = (int)(len * f->dbPerBlock * Q_PER_DB + 0.5f);
+    }
     const int   maxQ    = (int)(f->maxDb * Q_PER_DB + 0.5f);
     long long reached = 0;
 
@@ -374,8 +414,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                           if (dz) { fl += FLZ[ni]; fn++; }
                           if (fn) mat += fl / fn; }
 
-                        int nd = (dx ? 1 : 0) + (dy ? 1 : 0) + (dz ? 1 : 0);
-                        int q = c + (nd == 1 ? qStep : nd == 2 ? qStep2 : qStep3)
+                        int q = c + qmove[dx + 1][dy + 1][dz + 1]
                                   + (int)(mat * Q_PER_DB + 0.5f);
                         if (q > maxQ || q > MAX_Q) continue;
                         if (CUR[ni] <= q) continue;
@@ -411,8 +450,9 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
     /* Cell CENTRES sit half a cell in, so the sample point maps to a fractional cell index and the
      * eight surrounding centres are blended. This is what makes a source moving through the world
      * produce a curve instead of a staircase, and it costs eight lookups. */
-    float s = (float)f->step;
-    float gx = x / s - 0.5f, gy = y / s - 0.5f, gz = z / s - 0.5f;
+    float gx = x / (float)f->stepX - 0.5f;
+    float gy = y / (float)f->stepY - 0.5f;
+    float gz = z / (float)f->stepZ - 0.5f;
     int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
     float tx = gx - ix, ty = gy - iy, tz = gz - iz;
 
@@ -475,8 +515,9 @@ float cmm_fld_sample_db_blended(cmm_fld *f, float x, float y, float z, float mix
  * route going the long way round. Same interpolation as the total, over the same cells. */
 CMM_FLD_API float cmm_fld_sample_mat_db(cmm_fld *f, float x, float y, float z) {
     if (!f) return 0.0f;
-    float s = (float)f->step;
-    float gx = x / s - 0.5f, gy = y / s - 0.5f, gz = z / s - 0.5f;
+    float gx = x / (float)f->stepX - 0.5f;
+    float gy = y / (float)f->stepY - 0.5f;
+    float gz = z / (float)f->stepZ - 0.5f;
     int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
     float tx = gx - ix, ty = gy - iy, tz = gz - iz;
     float acc = 0.0f, wsum = 0.0f;

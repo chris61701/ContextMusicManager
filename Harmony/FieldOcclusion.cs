@@ -36,11 +36,28 @@ namespace CMM
     // moment earlier, which is a value the flood would have been entitled to read anyway.
     internal static class FieldOcclusion
     {
-        // Blocks per cell. The whole affordability of "rebuild it, don't patch it" rests on this:
-        // 3 blocks is ~34k cells over a 128-block span where 1 block would be 2M. Measured, a
-        // flood of that size is 7.3 ms. The cost is that an opening straddling a cell boundary
-        // reads part-open — pinned by a test in test_field.c at about 2.7 dB.
-        private const int Step = 3;
+        // Blocks per cell — WIDE AND SHORT, not cubic. The affordability of "rebuild it, don't
+        // patch it" rests on being coarse; the correctness rests on not being coarse VERTICALLY.
+        //
+        // Buildings are not isotropic. A wall spans a cell's full height, so a 3-block cell
+        // represents it exactly. A FLOOR is one block thick with a storey of air above it, and a
+        // 3-block-tall cell cannot represent that at all: a source standing on a floor landed in a
+        // cell whose Y middle plane WAS the floor, so reaching it from above was charged as going
+        // through the floor. Measured in FLAT OPEN AIR with nothing in the way, varying only where
+        // the ground's top block fell relative to the cell grid:
+        //
+        //     ground top y=20  ->   0.00 dB        y=22  ->  29.69 dB
+        //     ground top y=21  ->   1.36 dB        y=23  ->   0.00 dB
+        //
+        // Three ground heights in every eight were 29 dB down outdoors, which is "the music is all
+        // quiet and the occlusion is still broken" exactly. The offline probe missed it for weeks
+        // by testing a single ground height that happened to align.
+        //
+        // Short cells cost NOTHING in geometry reads — those track the block volume, which is
+        // unchanged at ~930k for a full window — and multiply only the flood, 7 ms to ~21 ms, on
+        // the scheduler thread at 3.3 Hz. test_field.c now sweeps every alignment.
+        private const int StepXZ = 3;
+        private const int StepY  = 1;
         private const int BelowBlocks = 24, AboveBlocks = 24;
 
         private static IntPtr _f = IntPtr.Zero;
@@ -59,7 +76,7 @@ namespace CMM
         {
             if (_f == IntPtr.Zero) return "not built";
             long pend = CellsPending, tot = CellsTotal;
-            return $"cells {tot} ({Step}-block, {_nx}x{_ny}x{_nz}), "
+            return $"cells {tot} ({StepXZ}x{StepY}x{StepXZ}-block, {_nx}x{_ny}x{_nz}), "
                  + (pend > 0 ? $"reading {100.0 * (tot - pend) / Math.Max(tot, 1):0}%, " : "read complete, ")
                  + $"reached {Reached}, flood {LastSolveUs / 1000.0:0.0} ms, {Discarded} discarded";
         }
@@ -73,13 +90,14 @@ namespace CMM
             Reset();
             _range = range;
             // Odd counts so the listener's cell sits at the centre of the window.
-            _nx = _nz = (range + Step - 1) / Step * 2 + 1;
-            _ny = (BelowBlocks + AboveBlocks) / Step + 1;
-            _f = NativeField.cmm_fld_create(_nx, _ny, _nz, Step);
+            _nx = _nz = (range + StepXZ - 1) / StepXZ * 2 + 1;
+            _ny = (BelowBlocks + AboveBlocks) / StepY + 1;
+            _f = NativeField.cmm_fld_create(_nx, _ny, _nz, StepXZ, StepY, StepXZ);
             if (_f == IntPtr.Zero) { Log.Warning("[CMM] field occlusion: create failed."); return false; }
             NativeField.cmm_fld_set_tuning(_f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
-            CMMConfig.D($"[CMM] field occlusion: {_nx}x{_ny}x{_nz} cells of {Step} blocks "
-                      + $"(+/-{range} blocks), {(long)_nx * _ny * _nz} total");
+            CMMConfig.D($"[CMM] field occlusion: {_nx}x{_ny}x{_nz} cells of "
+                      + $"{StepXZ}x{StepY}x{StepXZ} blocks (+/-{range} blocks), "
+                      + $"{(long)_nx * _ny * _nz} total");
             return true;
         }
 
@@ -116,10 +134,10 @@ namespace CMM
             catch (Exception e) { CMMConfig.D($"[CMM] field read failed: {e.Message}"); }
         }
 
-        // One coarse cell, from the blocks underneath it. Reads Step^3 blocks — 27 at Step 3 — and
-        // derives four numbers: how much gets through each of its three negative faces, and how
-        // solid its interior is (which is what stops a route cutting through the middle of a wall
-        // thicker than one cell).
+        // One coarse cell, from the blocks underneath it. Reads StepXZ*StepY*StepXZ blocks — 9 at
+        // 3x1x3 — and derives six numbers: how much gets through each of its three negative faces,
+        // and what stands across its interior on each axis (which is what stops a route cutting
+        // through the middle of a wall thicker than one cell).
         private static readonly float[] _cellScratch = new float[6];
         private static void FillCell(World world, int cx, int cy, int cz)
         {
@@ -133,15 +151,19 @@ namespace CMM
         // reader stores rather than a second copy of the arithmetic that could drift from it.
         private static void CellNumbers(World world, int cx, int cy, int cz, float[] o)
         {
-            int bx = cx * Step, by = cy * Step, bz = cz * Step;
-            int h = Step / 2;
+            int bx = cx * StepXZ, by = cy * StepY, bz = cz * StepXZ;
+            int hx = StepXZ / 2, hy = StepY / 2, hz = StepXZ / 2;
             float sumX = 0f, maxX = 0f, sumY = 0f, maxY = 0f, sumZ = 0f, maxZ = 0f;
             float mSumX = 0f, mMaxX = 0f, mSumY = 0f, mMaxY = 0f, mSumZ = 0f, mMaxZ = 0f;
-            int face = Step * Step;
+            // Each plane has its OWN sub-block count now that the cell is not a cube: the X and Z
+            // faces are StepY x StepXZ, the Y face is StepXZ x StepXZ. Dividing all six by one
+            // number was correct only while the cell was cubic.
+            float nFaceXZ = StepY * StepXZ;      // the -X and -Z faces, and their middle planes
+            float nFaceY  = StepXZ * StepXZ;     // the -Y face, and its middle plane
 
-            for (int dy = 0; dy < Step; dy++)
-                for (int dz = 0; dz < Step; dz++)
-                    for (int dx = 0; dx < Step; dx++)
+            for (int dy = 0; dy < StepY; dy++)
+                for (int dz = 0; dz < StepXZ; dz++)
+                    for (int dx = 0; dx < StepXZ; dx++)
                     {
                         int x = bx + dx, y = by + dy, z = bz + dz;
                         float t = Transmission(world, x, y, z);
@@ -152,35 +174,47 @@ namespace CMM
                         if (dy == 0) { sumY += t; if (t > maxY) maxY = t; }
                         if (dz == 0) { sumZ += t; if (t > maxZ) maxZ = t; }
                         // ...and the MIDDLE plane perpendicular to each axis: what stands across a
-                        // route passing through, which is what catches a wall sitting inside a cell
-                        // rather than on its edge. Directional, because a floor blocks vertical
-                        // travel through a cell and not horizontal — charging it for both made the
-                        // open air outdoors read 3.2 dB down for no reason a player could see.
-                        if (dx == h) { mSumX += t; if (t > mMaxX) mMaxX = t; }
-                        if (dy == h) { mSumY += t; if (t > mMaxY) mMaxY = t; }
-                        if (dz == h) { mSumZ += t; if (t > mMaxZ) mMaxZ = t; }
+                        // route passing through, which catches a wall sitting inside a cell rather
+                        // than on its edge. Directional, because a floor blocks vertical travel
+                        // through a cell and not horizontal.
+                        if (dx == hx) { mSumX += t; if (t > mMaxX) mMaxX = t; }
+                        if (dy == hy) { mSumY += t; if (t > mMaxY) mMaxY = t; }
+                        if (dz == hz) { mSumZ += t; if (t > mMaxZ) mMaxZ = t; }
                     }
 
-            o[0] = Face(sumX / face, maxX);   o[1] = Face(sumY / face, maxY);   o[2] = Face(sumZ / face, maxZ);
-            o[3] = Face(mSumX / face, mMaxX); o[4] = Face(mSumY / face, mMaxY); o[5] = Face(mSumZ / face, mMaxZ);
+            o[0] = Face(sumX / nFaceXZ, maxX);
+            o[1] = Face(sumY / nFaceY,  maxY);
+            o[2] = Face(sumZ / nFaceXZ, maxZ);
+            // A MIDDLE PLANE ONLY EXISTS IF THE CELL IS AT LEAST 2 BLOCKS DEEP ON THAT AXIS. At
+            // depth 1 the cell IS its own face — there is nothing between the two faces to catch —
+            // and charging one anyway would double the cost of every move along that axis. With
+            // StepY = 1 that is the Y axis, so vertical travel is charged by the faces alone.
+            o[3] = StepXZ >= 2 ? Face(mSumX / nFaceXZ, mMaxX) : 1f;
+            o[4] = StepY  >= 2 ? Face(mSumY / nFaceY,  mMaxY) : 1f;
+            o[5] = StepXZ >= 2 ? Face(mSumZ / nFaceXZ, mMaxZ) : 1f;
         }
 
-        // HOW MUCH GETS THROUGH A CELL FACE. The geometric mean of the area fraction and the best
-        // single crossing — decided by measurement, not by argument (test_field.c):
+        // HOW MUCH GETS THROUGH A CELL FACE: the AREA FRACTION. Decided by measurement, not by
+        // argument (test_field.c), and re-decided when the cell stopped being a cube:
         //
-        //   MEAN   grid-dependent: the same doorway costs 4.2 dB more when it straddles a boundary
-        //   MAX    a single 1-block hole reads as 3.0 dB, i.e. very nearly a doorway — a wall
-        //          becomes a rumour, which is the failure mode that matters most here
-        //   BLEND  straddle penalty 2.7 dB, pinhole 6.1 dB: passes both
+        //                doorway   1-block hole   gap    straddle penalty
+        //     MEAN         1.41        2.91      +1.50        none
+        //     MAX          0.30        0.30       0.00        none   <- a wall becomes a rumour
+        //     BLEND        0.91        1.66      +0.75        none
         //
-        // The argument for MAX is real — a route crosses a face at one point, so the best crossing
-        // is the physical answer for a shortest-path model — but it is the argument that loses to
-        // the pinhole measurement, and this project has paid enough for arguments that beat
-        // measurements.
+        // This was BLEND while cells were cubic, because MEAN then cost 4.2 dB on a doorway that
+        // straddled a cell boundary. That penalty came from a TALL cell splitting an opening
+        // vertically, and a one-block-tall cell cannot do it — so the only argument against MEAN
+        // went away with the shape, and MEAN now wins outright on the case that decides this.
+        //
+        // What the shape change COST, recorded because a fix's price is easier to forget than its
+        // benefit: a face is 1x3 sub-blocks instead of 3x3, so a single-block hole is a third of
+        // it rather than a ninth, and a pinhole can no longer be separated from a doorway as
+        // sharply. The ordering holds and a sealed wall is still 41 dB. `best` stays in the
+        // signature because this rule is chosen by measurement and has now changed twice.
         private static float Face(float mean, float best)
         {
-            float v = mean * best;
-            return v <= 0f ? 0f : Mathf.Sqrt(v);
+            return mean;
         }
 
         // One block's transmission as a linear energy fraction. CellLoss is the shared block reader
@@ -329,19 +363,20 @@ namespace CMM
               .Append("   detour ").Append(per.ToString("0.00")).Append(" dB/blk")
               .Append("\n   dist  routed   ideal   excess    wall  |  -X   -Y   -Z   midX midY midZ  (dB loss)");
 
-            int steps = Mathf.Clamp(Mathf.CeilToInt(total / Step * 2f), 1, 96);
+            int steps = Mathf.Clamp(Mathf.CeilToInt(total / StepY * 2f), 1, 160);
             var seen = new Vector3i(int.MinValue, int.MinValue, int.MinValue);
             for (int i = 0; i <= steps; i++)
             {
                 Vector3 sp = Vector3.Lerp(ear, spk, i / (float)steps);
-                var c = new Vector3i(Mathf.FloorToInt(sp.x / Step), Mathf.FloorToInt(sp.y / Step),
-                                     Mathf.FloorToInt(sp.z / Step));
+                var c = new Vector3i(Mathf.FloorToInt(sp.x / StepXZ), Mathf.FloorToInt(sp.y / StepY),
+                                     Mathf.FloorToInt(sp.z / StepXZ));
                 if (c == seen) continue;
                 seen = c;
 
                 // Sample at the CELL CENTRE, not at the ray point: the ray point interpolates
                 // across up to eight cells and would blur the very step being looked for.
-                Vector3 mid = new Vector3((c.x + 0.5f) * Step, (c.y + 0.5f) * Step, (c.z + 0.5f) * Step);
+                Vector3 mid = new Vector3((c.x + 0.5f) * StepXZ, (c.y + 0.5f) * StepY,
+                                          (c.z + 0.5f) * StepXZ);
                 float d = Vector3.Distance(ear, mid);
                 float ex = NativeField.cmm_fld_sample_db(_f, mid.x, mid.y, mid.z);
                 float mat = NativeField.cmm_fld_sample_mat_db(_f, mid.x, mid.y, mid.z);
