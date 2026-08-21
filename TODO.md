@@ -94,6 +94,43 @@ verification — emitters are excluded there anyway.
   (always resumes its track no matter how long you've been away). Today this requires a
   large per-context `stale` value in `contexts.xml`; add a first-class toggle.
 
+## Music library
+
+- [ ] **Scan registered / add-on music directories at startup** *(requested 2026-08-20 by a
+  soundtrack author; called "the single feature I'd request")*. Today a soundtrack has to be
+  copied INTO CMM's own music folder, so every soundtrack update means manually overwriting
+  files inside CMM. That makes CMM and the soundtrack one blob on disk, which is exactly what
+  a mod manager cannot cope with.
+  - **Why it matters beyond convenience:** under MO2/Wabbajack, CMM and a soundtrack would stay
+    separate mods with independent Nexus pages, versions, downloads and file provenance. A
+    soundtrack update becomes a normal mod update instead of a hand-merge, and uninstalling
+    either one leaves the other intact.
+  - **Shape:** other mods declare a music root (a small XML in their own Mods folder, or a
+    convention like `Mods/<anything>/CMMMusic/`), and CMM scans every registered root at
+    startup, unioning them into the same context tree it builds from `MusicPath` today.
+  - **Things it has to get right:** two roots supplying the same context folder must MERGE, not
+    win; the loudness store is hash-keyed so measurements survive a track moving between roots;
+    the file watcher must cover every root (and J: is exFAT, so each needs the sloppy-mtime
+    listing fallback); and a root that disappears must degrade to "those tracks are gone", not
+    to an error.
+
+- [ ] **Track cooldown / anti-repeat over the whole pool** *(requested 2026-08-20, same source)*.
+  With a large library, hearing the same track twice in a short window is far more noticeable
+  than any amount of variety is pleasing. The ask: every eligible song plays once before
+  anything reshuffles, so a big soundtrack FEELS as big as it is.
+  - **What exists today is weaker than the name suggests:** `RandomNoRepeat` (the default) only
+    excludes the track that just played -- one track of memory. Over a 200-track folder that
+    still lets a track return on the very next pick with probability ~1/199 each time, and the
+    birthday effect makes an early repeat likely within a listening session.
+  - **Shape:** a per-context bag (shuffled permutation) that refills only when exhausted, or a
+    recency window of the last N picks sized as a fraction of the pool. The bag is the stronger
+    guarantee and matches the request literally.
+  - **Things it has to get right:** interaction with `stale`/resume (a resumed track must not
+    consume a fresh bag slot), with ban/favourite flags (favourites want to appear MORE often,
+    which a strict bag forbids -- probably weighted refill rather than duplicate entries), with
+    a folder whose contents change mid-session, and with persistence (does the bag survive a
+    relog? Probably not, but the answer should be deliberate).
+
 ## Keybinds / shortcuts
 
 - [x] **Shortcut keys** — built (Alt+Delete ban / Alt+Insert favourite / Alt+Home
