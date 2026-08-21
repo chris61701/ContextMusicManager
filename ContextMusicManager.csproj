@@ -34,8 +34,10 @@
        zip name encodes a version. Add a version by copying a block below. -->
   <PropertyGroup>
     <GameVersion Condition="'$(GameVersion)' == ''">3.1.0 b14</GameVersion>
-    <!-- Debug builds rewrite the DEPLOYED settings.xml MusicPath to this; override with
-         -p:DebugMusicPath=... . Release ships the committed value ("Music") untouched. -->
+    <!-- Debug builds rewrite MusicPath in the deployed build/settings.dev.xml (the dev
+         override file at the front of CMM's settings chain) to this; override with
+         -p:DebugMusicPath=... . Release ships no settings file at all -- CMM generates one
+         on first run with the built-in default ("Music"). -->
     <DebugMusicPath Condition="'$(DebugMusicPath)' == ''">J:\7D2D Custom Music</DebugMusicPath>
     <!-- A plain Debug build (including the VS Build button, which never passes a target)
          fans out to EVERY game install via the DebugFanout target below, so all four
