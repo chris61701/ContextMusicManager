@@ -283,6 +283,14 @@ namespace CMM
             try { _cfgRadioTime    = StampOf(_cfgRadioPath);    } catch { }
         }
 
+        // Same, for CMMSettingsFile's sibling that creates / tops up contexts.xml.
+        // Kept separate because a contexts change is a much heavier reload than a
+        // settings one, so it is worth being precise about which file we just wrote.
+        internal static void NoteContextsWritten()
+        {
+            try { _cfgContextsTime = StampOf(_cfgContextsPath); } catch { }
+        }
+
         internal static void ConfigWatchTick()
         {
             if (_functionallyDormant) return;   // A/B dormant arm

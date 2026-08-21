@@ -295,6 +295,10 @@ namespace CMM
             if (!string.IsNullOrEmpty(name)) _combatMarked.Add(name);
         }
         public static void ClearCombatMarks() => _combatMarked.Clear();
+        // Only the EXPLICIT marks. The writer needs these and not the name-convention
+        // matches, or it would stamp combat="true" onto every Combat_* context and the
+        // generated file would be noisier than the one it replaces.
+        internal static bool IsExplicitCombatContext(string name) => _combatMarked.Contains(name);
 
         // Walks the fallback chain to find the nearest playable context.
         // Returns "Vanilla" when the chain terminates at a Vanilla fallback.

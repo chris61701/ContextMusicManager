@@ -374,6 +374,10 @@ FodyWeavers.xsd
 # no-deploy / compile-check / per-version build targets. All regenerable — glob
 # the whole family so a new temp*Config/ dir can never be committed by accident.
 /temp/
+# Throwaway build outputs from -p:OutputPath=temp... compile checks. The two rules
+# below only ever covered the old temp<x>Config naming; a plain -p:OutputPath=temp_cx/
+# slipped a whole deployed payload into a commit, so cover the directory itself.
+temp*/
 temp*Config/
 temp*ModInfo.xml
 UpgradeLog.htm

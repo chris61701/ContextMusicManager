@@ -39,6 +39,9 @@ namespace CMM
                                      args.Contains("--accept"));
 
             Console.WriteLine();
+            _fail += ContextTests.Run(repo);
+
+            Console.WriteLine();
             _fail += XmlHealth.Run(repo);
 
             Console.WriteLine();

@@ -33,10 +33,14 @@
     <Compile Include="FileTests.cs" />
     <Compile Include="SchemaGuard.cs" />
     <Compile Include="XmlHealth.cs" />
+    <Compile Include="ContextTests.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsSchema.cs" Link="linked\CMMSettingsSchema.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsIO.cs"     Link="linked\CMMSettingsIO.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsWriter.cs" Link="linked\CMMSettingsWriter.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsFile.cs"   Link="linked\CMMSettingsFile.cs" />
+    <Compile Include="..\..\Harmony\DataStructures.cs"     Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\CMMContextsSchema.cs"  Link="linked\CMMContextsSchema.cs" />
+    <Compile Include="..\..\Harmony\CMMContextsFile.cs"    Link="linked\CMMContextsFile.cs" />
   </ItemGroup>
 
 </Project>

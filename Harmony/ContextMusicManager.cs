@@ -119,7 +119,15 @@ namespace CMM
             // Config/*.xml -- see CMMSettingsFile for the backfill/migrate rules.
             CMMSettingsFile.EnsureAll(modPath);
             CMMConfigLoader.LoadSettings(modPath);
+            // Same deal as the settings files: create contexts.xml if it is not there and
+            // add any context introduced since this file was stamped, BEFORE reading it.
+            // Runs after InitContexts so the built-in table exists to render from.
+            CMMContextsFile.Ensure(modPath, contexts, IsExplicitCombatContext);
             CMMConfigLoader.LoadContexts(modPath);
+            // One folder per context under MusicPath, with a placeholder naming it.
+            // Was an MSBuild task that had been silently creating nothing since the
+            // path->source rename; see CMMMusicScaffold. Strictly additive.
+            CMMMusicScaffold.EnsureFolders(modPath);
             LoudnessStore.Load(modPath);
             PersonalRadio.Load(modPath);   // persisted dial state (Cache/radio.xml)
             ScriptHost.Load(modPath);   // external Lua decision script (Config/context.lua)

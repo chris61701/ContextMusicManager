@@ -136,7 +136,7 @@
          They are not in the repo either, so these Excludes match nothing today. They stay
          as a guard: dropping a settings.xml into Config/ while debugging is an easy thing
          to do, and without them the wildcard would package it silently. -->
-    <Content Include="Config\**\*" Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml">
+    <Content Include="Config\**\*" Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml;Config\contexts.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- Embed the canonical default context.lua so a missing or corrupt on-disk copy
@@ -169,6 +169,9 @@
     <Compile Include="Harmony\CMMSettingsIO.cs" />
     <Compile Include="Harmony\CMMSettingsWriter.cs" />
     <Compile Include="Harmony\CMMSettingsFile.cs" />
+    <Compile Include="Harmony\CMMContextsSchema.cs" />
+    <Compile Include="Harmony\CMMContextsFile.cs" />
+    <Compile Include="Harmony\CMMMusicScaffold.cs" />
     <Compile Include="Harmony\CmmGuard.cs" />
     <Compile Include="Harmony\NativeAcoustics.cs" />
     <Compile Include="Harmony\AcousticScene.cs" />
@@ -340,46 +343,9 @@
   <!-- Inline task: reads name+path from the SAME Context node (just like the runtime
        loader) so the placeholder filename can be the context name. A plain XmlPeek can
        only pull one attribute at a time and gives no way to pair a path with its name. -->
-  <UsingTask TaskName="ScaffoldMusicFolders" TaskFactory="RoslynCodeTaskFactory"
-             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
-    <ParameterGroup>
-      <ContextsXml ParameterType="System.String" Required="true" />
-      <MusicRoot   ParameterType="System.String" Required="true" />
-    </ParameterGroup>
-    <Task>
-      <Using Namespace="System" />
-      <Using Namespace="System.IO" />
-      <Using Namespace="System.Xml" />
-      <Code Type="Fragment" Language="cs"><![CDATA[
-        const string note = "Placeholder so mod managers don't delete this empty folder. Drop your music files here (you can delete this file once you do).";
-        var doc = new XmlDocument();
-        doc.Load(ContextsXml);
-        Directory.CreateDirectory(MusicRoot);
-        foreach (XmlNode node in doc.DocumentElement.ChildNodes)
-        {
-            if (node.NodeType != XmlNodeType.Element || node.Name != "Context") continue;
-            var el = (XmlElement)node;
-            string name = el.GetAttribute("name");
-            string path = el.GetAttribute("path");
-            // Skip sentinels (empty path) and any unnamed node — same as the loader.
-            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(path)) continue;
-            string dir = Path.Combine(MusicRoot, path.Replace('/', Path.DirectorySeparatorChar)
-                                                     .Replace('\\', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(dir);
-            // Placeholder named after the context that maps here (e.g. .Combat_Low),
-            // so a glance at the folder tells you which context it feeds. The audio
-            // scanner ignores non-audio extensions, so the dotfile is inert.
-            File.WriteAllText(Path.Combine(dir, "." + name), note);
-        }
-        Log.LogMessage(MessageImportance.High,
-            "[CMM] Ensured Music context folders (with .<context> placeholders) under " + MusicRoot);
-      ]]></Code>
-    </Task>
-  </UsingTask>
 
   <Target Name="CreateMusicContextFolders" AfterTargets="Build"
           Condition=" '$(Configuration)' == 'Release' And Exists('Config\contexts.xml') ">
-    <ScaffoldMusicFolders ContextsXml="Config\contexts.xml" MusicRoot="$(OutputPath)Music" />
   </Target>
 
   <!-- Fail fast on a bad/unknown -p:GameVersion before the compiler emits a wall of
@@ -409,7 +375,7 @@
          is worth it. -->
     <ItemGroup>
       <_DebugCfg Include="Config\**\*"
-                 Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml" />
+                 Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml;Config\contexts.xml" />
       <_DebugSnd Include="Sounds\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(_DebugCfg)"
