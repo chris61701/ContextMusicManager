@@ -651,6 +651,11 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
      * one, the position really is unreachable and maxDb is the honest reply. */
     float acc = 0.0f, wsum = 0.0f;
     int anyInWindow = 0;
+    /* How far above the cheapest surrounding cell a cell may be and still be treated as somewhere
+     * the sound comes from. Wide enough that a genuinely occluded neighbourhood all counts,
+     * narrow enough to exclude the inside of the wall a speaker is bolted to. */
+    const float WINDOW_DB = 12.0f;
+    int   wq[8]; float ww[8]; int nw = 0; int bestQ = 0x7fffffff;
     for (int dy = 0; dy <= 1; dy++)
     for (int dz = 0; dz <= 1; dz++)
     for (int dx = 0; dx <= 1; dx++) {
@@ -661,41 +666,44 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
         anyInWindow = 1;
         int v = fld[widx(f, cx, cy, cz)];
         if (v == UNREACHED) continue;
-        /* SUM ENERGY, NOT DECIBELS.
-         *
-         * Averaging the eight surrounding cells in dB says that an open cell at 0 dB and a cell
-         * inside a wall at 30 dB, half and half, is 15 dB. Physically it is about 3: the sound
-         * comes through the opening and barely notices the wall. Decibels are a logarithm, and
-         * averaging logarithms is averaging the wrong quantity -- the same mistake, in a different
-         * place, as summing two speakers' pan gains as amplitudes instead of powers.
-         *
-         * It shows up wherever a source sits NEXT TO geometry, which in practice is every speaker
-         * in the game, because they are mounted on walls. Measured: a speaker on a wall of an
-         * otherwise empty room read a flat 4.3-4.6 dB of occlusion from anywhere in the room, with
-         * clear line of sight and nothing between, and the number hardly moved as you walked up to
-         * it. Reported as "it sounds the same even if I'm 2 blocks away". At 1x1x1 cells the same
-         * scene reads 0.2-0.6 dB, which is the giveaway: it was never the geometry, it was the
-         * cells around it being blended the wrong way. */
-        acc += w * powf(10.0f, -((float)v / Q_PER_DB) * 0.1f);
-        wsum += w;
+        if (v < bestQ) bestQ = v;
+        wq[nw] = v; ww[nw] = w; nw++;
     }
-    /* NOTHING REACHABLE and NOTHING EVEN IN THE WINDOW are different answers.
+    /* AVERAGE THE FIELD, BUT ONLY OVER THE CELLS THE SOUND COULD PLAUSIBLY ARRIVE THROUGH.
      *
-     * An unreached cell inside the window means the geometry was read and no way through was
-     * found: maxDb is honest. A point entirely OUTSIDE the window means we never looked, and
-     * answering maxDb there declares a speaker silent on the strength of not having checked.
-     * Nothing occludes what has not been examined, so it reads clear and the mixer's distance
-     * falloff carries it alone.
+     * Two wrong answers were tried before this one, and they fail in opposite directions.
      *
-     * This is what makes it safe to spend window height on horizontal resolution: a speaker two
-     * storeys up now fades out of the field's opinion instead of being cut off by its edge. */
+     * Averaging all eight in DECIBELS treats a cell buried inside a wall as a real contributor:
+     * an open cell at 0 dB and a wall cell at 30 dB came out at 15, so a speaker MOUNTED ON A WALL
+     * -- which is every speaker in the game -- read a flat 4.5 dB from anywhere in the room with
+     * nothing between it and the listener.
+     *
+     * Summing them as ENERGY fixes that and breaks the opposite case: energy is dominated by its
+     * smallest term, so one cheap cell next to the source made the whole reading cheap no matter
+     * what stood in the way. Measured in game with the knobs turned up: material cost along the
+     * route 25.4 dB, published excess 2.6 dB. Walls stopped mattering, which is the bug the user
+     * was chasing.
+     *
+     * The mistake was treating an INTERPOLATION as a COMBINATION. Eight independent sound paths do
+     * combine in energy; eight samples of one scalar field do not -- interpolating a field is a
+     * weighted average of its value, and its value is a cost in dB.
+     *
+     * So: a weighted dB average, over the cells within WINDOW_DB of the best one. A cell far worse
+     * than its neighbours is not a path the sound takes, it is the inside of a wall, and it is
+     * excluded rather than averaged in. When everything around the source is expensive -- listener
+     * behind a wall -- they are all within the window of each other and all count, so the wall
+     * reads at full strength. Smooth, because the weights are still the trilinear ones and a cell
+     * crossing the window boundary is by definition contributing little. */
+    if (nw > 0) {
+        float cut = (float)bestQ + WINDOW_DB * Q_PER_DB;
+        for (int k = 0; k < nw; k++) {
+            if ((float)wq[k] > cut) continue;
+            acc  += ww[k] * ((float)wq[k] / Q_PER_DB);
+            wsum += ww[k];
+        }
+    }
     if (wsum <= 1e-6f) return anyInWindow ? f->maxDb : 0.0f;
-    {
-        float lin = acc / wsum;
-        if (lin <= 1e-12f) return f->maxDb;
-        float db = -10.0f * log10f(lin);
-        return db > f->maxDb ? f->maxDb : db;
-    }
+    return acc / wsum;
 }
 
 /* The routed cost includes the detour charge for the whole path, so a source in clear air still
@@ -783,6 +791,26 @@ CMM_FLD_API float cmm_fld_sample_mat_db(cmm_fld *f, float x, float y, float z) {
     float gz = z / (float)f->stepZ - 0.5f;
     int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
     float tx = gx - ix, ty = gy - iy, tz = gz - iz;
+    /* THE SAME CELLS sample_field USED, or this number is not a component of that one. It used to
+     * average every reached cell while the total averaged a subset, and the log then printed
+     * `excess=2.6dB (wall 25.4)` -- a part larger than the whole. I read that line repeatedly
+     * while deciding what to fix. A diagnostic that cannot be subtracted from the thing it splits
+     * is worse than none, because it is believed. */
+    const float WINDOW_DB = 12.0f;
+    int bestQ = 0x7fffffff;
+    for (int dy = 0; dy <= 1; dy++)
+    for (int dz = 0; dz <= 1; dz++)
+    for (int dx = 0; dx <= 1; dx++) {
+        float w = (dx ? tx : 1.0f - tx) * (dy ? ty : 1.0f - ty) * (dz ? tz : 1.0f - tz);
+        if (w <= 0.0f) continue;
+        int cx = ix + dx, cy = iy + dy, cz = iz + dz;
+        if (!in_win(f, cx, cy, cz)) continue;
+        int v = f->cur[widx(f, cx, cy, cz)];
+        if (v != UNREACHED && v < bestQ) bestQ = v;
+    }
+    if (bestQ == 0x7fffffff) return 0.0f;
+    float cut = (float)bestQ + WINDOW_DB * Q_PER_DB;
+
     float acc = 0.0f, wsum = 0.0f;
     for (int dy = 0; dy <= 1; dy++)
     for (int dz = 0; dz <= 1; dz++)
@@ -793,6 +821,7 @@ CMM_FLD_API float cmm_fld_sample_mat_db(cmm_fld *f, float x, float y, float z) {
         if (!in_win(f, cx, cy, cz)) continue;
         long long i = widx(f, cx, cy, cz);
         if (f->cur[i] == UNREACHED) continue;
+        if ((float)f->cur[i] > cut) continue;
         acc += w * ((float)f->curMat[i] / Q_PER_DB);
         wsum += w;
     }
