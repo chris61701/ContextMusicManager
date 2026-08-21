@@ -213,6 +213,29 @@ int main(int argc, char** argv) {
     ckf("...and far less than the sealed wall", thru - door > 25.0f,
         "sealed %.1f vs doorway %.1f dB", thru, door);
 
+    /* ── A DOOR MOVING MUST NOT MAKE THE ROOM VANISH WHILE WE RE-READ IT ────────────────
+     * Anything that changes the world -- a door swinging, a block broken, a chunk arriving --
+     * marks the cells around it for re-reading. Marking them used to CLEAR their geometry, and the
+     * flood treats geometry-less cells as opaque, so for as long as the amortised reader took to
+     * get back to them those cells were SOLID. A door two blocks from the listener therefore
+     * walled the listener in: the route went the long way round a speaker five blocks away and the
+     * level dropped 15 dB until the next read. Seen with the player standing still --
+     * excess 4.1 -> 19.4 -> 4.1 dB, `wall` unchanged, the whole spike in `detour`.
+     *
+     * Unread space being opaque is right; a cell we read a third of a second ago is not unread.
+     * So: dirty a region, DO NOT re-read it, and the answer must not move. */
+    {
+        cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+        float before = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
+        cmm_fld_dirty(f, 40, 2, 30, 3);            /* a door swings; nothing re-read yet */
+        cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+        float during = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
+        ckf("a door being re-read does not wall you in", fabsf(during - before) < 0.5f,
+            "%.2f -> %.2f dB with the cells dirty but not yet re-read", before, during);
+        fill_all(f);                               /* reader catches up; back to normal */
+        cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+    }
+
     /* ── round a corner, off the sight line: more than the doorway, less than the wall ── */
     float around = cmm_fld_sample_db(f, 44.5f, 2.5f, 44.5f);
     ckf("off to the side of the doorway: in between", around > door && around < thru,

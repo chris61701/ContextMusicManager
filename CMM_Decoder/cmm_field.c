@@ -63,7 +63,25 @@ struct cmm_fld {
      * it -- a floor blocks vertical travel through the cell and not horizontal, which is what a
      * floor does. */
     float *fillX, *fillY, *fillZ;
-    unsigned char *have;            /* 0 = geometry still pending: treated as opaque, never open */
+    /* NEVER READ vs NEEDS RE-READING. These are not the same thing and conflating them cost a
+     * 15 dB drop-out every time a door moved.
+     *
+     * `have` = this cell's geometry has been read at least once, so its values mean something.
+     * The flood treats !have as OPAQUE, which is right: unread space might be solid rock, and an
+     * unresident chunk read as open sky is what made the old model irreproducible.
+     *
+     * `dirty` = the values are still there but the world changed under them. Marking a cell dirty
+     * used to clear `have`, which threw the knowledge away -- so a door swinging two blocks from
+     * the listener turned its cells SOLID until the amortised reader got back to them, the route
+     * detoured 47 blocks round a speaker five blocks away, and the level dropped 15 dB for a
+     * flood. Observed with the player standing still: excess 4.1 -> 19.4 -> 4.1 dB, `wall`
+     * unchanged and the whole spike in `detour`.
+     *
+     * Re-reading is not not-knowing. A value from a third of a second ago is far closer to the
+     * truth than "solid", so a dirty cell keeps answering with what it last knew until the reader
+     * replaces it. Only genuinely unknown space is opaque. */
+    unsigned char *have;
+    unsigned char *dirty;
 
     /* Flood results. `cur` is the field just solved, `prev` the one before, so the caller can
      * crossfade across a re-solve instead of stepping. */
@@ -148,6 +166,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
     f->fillY = (float *)malloc(sizeof(float) * f->n);
     f->fillZ = (float *)malloc(sizeof(float) * f->n);
     f->have = (unsigned char *)calloc(f->n, 1);
+    f->dirty = (unsigned char *)calloc(f->n, 1);
     f->cur  = (int *)malloc(sizeof(int) * f->n);
     f->prev = (int *)malloc(sizeof(int) * f->n);
     f->nxt  = (int *)malloc(sizeof(int) * f->n);
@@ -157,7 +176,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
     f->bprev= (int *)malloc(sizeof(int) * f->n);
     f->binb = (int *)malloc(sizeof(int) * f->n);
     f->bhead= (int *)malloc(sizeof(int) * (MAX_Q + 1));
-    if (!f->fnx || !f->fny || !f->fnz || !f->fillX || !f->fillY || !f->fillZ || !f->have || !f->cur || !f->prev || !f->nxt || !f->curMat || !f->nxtMat
+    if (!f->fnx || !f->fny || !f->fnz || !f->fillX || !f->fillY || !f->fillZ || !f->have || !f->dirty || !f->cur || !f->prev || !f->nxt || !f->curMat || !f->nxtMat
         || !f->bnext || !f->bprev || !f->binb || !f->bhead) { cmm_fld_destroy(f); return NULL; }
     for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->prev[i] = UNREACHED; f->nxt[i] = UNREACHED; }
 
@@ -205,7 +224,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
 void cmm_fld_destroy(cmm_fld *f) {
     if (!f) return;
     free(f->fnx); free(f->fny); free(f->fnz);
-    free(f->fillX); free(f->fillY); free(f->fillZ); free(f->have);
+    free(f->fillX); free(f->fillY); free(f->fillZ); free(f->have); free(f->dirty);
     free(f->cur); free(f->prev); free(f->nxt);
     free(f->curMat); free(f->nxtMat); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
     free(f->order);
@@ -239,7 +258,11 @@ int cmm_fld_recentre(cmm_fld *f, int bx, int by, int bz) {
                  && z >= ooz && z < ooz + f->nz;
         if (wasIn) continue;
         long long i = widx(f, x, y, z);
-        if (f->have[i]) { f->have[i] = 0; f->pending++; }
+        /* Scrolled in from outside: we have never seen this, so it IS unknown, and unknown is
+         * opaque. Distinct from dirty below, which keeps what it knew. */
+        int wasNeed = (!f->have[i] || f->dirty[i]);
+        f->have[i] = 0; f->dirty[i] = 0;
+        if (!wasNeed) f->pending++;
     }
     if (f->pending > f->n) f->pending = f->n;
     f->cursor = 0;
@@ -257,7 +280,7 @@ int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz) {
         int z = f->oz + mz + f->order[k * 3 + 2];
         if (!in_win(f, x, y, z)) continue;
         long long i = widx(f, x, y, z);
-        if (f->have[i]) continue;
+        if (f->have[i] && !f->dirty[i]) continue;
         *cx = x; *cy = y; *cz = z;
         return 1;
     }
@@ -278,7 +301,9 @@ void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
     f->fillX[i] = t_db(midX);
     f->fillY[i] = t_db(midY);
     f->fillZ[i] = t_db(midZ);
-    if (!f->have[i]) { f->have[i] = 1; if (f->pending > 0) f->pending--; }
+    int wasNeed = (!f->have[i] || f->dirty[i]);
+    f->have[i] = 1; f->dirty[i] = 0;
+    if (wasNeed && f->pending > 0) f->pending--;
 }
 
 void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
@@ -293,7 +318,9 @@ void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
         int cx = b2c(bx2, f->stepX), cy = b2c(by2, f->stepY), cz = b2c(bz2, f->stepZ);
         if (!in_win(f, cx, cy, cz)) continue;
         long long i = widx(f, cx, cy, cz);
-        if (f->have[i]) { f->have[i] = 0; f->pending++; }
+        /* Queue a re-read WITHOUT discarding the values. See the have/dirty note on the struct. */
+        if (f->have[i]) { if (!f->dirty[i]) { f->dirty[i] = 1; f->pending++; } }
+        else if (!f->dirty[i]) { /* never read: already counted as pending */ }
     }
     f->cursor = 0;
 }
