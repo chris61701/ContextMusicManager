@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
@@ -222,6 +222,20 @@ namespace CMM
                 return sb.ToString();
             }
 
+            // cmm acoustics ray — what the FIELD charges along the straight line to the nearest
+            // speaker, cell by cell, next to the geometry it read. `column` answers the same
+            // question for the other model and at block resolution; this one is about the field.
+            if (arg == "ray")
+            {
+                var plr = GameManager.Instance?.World?.GetPrimaryPlayer();
+                var wr = GameManager.Instance?.World;
+                if (plr == null || wr == null) return "no player";
+                Vector3 rear = plr.getHeadPosition();
+                Vector3 rspk;
+                if (!EmitterAudioLayer.TryGetNearestSpeaker(rear, out rspk)) return "no speaker in range";
+                return FieldOcclusion.DescribeRay(wr, rear, rspk);
+            }
+
             if (arg == "rebuild")
             {
                 AcousticBridge.InvalidateGeometry();
@@ -264,7 +278,7 @@ namespace CMM
                  + "\n  scene:     " + AcousticBridge.LastStatus
                  + "\n  saturated: " + AcousticBridge.SaturatedPoints + " point(s) clamped at last publish"
                  + "\n  model:     " + EmitterAudioLayer.PinName
-                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column"
+                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column|ray"
                  + "\n             cmm acoustics wall <n> | verb <n>|off | model auto|native|legacy";
 #else
             return "native acoustics: not built into this game version";

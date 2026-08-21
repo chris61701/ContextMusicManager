@@ -1,4 +1,4 @@
-// Gated to 3.0+ (GV_V3): reads the world through EmitterAcoustics.CellLoss and publishes through
+﻿// Gated to 3.0+ (GV_V3): reads the world through EmitterAcoustics.CellLoss and publishes through
 // EmitterAudioLayer, both on the same gate.
 #if GV_V3
 using System;
@@ -120,7 +120,18 @@ namespace CMM
         // derives four numbers: how much gets through each of its three negative faces, and how
         // solid its interior is (which is what stops a route cutting through the middle of a wall
         // thicker than one cell).
+        private static readonly float[] _cellScratch = new float[6];
         private static void FillCell(World world, int cx, int cy, int cz)
+        {
+            CellNumbers(world, cx, cy, cz, _cellScratch);
+            NativeField.cmm_fld_set_cell(_f, cx, cy, cz,
+                _cellScratch[0], _cellScratch[1], _cellScratch[2],
+                _cellScratch[3], _cellScratch[4], _cellScratch[5]);
+        }
+
+        // The six numbers themselves, split out so the ray dump below reports exactly what the
+        // reader stores rather than a second copy of the arithmetic that could drift from it.
+        private static void CellNumbers(World world, int cx, int cy, int cz, float[] o)
         {
             int bx = cx * Step, by = cy * Step, bz = cz * Step;
             int h = Step / 2;
@@ -150,9 +161,8 @@ namespace CMM
                         if (dz == h) { mSumZ += t; if (t > mMaxZ) mMaxZ = t; }
                     }
 
-            NativeField.cmm_fld_set_cell(_f, cx, cy, cz,
-                Face(sumX / face, maxX),   Face(sumY / face, maxY),   Face(sumZ / face, maxZ),
-                Face(mSumX / face, mMaxX), Face(mSumY / face, mMaxY), Face(mSumZ / face, mMaxZ));
+            o[0] = Face(sumX / face, maxX);   o[1] = Face(sumY / face, maxY);   o[2] = Face(sumZ / face, maxZ);
+            o[3] = Face(mSumX / face, mMaxX); o[4] = Face(mSumY / face, mMaxY); o[5] = Face(mSumZ / face, mMaxZ);
         }
 
         // HOW MUCH GETS THROUGH A CELL FACE. The geometric mean of the area fraction and the best
@@ -274,6 +284,67 @@ namespace CMM
                      + $" extra={_dbgExtra:0.0}blk  {_dbgExcess / Math.Max(_dbgDist, 0.1f):0.00}dB/blk";
             _dbgDist = 1e9f;
             return s;
+        }
+
+        // ── cmm acoustics ray ───────────────────────────────────────────────────────────────────
+        // Walk the STRAIGHT line from the ear to a speaker and print, cell by cell, what the field
+        // charges there and what geometry it read to justify it.
+        //
+        // This exists because the total is unfalsifiable on its own. "Nine decibels of excess with
+        // a clear view" is consistent with a wall the reader invented, with a route that went the
+        // long way round, and with the model being right and the speaker not being where I think
+        // it is. Those want three different fixes, and every previous round of this was me picking
+        // one by argument. The columns separate them:
+        //
+        //   ROUTED climbing faster than IDEAL between two cells ⇒ the route is not this line.
+        //   wall appearing at a cell whose six numbers are all 0.0 dB ⇒ charged somewhere else.
+        //   a non-zero face in open air ⇒ CellLoss called something solid that a player sees through.
+        internal static string DescribeRay(World world, Vector3 ear, Vector3 spk)
+        {
+            if (_f == IntPtr.Zero) return "no field";
+            if (Reached <= 0) return "field has not flooded yet";
+
+            float per = CMMConfig.WorldEmitterFieldDetourDb;
+            var o = new float[6];
+            var sb = new System.Text.StringBuilder();
+            float total = Vector3.Distance(ear, spk);
+            sb.Append("ray  ear ").Append(ear.ToCultureInvariantString())
+              .Append(" -> speaker ").Append(spk.ToCultureInvariantString())
+              .Append("   d=").Append(total.ToString("0.0"))
+              .Append("   detour ").Append(per.ToString("0.00")).Append(" dB/blk")
+              .Append("\n   dist  routed   ideal   excess    wall  |  -X   -Y   -Z   midX midY midZ  (dB loss)");
+
+            int steps = Mathf.Clamp(Mathf.CeilToInt(total / Step * 2f), 1, 96);
+            var seen = new Vector3i(int.MinValue, int.MinValue, int.MinValue);
+            for (int i = 0; i <= steps; i++)
+            {
+                Vector3 sp = Vector3.Lerp(ear, spk, i / (float)steps);
+                var c = new Vector3i(Mathf.FloorToInt(sp.x / Step), Mathf.FloorToInt(sp.y / Step),
+                                     Mathf.FloorToInt(sp.z / Step));
+                if (c == seen) continue;
+                seen = c;
+
+                // Sample at the CELL CENTRE, not at the ray point: the ray point interpolates
+                // across up to eight cells and would blur the very step being looked for.
+                Vector3 mid = new Vector3((c.x + 0.5f) * Step, (c.y + 0.5f) * Step, (c.z + 0.5f) * Step);
+                float d = Vector3.Distance(ear, mid);
+                float ex = NativeField.cmm_fld_sample_db(_f, mid.x, mid.y, mid.z);
+                float mat = NativeField.cmm_fld_sample_mat_db(_f, mid.x, mid.y, mid.z);
+                CellNumbers(world, c.x, c.y, c.z, o);
+
+                sb.Append("\n  ").Append(d.ToString("0.0").PadLeft(5))
+                  .Append((ex + d * per).ToString("0.0").PadLeft(8))
+                  .Append((d * per).ToString("0.0").PadLeft(8))
+                  .Append(ex.ToString("0.0").PadLeft(9))
+                  .Append(mat.ToString("0.0").PadLeft(8)).Append("  | ");
+                for (int k = 0; k < 6; k++)
+                {
+                    float db = o[k] <= 1e-12f ? 99f : -10f * Mathf.Log10(o[k]);
+                    sb.Append((db < 0.05f ? "  . " : db.ToString("0.0").PadLeft(4)));
+                    if (k == 2) sb.Append(' ');
+                }
+            }
+            return sb.ToString();
         }
     }
 }
