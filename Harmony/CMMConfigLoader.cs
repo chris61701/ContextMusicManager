@@ -180,6 +180,7 @@ namespace CMM
                 CMMConfig.WorldEmitterFieldCache        = ReadBool (root, "WorldEmitterFieldCache",        CMMConfig.WorldEmitterFieldCache);
                 CMMConfig.WorldEmitterFieldOcclusion = ReadBool (root, "WorldEmitterFieldOcclusion", CMMConfig.WorldEmitterFieldOcclusion);
                 CMMConfig.WorldEmitterFieldDetourDb  = ReadFloat(root, "WorldEmitterFieldDetourDb",  CMMConfig.WorldEmitterFieldDetourDb);
+                CMMConfig.WorldEmitterFieldSlewDb    = ReadFloat(root, "WorldEmitterFieldSlewDb",    CMMConfig.WorldEmitterFieldSlewDb);
                 CMMConfig.WorldEmitterFieldWallDb    = ReadFloat(root, "WorldEmitterFieldWallDb",    CMMConfig.WorldEmitterFieldWallDb);
                 CMMConfig.WorldEmitterFieldWallPow   = ReadFloat(root, "WorldEmitterFieldWallPow",   CMMConfig.WorldEmitterFieldWallPow);
                 CMMConfig.WorldEmitterNativeAcoustics   = ReadBool (root, "WorldEmitterNativeAcoustics",   CMMConfig.WorldEmitterNativeAcoustics);

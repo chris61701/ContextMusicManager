@@ -109,6 +109,7 @@ namespace CMM
         {
             if (_f != IntPtr.Zero) { NativeField.cmm_fld_destroy(_f); _f = IntPtr.Zero; }
             _earValid = false; Discarded = 0; _centreValid = false; Recentres = 0;
+            _slew.Clear();
         }
 
         // ── Main thread: keep the window on the player and read the world into it ───────────────
@@ -313,6 +314,7 @@ namespace CMM
             if (_f == IntPtr.Zero || pts == null || ptGain == null || ptCount <= 0) return false;
             if (Reached <= 0) return false;                      // no flood has landed yet
 
+            SweepSlew(Time.realtimeSinceStartup);
             float mn = CMMConfig.WorldEmitterMinDistance;
             float mx = CMMConfig.WorldEmitterRange;
             float fexp = CMMConfig.WorldEmitterFalloff;
@@ -323,6 +325,34 @@ namespace CMM
                 Vector3 sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
                 float excessDb = NativeField.cmm_fld_sample_db(_f, sp.x, sp.y, sp.z);
                 if (excessDb < 0f) excessDb = 0f;
+
+                // SLEW IT, IN dB, BEFORE THE INVERSION.
+                //
+                // Each flood is an independent answer, and walking past a doorway flips the route
+                // from "straight through the opening" to "the long way round" between one flood
+                // and the next. Both answers are correct; the STEP between them is not something
+                // any real room does. Measured while walking: 2.7 -> 10.7 dB in a quarter second.
+                //
+                // This has to happen here, in dB, and not in the blocks-per-second limiter
+                // downstream: extra distance and loudness are not proportional, so a limit
+                // expressed in blocks is loose next to a speaker and tight far from one. That
+                // limiter was set to 50 blk/s -- 12.5 blocks per publish at 4 Hz -- which is to
+                // say it was passing the very jumps it was there to catch.
+                {
+                    var key = new Vector3i(Mathf.FloorToInt(sp.x), Mathf.FloorToInt(sp.y),
+                                           Mathf.FloorToInt(sp.z));
+                    float slew = CMMConfig.WorldEmitterFieldSlewDb;
+                    float now = Time.realtimeSinceStartup;
+                    if (slew > 0f && _slew.TryGetValue(key, out Slewed s) && now - s.At < 2f)
+                    {
+                        // A gap longer than a flood interval is a speaker that went out of range
+                        // and came back; clamp the step so it does not teleport on return.
+                        float step = slew * Mathf.Clamp(now - s.At, 0.02f, 1f);
+                        if (excessDb > s.Db + step) excessDb = s.Db + step;
+                        else if (excessDb < s.Db - step) excessDb = s.Db - step;
+                    }
+                    _slew[key] = new Slewed { Db = excessDb, At = now };
+                }
 
                 // Invert the mixer's own falloff so the published extra reproduces this attenuation
                 // exactly, whatever the curve's shape: att = ((mx-dEff)/span)^fexp.
@@ -351,6 +381,28 @@ namespace CMM
                 }
             }
             return true;
+        }
+
+        // Per-point slew state. Keyed by the speaker point's block, the same key the downstream
+        // limiter uses, so a speaker that is destroyed and rebuilt starts clean rather than
+        // inheriting a stale level.
+        private struct Slewed { public float Db; public float At; }
+        private static readonly System.Collections.Generic.Dictionary<Vector3i, Slewed> _slew =
+            new System.Collections.Generic.Dictionary<Vector3i, Slewed>();
+        private static readonly System.Collections.Generic.List<Vector3i> _slewDrop =
+            new System.Collections.Generic.List<Vector3i>();
+        private static float _slewSweptAt;
+
+        // Drop points nothing has published for a while. Runs at most every 10 s and reuses its
+        // scratch list, because this is on the 4 Hz publish path and the resolve path's allocation
+        // budget is already the thing being watched.
+        private static void SweepSlew(float now)
+        {
+            if (now - _slewSweptAt < 10f) return;
+            _slewSweptAt = now;
+            _slewDrop.Clear();
+            foreach (var kv in _slew) if (now - kv.Value.At > 10f) _slewDrop.Add(kv.Key);
+            for (int i = 0; i < _slewDrop.Count; i++) _slew.Remove(_slewDrop[i]);
         }
 
         private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra, _dbgMat;

@@ -277,6 +277,20 @@
   <WorldEmitterFieldWallDb>59.5</WorldEmitterFieldWallDb>
   <WorldEmitterFieldWallPow>1.56</WorldEmitterFieldWallPow>
 
+  <!-- HOW FAST occlusion may change, dB per second, per speaker. The field re-floods a few
+       times a second and each flood is an independent answer, so walking past a doorway flips
+       the route from "through the opening" to "the long way round" between one flood and the
+       next. Both answers are right; the STEP between them is not something a real room does.
+       Measured in game while walking: 2.7 -> 10.7 dB in a quarter second.
+
+       Limited in dB, not in the "extra virtual distance" the mixer takes, because dB is what
+       the ear hears and the two are not proportional - the same 14 blocks of extra is 8 dB at
+       five blocks from a speaker and almost nothing at fifty.
+
+       0 turns it off and publishes raw floods, which is the honest way to hear whether a
+       change is the model or the smoothing. Live: cmm field slew <n> -->
+  <WorldEmitterFieldSlewDb>12</WorldEmitterFieldSlewDb>
+
   <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
   <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>
   <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's

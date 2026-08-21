@@ -230,6 +230,20 @@ namespace CMM
         // the model has beyond the shared material curve -- everything else comes from the blocks.
         public static bool   WorldEmitterFieldOcclusion = false;
         public static float  WorldEmitterFieldDetourDb  = 0.35f;
+        // HOW FAST OCCLUSION IS ALLOWED TO CHANGE, in dB per second, per speaker point.
+        //
+        // The field re-floods a few times a second and each flood is an independent answer, so
+        // walking past a doorway swings the route from "through the opening" to "the long way
+        // round" between one flood and the next. That is not noise -- both answers are right --
+        // but published raw it is a lurch. Measured in game: excess jumping 2.7 -> 10.7 dB in
+        // 0.25 s while walking, with the published extra distance swinging 6 to 51 blocks.
+        //
+        // Limited in dB rather than in the "extra virtual distance" the mixer wants, because dB is
+        // what the ear hears and the two are not proportional: at 5 blocks from a speaker, extra
+        // 10 -> 24 blocks is 8 dB, while at 50 blocks the same 14 blocks is a fraction of one. The
+        // existing blocks-per-second limiter downstream could not tell those apart, which is why
+        // it was set fast enough (50 blk/s = 12.5 blocks per publish) to pass nearly everything.
+        public static float  WorldEmitterFieldSlewDb   = 12f;
         // What one block of material is worth, as dB = WallDb * loss^WallPow.
         //
         // DERIVED FROM THE SHIPPED MODEL, not invented. The field first borrowed the native

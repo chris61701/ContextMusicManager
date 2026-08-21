@@ -134,20 +134,21 @@ namespace CMM
         {
 #if GV_V3
             string a = p.Count > 1 ? p[1].ToLowerInvariant() : "";
-            if ((a == "detour" || a == "wall" || a == "pow") && p.Count > 2
+            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew") && p.Count > 2
                 && float.TryParse(p[2], System.Globalization.NumberStyles.Float,
                                   System.Globalization.CultureInfo.InvariantCulture, out float v))
             {
                 string was;
                 if (a == "detour") { was = CMMConfig.WorldEmitterFieldDetourDb.ToString("0.00"); CMMConfig.WorldEmitterFieldDetourDb = v; }
                 else if (a == "wall") { was = CMMConfig.WorldEmitterFieldWallDb.ToString("0.0"); CMMConfig.WorldEmitterFieldWallDb = v; }
-                else { was = CMMConfig.WorldEmitterFieldWallPow.ToString("0.00"); CMMConfig.WorldEmitterFieldWallPow = v; }
+                else if (a == "pow") { was = CMMConfig.WorldEmitterFieldWallPow.ToString("0.00"); CMMConfig.WorldEmitterFieldWallPow = v; }
+                else { was = CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0"); CMMConfig.WorldEmitterFieldSlewDb = v; }
                 // wall/pow change what each BLOCK is worth, so the stored geometry is now wrong and
                 // has to be read again; detour is used by the flood alone and lands by itself.
-                if (a != "detour") FieldOcclusion.RereadAll();
+                if (a == "wall" || a == "pow") FieldOcclusion.RereadAll();
                 return "field " + a + ": " + was + " -> " + v.ToString("0.00")
-                     + (a == "detour" ? "  (next flood, ~0.3 s)"
-                                      : "  (re-reading the world, a second or two)")
+                     + (a == "wall" || a == "pow" ? "  (re-reading the world, a second or two)"
+                                                  : "  (next flood, ~0.3 s)")
                      + "\n  " + FieldOcclusion.Status();
             }
             return "field occlusion knobs — dial these by ear while the music plays:"
@@ -157,9 +158,11 @@ namespace CMM
                  + "     dB for a fully solid block"
                  + "\n  pow    " + CMMConfig.WorldEmitterFieldWallPow.ToString("0.00")
                  + "   shape of the partial-block curve"
+                 + "\n  slew   " + CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0")
+                 + "     dB per second the level may change (0 = off, raw floods)"
                  + "\n  " + FieldOcclusion.Status()
                  + "\n  " + FieldOcclusion.DescribeNearest()
-                 + "\n  usage: cmm field detour|wall|pow <n>   |   cmm acoustics ray";
+                 + "\n  usage: cmm field detour|wall|pow|slew <n>   |   cmm acoustics ray";
 #else
             return "field occlusion: not built into this game version";
 #endif
