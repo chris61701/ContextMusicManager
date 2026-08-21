@@ -55,6 +55,11 @@ namespace CMM
                 // (Tier 2) and the occlusion tracks the physical swing, then poke the emitter to refresh now.
                 EmitterAcoustics.RegisterAnimatingDoor(door.blockValue.type, door.ToWorldPos(), _open);
                 EmitterAudioLayer.NotifyAcousticChange();
+                // Tell the FIELD here, at the latch. It used to hear about a door only from
+                // AcousticBridge.WatchDoors, which fires on the FALLING edge -- after the swing
+                // has finished, a second or so later -- so the model could not even begin to
+                // respond until the door had stopped moving. This is the earliest signal there is.
+                FieldOcclusion.Invalidate(door.ToWorldPos(), 3);
             }
             catch { /* a door must never break because of us */ }
         }

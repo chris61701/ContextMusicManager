@@ -388,8 +388,18 @@ namespace CMM
         // Pure arithmetic over the native arena; touches no game API, which is what makes it safe
         // off the main thread. A flood that races a recentre is discarded by the native side and
         // simply repeats on the next tick.
+        // Normally one flood every FloodSec. The scheduler polls faster than that so a DOOR can
+        // have one immediately: a flood is ~40 ms, and paying it three times a second for the
+        // second and a half a door is in play is a fair price for the sound landing with the latch.
+        private const double FloodSec = 0.30;
+        private static float _lastFloodAt;
+
         internal static void SchedulerTick()
         {
+            float nowF = Time.realtimeSinceStartup;
+            bool door = EmitterAudioLayer.DoorMovingOrJustMoved;
+            if (!door && nowF - _lastFloodAt < FloodSec) return;
+            _lastFloodAt = nowF;
             if (!EmitterAudioLayer.FieldActive || !_earValid) return;
             IntPtr f = System.Threading.Volatile.Read(ref _f);
             if (f == IntPtr.Zero) return;

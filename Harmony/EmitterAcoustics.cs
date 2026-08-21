@@ -992,6 +992,15 @@ namespace CMM
         // Called by the door hook (Patch_DoorAcousticChange) the instant a door toggles. `opening` is the
         // SetOpen target (the swing DIRECTION) — state-NAME-agnostic. Openness starts at the PRE-toggle
         // position so the door reads right until its clip actually begins (opening ⇒ shut 0; closing ⇒ open 1).
+        // Mark every mid-swing door's cells for re-reading. Called per frame while any door is
+        // animating; the field then follows the leaf rather than snapping when it stops.
+        internal static void InvalidateFieldForAnimatingDoors()
+        {
+#if GV_V3
+            foreach (var kv in _doors) FieldOcclusion.Invalidate(kv.Key, 3);
+#endif
+        }
+
         internal static void RegisterAnimatingDoor(int blockType, Vector3i parentPos, bool opening)
         {
             // May be off-thread — just enqueue; RefreshDoorAnim applies it on the main thread.

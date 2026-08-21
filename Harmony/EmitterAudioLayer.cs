@@ -264,6 +264,12 @@ namespace CMM
                     // field cache: a swing can start and settle between two 4 Hz ticks, and the
                     // native path must not depend on an unrelated feature being switched on.
                     AcousticBridge.WatchDoors(EmitterAcoustics.AnyDoorAnimating);
+                    // KEEP re-reading while the leaf swings. CellLoss blends a door's loss by how
+                    // far it has physically opened, so re-reading each frame makes the occlusion
+                    // track the swing instead of stepping once it is over. A door dirties about
+                    // 200 one-block cells, which is nothing against the frame's read budget.
+                    if (EmitterAcoustics.AnyDoorAnimating)
+                        EmitterAcoustics.InvalidateFieldForAnimatingDoors();
                     // Advance the native scene's world READ one slab (~1.5 ms). The read has to be
                     // here, on the main thread, because the game's chunks are not safe to touch from
                     // another one; only the solve that follows it runs on the scheduler.
