@@ -910,9 +910,7 @@ namespace CMM
                     // incremental publish will make this context playable within a second or two.
                     if (ctx.IncludeSubfolders) return null;
 
-                    string dir = Path.Combine(MusicDirectory, ctx.Source);
-                    if (!Directory.Exists(dir)) return null;
-                    files = EnumerateContextFiles(ctx, dir, out string[] pf);
+                    files = EnumerateContextRoots(ctx, out string[] pf);
                     cache.directorySnapshot = files;
                     cache.playlistFiles = pf;   // flat folder's in-folder .m3u list (for the watch)
                 }

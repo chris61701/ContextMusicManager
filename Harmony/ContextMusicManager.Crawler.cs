@@ -211,7 +211,12 @@ namespace CMM
         {
             string contextName = ctx.Context;
             string root = NormalizedContextDir(ctx.Source);
-            if (root == null || !Directory.Exists(root))
+            bool anyAddon = AddonDirsFor(ctx).Length > 0;
+            // Only give up when there is NOTHING to read anywhere. A recursive context
+            // whose music lives only in an add-on mod has no primary folder, and clearing
+            // it here would wipe it at the start of every single sweep -- the tracks would
+            // appear during the walk and vanish again seconds later, over and over.
+            if ((root == null || !Directory.Exists(root)) && !anyAddon)
             {
                 // Folder gone (or unresolved): clear the context out so it reads empty.
                 _crawl.Remove(contextName);
@@ -247,7 +252,7 @@ namespace CMM
                 LastPublish = Time.realtimeSinceStartup,
                 SloppyFs    = IsSloppyMtimeFilesystem(root),   // see the field — disables the mtime skip
             };
-            s.Stack.Push(root);
+            if (root != null && Directory.Exists(root)) s.Stack.Push(root);
             return s;
         }
 
@@ -373,10 +378,16 @@ namespace CMM
                 foreach (DirNode dn in state.Dirs.Values)
                     if (dn.Files.Length > 0) files.AddRange(dn.Files);
                 if (s.ScanFiles != null && s.ScanFiles.Count > 0) files.AddRange(s.ScanFiles);
-                if (files.Count > 0 && cacheMap.TryGetValue(s.ContextName, out ContextCache pc))
+                files.Sort(StringComparer.OrdinalIgnoreCase);
+                // The add-on folders go into the PARTIAL publish too. Without this a context
+                // fed by a pack would blink: its tracks would be present in the finished
+                // snapshot, absent from every partial one, and the first sweep on a big tree
+                // is minutes long.
+                string[] partial = WithAddons(GetContext(s.ContextName), files);
+                if (partial.Length > 0 && cacheMap.TryGetValue(s.ContextName, out ContextCache pc))
                 {
                     s.LastPublish = Time.realtimeSinceStartup;
-                    pc.directorySnapshot = files.ToArray();
+                    pc.directorySnapshot = partial;
                     ApplyPresenceFromSnapshot(s.ContextName, pc);
                     // Reclaim a recursive Menu from the vanilla bed the moment its FIRST files
                     // are published — not only when the full sweep finishes. On a huge tree
@@ -423,8 +434,13 @@ namespace CMM
             var files = new List<string>();
             foreach (DirNode dn in state.Dirs.Values)
                 if (dn.Files.Length > 0) files.AddRange(dn.Files);
+            // state.Dirs is a Dictionary, so its value order follows hashing rather than the
+            // tree. GlobalTrackOrder=Sequential indexes straight into this array, so without
+            // a sort a recursive sequential context reshuffles itself whenever the dictionary
+            // rehashes. Sort here, once, where the authoritative snapshot is assembled.
+            files.Sort(StringComparer.OrdinalIgnoreCase);
 
-            yield return ApplyCrawlSnapshot(s.ContextName, files.ToArray());
+            yield return ApplyCrawlSnapshot(s.ContextName, WithAddons(GetContext(s.ContextName), files));
         }
 
         // Publish a freshly-assembled snapshot and react where the crawler is the only
@@ -432,6 +448,35 @@ namespace CMM
         // files have just reappeared swaps back to the real track. Every other reaction
         // is already covered — presence changes drive ContextScanLoop, and a removed
         // PLAYING file is caught by FileWatchLoop's O(1) ping.
+        // The crawler owns the PRIMARY tree (deep). Add-on mods' folders for the same
+        // context are always FLAT -- that is what keeps this walk single-rooted -- so they
+        // are listed here, in full, on every publish rather than being cached per directory.
+        // One flat listing per add-on per sweep is cheap, and it sidesteps the mtime
+        // shortcut entirely: an add-on on exFAT (where folder timestamps never move) would
+        // otherwise go permanently undetected under an NTFS primary.
+        private static string[] AddonDirsFor(Contexts ctx)
+        {
+            string[] all = MusicRoots.DirsFor(ctx);
+            if (all.Length <= 1) return MusicRoots.NoDirs;
+            var live = new List<string>(all.Length - 1);
+            for (int i = 1; i < all.Length; i++)
+                if (!string.IsNullOrEmpty(all[i]) && Directory.Exists(all[i])) live.Add(all[i]);
+            return live.ToArray();
+        }
+
+        private static string[] WithAddons(Contexts ctx, List<string> primary)
+        {
+            string[] dirs = ctx == null ? MusicRoots.NoDirs : AddonDirsFor(ctx);
+            if (dirs.Length == 0) return primary.ToArray();
+            string[] addon = EnumerateFlatPoolMulti(dirs, SourceScan._noClaimPrefixes, out _);
+            if (addon.Length == 0) return primary.ToArray();
+            var merged = new List<string>(primary.Count + addon.Length);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string f in primary) if (seen.Add(FullKey(f))) merged.Add(f);
+            foreach (string f in addon)   if (seen.Add(FullKey(f))) merged.Add(f);
+            return merged.ToArray();
+        }
+
         private IEnumerator ApplyCrawlSnapshot(string contextName, string[] snapshot)
         {
             if (!cacheMap.TryGetValue(contextName, out ContextCache cache)) yield break;

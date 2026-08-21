@@ -29,15 +29,17 @@ namespace CMM
         //     not the parent. Each track maps to exactly one context — the deepest
         //     one whose Path is a prefix — so a recursive parent never double-counts
         //     a child's library. Mirrors the resolver's "most-specific wins" rule.
-        private static readonly string[] _noClaimPrefixes = new string[0];
 
         // One context's pre-resolved scan parameters, handed to the background
         // PresenceScanLoop thread so it never touches the shared `contexts` dict.
         private struct PresenceScanItem
         {
             public string Name;
-            public string Dir;
-            public SearchOption Option;
+            // Every folder this context reads from -- MusicPath's first, then one per add-on
+            // mod. Resolved on the main thread with the rest of the item so the background
+            // scan never touches shared state.
+            public string[] Dirs;
+            public SearchOption Option;    // applies to Dirs[0] only; add-on folders are flat
             public string[] Claimed;
             // Playlist source: gather the tracks LISTED in this .m3u file instead of
             // scanning Dir. When true, PlaylistFile holds the resolved playlist path and
@@ -61,7 +63,7 @@ namespace CMM
             return new PresenceScanItem
             {
                 Name    = ctx.Context,
-                Dir     = Path.Combine(MusicDirectory, ctx.Source),
+                Dirs    = MusicRoots.DirsFor(ctx),
                 Option  = SearchOptionFor(ctx),
                 Claimed = GetClaimedSubtreePrefixes(ctx.Context),
             };
@@ -81,17 +83,101 @@ namespace CMM
         // Pure IO + path string math with no shared-state access, so it is safe to call on
         // a ThreadPool thread. Never throws and never returns null (a bad folder / unreadable
         // playlist reads as "no files" and recovers on a later tick).
+        // `cmm roots` — the support tool. Without it "my music pack is not playing" is
+        // unanswerable: the roots are found at launch, the folders are matched by a
+        // relative path, and every one of those steps is invisible from in-game.
+        // With no argument: the roots. With a context name: what each root contributes
+        // to it, which is what actually settles the question.
+        internal static string RootsReport(string contextFilter)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(MusicRoots.Describe());
+
+            if (string.IsNullOrEmpty(contextFilter))
+            {
+                int supplying = 0;
+                foreach (Contexts c in contexts.Values)
+                {
+                    if (c == null || string.IsNullOrEmpty(c.Source) || c.IsPlaylist) continue;
+                    string[] dirs = MusicRoots.DirsFor(c);
+                    for (int i = 1; i < dirs.Length; i++)
+                        if (!string.IsNullOrEmpty(dirs[i]) && Directory.Exists(dirs[i])) { supplying++; break; }
+                }
+                sb.Append(CMMSettingsWriter.NL)
+                  .Append("contexts fed by at least one add-on: ").Append(supplying)
+                  .Append(CMMSettingsWriter.NL)
+                  .Append("usage: cmm roots <context>   for the per-folder breakdown");
+                return sb.ToString();
+            }
+
+            Contexts ctx = GetContext(contextFilter);
+            if (ctx == null) return sb.Append(CMMSettingsWriter.NL)
+                                      .Append("no context named '").Append(contextFilter).Append("'").ToString();
+
+            sb.Append(CMMSettingsWriter.NL).Append("context ").Append(ctx.Context)
+              .Append("  source=\"").Append(ctx.Source ?? "").Append("\"");
+            if (ctx.IsPlaylist) sb.Append("  (playlist — add-ons never extend it)");
+            else if (!string.IsNullOrEmpty(ctx.Source) && System.IO.Path.IsPathRooted(ctx.Source))
+                sb.Append("  (absolute — add-ons never extend it)");
+            if (ctx.IncludeSubfolders) sb.Append("  subfolders=true (primary only; add-ons stay flat)");
+
+            string[] all = MusicRoots.DirsFor(ctx);
+            if (all.Length == 0) { sb.Append(CMMSettingsWriter.NL).Append("  (no folders)"); return sb.ToString(); }
+
+            int total = 0;
+            for (int i = 0; i < all.Length; i++)
+            {
+                string d = all[i];
+                sb.Append(CMMSettingsWriter.NL).Append("  ").Append(i == 0 ? "primary " : "add-on  ").Append(d);
+                if (string.IsNullOrEmpty(d) || !Directory.Exists(d)) { sb.Append("   (no folder)"); continue; }
+                try
+                {
+                    bool rec = ctx.IncludeSubfolders && i == 0;
+                    string[] pool = EnumerateFolderPoolRaw(d, rec, GetClaimedSubtreePrefixes(ctx.Context), out _);
+                    total += pool.Length;
+                    sb.Append("   ").Append(pool.Length).Append(rec ? " track(s), recursive" : " track(s)");
+                }
+                catch (Exception ex) { sb.Append("   UNREADABLE: ").Append(ex.Message); }
+            }
+            ContextCache cc = cacheMap.TryGetValue(ctx.Context, out var c2) ? c2 : null;
+            sb.Append(CMMSettingsWriter.NL).Append("  = ").Append(total)
+              .Append(" track(s) across ").Append(all.Length).Append(" folder(s); live pool holds ")
+              .Append(cc?.directorySnapshot?.Length ?? 0);
+            return sb.ToString();
+        }
+
+        private static ScanResult Multi(PresenceScanItem item)
+        {
+            string[] files = EnumerateFlatPoolMulti(item.Dirs, item.Claimed, out string[] pf);
+            return new ScanResult { Files = files, PlaylistFiles = pf };
+        }
+
         private static ScanResult EnumerateScanItem(PresenceScanItem item)
         {
             try
             {
                 if (item.IsPlaylist)
                     return new ScanResult { Files = PlaylistSource.ReadTracks(item.PlaylistFile), PlaylistFiles = _noPlaylistFiles };
-                if (!Directory.Exists(item.Dir))
-                    return new ScanResult { Files = new string[0], PlaylistFiles = _noPlaylistFiles };
-                string[] files = EnumerateFolderPoolRaw(item.Dir, item.Option == SearchOption.AllDirectories,
-                                                        item.Claimed, out string[] pf);
-                return new ScanResult { Files = files, PlaylistFiles = pf };
+                bool recursive = item.Option == SearchOption.AllDirectories;
+                if (!recursive)
+                    return Multi(item);
+                // A recursive PRIMARY is walked here as before; its add-on folders are flat
+                // and get unioned in on top. (In practice this path is unused -- recursive
+                // contexts are owned by the crawler -- but ConfigWatch's repoint rescan can
+                // still reach it, and silently dropping the add-on half would be a bug.)
+                string[] prim = Directory.Exists(item.Dirs[0])
+                    ? EnumerateFolderPoolRaw(item.Dirs[0], true, item.Claimed, out _)
+                    : new string[0];
+                if (item.Dirs.Length == 1)
+                    return new ScanResult { Files = prim, PlaylistFiles = _noPlaylistFiles };
+                var rest = new string[item.Dirs.Length - 1];
+                Array.Copy(item.Dirs, 1, rest, 0, rest.Length);
+                string[] addon = EnumerateFlatPoolMulti(rest, item.Claimed, out _);
+                var merged = new List<string>(prim.Length + addon.Length);
+                var seenM = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string f in prim)  if (seenM.Add(FullKey(f))) merged.Add(f);
+                foreach (string f in addon) if (seenM.Add(FullKey(f))) merged.Add(f);
+                return new ScanResult { Files = merged.ToArray(), PlaylistFiles = _noPlaylistFiles };
             }
             catch { return new ScanResult { Files = new string[0], PlaylistFiles = _noPlaylistFiles }; }
         }
@@ -110,37 +196,13 @@ namespace CMM
         // these is claimed by the deeper context and must be dropped from this one.
         // Empty (the cheap, common case) unless this context recurses AND has at least
         // one child context inside it — so non-recursive contexts pay nothing.
+        // Moved to MusicRoots so the offline harnesses can link the real thing instead
+        // of the hand-ported copy they had been grading themselves against — that copy
+        // had already drifted (it was missing the IsPlaylist guards below). Computed
+        // against the PRIMARY root only: add-on folders never recurse, so nothing in
+        // one can be swallowed by an outer context.
         private static string[] GetClaimedSubtreePrefixes(string contextName)
-        {
-            Contexts self = GetContext(contextName);
-            // Claiming is a folder-recursion concern only; a playlist lists its files
-            // explicitly, so it is never a claimer nor claimed-against.
-            if (self == null || string.IsNullOrEmpty(self.Source) || self.IsPlaylist || !self.IncludeSubfolders)
-                return _noClaimPrefixes;
-
-            string selfDir = NormalizedContextDir(self.Source);
-            if (selfDir == null) return _noClaimPrefixes;
-            string selfPrefix = selfDir + Path.DirectorySeparatorChar;
-
-            List<string> prefixes = null;
-            foreach (Contexts other in contexts.Values)
-            {
-                if (other == self || string.IsNullOrEmpty(other.Source) || other.IsPlaylist) continue;
-                if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
-
-                string otherDir = NormalizedContextDir(other.Source);
-                if (otherDir == null) continue;
-                // Strictly nested beneath self (a context at the SAME folder is a
-                // pre-existing ambiguity claiming doesn't touch).
-                if (otherDir.Length > selfDir.Length &&
-                    otherDir.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    (prefixes ?? (prefixes = new List<string>()))
-                        .Add(otherDir + Path.DirectorySeparatorChar);
-                }
-            }
-            return prefixes == null ? _noClaimPrefixes : prefixes.ToArray();
-        }
+            => MusicRoots.ClaimPrefixes(GetContext(contextName), contexts.Values);
 
         // NOTE: IsClaimedByDeeperContext, ContextWriteSignatureUtc and PlaylistWriteSignatureUtc
         // now live in SourceScan.cs (linked into the offline test harness). Reached unqualified
@@ -148,15 +210,12 @@ namespace CMM
 
         // Resolve a context Path (relative to MusicDirectory, or absolute) to a full,
         // non-separator-terminated directory path for prefix comparisons. Null on error.
+        // The context's own folder under the PRIMARY root. Was doing double duty as both
+        // the crawler's walk root and the claim-prefix base; both are primary-only, so
+        // the one meaning survives — but it now goes through MusicRoots, which is also
+        // what knows about the add-on folders this deliberately excludes.
         private static string NormalizedContextDir(string ctxPath)
-        {
-            try
-            {
-                return Path.GetFullPath(Path.Combine(MusicDirectory, ctxPath))
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            }
-            catch { return null; }
-        }
+            => MusicRoots.Combine(MusicRoots.Primary, ctxPath);
 
         // Enumerate a FOLDER context's eligible files: applies reach (flat vs recursive),
         // subtree claiming, and — for a flat folder — union with its top-level .m3u tracks,
@@ -168,6 +227,20 @@ namespace CMM
         // Overload that also outputs the flat folder's top-level .m3u files, so a caller
         // holding the context's cache can record them (cache.playlistFiles) for the
         // change-signature watch. Empty for recursive folders.
+        // EVERY folder this context reads from, as one pool. The three callers that used
+        // to resolve a single directory themselves now go through this, so a context is
+        // never accidentally read from MusicPath alone. Flat only -- a recursive context
+        // belongs to the crawler and its callers already return early for it.
+        private static string[] EnumerateContextRoots(Contexts ctx, out string[] playlistFiles)
+        {
+            string[] pool = EnumerateFlatPoolMulti(MusicRoots.DirsFor(ctx),
+                                                   GetClaimedSubtreePrefixes(ctx.Context),
+                                                   out playlistFiles);
+            return _invalidFiles.Count == 0
+                ? pool
+                : pool.Where(f => !_invalidFiles.Contains(f)).ToArray();
+        }
+
         private static string[] EnumerateContextFiles(Contexts ctx, string dir, out string[] playlistFiles)
         {
             string[] pool = EnumerateFolderPoolRaw(dir, ctx.IncludeSubfolders,
@@ -304,9 +377,11 @@ namespace CMM
                 // on a tree with thousands of folders. Their presence flips on as soon
                 // as the crawler sees the first file (a short delay after load).
                 if (ctx.IncludeSubfolders) continue;
-                string d = Path.Combine(MusicDirectory, ctx.Source);
-                if (!Directory.Exists(d)) continue;
-                string[] files = EnumerateContextFiles(ctx, d, out string[] pf);
+                // No Directory.Exists gate on the primary any more: a context whose music
+                // lives ONLY in an add-on mod would have been skipped by it, and read as
+                // empty for the whole first frame -- long enough for the menu to start on
+                // the vanilla bed. EnumerateContextRoots skips missing folders itself.
+                string[] files = EnumerateContextRoots(ctx, out string[] pf);
                 // Record the in-folder .m3u list now so the change signature can watch it
                 // from the first tick (before the background presence scan first runs).
                 if (cacheMap.TryGetValue(ctx.Context, out ContextCache cache)) cache.playlistFiles = pf;

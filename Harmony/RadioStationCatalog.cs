@@ -404,6 +404,22 @@ namespace CMM
         // NTFS/ReFS keep the pure-stat path (returns 0 there).
         private static long _catalogHash;
 
+        // The station parents: MusicPath's, then one per add-on mod supplying the same
+        // relative folder. An ABSOLUTE or PLAYLIST source names exactly one place and is
+        // never extended -- there is no relative path to append.
+        private static string[] SourceDirs(string src)
+        {
+            if (string.IsNullOrWhiteSpace(src)) return MusicRoots.NoDirs;
+            string ext = Path.GetExtension(src).ToLowerInvariant();
+            if (ext == ".m3u" || ext == ".m3u8") return MusicRoots.NoDirs;
+            if (Path.IsPathRooted(src)) return new[] { MusicRoots.Normalize(src) };
+
+            MusicRoot[] roots = MusicRoots.All;
+            var dirs = new string[roots.Length];
+            for (int i = 0; i < roots.Length; i++) dirs[i] = MusicRoots.Combine(roots[i].Path, src);
+            return dirs;
+        }
+
         private static long ContentHash(string src)
         {
             try
@@ -411,9 +427,17 @@ namespace CMM
                 if (string.IsNullOrWhiteSpace(src)) return 0;
                 string ext = Path.GetExtension(src).ToLowerInvariant();
                 if (ext == ".m3u" || ext == ".m3u8") return 0;   // playlist source: its own mtime suffices
-                string dir = Path.IsPathRooted(src) ? src : Path.Combine(ContextMusicManager.MusicDirectory, src);
-                if (!SourceScan.IsSloppyMtimeFilesystem(dir)) return 0;
-                return SourceScan.FileSetContentHash(dir, includeSubfolders: true);
+                // Every parent, and per-folder: a primary on NTFS with an add-on on exFAT
+                // needs the listing for the add-on only, and gating on the primary alone
+                // would leave a pack's stations permanently undetected.
+                long h = 0;
+                foreach (string dir in SourceDirs(src))
+                {
+                    if (string.IsNullOrEmpty(dir) || !SourceScan.IsSloppyMtimeFilesystem(dir)) continue;
+                    if (!Directory.Exists(dir)) continue;
+                    h = unchecked(h * 1099511628211L ^ SourceScan.FileSetContentHash(dir, includeSubfolders: true));
+                }
+                return h;
             }
             catch
             {
@@ -443,27 +467,59 @@ namespace CMM
                     }
                     else
                     {
-                        string dir = Path.IsPathRooted(src) ? src : Path.Combine(ContextMusicManager.MusicDirectory, src);
-                        if (Directory.Exists(dir))
+                        // Stations are gathered across EVERY parent first and MERGED by name,
+                        // then added once each. Two packs shipping a "Country" folder make one
+                        // Country station holding both pools -- adding twice would silently keep
+                        // only the last, which is the worst kind of partial success.
+                        // Order within a station stays deterministic: AddStation sorts and then
+                        // shuffles from a seed derived from the station NAME, so the broadcast
+                        // schedule still agrees across sessions and MP clients.
+                        var byName = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                        var order = new List<string>();
+                        string[] parents = SourceDirs(src);
+                        foreach (string dir in parents)
                         {
-                            string[] subs = Directory.GetDirectories(dir);
+                            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                            string[] subs;
+                            try { subs = Directory.GetDirectories(dir); } catch { continue; }
                             Array.Sort(subs, StringComparer.OrdinalIgnoreCase);
                             foreach (string sub in subs)
                             {
                                 string[] pool = StationPool(sub);
-                                if (pool != null && pool.Length > 0)
-                                    AddStation(Path.GetFileName(sub), pool);
+                                if (pool == null || pool.Length == 0) continue;
+                                string name = Path.GetFileName(sub);
+                                if (!byName.TryGetValue(name, out List<string> acc))
+                                { byName[name] = acc = new List<string>(); order.Add(name); }
+                                acc.AddRange(pool);
                             }
-                            if (Stations.Count == 0)
+                        }
+                        foreach (string name in order)
+                        {
+                            var seenT = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            var merged = new List<string>();
+                            foreach (string f in byName[name])
+                                if (seenT.Add(SourceScan.FullKey(f))) merged.Add(f);
+                            AddStation(name, merged.ToArray());
+                        }
+
+                        if (Stations.Count == 0)
+                        {
+                            // Root fallback: no subfolder anywhere had a playable pool — the source
+                            // folders themselves are one station (the pre-multi-station behaviour).
+                            var seenR = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            var rootPool = new List<string>();
+                            string label = null;
+                            foreach (string dir in parents)
                             {
-                                // Root fallback: no subfolder had a playable pool — the source folder
-                                // itself is the single station (the pre-multi-station behaviour). The
-                                // flat scan already expands the root's own top-level playlists.
+                                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                                if (label == null) label = Path.GetFileName(dir.TrimEnd('\\', '/'));
                                 string[] pool = SourceScan.EnumerateFolderPoolRaw(dir, false, claimed: new string[0], out string[] rootPls);
                                 if (rootPls != null) _plScratch.AddRange(rootPls);
-                                if (pool != null && pool.Length > 0)
-                                    AddStation(Path.GetFileName(dir.TrimEnd('\\', '/')), pool);
+                                if (pool == null) continue;
+                                foreach (string f in pool)
+                                    if (seenR.Add(SourceScan.FullKey(f))) rootPool.Add(f);
                             }
+                            if (rootPool.Count > 0) AddStation(label ?? "Radio", rootPool.ToArray());
                         }
                     }
                 }
@@ -562,8 +618,20 @@ namespace CMM
                     t = SourceScan.PlaylistWriteSignatureUtc(PlaylistSource.ResolveFullPath(src));
                 else
                 {
-                    string dir = Path.IsPathRooted(src) ? src : Path.Combine(ContextMusicManager.MusicDirectory, src);
-                    t = SourceScan.ContextWriteSignatureUtc(dir, true);
+                    // Every parent. A MAX alone would absorb a whole add-on folder
+                    // disappearing (a missing folder reports MinValue, which is the identity
+                    // element of max), so the COUNT of live parents is folded in as a
+                    // synthetic tick offset: parents coming and going always moves the value.
+                    t = DateTime.MinValue;
+                    int live = 0;
+                    foreach (string dir in SourceDirs(src))
+                    {
+                        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                        live++;
+                        DateTime dt = SourceScan.ContextWriteSignatureUtc(dir, true);
+                        if (dt > t) t = dt;
+                    }
+                    if (t != DateTime.MinValue && live > 1) t = t.AddTicks(live);
                 }
                 foreach (string pf in _catalogPlaylists)
                 {

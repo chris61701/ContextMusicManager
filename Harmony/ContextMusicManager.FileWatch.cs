@@ -18,10 +18,10 @@ namespace CMM
     {
         private IEnumerator FileWatchLoop()
         {
-            var lastWriteTimes = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
-            // Sloppy-filesystem content hashes (see _fwLastContentHash on the scheduler path —
-            // this is the coroutine fallback's own copy of the same exFAT/FAT/network guard).
-            var lastContentHashes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            // Shares the scheduler path's state rather than keeping coroutine locals: the
+            // two loops are mutually exclusive, and locals were unreachable from anything
+            // that needed to invalidate them.
+            var lastWriteTimes = _fwLastSig;
             // Re-validate blacklisted files no more than this often (seconds). The
             // directory mtime does NOT change when a file finishes writing its contents,
             // so a file that failed validation while still being copied in (locked /
@@ -100,7 +100,8 @@ namespace CMM
                     // always flat, so the recursive-crawler branch never applies to it.
                     bool isPlaylist = ctx.IsPlaylist;
                     string playlistFile = isPlaylist ? PlaylistSource.ResolveFullPath(ctx.Source) : null;
-                    string dir = isPlaylist ? null : Path.Combine(MusicDirectory, ctx.Source);
+                    string[] dirs = isPlaylist ? null : MusicRoots.DirsFor(ctx);
+                    bool[] sloppyPerDir = isPlaylist ? null : MusicRoots.SloppyFor(ctx);
                     // In-folder .m3u files from the last scan, folded into the flat folder's
                     // change signature so editing one in place hot-reloads (its mtime changes
                     // but the folder's does not). Null/empty for playlist + recursive sources.
@@ -149,17 +150,16 @@ namespace CMM
                     }
 
                     // ── FAST PATH: single stat (+ one ping for the active context) ──────
-                    DateTime currentWriteTime = DateTime.MinValue;
+                    SourceScan.WatchSig sig = default(SourceScan.WatchSig);
                     bool playingFileGone = false;
-                    long contentHash = 0;
                     bool statDone = false;
                     ThreadPool.QueueUserWorkItem(_ =>
                     {
                         try
                         {
-                            currentWriteTime = isPlaylist
-                                ? PlaylistWriteSignatureUtc(playlistFile)
-                                : ContextWriteSignatureUtc(dir, includeSub, folderPlaylistFiles);
+                            sig = isPlaylist
+                                ? PlaylistSig(playlistFile)
+                                : ContextWatchSignature(dirs, sloppyPerDir, includeSub, folderPlaylistFiles);
                             if (!string.IsNullOrEmpty(playingFile))
                                 playingFileGone = !File.Exists(playingFile);
                             // Files (audio OR .m3u) appearing/vanishing/renamed that the
@@ -168,19 +168,14 @@ namespace CMM
                             // on those sloppy filesystems — NTFS stays pure-stat. A throw lands in
                             // the outer catch, leaving 0 = "no change" (transient IO must not
                             // trigger a rescan). Subsumes the old top-level-.m3u set-diff.
-                            if (!isPlaylist && IsSloppyMtimeFilesystem(dir))
-                                contentHash = FileSetContentHash(dir, false);
                         }
-                        catch { }
+                        catch { sig.Faulted = true; }
                         statDone = true;
                     });
                     while (!statDone) yield return null;
+                    if (sig.Faulted) continue;   // partial fold: retry next tick, store nothing
 
-                    bool contentChanged = contentHash != 0
-                        && lastContentHashes.TryGetValue(contextName, out long knownHash)
-                        && contentHash != knownHash;
-
-                    lastWriteTimes.TryGetValue(contextName, out DateTime knownTime);
+                    lastWriteTimes.TryGetValue(contextName, out long knownFold);
 
                     // Special case: if we've never scanned this context and the folder
                     // exists, treat it as changed so we populate the snapshot.
@@ -206,13 +201,12 @@ namespace CMM
                     // no extra IO (we already have currentWriteTime), and it self-limits to the
                     // brief window after an edit, settling back to the stamp shortcut once the
                     // folder goes quiet for SignatureFreshnessWindow seconds.
-                    bool recentlyTouched = currentWriteTime != DateTime.MinValue
-                        && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(SignatureFreshnessWindow);
+                    bool recentlyTouched = SourceScan.RecentlyTouched(sig.Newest, SignatureFreshnessWindow);
 
                     if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
-                        && !contentChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;
-                    lastWriteTimes[contextName] = currentWriteTime;
-                    if (contentHash != 0) lastContentHashes[contextName] = contentHash;
+                        && sig.Fold == knownFold && !blacklistRetryDue) continue;
+                    lastWriteTimes[contextName] = sig.Fold;
+                    _fwLastNewest[contextName] = sig.Newest;
 
                     // ── FAST REACTION: the ping found the playing file gone ──────────
                     // We already know exactly what changed, so react off the in-memory
@@ -255,7 +249,7 @@ namespace CMM
 
             bool isPlaylist = ctx.IsPlaylist;
             string playlistFile = isPlaylist ? PlaylistSource.ResolveFullPath(ctx.Source) : null;
-            string dir = isPlaylist ? null : Path.Combine(MusicDirectory, ctx.Source);
+            string[] dirs = isPlaylist ? MusicRoots.NoDirs : MusicRoots.DirsFor(ctx);
             bool includeSub = !isPlaylist && ctx.IncludeSubfolders;
             string[] claimedPrefixes = GetClaimedSubtreePrefixes(contextName);
 
@@ -298,33 +292,54 @@ namespace CMM
                         }
                         discoveredPlaylistFiles = _noPlaylistFiles;   // direct playlist watches its own file
                     }
-                    else if (Directory.Exists(dir))
+                    else
                     {
-                        // Folder: loose supported files (with free size+mtime keys from the
-                        // listing) plus — when FLAT — the tracks from each top-level .m3u,
-                        // deduped by full path. Recursive folders ignore .m3u entirely.
-                        var fis = new DirectoryInfo(dir)
-                            .GetFiles("*", includeSub ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
-                        var pool = new List<string>(fis.Length);
+                        // EVERY folder this context reads from, in root order: MusicPath's
+                        // first, then each add-on mod's. Only the PRIMARY may recurse -- add-on
+                        // folders are always flat, which is what keeps the crawler single-rooted
+                        // and keeps "deepest context owns the file" out of them entirely.
+                        //
+                        // Each folder's own listing is SORTED before it is appended. Filesystem
+                        // order is not guaranteed to repeat, and GlobalTrackOrder=Sequential
+                        // indexes straight into this array -- unsorted, a sequential context
+                        // would quietly reshuffle itself whenever a directory rehashed.
+                        var pool = new List<string>();
                         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         List<string> m3us = null;
-                        foreach (var fi in fis)
+                        for (int di = 0; di < dirs.Length; di++)
                         {
-                            string fn = fi.FullName;
-                            if (!includeSub && Contexts.IsPlaylistSource(fn))
+                            string dir = dirs[di];
+                            if (string.IsNullOrEmpty(dir)) continue;
+                            bool recurseHere = includeSub && di == 0;
+                            try
                             {
-                                (m3us ?? (m3us = new List<string>())).Add(fn);
-                                continue;
-                            }
-                            if (AudioDecoder.IsSupported(fn) && !IsClaimedByDeeperContext(fn, claimedPrefixes))
-                            {
-                                string nk = norm(fn);
-                                if (seen.Add(nk))
+                                if (!Directory.Exists(dir)) continue;
+                                var fis = new DirectoryInfo(dir).GetFiles("*",
+                                    recurseHere ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+                                Array.Sort(fis, (a, b) =>
+                                    string.Compare(a.FullName, b.FullName, StringComparison.OrdinalIgnoreCase));
+                                foreach (var fi in fis)
                                 {
-                                    pool.Add(fn);
-                                    keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                                    string fn = fi.FullName;
+                                    if (!recurseHere && Contexts.IsPlaylistSource(fn))
+                                    {
+                                        (m3us ?? (m3us = new List<string>())).Add(fn);
+                                        continue;
+                                    }
+                                    if (AudioDecoder.IsSupported(fn)
+                                        && !IsClaimedByDeeperContext(fn, claimedPrefixes))
+                                    {
+                                        string nk = norm(fn);
+                                        if (seen.Add(nk))
+                                        {
+                                            pool.Add(fn);
+                                            keyByPath[nk] = $"{nk}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+                                        }
+                                    }
                                 }
                             }
+                            // One unreadable add-on costs you that add-on, never the context.
+                            catch { }
                         }
                         if (m3us != null)
                         {
@@ -344,7 +359,6 @@ namespace CMM
                         else discoveredPlaylistFiles = _noPlaylistFiles;
                         currentFiles = pool.ToArray();
                     }
-                    else currentFiles = new string[0];
                 }
                 // A throw mid-enumeration (an unreadable subdir or an over-MAX_PATH
                 // path under a recursive subfolders="true" context, removed media, or
@@ -572,7 +586,16 @@ namespace CMM
         private sealed class FileWatchDescriptor
         {
             public string ContextName;
-            public string Dir;
+            // Every folder this context reads from: MusicPath's first, then one per
+            // add-on mod that could supply it. Present whether or not they exist —
+            // existence is part of the signature, so a pack folder appearing or
+            // vanishing is noticed without re-discovering anything.
+            public string[] Dirs;
+            // Per-folder "this volume lies about timestamps" flags, aligned with Dirs.
+            // Per FOLDER, not per context: a primary on NTFS with an add-on on exFAT
+            // genuinely needs both branches, and gating on the primary alone would
+            // leave the add-on's changes permanently undetected.
+            public bool[]   Sloppy;
             public bool   IncludeSub;
             public string PlayingFile;      // active context only (else null) — the O(1) ping target
             public bool   IsActiveContext;
@@ -591,21 +614,27 @@ namespace CMM
 
         // Scheduler-owned: only ever touched on the scheduler thread, never the main thread,
         // so they need no lock and stay independent of the coroutine fallback's own copies.
-        private static readonly Dictionary<string, DateTime> _fwLastWriteTimes =
+        // ONE composite signature per context, covering every folder it reads from.
+        // Shared with the coroutine fallback (they are mutually exclusive) so there is a
+        // single place to clear -- the fallback used to keep its own copies as coroutine
+        // locals, where nothing could reach them.
+        private static readonly Dictionary<string, long> _fwLastSig =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        // Newest folder timestamp seen, for the "touched in the last few seconds" gate only.
+        private static readonly Dictionary<string, DateTime> _fwLastNewest =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         // Listing-based content hash per flat context, ONLY populated on sloppy-mtime filesystems
         // (exFAT/FAT/removable/network), where the directory write time never moves on child
         // add/remove/rename and the mtime signature above is therefore blind (the radio catalog
         // hit exactly this on the user's exFAT music drive). NTFS contexts never pay the listing.
-        private static readonly Dictionary<string, long> _fwLastContentHash =
-            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
         private static readonly System.Diagnostics.Stopwatch _fwClock = System.Diagnostics.Stopwatch.StartNew();
         private static double _fwLastBlacklistRetry;
 
         internal static void FileWatchInit()
         {
-            _fwLastWriteTimes.Clear();
-            _fwLastContentHash.Clear();
+            _fwLastSig.Clear();
+            _fwLastNewest.Clear();
             _fwLastBlacklistRetry = -FwBlacklistRetryInterval;   // allow the first retry sweep immediately
         }
 
@@ -659,7 +688,8 @@ namespace CMM
                     ContextName     = contextName,
                     IsPlaylist      = isPlaylist,
                     PlaylistFile    = isPlaylist ? PlaylistSource.ResolveFullPath(ctx.Source) : null,
-                    Dir             = isPlaylist ? null : Path.Combine(MusicDirectory, ctx.Source),
+                    Dirs            = isPlaylist ? null : MusicRoots.DirsFor(ctx),
+                    Sloppy          = isPlaylist ? null : MusicRoots.SloppyFor(ctx),
                     IncludeSub      = !isPlaylist && ctx.IncludeSubfolders,
                     FolderPlaylistFiles = isPlaylist ? null : cache.playlistFiles,
                     // Active context only: we can't trust the folder mtime for the playing
@@ -716,9 +746,13 @@ namespace CMM
                     // FAST PATH: one write-time signature (+ one ping for the active ctx).
                     // Playlist → the .m3u file's own mtime; folder → the directory mtime,
                     // plus any in-folder .m3u files' mtimes (for in-place playlist edits).
-                    DateTime currentWriteTime = d.IsPlaylist
-                        ? PlaylistWriteSignatureUtc(d.PlaylistFile)
-                        : ContextWriteSignatureUtc(d.Dir, false, d.FolderPlaylistFiles);
+                    SourceScan.WatchSig sig = d.IsPlaylist
+                        ? PlaylistSig(d.PlaylistFile)
+                        : ContextWatchSignature(d.Dirs, d.Sloppy, false, d.FolderPlaylistFiles);
+                    // IO threw somewhere in the fold. A PARTIAL hash would differ every tick and
+                    // start a rescan storm on a flaky or removable volume, so skip this context
+                    // entirely WITHOUT storing the value -- the next tick tries again.
+                    if (sig.Faulted) continue;
                     bool playingFileGone = !string.IsNullOrEmpty(pf) && PingGone(pf);
                     // Files (audio OR .m3u) appearing/vanishing/renamed that the max-of-mtimes
                     // signature can't see (the folder mtime doesn't bump on exFAT/FAT/network):
@@ -726,26 +760,18 @@ namespace CMM
                     // filesystems — NTFS bumps the folder mtime for all of it, staying pure-stat.
                     // A throw mid-listing leaves the hash 0 = "no change" (transient IO must not
                     // trigger a rescan). Subsumes the old top-level-.m3u set-diff.
-                    long contentHash = 0;
-                    if (!d.IsPlaylist && IsSloppyMtimeFilesystem(d.Dir))
-                        try { contentHash = FileSetContentHash(d.Dir, false); } catch { }
-                    bool contentChanged = contentHash != 0
-                        && _fwLastContentHash.TryGetValue(ctxName, out long knownHash)
-                        && contentHash != knownHash;
-
-                    bool neverScanned = !_fwLastWriteTimes.TryGetValue(ctxName, out DateTime knownTime);
+                    bool neverScanned = !_fwLastSig.TryGetValue(ctxName, out long knownFold);
                     // Never trust the write-time shortcut for an empty dir (a refill can land on
                     // the same filesystem-precision stamp) or a folder touched within the last
                     // few poll intervals (a same-valued FAT/exFAT stamp may be masking a change).
                     bool previouslyEmpty = !neverScanned && d.SnapshotLength == 0;
                     bool activeNeedsScan = d.IsActiveContext && playingFileGone;
-                    bool recentlyTouched = currentWriteTime != DateTime.MinValue
-                        && (DateTime.UtcNow - currentWriteTime) < TimeSpan.FromSeconds(FwSignatureFreshnessWindow);
+                    bool recentlyTouched = SourceScan.RecentlyTouched(sig.Newest, FwSignatureFreshnessWindow);
 
                     if (!activeNeedsScan && !neverScanned && !previouslyEmpty && !recentlyTouched
-                        && !contentChanged && currentWriteTime == knownTime && !blacklistRetryDue) continue;   // no change — no main hop
-                    _fwLastWriteTimes[ctxName] = currentWriteTime;
-                    if (contentHash != 0) _fwLastContentHash[ctxName] = contentHash;
+                        && sig.Fold == knownFold && !blacklistRetryDue) continue;   // no change — no main hop
+                    _fwLastSig[ctxName] = sig.Fold;
+                    _fwLastNewest[ctxName] = sig.Newest;
 
                     if (d.IsActiveContext && playingFileGone)
                     {
@@ -762,6 +788,17 @@ namespace CMM
                 }
                 catch (Exception ex) { Log.Error($"[CMM] FileWatchTick '{ctxName}' failed: {ex.Message}"); }
             }
+        }
+
+        // A playlist source has one file and its own mtime IS the signature.
+        private static SourceScan.WatchSig PlaylistSig(string file)
+        {
+            try
+            {
+                DateTime t = PlaylistWriteSignatureUtc(file);
+                return new SourceScan.WatchSig { Fold = t.Ticks, Newest = t };
+            }
+            catch { return new SourceScan.WatchSig { Faulted = true }; }
         }
 
         // File.Exists, swallowing the transient IO error an external move/delete can throw

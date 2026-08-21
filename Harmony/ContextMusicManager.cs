@@ -17,7 +17,16 @@ namespace CMM
 
     public partial class ContextMusicManager
     {
-        public static string MusicDirectory;  // absolute path; set in Init, overridable via settings.xml MusicPath
+        // The PRIMARY music folder. Still spelled the same everywhere, but the storage
+        // moved into MusicRoots, which owns the whole list — MusicPath plus every
+        // installed mod's Music folder. Keeping this as the single name for "the
+        // primary" means the 16 existing readers did not have to change meaning, and
+        // there is exactly one place the value lives.
+        public static string MusicDirectory
+        {
+            get => MusicRoots.Primary;
+            set => MusicRoots.SetPrimary(value);
+        }
         public static bool inGame = false;
         public static bool playerIsDead = true;
         public static string ModPath;
@@ -119,6 +128,12 @@ namespace CMM
             // Config/*.xml -- see CMMSettingsFile for the backfill/migrate rules.
             CMMSettingsFile.EnsureAll(modPath);
             CMMConfigLoader.LoadSettings(modPath);
+            // Find the add-on music folders now: after LoadSettings so MusicPath is
+            // resolved, and well before RebuildContextsWithFiles -- that first scan marks
+            // presence clean and does not re-queue itself, so a context whose music lives
+            // only in a pack would read as empty for the whole first frame and the menu
+            // would start on the vanilla bed.
+            MusicRootsDiscovery.Discover(modPath);
             // Same deal as the settings files: create contexts.xml if it is not there and
             // add any context introduced since this file was stamped, BEFORE reading it.
             // Runs after InitContexts so the built-in table exists to render from.
@@ -770,7 +785,9 @@ namespace CMM
                 if (ictx != null && !string.IsNullOrEmpty(ictx.Source))
                 {
                     bool isPlaylist = ictx.IsPlaylist;
-                    string dir = isPlaylist ? null : Path.Combine(MusicDirectory, ictx.Source);
+                    string[] dirs = isPlaylist ? MusicRoots.NoDirs : MusicRoots.DirsFor(ictx);
+                    string[] claimed = isPlaylist ? SourceScan._noClaimPrefixes
+                                                  : GetClaimedSubtreePrefixes(contextName);
                     string playlistFile = isPlaylist ? PlaylistSource.ResolveFullPath(ictx.Source) : null;
                     string[] fresh = null;
                     string[] freshPlaylistFiles = _noPlaylistFiles;
@@ -780,7 +797,7 @@ namespace CMM
                         try
                         {
                             if (isPlaylist) fresh = PlaylistSource.ReadTracks(playlistFile);
-                            else if (Directory.Exists(dir)) fresh = EnumerateContextFiles(ictx, dir, out freshPlaylistFiles);
+                            else fresh = EnumerateFlatPoolMulti(dirs, claimed, out freshPlaylistFiles);
                         }
                         catch { }
                         finally { scanDone = true; }

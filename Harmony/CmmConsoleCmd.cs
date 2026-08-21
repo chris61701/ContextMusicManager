@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
@@ -71,10 +71,20 @@ namespace CMM
             if (_params == null || _params.Count == 0) { Out(Help); return; }
 
             string sub = _params[0].ToLowerInvariant();
-            if (sub == "rescan")
+            if (sub == "rescan" || sub == "scan")
             {
+                // Re-find the add-on Music folders as well as re-enumerating. The mod list
+                // itself is fixed for the session, but a Music folder can be added to an
+                // installed mod while the game runs, and this is the only thing that looks
+                // for one -- discovery is deliberately not on a timer.
+                int n = MusicRootsDiscovery.Discover(ContextMusicManager.ModPath);
                 string target = _params.Count > 1 ? _params[1] : "all";
-                Out(ContextMusicManager.RescanCommand(target));
+                Out($"music roots: 1 primary + {n} add-on. " + ContextMusicManager.RescanCommand(target));
+                return;
+            }
+            if (sub == "roots")
+            {
+                Out(ContextMusicManager.RootsReport(_params.Count > 1 ? _params[1] : null));
                 return;
             }
             if (sub == "nativeplay")

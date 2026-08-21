@@ -16,6 +16,9 @@ namespace CMM
     internal static class SourceScan
     {
         internal static readonly string[] _noPlaylistFiles = new string[0];
+        // Moved here from the ContextMusicManager partial so MusicRoots (Unity-free, and
+        // therefore linkable into the offline harnesses) can share it.
+        internal static readonly string[] _noClaimPrefixes = new string[0];
 
         // The eligible tracks for a FOLDER source. Recursive: every supported, non-claimed
         // file across the tree, with .m3u files ignored. Flat: the supported files directly
@@ -54,6 +57,153 @@ namespace CMM
                 playlistFiles = m3us.ToArray();
             }
             return pool.ToArray();
+        }
+
+        // ── Several folders, read as one ──────────────────────────────────────
+
+        // The pool for a context that draws from MusicPath AND any number of add-on
+        // mods' Music folders. Every folder is read FLAT: add-on folders never recurse
+        // (see MusicRoots), and a recursive PRIMARY is the crawler's job, not this one.
+        //
+        // Order is deliberate and stable: each folder's own listing is sorted, and the
+        // folders are concatenated in root order (primary first). Filesystem
+        // enumeration order is not guaranteed to repeat across sessions, and
+        // GlobalTrackOrder=Sequential indexes straight into this array — without the
+        // sort a sequential context would silently reshuffle itself on a rehash.
+        //
+        // A folder that does not exist contributes nothing and is not an error: that
+        // is how a pack with no folder for this context, and a pack whose folder was
+        // deleted, both cost exactly one Directory.Exists.
+        //
+        // A folder that THROWS is skipped and the rest still count. One unreadable
+        // add-on must cost you that add-on, never the context.
+        internal static string[] EnumerateFlatPoolMulti(string[] dirs, string[] claimed,
+                                                        out string[] playlistFiles)
+        {
+            playlistFiles = _noPlaylistFiles;
+            if (dirs == null || dirs.Length == 0) return new string[0];
+
+            var pool = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> allPlaylists = null;
+
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                string dir = dirs[i];
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                try
+                {
+                    string[] part = EnumerateFolderPoolRaw(dir, false, claimed, out string[] pls);
+                    Array.Sort(part, StringComparer.OrdinalIgnoreCase);
+                    foreach (string f in part)
+                        if (seen.Add(FullKey(f))) pool.Add(f);
+                    if (pls != null && pls.Length > 0)
+                        (allPlaylists ?? (allPlaylists = new List<string>())).AddRange(pls);
+                }
+                catch { /* this folder is unreadable right now; the others still count */ }
+            }
+
+            if (allPlaylists != null) playlistFiles = allPlaylists.ToArray();
+            return pool.ToArray();
+        }
+
+        // ── The change signature across several folders ───────────────────────
+
+        // What a watch tick compares against last tick's value.
+        //
+        // A MAX OF TIMESTAMPS WOULD BE WRONG, and quietly so. A folder that does not
+        // exist reports DateTime.MinValue, and MinValue is the identity element of a
+        // max — so with one folder that sentinel is exactly what FORCES the rescan,
+        // and folded across several it is absorbed and a deleted add-on folder is
+        // never noticed. The pool then holds files that are gone, forever, while the
+        // music keeps playing and nothing looks wrong.
+        //
+        // So this folds MEMBERSHIP as well as time: every folder's path and whether it
+        // exists go into the hash, and a missing folder contributes a sentinel that no
+        // real tick count can collide with.
+        internal struct WatchSig
+        {
+            public long     Fold;
+            public DateTime Newest;    // for the "touched in the last few seconds" heuristic only
+            public bool     Faulted;   // IO threw: caller must skip WITHOUT storing this value
+        }
+
+        private const ulong FnvOffset = 14695981039346656037UL;
+        private const ulong FnvPrime  = 1099511628211UL;
+
+        private static void MixI64(ref ulong h, long v)
+        {
+            for (int i = 0; i < 8; i++) { h ^= (byte)(v >> (i * 8)); h *= FnvPrime; }
+        }
+
+        private static void MixString(ref ulong h, string s)
+        {
+            if (s == null) { h ^= 0xFF; h *= FnvPrime; return; }
+            for (int i = 0; i < s.Length; i++) { h ^= char.ToLowerInvariant(s[i]); h *= FnvPrime; }
+            h ^= 0x2F; h *= FnvPrime;                       // separator, so ["ab","c"] != ["a","bc"]
+        }
+
+        // "Touched within the last few seconds", so a coarse FAT/exFAT stamp that lands on
+        // the same value it already had cannot hide an edit.
+        //
+        // The lower bound is not decoration. A FUTURE timestamp -- clock skew on a
+        // removable or network volume, robocopy /DCOPY:T, a restored backup -- makes the
+        // difference negative, which is also "< 6s", so the folder would read as
+        // permanently just-touched and re-enumerate every single tick forever. With
+        // several folders folded together, one bad stamp anywhere would do it.
+        internal static bool RecentlyTouched(DateTime newest, double windowSec)
+        {
+            if (newest == DateTime.MinValue) return false;
+            TimeSpan age = DateTime.UtcNow - newest;
+            return age >= TimeSpan.Zero && age < TimeSpan.FromSeconds(windowSec);
+        }
+
+        internal static WatchSig ContextWatchSignature(string[] dirs, bool[] sloppy,
+                                                       bool primaryRecursive,
+                                                       string[] folderPlaylistFiles)
+        {
+            var sig = new WatchSig { Newest = DateTime.MinValue };
+            ulong h = FnvOffset;
+            if (dirs == null) { sig.Fold = (long)h; return sig; }
+
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                string dir = dirs[i];
+                MixString(ref h, dir);                       // membership + order
+
+                bool exists;
+                try { exists = !string.IsNullOrEmpty(dir) && Directory.Exists(dir); }
+                catch { sig.Faulted = true; return sig; }
+
+                // -1 can never be a real tick count, so present→missing always moves the
+                // fold even when another folder holds a later timestamp.
+                long ticks = -1L;
+                if (exists)
+                {
+                    try
+                    {
+                        // Only the PRIMARY may be recursive; add-on folders are flat.
+                        DateTime t = ContextWriteSignatureUtc(dir, primaryRecursive && i == 0,
+                                                              i == 0 ? folderPlaylistFiles : null);
+                        ticks = t.Ticks;
+                        if (t > sig.Newest) sig.Newest = t;
+                    }
+                    catch { sig.Faulted = true; return sig; }
+                }
+                MixI64(ref h, ticks);
+
+                // Per FOLDER, not per context: a primary on NTFS and an add-on on exFAT
+                // genuinely need different treatment, and gating on the primary alone
+                // would leave the add-on's changes permanently undetected.
+                if (exists && sloppy != null && i < sloppy.Length && sloppy[i])
+                {
+                    try { MixI64(ref h, FileSetContentHash(dir, primaryRecursive && i == 0)); }
+                    catch { sig.Faulted = true; return sig; }
+                }
+            }
+
+            sig.Fold = (long)h;
+            return sig;
         }
 
         // Case-insensitive full-path dedupe key. Falls back to the raw string if the path
