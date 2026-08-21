@@ -4,7 +4,9 @@
 run with default values. On upgrade, settings we have added since are written into the existing
 file. Chosen upgrade policy for **changed** defaults: **option B — version-stamped migration.**
 
-**Status.** Plan only, no code.
+**Status.** **BUILT 2026-08-21** — steps 1-4 of section 6 are done and committed
+(`f6afaf9`, `600417a`, `ec91150`, `76aac81`). Step 5, `contexts.xml`, is still open.
+`tools/CmmConfigTest` is green: 133 settings, the file lifecycle, and the schema guard.
 
 ---
 
@@ -127,6 +129,29 @@ schema fails the test.
    there. Intended, but worth knowing before someone reports "no settings.xml on my server".
 
 ## 6. Order of work
+
+> Steps 1-4 are **done**. What actually happened, and what was found on the way:
+>
+> - **A pre-flight nobody planned for.** 13 C# defaults had rotted away from the values
+>   the shipped XML carried — including `VolumeModifier` 1.0 vs 0.5, `WorldEmitterEnabled`
+>   false vs true and `WorldEmitterSource` "" vs "Radio". The XML wins today, so they were
+>   invisible; the moment it stopped shipping they would each have become a silent
+>   behaviour change. Fixed first, on its own, as a no-op commit (`f6afaf9`).
+> - **The harness paid for itself immediately.** It caught a bug that would have bricked
+>   every upgraded config on the *following* launch: building the document through a
+>   `StringBuilder` makes `XmlWriter` stamp `encoding="utf-16"` on bytes then written as
+>   UTF-8. The file writes fine and fails to parse next start.
+> - **The guardrail was tested in both directions** rather than assumed — an undeclared
+>   default change fails with the exact `changedIn:`/`was:` to add, and a properly declared
+>   one passes.
+> - **Three settings that only ever existed in code are now documented** for the first
+>   time: `ReverseFadeReclaim`, `NativeScheduler`, `NativePreStageAdvance`.
+> - **Workflow change worth knowing:** the repo no longer holds `settings.xml` /
+>   `radio.xml`, so tuning by editing the repo copy and rebuilding is gone. Tune the
+>   *deployed* file (it hot-reloads, no build needed); change a default *for everyone* in
+>   `CMMSettingsSchema.cs`, with a schema bump. Every value tuned so far is preserved —
+>   the schema was generated from the shipped files.
+
 
 1. The schema table + move the docs into it; loader drives off the table. **No behaviour
    change** — the shipped XML still wins, nothing is written yet.
