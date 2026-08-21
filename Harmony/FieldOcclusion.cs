@@ -73,7 +73,25 @@ namespace CMM
         // window -- the same money, paid for out of vertical extent (see BelowBlocks/AboveBlocks).
         // Geometry reads do not change at all: they track the number of BLOCKS in the window, not
         // the number of cells.
-        private const int StepXZ = 2;
+        // ONE BLOCK. Not two, not three.
+        //
+        // Two blocks could not seal a one-block wall, which is the same failure as the original
+        // three-block-tall cell against a one-block floor -- now for the third time, on the last
+        // axes left. Measured on a POI bathroom with the game's own face rule, a SHUT door read
+        // identical to bricking the doorway up with concrete, to the decimal, at every one of the
+        // four ways the room can land on the cell grid. Swapping the wood door for a steel vault
+        // door changed nothing. The door's mass was not an input to the answer.
+        //
+        // A cell straddling a room's outside corner holds one wall block and three air blocks, and
+        // every route left through such a corner in one diagonal hop. No material knob can reach
+        // that: sweeping the aperture exponent 1..8 moved the OPEN-door path 3.3 -> 24.3 dB while
+        // shut saturated at 4.6.
+        //
+        // The cost is a smaller window, and it comes out even. Geometry reads track BLOCKS, not
+        // cells, so they get ~4x cheaper (560k -> 140k) and the full re-read sweep drops from ~11 s
+        // to ~3 s. The flood over +/-32 blocks costs 30.8 ms against the 24.9 ms two-wide cells
+        // cost over +/-64. Same money, exact geometry.
+        private const int StepXZ = 1;
         private const int StepY  = 1;
         // What the finer horizontal grid is paid for with; was 24/24. Safe because a speaker
         // outside the window now reads CLEAR rather than sealed (see sample_field in cmm_field.c),
@@ -117,7 +135,13 @@ namespace CMM
         private static bool Ensure()
         {
             if (!NativeField.Available) return false;
-            int range = Mathf.Clamp(Mathf.CeilToInt(CMMConfig.WorldEmitterRange) + 4, 24, 128);
+            // The field's opinion reaches FieldRangeCap blocks even when the mixer carries sound
+            // further: at one block per cell the window is what costs, and occlusion matters most
+            // in the room you are standing in. Beyond it a speaker reads CLEAR rather than sealed
+            // (sample_field returns "no opinion" outside the window), so the edge is a graceful
+            // absence of occlusion, not a cut-off.
+            const int FieldRangeCap = 32;
+            int range = Mathf.Clamp(Mathf.CeilToInt(CMMConfig.WorldEmitterRange) + 4, 24, FieldRangeCap);
             if (_f != IntPtr.Zero && range == _range) return true;
             Reset();
             _range = range;

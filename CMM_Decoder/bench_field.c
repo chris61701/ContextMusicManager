@@ -36,9 +36,7 @@ static void run(int SX, int SY, int SZ, int NX, int NY, int NZ) {
 int main(void) {
     /* What shipped (cubic), against what ships now (wide and short over the same block volume).
      * The flood is the only thing that grows: geometry reads track the BLOCK volume, unchanged. */
-    run(3, 1, 3, 45, 49, 45);     /* shipped: +/-64 blocks, +/-24 up/down */
-    run(2, 1, 2, 67, 49, 67);     /* 2-wide, same coverage */
-    run(2, 1, 2, 67, 33, 67);     /* 2-wide, +/-16 up/down */
-    run(2, 1, 2, 61, 33, 61);     /* 2-wide, +/-60 blocks (= WorldEmitterRange) */
+    run(2, 1, 2, 65, 33, 65);     /* what shipped an hour ago: 2-wide, +/-64 blocks */
+    run(1, 1, 1, 65, 33, 65);     /* what ships now: 1 block per cell, +/-32 blocks */
     return 0;
 }

@@ -289,7 +289,7 @@
        now 1x3, so a one-block hole went from a ninth of a face to a third. Squaring puts it
        back at a ninth. A fully open face and a sealed one are unaffected at any value, so
        open air stays at 0 dB. Live: cmm field aperture <n> -->
-  <WorldEmitterFieldAperturePow>2.0</WorldEmitterFieldAperturePow>
+  <WorldEmitterFieldAperturePow>1.0</WorldEmitterFieldAperturePow>
 
   <!-- HOW FAST occlusion may change, dB per second, per speaker. The field re-floods a few
        times a second and each flood is an independent answer, so walking past a doorway flips

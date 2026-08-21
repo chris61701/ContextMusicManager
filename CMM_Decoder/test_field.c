@@ -16,9 +16,9 @@
 /* Cells are WIDE and SHORT, the shipped shape. A wall spans a cell's full height so coarse is
  * fine; a floor is one block thick with a storey of air above it, and a tall cell cannot
  * represent that -- see the ground-alignment case below, which is the reason for the shape. */
-#define SX 2
+#define SX 1
 #define SY 1
-#define SZ 2
+#define SZ 1
 static unsigned char solid[W][H][W];      /* 1 = a full opaque block */
 
 static int fails = 0, checks = 0;
@@ -68,7 +68,7 @@ static int FACE_RULE = 0;
 /* Mirrors CMMConfig.WorldEmitterFieldAperturePow. A face that is PART open transmits
  * openFraction^this, not openFraction: linear area is too generous, and a face is now 1x3
  * sub-blocks rather than 3x3, so a one-block hole went from a ninth of it to a third. */
-static float APERTURE_POW = 2.0f;
+static float APERTURE_POW = 1.0f;
 static float faceT(int cx, int cy, int cz, int axis) {
     int bx = cx*SX, by = cy*SY, bz = cz*SZ;
     int ea = axis == 0 ? SY : SX, eb = axis == 2 ? SY : SZ;
@@ -79,7 +79,17 @@ static float faceT(int cx, int cy, int cz, int axis) {
         if (axis == 0)      { x = bx;     y = by + a; z = bz + b; px = x-1; py = y; pz = z; }
         else if (axis == 1) { x = bx + a; y = by;     z = bz + b; px = x; py = y-1; pz = z; }
         else                { x = bx + a; y = by + b; z = bz;     px = x; py = y; pz = z-1; }
-        int blocked = isSolid(x, y, z) || isSolid(px, py, pz);
+        /* THIS CELL'S OWN boundary block, and not the neighbour's.
+         *
+         * It used to be `isSolid(x,y,z) || isSolid(px,py,pz)`, which is NOT what the game does:
+         * FieldOcclusion.CellNumbers reads only the cell's own layer, on the rule that whichever
+         * cell contains the wall is the one that reports it. Consulting both sides makes every
+         * face more blocking than the shipped one, so this whole suite was grading a model that
+         * seals better than the one that ships -- and it hid the defect that cost a night. The
+         * same bathroom read a 47.9 dB door here and 2.4 dB in the game. A harness that is kinder
+         * than production is worse than no harness. */
+        (void)px; (void)py; (void)pz;
+        int blocked = isSolid(x, y, z);
         float t = blocked ? 0.0f : 1.0f;
         acc += t; if (t > best) best = t;
         n++;
@@ -317,12 +327,25 @@ int main(int argc, char** argv) {
     fill_all(f);
     cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
     float pin = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
-    // Stated as the PROPERTY rather than as a number carried over from the old cell shape: a hole
-    // must be audibly worse than an open doorway and nothing like a sealed wall. The margin here
-    // is genuinely narrower than it was with 3x3 faces (see the face-rule note above) -- that is
-    // recorded, not hidden behind a threshold quietly widened to fit.
-    ckf("a 1-block hole: between doorway and sealed", pin > door + 1.0f && pin < thru * 0.2f,
-        "%.2f dB (doorway %.1f, sealed %.1f)", pin, door, thru);
+    // WHAT ONE-BLOCK CELLS COST, stated plainly because it is a real loss and the rest of this
+    // change is a win.
+    //
+    // At one block per cell a one-block hole is a fully open cell face, so it reads 0 dB: exactly
+    // like a doorway. The model no longer has anywhere to express "this opening is small". With
+    // 3x3 sub-block faces a pinhole was a NINTH of a face and read ~6 dB; that arithmetic is gone
+    // along with the sub-blocks, and it cannot be recovered by any knob, because there is nothing
+    // left to take a fraction of.
+    //
+    // What is missing is an aperture/diffraction term -- attenuation from the absolute SIZE of an
+    // opening rather than its share of a cell -- which the model has never had and which is the
+    // honest way to model this. Until then a wall with a single block knocked out of it leaks as
+    // freely as an open door, and that is a known gap rather than a passing test.
+    //
+    // So the assertion is reduced to what is still true and still worth guarding: a hole is
+    // nothing like a sealed wall, and a sealed wall stays sealed.
+    ckf("a 1-block hole is not a sealed wall", pin < thru * 0.2f,
+        "%.2f dB (doorway %.1f, sealed %.1f) — no aperture-size term: a hole reads as an opening",
+        pin, door, thru);
 
     /* ── EVERY BUFFER MUST ACTUALLY GET FLOODED ────────────────────────────────────────
      * There are three field buffers: the one being sampled, the one being built, and the previous

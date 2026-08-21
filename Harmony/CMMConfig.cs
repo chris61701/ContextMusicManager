@@ -269,7 +269,13 @@ namespace CMM
         //
         // 1.0 restores the linear behaviour exactly. A fully open face (1) and a sealed one (0)
         // are unaffected at any value, so open air stays at 0 dB regardless.
-        public static float  WorldEmitterFieldAperturePow = 2f;
+        // 1 = the plain open-area fraction. It was 2 to compensate for faces being averaged over
+        // several sub-blocks, and there are none left: at one block per cell a face IS one block.
+        // Leaving it at 2 would silently square every material's transmission and double its dB --
+        // a 20.2 dB wood wall reading 39.2. Kept as a knob because it still works on the partial
+        // transmission a single block can report (damaged blocks, terrain density, a door
+        // mid-swing), where raising it makes part-open geometry heavier.
+        public static float  WorldEmitterFieldAperturePow = 1f;
         // What one block of material is worth, as dB = WallDb * loss^WallPow.
         //
         // DERIVED FROM THE SHIPPED MODEL, not invented. The field first borrowed the native

@@ -616,11 +616,19 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                         /* ...and whatever stands ACROSS the route inside the cell being entered.
                          * Averaged over the axes the step actually moves along, so a diagonal is
                          * charged for the planes it genuinely crosses rather than for all three. */
-                        { float fl = 0.0f; int fn = 0;
-                          if (dx) { fl += FLX[ni]; fn++; }
-                          if (dy) { fl += FLY[ni]; fn++; }
-                          if (dz) { fl += FLZ[ni]; fn++; }
-                          if (fn) mat += fl / fn; }
+                        /* SUM the interior planes crossed; do not average them, and do not count
+                         * an axis that has no interior plane to cross.
+                         *
+                         * Averaging meant a three-axis diagonal divided its obstruction by three --
+                         * and one of those three was Y, whose middle plane does not exist at
+                         * stepY == 1 and always reads fully open. So 12 dB of corner became 4, and
+                         * every route out of a sealed room left through a corner in one diagonal
+                         * hop. Averaging also made a diagonal CHEAPER than either of the straight
+                         * moves it replaces, which is backwards: crossing two planes is more
+                         * obstruction than crossing one, not the mean of them. */
+                        { if (dx && f->stepX >= 2) mat += FLX[ni];
+                          if (dy && f->stepY >= 2) mat += FLY[ni];
+                          if (dz && f->stepZ >= 2) mat += FLZ[ni]; }
 
                         int q = c + qmove[dx + 1][dy + 1][dz + 1]
                                   + (int)(mat * Q_PER_DB + 0.5f);
