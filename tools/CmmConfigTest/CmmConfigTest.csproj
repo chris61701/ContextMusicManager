@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmConfigTest — proves the generated config files match what shipped.
+
+       LINKS the mod's real CMMSettingsSchema.cs / CMMSettingsIO.cs /
+       CMMSettingsWriter.cs, so what this renders is byte-for-byte what the game
+       will write. No hand-ported copy: the whole point of the check is that a
+       harness grading its OWN model is worthless (see the acoustics harness,
+       which read a different face rule from the shipped one for hours).
+
+       Shims.cs supplies only Log and CMMConfig.D — the two non-audio symbols the
+       linked files touch. Field BINDING (reflection onto CMMConfig /
+       ContextMusicManager statics) is deliberately NOT exercised here: it needs
+       the real MonoBehaviour. Rendering and parsing do not, and they are what
+       this checks.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmConfigTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="Shims.cs" />
+    <Compile Include="..\..\Harmony\CMMSettingsSchema.cs" Link="linked\CMMSettingsSchema.cs" />
+    <Compile Include="..\..\Harmony\CMMSettingsIO.cs"     Link="linked\CMMSettingsIO.cs" />
+    <Compile Include="..\..\Harmony\CMMSettingsWriter.cs" Link="linked\CMMSettingsWriter.cs" />
+  </ItemGroup>
+
+</Project>

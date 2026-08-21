@@ -55,31 +55,22 @@ namespace CMM
             try
             {
 
-                CMMConfig.VolumeModifier   = ReadFloat(root, "VolumeModifier",   CMMConfig.VolumeModifier);
-                CMMConfig.CrossfadeEnabled   = ReadBool (root, "CrossfadeEnabled",   CMMConfig.CrossfadeEnabled);
-                CMMConfig.ReverseFadeReclaim = ReadBool (root, "ReverseFadeReclaim", CMMConfig.ReverseFadeReclaim);
-                CMMConfig.DebugLogging       = ReadBool (root, "DebugLogging",       CMMConfig.DebugLogging);
+                // Every plain setting is applied from the schema table now: one pass in
+                // table order, first file in the chain wins, a setting the chain does not
+                // mention keeps what it already holds. Same semantics the 130 hand-written
+                // ReadBool/ReadFloat/... calls had — the table is just doing it instead, so
+                // the default, the documentation and the parsing can no longer disagree.
+                // See Harmony/CMMSettingsSchema.cs.
+                int applied = CMMSettingsIO.Apply(root);
 
+                // ── The handful that are not a plain field assignment ──────────────
+
+                // A block element with children rather than a value.
                 LoadDisabledVanillaSections(root);
 
-                CMMConfig.LoudnessNormalizationEnabled = ReadBool (root, "LoudnessNormalizationEnabled", CMMConfig.LoudnessNormalizationEnabled);
-                CMMConfig.LoudnessTargetLufs           = ReadFloat(root, "LoudnessTargetLufs",           CMMConfig.LoudnessTargetLufs);
-                CMMConfig.LoudnessMaxBoostDb           = ReadFloat(root, "LoudnessMaxBoostDb",           CMMConfig.LoudnessMaxBoostDb);
-                CMMConfig.LoudnessMeasureAhead         = ReadInt  (root, "LoudnessMeasureAhead",         CMMConfig.LoudnessMeasureAhead);
-
-                CMMConfig.EnemyDetectRange                = ReadFloat(root, "EnemyDetectRange",                 CMMConfig.EnemyDetectRange);
-                CMMConfig.PlayerDetectRange                = ReadFloat(root, "PlayerDetectRange",                CMMConfig.PlayerDetectRange);
-                CMMConfig.CombatShareRange                 = ReadFloat(root, "CombatShareRange",                 CMMConfig.CombatShareRange);
-                CMMConfig.CombatShareRequireAlly           = ReadBool (root, "CombatShareRequireAlly",           CMMConfig.CombatShareRequireAlly);
-                CMMConfig.HomeDetectRange                  = ReadFloat(root, "HomeDetectRange",                  CMMConfig.HomeDetectRange);
-                CMMConfig.PlayerHealthDangerThresholdPercent = ReadFloat(root, "PlayerHealthDangerThresholdPercent", CMMConfig.PlayerHealthDangerThresholdPercent);
-                CMMConfig.CombatExitDelay                  = ReadFloat(root, "CombatExitDelay",                  CMMConfig.CombatExitDelay);
-                CMMConfig.CombatCooldown                   = ReadFloat(root, "CombatCooldown",                   CMMConfig.CombatCooldown);
-
-                CMMConfig.CombatLowEnemyThreshold  = ReadInt(root, "CombatLowEnemyThreshold",  CMMConfig.CombatLowEnemyThreshold);
-                CMMConfig.CombatHighEnemyThreshold = ReadInt(root, "CombatHighEnemyThreshold", CMMConfig.CombatHighEnemyThreshold);
-
-                string rawMusicPath = ReadString(root, "MusicPath", null);
+                // No backing field of its own: the raw string is resolved against the mod
+                // folder and lands in ContextMusicManager.MusicDirectory.
+                string rawMusicPath = CMMSettingsIO.RawText(root, "MusicPath");
                 if (!string.IsNullOrWhiteSpace(rawMusicPath))
                 {
                     ContextMusicManager.MusicDirectory = Path.IsPathRooted(rawMusicPath)
@@ -88,135 +79,20 @@ namespace CMM
                     CMMConfig.D($"[CMM] MusicPath resolved to: {ContextMusicManager.MusicDirectory}");
                 }
 
-                ContextMusicManager.CrossFadeDuration           = ReadFloat(root, "CrossFadeDuration",           ContextMusicManager.CrossFadeDuration);
-                ContextMusicManager.TrackTransitionFadeDuration = ReadFloat(root, "TrackTransitionFadeDuration", ContextMusicManager.TrackTransitionFadeDuration);
-                ContextMusicManager.ContextScanCooldown         = ReadFloat(root, "ContextScanCooldown",         ContextMusicManager.ContextScanCooldown);
-                ContextMusicManager.StalenessCheckInterval      = ReadFloat(root, "StalenessCheckInterval",      ContextMusicManager.StalenessCheckInterval);
-                ContextMusicManager.TrackEndPollInterval        = ReadFloat(root, "TrackEndPollInterval",        ContextMusicManager.TrackEndPollInterval);
-                ContextMusicManager.GlobalTrackOrder            = ReadEnum<TrackOrderMode>(root, "GlobalTrackOrder", ContextMusicManager.GlobalTrackOrder);
-
-                CMMConfig.KeybindsEnabled    = ReadBool(root, "KeybindsEnabled",    CMMConfig.KeybindsEnabled);
-                CMMConfig.KeybindRequireCtrl = ReadBool(root, "KeybindRequireCtrl", CMMConfig.KeybindRequireCtrl);
-                CMMConfig.KeybindRequireAlt  = ReadBool(root, "KeybindRequireAlt",  CMMConfig.KeybindRequireAlt);
-                CMMConfig.KeyNextTrack  = ReadEnum<UnityEngine.KeyCode>(root, "KeyNextTrack",  CMMConfig.KeyNextTrack);
-                CMMConfig.KeyPrevTrack  = ReadEnum<UnityEngine.KeyCode>(root, "KeyPrevTrack",  CMMConfig.KeyPrevTrack);
-                CMMConfig.KeyVolumeUp   = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeUp",   CMMConfig.KeyVolumeUp);
-                CMMConfig.KeyVolumeDown = ReadEnum<UnityEngine.KeyCode>(root, "KeyVolumeDown", CMMConfig.KeyVolumeDown);
-                CMMConfig.KeyBanTrack          = ReadEnum<UnityEngine.KeyCode>(root, "KeyBanTrack",          CMMConfig.KeyBanTrack);
-                CMMConfig.KeyUndoBan           = ReadEnum<UnityEngine.KeyCode>(root, "KeyUndoBan",           CMMConfig.KeyUndoBan);
-                CMMConfig.KeyFavouriteTrack   = ReadEnum<UnityEngine.KeyCode>(root, "KeyFavouriteTrack",   CMMConfig.KeyFavouriteTrack);
-                CMMConfig.KeyToggleCombatMusic = ReadEnum<UnityEngine.KeyCode>(root, "KeyToggleCombatMusic", CMMConfig.KeyToggleCombatMusic);
-                // The MUTE STATE, not just the key. Read every load, including hot-reloads —
-                // which is safe precisely because the keybind writes the file: a reload can only
-                // ever read back the value the toggle just stored, so the two cannot disagree.
-                CMMConfig.CombatMusicMuted     = ReadBool(root, "CombatMusicMuted", CMMConfig.CombatMusicMuted);
+                // The mute STATE, not just the key, and it drives a live toggle. Applied on
+                // every load including hot-reloads — which is safe precisely because the
+                // keybind writes the file: a reload can only ever read back the value the
+                // toggle just stored, so the two cannot disagree.
                 ContextMusicManager.SetCombatMusicMuted(CMMConfig.CombatMusicMuted);
-                CMMConfig.KeyNowPlaying        = ReadEnum<UnityEngine.KeyCode>(root, "KeyNowPlaying",        CMMConfig.KeyNowPlaying);
-                CMMConfig.KeyRadioNext         = ReadEnum<UnityEngine.KeyCode>(root, "KeyRadioNext",         CMMConfig.KeyRadioNext);
-                CMMConfig.KeyRadioPrev         = ReadEnum<UnityEngine.KeyCode>(root, "KeyRadioPrev",         CMMConfig.KeyRadioPrev);
-                CMMConfig.NowPlayingEnabled    = ReadBool(root, "NowPlayingEnabled", CMMConfig.NowPlayingEnabled);
-                CMMConfig.UserTrimStep  = ReadFloat(root, "UserTrimStep", CMMConfig.UserTrimStep);
-                CMMConfig.FavouriteWeight = ReadFloat(root, "FavouriteWeight", CMMConfig.FavouriteWeight);
-                CMMConfig.ManualSkipFadeDuration = ReadFloat(root, "ManualSkipFadeDuration", CMMConfig.ManualSkipFadeDuration);
 
                 // MusicPath may have just changed (settings hot-reload): the ban /
                 // favourite mirrors hold absolute paths derived from it, so re-derive.
                 LoudnessStore.RebuildDerivedPathSets();
 
-                CMMConfig.NativeOutputRingMs = ReadInt (root, "NativeOutputRingMs", CMMConfig.NativeOutputRingMs);
-                CMMConfig.NativeOutputMaxRingMs = ReadInt (root, "NativeOutputMaxRingMs", CMMConfig.NativeOutputMaxRingMs);
-                CMMConfig.NativeScheduler = ReadBool(root, "NativeScheduler", CMMConfig.NativeScheduler);
-                CMMConfig.NativePreStageAdvance = ReadBool(root, "NativePreStageAdvance", CMMConfig.NativePreStageAdvance);
+                // Tiny anchor windows mean the station schedule re-anchors constantly.
+                if (CMMConfig.RadioAnchorSeconds < 300f) CMMConfig.RadioAnchorSeconds = 300f;
 
-                CMMConfig.WorldEmitterEnabled = ReadBool  (root, "WorldEmitterEnabled", CMMConfig.WorldEmitterEnabled);
-                CMMConfig.WorldEmitterSource  = ReadString(root, "WorldEmitterSource",  CMMConfig.WorldEmitterSource);
-                CMMConfig.WorldEmitterRange   = ReadFloat (root, "WorldEmitterRange",   CMMConfig.WorldEmitterRange);
-                CMMConfig.WorldEmitterVolume  = ReadFloat (root, "WorldEmitterVolume",  CMMConfig.WorldEmitterVolume);
-                CMMConfig.WorldEmitterFade    = ReadFloat (root, "WorldEmitterFade",    CMMConfig.WorldEmitterFade);
-                CMMConfig.RadioAnchorSeconds  = ReadFloat (root, "RadioAnchorSeconds",  CMMConfig.RadioAnchorSeconds);
-                CMMConfig.RadioSfxEnabled     = ReadBool  (root, "RadioSfxEnabled",     CMMConfig.RadioSfxEnabled);
-                CMMConfig.RadioSfxVolume      = ReadFloat (root, "RadioSfxVolume",      CMMConfig.RadioSfxVolume);
-                CMMConfig.RadioStaticVolume   = ReadFloat (root, "RadioStaticVolume",   CMMConfig.RadioStaticVolume);
-                CMMConfig.RadioStaticLowHz    = ReadFloat (root, "RadioStaticLowHz",    CMMConfig.RadioStaticLowHz);
-                CMMConfig.RadioStaticHighHz   = ReadFloat (root, "RadioStaticHighHz",   CMMConfig.RadioStaticHighHz);
-                CMMConfig.RadioStaticCrackle  = ReadFloat (root, "RadioStaticCrackle",  CMMConfig.RadioStaticCrackle);
-                CMMConfig.RadioClickOnHz        = ReadFloat(root, "RadioClickOnHz",        CMMConfig.RadioClickOnHz);
-                CMMConfig.RadioClickOnSnap      = ReadFloat(root, "RadioClickOnSnap",      CMMConfig.RadioClickOnSnap);
-                CMMConfig.RadioClickOnLengthMs  = ReadFloat(root, "RadioClickOnLengthMs",  CMMConfig.RadioClickOnLengthMs);
-                CMMConfig.RadioClickOnBody      = ReadFloat(root, "RadioClickOnBody",      CMMConfig.RadioClickOnBody);
-                CMMConfig.RadioClickOnBodyHz    = ReadFloat(root, "RadioClickOnBodyHz",    CMMConfig.RadioClickOnBodyHz);
-                CMMConfig.RadioClickOnDouble    = ReadFloat(root, "RadioClickOnDouble",    CMMConfig.RadioClickOnDouble);
-                CMMConfig.RadioClickOnVolume    = ReadFloat(root, "RadioClickOnVolume",    CMMConfig.RadioClickOnVolume);
-                CMMConfig.RadioClickOffHz       = ReadFloat(root, "RadioClickOffHz",       CMMConfig.RadioClickOffHz);
-                CMMConfig.RadioClickOffSnap     = ReadFloat(root, "RadioClickOffSnap",     CMMConfig.RadioClickOffSnap);
-                CMMConfig.RadioClickOffLengthMs = ReadFloat(root, "RadioClickOffLengthMs", CMMConfig.RadioClickOffLengthMs);
-                CMMConfig.RadioClickOffBody     = ReadFloat(root, "RadioClickOffBody",     CMMConfig.RadioClickOffBody);
-                CMMConfig.RadioClickOffBodyHz   = ReadFloat(root, "RadioClickOffBodyHz",   CMMConfig.RadioClickOffBodyHz);
-                CMMConfig.RadioClickOffDouble   = ReadFloat(root, "RadioClickOffDouble",   CMMConfig.RadioClickOffDouble);
-                CMMConfig.RadioClickDialHz       = ReadFloat(root, "RadioClickDialHz",       CMMConfig.RadioClickDialHz);
-                CMMConfig.RadioClickDialSnap     = ReadFloat(root, "RadioClickDialSnap",     CMMConfig.RadioClickDialSnap);
-                CMMConfig.RadioClickDialLengthMs = ReadFloat(root, "RadioClickDialLengthMs", CMMConfig.RadioClickDialLengthMs);
-                CMMConfig.RadioClickDialBody     = ReadFloat(root, "RadioClickDialBody",     CMMConfig.RadioClickDialBody);
-                CMMConfig.RadioClickDialBodyHz   = ReadFloat(root, "RadioClickDialBodyHz",   CMMConfig.RadioClickDialBodyHz);
-                CMMConfig.RadioClickDialDouble   = ReadFloat(root, "RadioClickDialDouble",   CMMConfig.RadioClickDialDouble);
-                CMMConfig.RadioClickDialVolume   = ReadFloat(root, "RadioClickDialVolume",   CMMConfig.RadioClickDialVolume);
-                CMMConfig.RadioClickVary         = ReadFloat(root, "RadioClickVary",         CMMConfig.RadioClickVary);
-                CMMConfig.RadioClickSamples        = ReadBool (root, "RadioClickSamples",        CMMConfig.RadioClickSamples);
-                CMMConfig.RadioClickSampleJitterHz = ReadFloat(root, "RadioClickSampleJitterHz", CMMConfig.RadioClickSampleJitterHz);
-                CMMConfig.RadioClickOffVolume   = ReadFloat(root, "RadioClickOffVolume",   CMMConfig.RadioClickOffVolume);
-                CMMConfig.WorldEmitterBirthFade = ReadFloat(root, "WorldEmitterBirthFade", CMMConfig.WorldEmitterBirthFade);
-                if (CMMConfig.RadioAnchorSeconds < 300f) CMMConfig.RadioAnchorSeconds = 300f;   // tiny windows = constant re-anchoring
-                CMMConfig.WorldEmitterMinDistance = ReadFloat(root, "WorldEmitterMinDistance", CMMConfig.WorldEmitterMinDistance);
-                CMMConfig.WorldEmitterFalloff     = ReadFloat(root, "WorldEmitterFalloff",     CMMConfig.WorldEmitterFalloff);
-                CMMConfig.WorldEmitterMuffle      = ReadFloat(root, "WorldEmitterMuffle",      CMMConfig.WorldEmitterMuffle);
-                CMMConfig.WorldEmitterStereoWidth = ReadFloat(root, "WorldEmitterStereoWidth", CMMConfig.WorldEmitterStereoWidth);
-                CMMConfig.WorldEmitterOcclusion         = ReadBool (root, "WorldEmitterOcclusion",         CMMConfig.WorldEmitterOcclusion);
-                CMMConfig.WorldEmitterOcclusionWallDistance = ReadFloat(root, "WorldEmitterOcclusionWallDistance", CMMConfig.WorldEmitterOcclusionWallDistance);
-                CMMConfig.WorldEmitterOcclusionMaxDistance  = ReadFloat(root, "WorldEmitterOcclusionMaxDistance",  CMMConfig.WorldEmitterOcclusionMaxDistance);
-                CMMConfig.WorldEmitterOcclusionHardStop     = ReadFloat(root, "WorldEmitterOcclusionHardStop",     CMMConfig.WorldEmitterOcclusionHardStop);
-                CMMConfig.WorldEmitterOcclusionFadeRate     = ReadFloat(root, "WorldEmitterOcclusionFadeRate",     CMMConfig.WorldEmitterOcclusionFadeRate);
-                CMMConfig.WorldEmitterPathRouting       = ReadBool (root, "WorldEmitterPathRouting",       CMMConfig.WorldEmitterPathRouting);
-                CMMConfig.WorldEmitterFloodRadius       = ReadInt  (root, "WorldEmitterFloodRadius",       CMMConfig.WorldEmitterFloodRadius);
-                CMMConfig.WorldEmitterFieldCache        = ReadBool (root, "WorldEmitterFieldCache",        CMMConfig.WorldEmitterFieldCache);
-                CMMConfig.WorldEmitterFieldOcclusion = ReadBool (root, "WorldEmitterFieldOcclusion", CMMConfig.WorldEmitterFieldOcclusion);
-                CMMConfig.WorldEmitterFieldDetourDb  = ReadFloat(root, "WorldEmitterFieldDetourDb",  CMMConfig.WorldEmitterFieldDetourDb);
-                CMMConfig.WorldEmitterFieldSlewDb    = ReadFloat(root, "WorldEmitterFieldSlewDb",    CMMConfig.WorldEmitterFieldSlewDb);
-                CMMConfig.WorldEmitterDoorSwingFrac  = ReadFloat(root, "WorldEmitterDoorSwingFrac",  CMMConfig.WorldEmitterDoorSwingFrac);
-                CMMConfig.WorldEmitterFieldAperturePow = ReadFloat(root, "WorldEmitterFieldAperturePow", CMMConfig.WorldEmitterFieldAperturePow);
-                CMMConfig.WorldEmitterFieldWallDb    = ReadFloat(root, "WorldEmitterFieldWallDb",    CMMConfig.WorldEmitterFieldWallDb);
-                CMMConfig.WorldEmitterFieldWallPow   = ReadFloat(root, "WorldEmitterFieldWallPow",   CMMConfig.WorldEmitterFieldWallPow);
-                CMMConfig.WorldEmitterNativeAcoustics   = ReadBool (root, "WorldEmitterNativeAcoustics",   CMMConfig.WorldEmitterNativeAcoustics);
-                CMMConfig.WorldEmitterOcclusionFullDb   = ReadFloat(root, "WorldEmitterOcclusionFullDb",   CMMConfig.WorldEmitterOcclusionFullDb);
-                CMMConfig.WorldEmitterFieldRadius       = ReadInt  (root, "WorldEmitterFieldRadius",       CMMConfig.WorldEmitterFieldRadius);
-                CMMConfig.WorldEmitterFieldRefresh      = ReadFloat(root, "WorldEmitterFieldRefresh",      CMMConfig.WorldEmitterFieldRefresh);
-                CMMConfig.WorldEmitterReverbBounce      = ReadBool (root, "WorldEmitterReverbBounce",      CMMConfig.WorldEmitterReverbBounce);
-                CMMConfig.WorldEmitterOcclusionDirectional = ReadBool (root, "WorldEmitterOcclusionDirectional", CMMConfig.WorldEmitterOcclusionDirectional);
-                CMMConfig.WorldEmitterReverbEnabled     = ReadBool (root, "WorldEmitterReverbEnabled",     CMMConfig.WorldEmitterReverbEnabled);
-                CMMConfig.WorldEmitterReverbWet         = ReadFloat(root, "WorldEmitterReverbWet",         CMMConfig.WorldEmitterReverbWet);
-                CMMConfig.WorldEmitterReverbDecay       = ReadFloat(root, "WorldEmitterReverbDecay",       CMMConfig.WorldEmitterReverbDecay);
-                CMMConfig.WorldEmitterReverbRange       = ReadFloat(root, "WorldEmitterReverbRange",       CMMConfig.WorldEmitterReverbRange);
-                CMMConfig.WorldEmitterReverbCarry       = ReadFloat(root, "WorldEmitterReverbCarry",       CMMConfig.WorldEmitterReverbCarry);
-                CMMConfig.WorldEmitterDoorGapFull       = ReadFloat(root, "WorldEmitterDoorGapFull",       CMMConfig.WorldEmitterDoorGapFull);
-                CMMConfig.WorldEmitterDoorGapFullOpen   = ReadFloat(root, "WorldEmitterDoorGapFullOpen",   CMMConfig.WorldEmitterDoorGapFullOpen);
-                CMMConfig.WorldEmitterDoorGapClosed     = ReadFloat(root, "WorldEmitterDoorGapClosed",     CMMConfig.WorldEmitterDoorGapClosed);
-                CMMConfig.WorldEmitterDoorSealTypes     = ReadString(root, "WorldEmitterDoorSealTypes",    CMMConfig.WorldEmitterDoorSealTypes);
-                CMMConfig.WorldEmitterDoorGapOverrides  = ReadString(root, "WorldEmitterDoorGapOverrides", CMMConfig.WorldEmitterDoorGapOverrides);
-                CMMConfig.WorldEmitterReverbRangeMult   = ReadFloat(root, "WorldEmitterReverbRangeMult",   CMMConfig.WorldEmitterReverbRangeMult);
-                CMMConfig.WorldEmitterReverbPan         = ReadFloat(root, "WorldEmitterReverbPan",         CMMConfig.WorldEmitterReverbPan);
-                CMMConfig.WorldEmitterReverbDepth       = ReadFloat(root, "WorldEmitterReverbDepth",       CMMConfig.WorldEmitterReverbDepth);
-                CMMConfig.WorldEmitterColorDrive        = ReadFloat(root, "WorldEmitterColorDrive",        CMMConfig.WorldEmitterColorDrive);
-                CMMConfig.WorldEmitterColorStatic       = ReadFloat(root, "WorldEmitterColorStatic",       CMMConfig.WorldEmitterColorStatic);
-                CMMConfig.WorldEmitterColorVoice        = ReadFloat(root, "WorldEmitterColorVoice",        CMMConfig.WorldEmitterColorVoice);
-                CMMConfig.WorldEmitterHamColorDrive     = ReadFloat(root, "WorldEmitterHamColorDrive",     CMMConfig.WorldEmitterHamColorDrive);
-                CMMConfig.WorldEmitterHamColorStatic    = ReadFloat(root, "WorldEmitterHamColorStatic",    CMMConfig.WorldEmitterHamColorStatic);
-                CMMConfig.WorldEmitterHamColorVoice     = ReadFloat(root, "WorldEmitterHamColorVoice",     CMMConfig.WorldEmitterHamColorVoice);
-
-                CMMConfig.PerfTiming  = ReadBool(root, "PerfTiming",  CMMConfig.PerfTiming);
-                CMMConfig.PerfSpikeMs = ReadFloat(root, "PerfSpikeMs", CMMConfig.PerfSpikeMs);
-                CMMConfig.PerfFrameSpikeFactor = ReadFloat(root, "PerfFrameSpikeFactor", CMMConfig.PerfFrameSpikeFactor);
-                CMMConfig.PerfFrameSpikeFloorMs = ReadFloat(root, "PerfFrameSpikeFloorMs", CMMConfig.PerfFrameSpikeFloorMs);
-
-                CMMConfig.D("[CMM] Config/settings.xml loaded.");
+                CMMConfig.D($"[CMM] Config loaded — {applied} settings applied from file.");
             }
             catch (Exception ex)
             {
@@ -355,39 +231,6 @@ namespace CMM
                 if (n != null) return n;
             }
             return null;
-        }
-
-        private static string ReadString(XmlElement[] roots, string tag, string fallback)
-        {
-            var n = Find(roots, tag);
-            return n != null ? n.InnerText : fallback;
-        }
-
-        private static float ReadFloat(XmlElement[] roots, string tag, float fallback)
-        {
-            var n = Find(roots, tag);
-            return n != null && float.TryParse(n.InnerText, NumberStyles.Float,
-                CultureInfo.InvariantCulture, out float v) ? v : fallback;
-        }
-
-        private static int ReadInt(XmlElement[] roots, string tag, int fallback)
-        {
-            var n = Find(roots, tag);
-            return n != null && int.TryParse(n.InnerText, NumberStyles.Integer,
-                CultureInfo.InvariantCulture, out int v) ? v : fallback;
-        }
-
-        private static bool ReadBool(XmlElement[] roots, string tag, bool fallback)
-        {
-            var n = Find(roots, tag);
-            return n != null && bool.TryParse(n.InnerText, out bool v) ? v : fallback;
-        }
-
-        private static T ReadEnum<T>(XmlElement[] roots, string tag, T fallback) where T : struct
-        {
-            var n = Find(roots, tag);
-            if (n == null) return fallback;
-            return Enum.TryParse(n.InnerText, true, out T v) ? v : fallback;
         }
 
         // ── Helpers: attribute readers ────────────────────────────────────────
