@@ -30,8 +30,16 @@ struct cmm_fld {
 
     /* Flood results. `cur` is the field just solved, `prev` the one before, so the caller can
      * crossfade across a re-solve instead of stepping. */
-    int *cur, *prev;
+    /* THREE buffers, not two. Geometry is read on the game's MAIN thread (chunk access is not
+     * safe anywhere else) while the flood runs on the scheduler thread, so the flood must never
+     * write the field anyone is sampling: it fills `nxt` and only rotates it in if the window did
+     * not move under it. A recentre changes what every index MEANS, so a flood that raced one is
+     * discarded rather than published -- 20 ms of wasted work, against a field that would
+     * otherwise be indexed against an origin it was not built for. */
+    int *cur, *prev, *nxt;
     float clx, cly, clz;            /* listener the CURRENT field was flooded from */
+    float nlx, nly, nlz;            /* ...and the one `nxt` is being built from */
+    unsigned gen;                   /* bumped by recentre; a flood carries the one it started on */
 
     /* Bucket queue (Dial's, with decrease-key). A cell is in AT MOST ONE bucket at a time --
      * relaxing it to a cheaper cost UNLINKS it from where it was and relinks it. The obvious
@@ -92,13 +100,14 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
     f->have = (unsigned char *)calloc(f->n, 1);
     f->cur  = (int *)malloc(sizeof(int) * f->n);
     f->prev = (int *)malloc(sizeof(int) * f->n);
+    f->nxt  = (int *)malloc(sizeof(int) * f->n);
     f->bnext= (int *)malloc(sizeof(int) * f->n);
     f->bprev= (int *)malloc(sizeof(int) * f->n);
     f->binb = (int *)malloc(sizeof(int) * f->n);
     f->bhead= (int *)malloc(sizeof(int) * (MAX_Q + 1));
-    if (!f->fnx || !f->fny || !f->fnz || !f->fill || !f->have || !f->cur || !f->prev
+    if (!f->fnx || !f->fny || !f->fnz || !f->fill || !f->have || !f->cur || !f->prev || !f->nxt
         || !f->bnext || !f->bprev || !f->binb || !f->bhead) { cmm_fld_destroy(f); return NULL; }
-    for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->prev[i] = UNREACHED; }
+    for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->prev[i] = UNREACHED; f->nxt[i] = UNREACHED; }
 
     f->order = (short *)malloc(sizeof(short) * 3 * f->n);
     if (!f->order) { cmm_fld_destroy(f); return NULL; }
@@ -138,7 +147,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
 void cmm_fld_destroy(cmm_fld *f) {
     if (!f) return;
     free(f->fnx); free(f->fny); free(f->fnz); free(f->fill); free(f->have);
-    free(f->cur); free(f->prev); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
+    free(f->cur); free(f->prev); free(f->nxt); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
     free(f->order);
     free(f);
 }
@@ -162,6 +171,7 @@ int cmm_fld_recentre(cmm_fld *f, int bx, int by, int bz) {
     int oox = f->ox, ooy = f->oy, ooz = f->oz;
     int first = (f->pending == f->n);          /* nothing has ever been read: no old window at all */
     f->ox = nox; f->oy = noy; f->oz = noz;
+    f->gen++;                       /* every index now means something else: see the buffer note */
     for (int y = noy; y < noy + f->ny; y++)
     for (int z = noz; z < noz + f->nz; z++)
     for (int x = nox; x < nox + f->nx; x++) {
@@ -244,13 +254,21 @@ static inline void bq_set(cmm_fld *f, long long i, int q) {
 int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     if (!f) return 0;
     long long t0 = now_us();
+    /* The window's identity when this flood started. If a recentre lands while it runs, every
+     * index it has written means something else and the result is thrown away rather than
+     * published — see the buffer note on the struct. */
+    unsigned gen0 = f->gen;
 
     /* The field just solved becomes the one to crossfade FROM. */
     { int *sw = f->prev; f->prev = f->cur; f->cur = sw; }
-    for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->binb[i] = -1; }
+    /* Clear the buffer being BUILT, not the one being sampled. `cur` is live: the audio layer
+     * reads it while this runs. And binb must be reset every flood -- it is the "which bucket is
+     * this cell in" index, and stale entries make bq_set unlink from lists that no longer exist,
+     * which corrupts the queue and silently strands the flood one cell from its seed. */
+    for (long long i = 0; i < f->n; i++) { f->nxt[i] = UNREACHED; f->binb[i] = -1; }
     for (int c = 0; c <= MAX_Q; c++) f->bhead[c] = -1;
 
-    f->clx = lx; f->cly = ly; f->clz = lz;
+    f->nlx = lx; f->nly = ly; f->nlz = lz;
     int bx = (int)floorf(lx), by = (int)floorf(ly), bz = (int)floorf(lz);
     int scx = (bx >= 0 ? bx : bx - f->step + 1) / f->step;
     int scy = (by >= 0 ? by : by - f->step + 1) / f->step;
@@ -258,7 +276,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     if (!in_win(f, scx, scy, scz)) { f->reached = 0; return 0; }
 
     long long si = widx(f, scx, scy, scz);
-    f->cur[si] = 0; bq_set(f, si, 0);
+    f->nxt[si] = 0; bq_set(f, si, 0);
 
     /* A step between cell centres is `step` blocks of detour; a diagonal is longer, and charging
      * the true length is what stops the flood from preferring staircase routes through corners. */
@@ -279,7 +297,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     const int NX = f->nx, NY = f->ny, NZ = f->nz;
     const float *FNX = f->fnx, *FNY = f->fny, *FNZ = f->fnz, *FILL = f->fill;
     const unsigned char *HAVE = f->have;
-    int *CUR = f->cur;
+    int *CUR = f->nxt;
 
     for (int c = 0; c <= MAX_Q && c <= maxQ; c++) {
         while (f->bhead[c] != -1) {
@@ -337,6 +355,11 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     }
 
     f->lastUs = now_us() - t0;
+    if (f->gen != gen0) { f->reached = 0; return -1; }   /* the window moved under us: discard */
+    /* Publish: the field just solved becomes current, the previous one stays available for the
+     * caller's crossfade, and the oldest buffer is recycled for the next flood. */
+    { int *old = f->prev; f->prev = f->cur; f->cur = f->nxt; f->nxt = old; }
+    f->clx = f->nlx; f->cly = f->nly; f->clz = f->nlz;
     f->reached = reached;
     return (int)reached;
 }

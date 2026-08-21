@@ -223,6 +223,14 @@ namespace CMM
         // Route occlusion through the NATIVE acoustic model (cmm_acoustics) instead of the
         // shipped ear-anchored flood. Off by default until it has been heard in game: the old
         // path stays reachable so the two can be A/B'd without a rebuild.
+        // ── Field occlusion (the rebuild) ────────────────────────────────────────────────────
+        // ONE occlusion field, centred on the listener, read by every source. Off by default until
+        // it has been judged by ear; `cmm acoustics model field` switches to it live.
+        // DetourDb is what a block of going-the-long-way costs, and it is the ONLY tuning constant
+        // the model has beyond the shared material curve -- everything else comes from the blocks.
+        public static bool   WorldEmitterFieldOcclusion = false;
+        public static float  WorldEmitterFieldDetourDb  = 0.35f;
+
         public static bool   WorldEmitterNativeAcoustics   = true;
         // Occlusion (dB) at which the emitter tone reaches full dullness, when the native acoustic
         // model is driving. 8 dB is about what the shipped model's virtual distance produced for a

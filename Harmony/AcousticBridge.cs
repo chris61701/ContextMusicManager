@@ -558,6 +558,10 @@ namespace CMM
             // same 125-voxel cube 30 times -- up to 8,000 unbudgeted GetBlock calls in the single
             // frame the door lands on. The 64-entry cap also meant one long swing could evict
             // ANOTHER door's position, so that door silently never got patched at all.
+            // The field re-reads those cells and picks the change up on its next flood -- no
+            // patch, no staleness window, nothing to get the ordering of.
+            for (int i = 0; i < _doorPositions.Count; i++) FieldOcclusion.Invalidate(_doorPositions[i], 2);
+
             _doorPositions.Sort((a, b) => a.x != b.x ? a.x - b.x : a.y != b.y ? a.y - b.y : a.z - b.z);
             int uniq = 0;
             for (int i = 0; i < _doorPositions.Count; i++)

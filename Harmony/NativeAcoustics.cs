@@ -52,6 +52,22 @@ namespace CMM
         // `verb 0` unable to mean "no reverberant field". It needs a sentinel outside the range.
         internal const double Keep = -1.0e6;
 
+        // The material curve, read from the native side rather than restated here. dB = DbMat *
+        // loss^MatPow is the one place a wall's worth is defined, and the field occlusion has to
+        // agree with it exactly or the two models would price the same wall differently -- which
+        // is the calibration mismatch that made switching between models audible in the first
+        // place. Cached: the values only change via `cmm acoustics wall`, which forces a refresh.
+        private static double _dbMat = 40.1, _matPow = 2.74;
+        private static bool _tuningRead;
+        internal static void RefreshTuning()
+        {
+            if (!Available) return;
+            try { cmm_ac_get_tuning(out _dbMat, out _matPow, out _); _tuningRead = true; }
+            catch { /* keep the defaults; they match the shipped constants */ }
+        }
+        internal static double DbMat  { get { if (!_tuningRead) RefreshTuning(); return _dbMat; } }
+        internal static double MatPow { get { if (!_tuningRead) RefreshTuning(); return _matPow; } }
+
         // Live tuning (ABI 2). These are SCENE inputs -- material loss feeds the room coupling
         // and the calibration feeds the room fields, both computed at build time -- so a change
         // only takes full effect after a rebuild. Pass Keep (or, for the two scales, any

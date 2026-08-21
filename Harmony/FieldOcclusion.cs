@@ -1,0 +1,259 @@
+// Gated to 3.0+ (GV_V3): reads the world through EmitterAcoustics.CellLoss and publishes through
+// EmitterAudioLayer, both on the same gate.
+#if GV_V3
+using System;
+using UnityEngine;
+
+namespace CMM
+{
+    // ─────────────────────────────────────────────────────────────────────────────
+    // FieldOcclusion — the game side of the one listener-anchored field
+    // ─────────────────────────────────────────────────────────────────────────────
+    // There is exactly one pair of ears and there may be many things making noise, some of them
+    // moving. So nothing here is computed per source: a single field is flooded outward from the
+    // listener a few times a second, and a speaker — or later a zombie, or anything else — finds
+    // out how muffled it is by looking up where it happens to be standing. Attenuation is
+    // symmetric, so a field built from the listener answers for a source exactly as one built from
+    // the source would have.
+    //
+    // WHAT THIS FIXES, stated plainly, because the previous model failed on each of them:
+    //
+    //   Nothing persists long enough to go stale. The field is rebuilt whole, so a door that opens
+    //   is simply in the next one. There is no patch, no "has the rebuild landed", no handover at
+    //   the wrong moment, and no second model to fall back to — the bug class that cost a week
+    //   cannot occur here rather than being fixed here.
+    //
+    //   Nothing is global. Every cell's value comes from a route to it. A chunk loading eighty
+    //   blocks away cannot change what you hear, which the room-coupling solve could and did.
+    //
+    //   Moving sources are free. The hundredth costs one lookup.
+    //
+    // THREADING. Reading blocks is the one part that must be on the main thread (chunk access off
+    // it is a crash, not an exception), so the geometry fill is amortised across frames there. The
+    // flood is pure arithmetic over the native arena and runs on the scheduler. They overlap
+    // safely: the flood builds into its own buffer and publishes only if the window did not move
+    // under it, and a cell being re-read mid-flood just means that cell carries geometry from a
+    // moment earlier, which is a value the flood would have been entitled to read anyway.
+    internal static class FieldOcclusion
+    {
+        // Blocks per cell. The whole affordability of "rebuild it, don't patch it" rests on this:
+        // 3 blocks is ~34k cells over a 128-block span where 1 block would be 2M. Measured, a
+        // flood of that size is 7.3 ms. The cost is that an opening straddling a cell boundary
+        // reads part-open — pinned by a test in test_field.c at about 2.7 dB.
+        private const int Step = 3;
+        private const int BelowBlocks = 24, AboveBlocks = 24;
+
+        private static IntPtr _f = IntPtr.Zero;
+        private static int _nx, _ny, _nz, _range;
+        private static Vector3 _ear;              // captured on the main thread, read by the flood
+        private static bool _earValid;
+
+        internal static long CellsPending => _f == IntPtr.Zero ? -1 : NativeField.cmm_fld_stat(_f, 1);
+        internal static long CellsTotal   => _f == IntPtr.Zero ? -1 : NativeField.cmm_fld_stat(_f, 0);
+        internal static long LastSolveUs  => _f == IntPtr.Zero ? -1 : NativeField.cmm_fld_stat(_f, 3);
+        internal static long Reached      => _f == IntPtr.Zero ? -1 : NativeField.cmm_fld_stat(_f, 2);
+        internal static int  Discarded;           // floods thrown away because the window moved
+        internal static bool Ready => _f != IntPtr.Zero && Reached > 0;
+
+        internal static string Status()
+        {
+            if (_f == IntPtr.Zero) return "not built";
+            long pend = CellsPending, tot = CellsTotal;
+            return $"cells {tot} ({Step}-block, {_nx}x{_ny}x{_nz}), "
+                 + (pend > 0 ? $"reading {100.0 * (tot - pend) / Math.Max(tot, 1):0}%, " : "read complete, ")
+                 + $"reached {Reached}, flood {LastSolveUs / 1000.0:0.0} ms, {Discarded} discarded";
+        }
+
+        // ── Lifetime ────────────────────────────────────────────────────────────────────────────
+        private static bool Ensure()
+        {
+            if (!NativeField.Available) return false;
+            int range = Mathf.Clamp(Mathf.CeilToInt(CMMConfig.WorldEmitterRange) + 4, 24, 128);
+            if (_f != IntPtr.Zero && range == _range) return true;
+            Reset();
+            _range = range;
+            // Odd counts so the listener's cell sits at the centre of the window.
+            _nx = _nz = (range + Step - 1) / Step * 2 + 1;
+            _ny = (BelowBlocks + AboveBlocks) / Step + 1;
+            _f = NativeField.cmm_fld_create(_nx, _ny, _nz, Step);
+            if (_f == IntPtr.Zero) { Log.Warning("[CMM] field occlusion: create failed."); return false; }
+            NativeField.cmm_fld_set_tuning(_f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
+            CMMConfig.D($"[CMM] field occlusion: {_nx}x{_ny}x{_nz} cells of {Step} blocks "
+                      + $"(+/-{range} blocks), {(long)_nx * _ny * _nz} total");
+            return true;
+        }
+
+        internal static void Reset()
+        {
+            if (_f != IntPtr.Zero) { NativeField.cmm_fld_destroy(_f); _f = IntPtr.Zero; }
+            _earValid = false; Discarded = 0;
+        }
+
+        // ── Main thread: keep the window on the player and read the world into it ───────────────
+        // Called per frame from the emitter layer's existing budgeted slot. The recentre is cheap
+        // (it only marks what scrolled in as pending), so it can happen every frame and the window
+        // never lags the player.
+        internal static void FrameStep(EntityPlayerLocal player, World world, float budgetMs)
+        {
+            if (!CMMConfig.WorldEmitterFieldOcclusion || player == null || world == null) return;
+            if (!Ensure()) return;
+
+            _ear = EmitterAudioLayer.ListenerWorldPos(player);
+            _earValid = true;
+            NativeField.cmm_fld_recentre(_f, Mathf.FloorToInt(_ear.x),
+                                             Mathf.FloorToInt(_ear.y), Mathf.FloorToInt(_ear.z));
+
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            try
+            {
+                while (NativeField.cmm_fld_next_pending(_f, out int cx, out int cy, out int cz) != 0)
+                {
+                    FillCell(world, cx, cy, cz);
+                    if ((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs >= budgetMs) break;
+                }
+            }
+            catch (Exception e) { CMMConfig.D($"[CMM] field read failed: {e.Message}"); }
+        }
+
+        // One coarse cell, from the blocks underneath it. Reads Step^3 blocks — 27 at Step 3 — and
+        // derives four numbers: how much gets through each of its three negative faces, and how
+        // solid its interior is (which is what stops a route cutting through the middle of a wall
+        // thicker than one cell).
+        private static void FillCell(World world, int cx, int cy, int cz)
+        {
+            int bx = cx * Step, by = cy * Step, bz = cz * Step;
+            float sumAll = 0f;
+            float sumX = 0f, maxX = 0f, sumY = 0f, maxY = 0f, sumZ = 0f, maxZ = 0f;
+            int face = Step * Step;
+
+            for (int dy = 0; dy < Step; dy++)
+                for (int dz = 0; dz < Step; dz++)
+                    for (int dx = 0; dx < Step; dx++)
+                    {
+                        int x = bx + dx, y = by + dy, z = bz + dz;
+                        float t = Transmission(world, x, y, z);
+                        sumAll += t;
+                        // The cell's own boundary layer stands for the face it shares with the
+                        // neighbour below it on that axis. Using only this cell's blocks halves
+                        // the reads: whichever cell contains the wall is the one that reports it.
+                        if (dx == 0) { sumX += t; if (t > maxX) maxX = t; }
+                        if (dy == 0) { sumY += t; if (t > maxY) maxY = t; }
+                        if (dz == 0) { sumZ += t; if (t > maxZ) maxZ = t; }
+                    }
+
+            NativeField.cmm_fld_set_cell(_f, cx, cy, cz,
+                Face(sumX / face, maxX), Face(sumY / face, maxY), Face(sumZ / face, maxZ),
+                1f - sumAll / (face * Step));
+        }
+
+        // HOW MUCH GETS THROUGH A CELL FACE. The geometric mean of the area fraction and the best
+        // single crossing — decided by measurement, not by argument (test_field.c):
+        //
+        //   MEAN   grid-dependent: the same doorway costs 4.2 dB more when it straddles a boundary
+        //   MAX    a single 1-block hole reads as 3.0 dB, i.e. very nearly a doorway — a wall
+        //          becomes a rumour, which is the failure mode that matters most here
+        //   BLEND  straddle penalty 2.7 dB, pinhole 6.1 dB: passes both
+        //
+        // The argument for MAX is real — a route crosses a face at one point, so the best crossing
+        // is the physical answer for a shortest-path model — but it is the argument that loses to
+        // the pinhole measurement, and this project has paid enough for arguments that beat
+        // measurements.
+        private static float Face(float mean, float best)
+        {
+            float v = mean * best;
+            return v <= 0f ? 0f : Mathf.Sqrt(v);
+        }
+
+        // One block's transmission as a linear energy fraction, through the SAME material curve the
+        // rest of the mod uses (dB = scale * loss^power), so a wood wall is worth here exactly what
+        // it is worth everywhere else. CellLoss is the shared block reader: per-instance shapes,
+        // door state, damage, water, terrain density — the game's own answer rather than ours.
+        private static float Transmission(World world, int x, int y, int z)
+        {
+            BlockValue bv = world.GetBlock(x, y, z);
+            float loss = EmitterAcoustics.DebugCellLoss(bv, world, x, y, z);
+            if (loss <= 0.0001f) return 1f;
+            float db = (float)(NativeAcoustics.DbMat * Math.Pow(loss, NativeAcoustics.MatPow));
+            if (db <= 0f) return 1f;
+            if (db > 120f) db = 120f;
+            return Mathf.Pow(10f, -db / 10f);
+        }
+
+        // ── Scheduler thread: the flood ─────────────────────────────────────────────────────────
+        // Pure arithmetic over the native arena; touches no game API, which is what makes it safe
+        // off the main thread. A flood that races a recentre is discarded by the native side and
+        // simply repeats on the next tick.
+        internal static void SchedulerTick()
+        {
+            if (!CMMConfig.WorldEmitterFieldOcclusion || _f == IntPtr.Zero || !_earValid) return;
+            try
+            {
+                NativeField.cmm_fld_set_tuning(_f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
+                Vector3 e = _ear;
+                if (NativeField.cmm_fld_solve(_f, e.x, e.y, e.z) < 0) Discarded++;
+            }
+            catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }
+        }
+
+        // A door swung, a wall came down, a chunk arrived: mark those cells for re-reading. Cheap —
+        // it queues work, it never touches the field. The next flood picks up whatever has been
+        // re-read by then, which is why there is no "settling" state to get wrong.
+        internal static void Invalidate(Vector3i pos, int radiusBlocks)
+        {
+            if (_f == IntPtr.Zero) return;
+            try { NativeField.cmm_fld_dirty(_f, pos.x, pos.y, pos.z, radiusBlocks); }
+            catch { /* a failed invalidation costs freshness, never correctness */ }
+        }
+
+        // ── Publishing ──────────────────────────────────────────────────────────────────────────
+        // Fill ptGain with the extra virtual distance that reproduces the field's occlusion at each
+        // speaker point. The field carries EXCESS attenuation only — what the building adds over a
+        // clear line — so this transports occlusion and nothing else; distance stays the mixer's
+        // job, which already has both positions. That separation is what the previous bridge got
+        // wrong, and it is why its numbers could never be tuned.
+        internal static bool ComputeOcclusion(Vector3 ear, float[] pts, int ptCount, float[] ptGain)
+        {
+            if (_f == IntPtr.Zero || pts == null || ptGain == null || ptCount <= 0) return false;
+            if (Reached <= 0) return false;                      // no flood has landed yet
+
+            float mn = CMMConfig.WorldEmitterMinDistance;
+            float mx = CMMConfig.WorldEmitterRange;
+            float fexp = CMMConfig.WorldEmitterFalloff;
+            if (mx - mn <= 0.01f || fexp <= 0.01f) return false;
+
+            for (int k = 0; k < ptCount; k++)
+            {
+                Vector3 sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
+                float excessDb = NativeField.cmm_fld_sample_db(_f, sp.x, sp.y, sp.z);
+                if (excessDb < 0f) excessDb = 0f;
+
+                // Invert the mixer's own falloff so the published extra reproduces this attenuation
+                // exactly, whatever the curve's shape: att = ((mx-dEff)/span)^fexp.
+                double amp = Math.Pow(10.0, -excessDb / 20.0);
+                if (amp > 1.0) amp = 1.0;
+                if (amp < 1e-6) amp = 1e-6;
+                float d = Vector3.Distance(ear, sp);
+                float head = mx - d;
+                float extra = head > 0f ? (float)(head * (1.0 - Math.Pow(amp, 1.0 / fexp))) : 0f;
+                ptGain[k] = extra > 0f ? extra : 0f;
+
+                if (k == 0 || d < _dbgDist) { _dbgDist = d; _dbgExcess = excessDb; _dbgExtra = ptGain[k]; }
+            }
+            return true;
+        }
+
+        private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra;
+
+        // Nearest published point, reset ON REPORT rather than per station — the exact bug that
+        // made the previous model's diagnostic describe a speaker ninety blocks away for a week.
+        internal static string DescribeNearest()
+        {
+            if (_dbgDist > 1e8f) return "no point";
+            string s = $"d={_dbgDist:0.0} excess={_dbgExcess:0.0}dB extra={_dbgExtra:0.0}blk";
+            _dbgDist = 1e9f;
+            return s;
+        }
+    }
+}
+#endif

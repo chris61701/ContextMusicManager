@@ -37,8 +37,16 @@ static int isSolid(int x, int y, int z) {
 /* Fill the field's geometry from `solid`, exactly the way the game side will: transmission across
  * a face is the ENERGY sum over its sub-faces, so one gap in an otherwise solid face dominates.
  * That is a doorway, and it comes out of the averaging rather than out of special-case code. */
+/* HOW MUCH GETS THROUGH A CELL FACE, given the block faces underneath it.
+ *   0 = MEAN  (area fraction)   the diffuse answer: half the face open, half the energy
+ *   1 = MAX   (best crossing)   the path answer: a route crosses at ONE point
+ *   2 = BLEND (geometric mean of the two)
+ * This is the last real physics choice in the model and it is decided by measurement below, not
+ * by argument -- a path model wants MAX, but MAX also means one gap in an otherwise solid face
+ * reads as wide open, which is how a wall becomes a rumour. */
+static int FACE_RULE = 2;
 static float faceT(int cx, int cy, int cz, int axis) {
-    float acc = 0; int n = 0;
+    float acc = 0, best = 0; int n = 0;
     for (int a = 0; a < STEP; a++)
     for (int b = 0; b < STEP; b++) {
         int x, y, z, px, py, pz;
@@ -46,10 +54,15 @@ static float faceT(int cx, int cy, int cz, int axis) {
         else if (axis == 1) { x = cx*STEP + a; y = cy*STEP; z = cz*STEP + b; px = x; py = y-1; pz = z; }
         else { x = cx*STEP + a; y = cy*STEP + b; z = cz*STEP; px = x; py = y; pz = z-1; }
         int blocked = isSolid(x, y, z) || isSolid(px, py, pz);
-        acc += blocked ? 0.0f : 1.0f;
+        float t = blocked ? 0.0f : 1.0f;
+        acc += t; if (t > best) best = t;
         n++;
     }
-    return n ? acc / n : 0.0f;
+    if (!n) return 0.0f;
+    float mean = acc / n;
+    if (FACE_RULE == 0) return mean;
+    if (FACE_RULE == 1) return best;
+    return sqrtf(mean * best);
 }
 static float cellFill(int cx, int cy, int cz) {
     int s = 0, n = 0;
@@ -66,8 +79,10 @@ static void fill_all(cmm_fld *f) {
                          cellFill(cx, cy, cz));
 }
 
-int main(void) {
-    printf("cmm_field ABI %d\n\n", cmm_fld_abi());
+int main(int argc, char** argv) {
+    if (argc > 1) FACE_RULE = atoi(argv[1]);
+    printf("cmm_field ABI %d   face rule %s\n\n", cmm_fld_abi(),
+           FACE_RULE == 0 ? "MEAN (area)" : FACE_RULE == 1 ? "MAX (best crossing)" : "BLEND");
 
     /* ── an open field: nothing between anything ─────────────────────────────────────── */
     memset(solid, 0, sizeof solid);
@@ -120,6 +135,23 @@ int main(void) {
     float straddle = cmm_fld_sample_db(f, 44.5f, 2.5f, 31.5f);
     ckf("same doorway, straddling the grid: costs some", straddle - door < 9.0f,
         "aligned %.1f vs straddling %.1f dB (gap %.1f)", door, straddle, straddle - door);
+
+    /* ── A PINHOLE IS NOT A DOORWAY ─────────────────────────────────────────────────
+     * The risk of taking the BEST crossing of a face is that one small gap makes the whole face
+     * read as open, and a wall becomes a rumour. A single 1x1 hole should land clearly between a
+     * doorway and a sealed wall -- sound does get through a hole, but not as though the wall were
+     * not there. This is the test that decides the face rule, because it is the case where the
+     * three rules disagree; grid alignment alone would just pick MAX. */
+    memset(solid, 0, sizeof solid);
+    for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+    for (int y = 1; y < H; y++) for (int z = 0; z < W; z++) solid[40][y][z] = 1;
+    solid[40][2][30] = 0;                                     /* one block of hole */
+    cmm_fld_dirty(f, 40, 4, 31, 40);
+    fill_all(f);
+    cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+    float pin = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
+    ckf("a 1-block hole: between doorway and sealed", pin > door + 2.0f && pin < thru - 8.0f,
+        "%.2f dB (doorway %.1f, sealed %.1f)", pin, door, thru);
 
     /* ── THE PROPERTY THE WHOLE DESIGN IS FOR: a source moving is smooth ─────────────── */
     float worst = 0, prev = -1;

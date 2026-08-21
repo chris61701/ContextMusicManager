@@ -234,11 +234,16 @@ namespace CMM
             if (arg == "model")
             {
                 string m = p.Count > 2 ? p[2].ToLowerInvariant() : "";
-                if (m == "auto" || m == "native" || m == "legacy")
+                if (m == "auto" || m == "native" || m == "legacy" || m == "field")
                 {
                     EmitterAudioLayer.SetPin(m);
+                    if (m == "field")
+                        return "occlusion model pinned to FIELD - the rebuild: one field centred on"
+                             + " you, read by every speaker.\n  " + FieldOcclusion.Status()
+                             + "\n  give it a few seconds to read the world in; it is"
+                             + " quiet-but-correct close by while it does.";
                     return "occlusion model pinned to " + m.ToUpperInvariant()
-                         + (m == "native" ? "  (never hands back — a door mid-swing will sound wrong for a moment; that is expected)"
+                         + (m == "native" ? "  (never hands back - a door mid-swing will sound wrong for a moment; that is expected)"
                           : m == "legacy" ? "  (native + field cache both skipped)"
                           : "  (ship behaviour: all three, switched live)");
                 }

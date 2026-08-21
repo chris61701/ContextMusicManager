@@ -33,10 +33,7 @@ static void run(int STEP, int NX, int NY, int NZ) {
 }
 
 int main(void) {
-    run(2, 101, 25, 101);
-    run(2,  65, 25,  65);
-    run(3,  67, 17,  67);
-    run(4,  51, 13,  51);
-    run(4,  33, 13,  33);
+    run(3, 45, 17, 45);
+    run(3, 67, 17, 67);
     return 0;
 }

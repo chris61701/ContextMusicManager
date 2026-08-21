@@ -170,6 +170,9 @@ namespace CMM
                 // tick only records where the listener is; this notices and rebuilds.
 #if GV_V3
                 CmmScheduler.Every(0.5, AcousticBridge.SchedulerTick, "acoustics-scene");
+                // The one field's flood: pure arithmetic over a native arena, so it is safe here
+                // and must be here -- 7 ms on the frame loop three times a second is a stutter.
+                CmmScheduler.Every(0.30, FieldOcclusion.SchedulerTick, "occlusion-field");
 #endif
                 // Music-folder watch, off the frame loop: the directory-signature probe +
                 // active-track ping run on the scheduler thread and only an actual change

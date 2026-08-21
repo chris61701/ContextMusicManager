@@ -133,12 +133,18 @@ namespace CMM
         // legacy = the shipped flood only; native and the field cache are both skipped
         //
         // Diagnostic only, never persisted: it resets to auto on every launch.
-        internal static bool PinNative, PinLegacy;
-        internal static string PinName => PinNative ? "native" : PinLegacy ? "legacy" : "auto";
+        internal static bool PinNative, PinLegacy, PinField;
+        internal static string PinName =>
+            PinField ? "field" : PinNative ? "native" : PinLegacy ? "legacy" : "auto";
         internal static void SetPin(string mode)
         {
             PinNative = mode == "native";
             PinLegacy = mode == "legacy";
+            PinField  = mode == "field";
+            // The field model is the rebuild: ONE listener-anchored field, read by every source.
+            // Selecting it also switches it on, because a pin nobody can hear is not a test.
+            CMMConfig.WorldEmitterFieldOcclusion = PinField;
+            if (!PinField) FieldOcclusion.Reset();
         }
         private static float _statPubSum, _statPubMax;
         private static int   _statPubN;
@@ -249,6 +255,9 @@ namespace CMM
                     // here, on the main thread, because the game's chunks are not safe to touch from
                     // another one; only the solve that follows it runs on the scheduler.
                     AcousticBridge.FrameStep(w);
+                    // The field's own world read, on the same main-thread budget. Cheap when the
+                    // model is off (it returns immediately) and self-limiting when on.
+                    FieldOcclusion.FrameStep(player, w, 1.5f);
                 }
             }
 
@@ -289,6 +298,13 @@ namespace CMM
                                 ? $" | ac gain={AcousticBridge.GainPoints} sat={AcousticBridge.SaturatedPoints}"
                                   + $" pts={AcousticBridge.PublishedPoints} scene={AcousticBridge.LastStatus}"
                                   + $"\n[CMM]   ac nearest: {AcousticBridge.DescribeNearest()}"
+                                : "")
+                            // The field model's own line. Deliberately separate from the native
+                            // model's: one readout serving two models is how "ac nearest" came to
+                            // describe a speaker ninety blocks away for a week.
+                            + (CMMConfig.WorldEmitterFieldOcclusion
+                                ? $"\n[CMM]   field: {FieldOcclusion.Status()}"
+                                  + $"\n[CMM]   field nearest: {FieldOcclusion.DescribeNearest()}"
                                 : ""));
                 _statFieldTicks = _statLegacyTicks = 0;
                 _statPubSum = _statPubMax = 0f; _statPubN = 0;
@@ -338,8 +354,26 @@ namespace CMM
             // them outright — it is not a source of gains for the flood to blend, it is the flood's
             // successor. Anything it declines (warming up, door mid-swing, native DLL missing) falls
             // through to the shipped paths below unchanged, so the A/B is a live config flip.
-            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterNativeAcoustics && world != null
-                && !PinLegacy
+            // ── THE FIELD MODEL ───────────────────────────────────────────────────────────────
+            // Sits ahead of everything because it replaces all of it. It never hands back: there is
+            // no door window, no settling state and no second model, which is the entire point --
+            // the previous design's worst bugs were all in the handover, not in the physics. If a
+            // flood has not landed yet it simply publishes nothing and the speakers stay where they
+            // were, which is honest; a fallback that computes the same quantity differently is a
+            // second model wearing a disguise.
+            if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterFieldOcclusion && world != null
+                && TryFieldModel(player, world, audibleR))
+            {
+                if (!_occlPending)
+                {
+                    _occlEar = ListenerWorldPos(player);
+                    EmitterAcoustics.OcclusionBegin(_occlEar, world);
+                    _occlPending = true;
+                }
+                _floodRoomOnly = true;      // keep the reverb's room measure running underneath
+            }
+            else if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterNativeAcoustics && world != null
+                && !PinLegacy && !PinField
                 && TryNativeOcclusion(player, world, audibleR))
             {
                 // Keep the listener-anchored ROOM flood running underneath, exactly as the field
@@ -482,6 +516,41 @@ namespace CMM
         //   UNSEEDED REVERB STATE — the native model produces a level, not a seal/solid/depth, so
         //     a station that has never been through a legacy or field tick has nothing for the
         //     reverb to carry. One legacy tick seeds it, then this path takes over.
+        // Publish every audible station from the one field. Named apart from TryFieldOcclusion,
+        // which is the per-speaker field CACHE and a different thing entirely -- one caches a field
+        // per source, this samples one field for all of them.
+        //
+        // No readiness gate beyond "a flood has landed": the field is conservative before it is
+        // complete (unread space is opaque), so a half-filled window is quiet-but-correct near the
+        // player rather than wrong everywhere.
+        private static bool TryFieldModel(EntityPlayerLocal player, World world, float audibleR)
+        {
+            if (!FieldOcclusion.Ready) { _statWhy = "field-warming"; return false; }
+            Vector3 ear = ListenerWorldPos(player);
+            bool any = false;
+            for (int i = 0; i < _stations.Count; i++)
+            {
+                Station st = _stations[i];
+                if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                if (st.PtCount == 0)
+                {
+                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                    RecordPtPush(st, 0);
+                    continue;
+                }
+                if (!FieldOcclusion.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain))
+                { _statWhy = "field-declined"; return false; }
+                PostProcessGains(st);
+                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                RecordPtPush(st, st.PtCount);
+                any = true;
+            }
+            if (!any) { _statWhy = "field-nopoints"; return false; }
+            _statWhy = "field";
+            PushReverb(player);
+            return true;
+        }
+
         private static bool TryNativeOcclusion(EntityPlayerLocal player, World world, float audibleR)
         {
             // HAND BACK UNTIL THE SCENE HAS CAUGHT UP, not merely until the swing stops.
@@ -1256,7 +1325,7 @@ namespace CMM
 
         // The listener's world-space position (camera ear), matching block coords. Falls back to
         // the entity position if the camera isn't up yet.
-        private static Vector3 ListenerWorldPos(EntityPlayerLocal player)
+        internal static Vector3 ListenerWorldPos(EntityPlayerLocal player)
         {
             Transform t = player.cameraTransform;
             return t != null ? t.position + Origin.position : player.position;
