@@ -149,7 +149,7 @@ namespace CMM
                      + ".\n  If a dip survives OFF, the cause is not occlusion.";
             }
 
-            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew") && p.Count > 2
+            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew" || a == "aperture") && p.Count > 2
                 && float.TryParse(p[2], System.Globalization.NumberStyles.Float,
                                   System.Globalization.CultureInfo.InvariantCulture, out float v))
             {
@@ -157,12 +157,13 @@ namespace CMM
                 if (a == "detour") { was = CMMConfig.WorldEmitterFieldDetourDb.ToString("0.00"); CMMConfig.WorldEmitterFieldDetourDb = v; }
                 else if (a == "wall") { was = CMMConfig.WorldEmitterFieldWallDb.ToString("0.0"); CMMConfig.WorldEmitterFieldWallDb = v; }
                 else if (a == "pow") { was = CMMConfig.WorldEmitterFieldWallPow.ToString("0.00"); CMMConfig.WorldEmitterFieldWallPow = v; }
-                else { was = CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0"); CMMConfig.WorldEmitterFieldSlewDb = v; }
+                else if (a == "slew") { was = CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0"); CMMConfig.WorldEmitterFieldSlewDb = v; }
+                else { was = CMMConfig.WorldEmitterFieldAperturePow.ToString("0.00"); CMMConfig.WorldEmitterFieldAperturePow = v; }
                 // wall/pow change what each BLOCK is worth, so the stored geometry is now wrong and
                 // has to be read again; detour is used by the flood alone and lands by itself.
-                if (a == "wall" || a == "pow") FieldOcclusion.RereadAll();
+                if (a == "wall" || a == "pow" || a == "aperture") FieldOcclusion.RereadAll();
                 return "field " + a + ": " + was + " -> " + v.ToString("0.00")
-                     + (a == "wall" || a == "pow" ? "  (re-reading the world, a second or two)"
+                     + (a == "wall" || a == "pow" || a == "aperture" ? "  (re-reading the world, a second or two)"
                                                   : "  (next flood, ~0.3 s)")
                      + "\n  " + FieldOcclusion.Status();
             }
@@ -173,13 +174,15 @@ namespace CMM
                  + "     dB for a fully solid block"
                  + "\n  pow    " + CMMConfig.WorldEmitterFieldWallPow.ToString("0.00")
                  + "   shape of the partial-block curve"
+                 + "\n  apert  " + CMMConfig.WorldEmitterFieldAperturePow.ToString("0.00")
+                 + "   how hard a PARTLY OPEN face attenuates (open fraction ^ this). THE one that decides how solid a real building sounds. 1 = linear area, 2 = default, higher = heavier."
                  + "\n  slew   " + CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0")
                  + "     dB per second the level may change (0 = off, raw floods)"
                  + "\n  " + FieldOcclusion.Status()
                  + "\n  " + FieldOcclusion.DescribeNearest()
                  + "\n  occl   " + (CMMConfig.WorldEmitterOcclusion ? "ON" : "OFF")
                  + "      master bypass — off = clear line for every speaker (the bisect)"
-                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew <n>"
+                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew|aperture <n>"
                  + "\n         cmm acoustics ray";
 #else
             return "field occlusion: not built into this game version";

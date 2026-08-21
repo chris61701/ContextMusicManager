@@ -65,6 +65,10 @@ static int isSolid(int x, int y, int z) {
  * ninth, and the model can no longer separate a pinhole from a doorway as sharply. The ordering
  * holds and a sealed wall is still 41 dB; the resolution is coarser. That is the trade. */
 static int FACE_RULE = 0;
+/* Mirrors CMMConfig.WorldEmitterFieldAperturePow. A face that is PART open transmits
+ * openFraction^this, not openFraction: linear area is too generous, and a face is now 1x3
+ * sub-blocks rather than 3x3, so a one-block hole went from a ninth of it to a third. */
+static float APERTURE_POW = 2.0f;
 static float faceT(int cx, int cy, int cz, int axis) {
     int bx = cx*SX, by = cy*SY, bz = cz*SZ;
     int ea = axis == 0 ? SY : SX, eb = axis == 2 ? SY : SZ;
@@ -82,9 +86,9 @@ static float faceT(int cx, int cy, int cz, int axis) {
     }
     if (!n) return 0.0f;
     float mean = acc / n;
-    if (FACE_RULE == 0) return mean;
     if (FACE_RULE == 1) return best;
-    return sqrtf(mean * best);
+    if (FACE_RULE == 2) return sqrtf(mean * best);
+    return (mean <= 0.0f || mean >= 1.0f) ? mean : powf(mean, APERTURE_POW);
 }
 /* Transmission through the cell's MIDDLE PLANE perpendicular to `axis` -- what stands across a
  * route passing through the cell. Directional, because a floor blocks vertical travel through a
@@ -109,9 +113,9 @@ static float midT(int cx, int cy, int cz, int axis) {
     }
     if (!n) return 0.0f;
     float mean = acc / n;
-    if (FACE_RULE == 0) return mean;
     if (FACE_RULE == 1) return best;
-    return sqrtf(mean * best);
+    if (FACE_RULE == 2) return sqrtf(mean * best);
+    return (mean <= 0.0f || mean >= 1.0f) ? mean : powf(mean, APERTURE_POW);
 }
 
 static void fill_all(cmm_fld *f) {
@@ -124,6 +128,7 @@ static void fill_all(cmm_fld *f) {
 
 int main(int argc, char** argv) {
     if (argc > 1) FACE_RULE = atoi(argv[1]);
+    if (argc > 2) APERTURE_POW = (float)atof(argv[2]);
     printf("cmm_field ABI %d   face rule %s\n\n", cmm_fld_abi(),
            FACE_RULE == 0 ? "MEAN (area)" : FACE_RULE == 1 ? "MAX (best crossing)" : "BLEND");
 

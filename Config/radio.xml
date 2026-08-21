@@ -277,6 +277,20 @@
   <WorldEmitterFieldWallDb>59.5</WorldEmitterFieldWallDb>
   <WorldEmitterFieldWallPow>1.56</WorldEmitterFieldWallPow>
 
+  <!-- HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.
+       The two settings above say what a SOLID block is worth, and a solid block is already
+       effectively sealed, so neither of them changes what a real building sounds like. What
+       decides that is how a face with a gap in it scores. Measured in game across 194 samples
+       with this at 1 (plain area fraction), the material term never once exceeded 11.1 dB:
+       every wall in a POI has some opening and the route always found one cheap enough.
+       Linear area is also too generous to be physical, since a small aperture radiates far
+       less than its share of the wall.
+       2 also repays what the cell-shape change cost: faces used to be 3x3 sub-blocks and are
+       now 1x3, so a one-block hole went from a ninth of a face to a third. Squaring puts it
+       back at a ninth. A fully open face and a sealed one are unaffected at any value, so
+       open air stays at 0 dB. Live: cmm field aperture <n> -->
+  <WorldEmitterFieldAperturePow>2.0</WorldEmitterFieldAperturePow>
+
   <!-- HOW FAST occlusion may change, dB per second, per speaker. The field re-floods a few
        times a second and each flood is an independent answer, so walking past a doorway flips
        the route from "through the opening" to "the long way round" between one flood and the

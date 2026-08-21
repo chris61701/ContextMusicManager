@@ -260,7 +260,10 @@ namespace CMM
         // signature because this rule is chosen by measurement and has now changed twice.
         private static float Face(float mean, float best)
         {
-            return mean;
+            if (mean <= 0f) return 0f;
+            if (mean >= 1f) return 1f;      // fully open stays free at any exponent
+            float p = CMMConfig.WorldEmitterFieldAperturePow;
+            return p == 1f ? mean : Mathf.Pow(mean, p);
         }
 
         // One block's transmission as a linear energy fraction. CellLoss is the shared block reader

@@ -250,6 +250,26 @@ namespace CMM
         // existing blocks-per-second limiter downstream could not tell those apart, which is why
         // it was set fast enough (50 blk/s = 12.5 blocks per publish) to pass nearly everything.
         public static float  WorldEmitterFieldSlewDb   = 12f;
+        // HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.
+        //
+        // The other two material knobs set what a SOLID block is worth, and a solid block is
+        // already effectively sealed, so neither of them changes what a real building sounds
+        // like. What decides that is how a face with a gap in it scores, and that was hard-coded
+        // linear in area. Measured in game across 194 samples, the material term never once
+        // exceeded 11.1 dB: every wall in a POI has some opening in it and the route always found
+        // one cheap enough to walk through.
+        //
+        // Linear area is also too generous to be physical. A small aperture radiates much less
+        // than its share of the wall, because the edges cost you; the fraction wants an exponent.
+        //
+        // 2.0 is the default for a second reason: it repays what the cell-shape fix cost. Faces
+        // used to be 3x3 sub-blocks and are now 1x3, so a one-block hole went from a NINTH of the
+        // face to a THIRD, and every partial wall got roughly twice as transparent overnight.
+        // Squaring the fraction puts a one-block hole back at a ninth.
+        //
+        // 1.0 restores the linear behaviour exactly. A fully open face (1) and a sealed one (0)
+        // are unaffected at any value, so open air stays at 0 dB regardless.
+        public static float  WorldEmitterFieldAperturePow = 2f;
         // What one block of material is worth, as dB = WallDb * loss^WallPow.
         //
         // DERIVED FROM THE SHIPPED MODEL, not invented. The field first borrowed the native
