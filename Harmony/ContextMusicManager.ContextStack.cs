@@ -39,13 +39,20 @@ namespace CMM
                      int cool = 5, float fadeintime = 5f, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
                      int warmup = 0, string warmgroup = null, bool subfolders = false,
-                     string link = null)
-                => contexts[name] = new Contexts(name, path, fallback, resume, stale,
-                                                 loop, cool, fadeintime, bypass, priority, once, volume,
-                                                 warmup, warmgroup, subfolders, link);
+                     string link = null, bool combat = false)
+            {
+                contexts[name] = new Contexts(name, path, fallback, resume, stale,
+                                              loop, cool, fadeintime, bypass, priority, once, volume,
+                                              warmup, warmgroup, subfolders, link);
+                // Explicitly-marked FIGHT music, same meaning as combat="true" in contexts.xml.
+                // The naming convention catches Combat_*; this is for the ones it cannot, like
+                // Low_Health_Panic — a fight sting in everything but its name. Without it here,
+                // a install with no contexts.xml would silently stop honouring the mute for it.
+                if (combat) MarkCombatContext(name);
+            }
 
-            Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:100, once:true);
-            Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90);
+            Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:0.1f, bypass:true, priority:100, once:true);
+            Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90, combat:true);
             Add("Blood_Moon_Combat",   "combat/blood_moon",     "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:71, link:"Bloodmoon");
             Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
             Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
@@ -53,7 +60,7 @@ namespace CMM
             Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
             Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
             Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:69, warmup:1);
-            Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:91, once:true, volume:1.0f);
+            Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:91, once:true, fadeintime:0);
             // Three combat tiers. The combat/ root folder IS the base (Low) tier; _high and
             // _boss subfolders hold the escalations (underscore-prefixed so the top-level
             // directory scan never confuses them with the per-biome subfolders). Low bridges
@@ -81,31 +88,31 @@ namespace CMM
             Add("Combat_Boss_Wasteland",    "combat/wasteland/_boss",    "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
             Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
             Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
-            Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:1, bypass:true, priority:45, once:true);
+            Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:0.1f, bypass:true, priority:45, once:true);
             Add("Tension",             "tension",               stale:30,                                      priority:30, warmup:2, link:"Suspense");
-            Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, warmup:3, link:"TraderJoel");
-            Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, warmup:3, link:"TraderJen");
-            Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, warmup:3, link:"TraderRekt");
-            Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, warmup:3, link:"TraderBob");
-            Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, warmup:3, link:"TraderHugh");
-            Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25, warmup:3);
+            Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, link:"TraderJoel");
+            Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, link:"TraderJen");
+            Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, link:"TraderRekt");
+            Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, link:"TraderBob");
+            Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, link:"TraderHugh");
+            Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25);
             Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home", link:"HomeNight");
             Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home", link:"HomeDay");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T0",     "poi/infested/t0",       stale:60,                                      priority:21, warmup:10, warmgroup:"poi");
-            Add("POI_Infested",        "poi/infested",          stale:60,                                      priority:20, warmup:10, warmgroup:"poi");
-            Add("POI_T5",              "poi/t5",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T4",              "poi/t4",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T3",              "poi/t3",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T2",              "poi/t2",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T1",              "poi/t1",                "POI",        stale:60,                        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T0",              "poi/t0",                stale:60,                                      priority:17, warmup:5, warmgroup:"poi");
-            Add("POI",                 "poi",                   stale:60,                                      priority:16, warmup:5, warmgroup:"poi");
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, warmup:10, warmgroup:"poi");
+            Add("POI_Infested",        "poi/infested",          priority:20, warmup:10, warmgroup:"poi");
+            Add("POI_T5",              "poi/t5",                "POI",        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T4",              "poi/t4",                "POI",        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T3",              "poi/t3",                "POI",        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T2",              "poi/t2",                "POI",        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T1",              "poi/t1",                "POI",        priority:18, warmup:5, warmgroup:"poi");
+            Add("POI_T0",              "poi/t0",                priority:17, warmup:5, warmgroup:"poi");
+            Add("POI",                 "poi",                   priority:16, warmup:5, warmgroup:"poi");
             Add("Ambient_Forest_Night",      "ambient/forest/_night",       "Ambient_Night",             priority:12);
             Add("Ambient_Forest",            "ambient/forest",              "Ambient",                   priority:11);
             Add("Ambient_Burnt_Forest_Night","ambient/burnt_forest/_night", "Ambient_Night",             priority:12);
@@ -118,6 +125,18 @@ namespace CMM
             Add("Ambient_Wasteland",         "ambient/wasteland",           "Ambient",                   priority:11);
             Add("Ambient_Night",             "ambient/_night",              "Stack",                     priority:11);
             Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10, link:"Exploration");
+
+            // Multiplayer presence. Detection is relationship-only and ignores the server's
+            // PvP mode; the warmup dwell keeps someone merely passing through from
+            // interrupting. A stranger outranks ambient/home/trader exploration music.
+            Add("Online_Stranger",           "testing/online/stranger",    stale:30, priority:29, warmup:3);
+            Add("Online_Friend",             "testing/online/friendly",    stale:30, priority:14, warmup:3);
+
+            // The world-emitter / personal-radio source. Nothing auto-activates it: no vanilla
+            // link and no detection wires it to a game state, so the resolver never puts it on
+            // the stack. It is here because WorldEmitterSource points at it BY NAME, and an
+            // install with no contexts.xml would otherwise have the radio aimed at nothing.
+            Add("Radio",                     "Radio",                      priority:10, volume:0.5f);
             // Sentinels — no path, no files
             Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0, link:"None");
             Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:-1);
