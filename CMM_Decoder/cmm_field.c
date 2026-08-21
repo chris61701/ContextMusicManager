@@ -44,6 +44,12 @@ struct cmm_fld {
      * discarded rather than published -- 20 ms of wasted work, against a field that would
      * otherwise be indexed against an origin it was not built for. */
     int *cur, *prev, *nxt;
+    /* The MATERIAL-only cost along the same winning route, carried alongside. Excess on its own
+     * cannot tell you whether a speaker is quiet because of walls or because the route wandered,
+     * and those want opposite fixes -- so the field reports both rather than leaving it to be
+     * argued about. Follows the winner: whenever a cell's total improves, its material total is
+     * overwritten from the same predecessor. */
+    int *curMat, *nxtMat;
     float clx, cly, clz;            /* listener the CURRENT field was flooded from */
     float nlx, nly, nlz;            /* ...and the one `nxt` is being built from */
     unsigned gen;                   /* bumped by recentre; a flood carries the one it started on */
@@ -110,11 +116,13 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
     f->cur  = (int *)malloc(sizeof(int) * f->n);
     f->prev = (int *)malloc(sizeof(int) * f->n);
     f->nxt  = (int *)malloc(sizeof(int) * f->n);
+    f->curMat = (int *)malloc(sizeof(int) * f->n);
+    f->nxtMat = (int *)malloc(sizeof(int) * f->n);
     f->bnext= (int *)malloc(sizeof(int) * f->n);
     f->bprev= (int *)malloc(sizeof(int) * f->n);
     f->binb = (int *)malloc(sizeof(int) * f->n);
     f->bhead= (int *)malloc(sizeof(int) * (MAX_Q + 1));
-    if (!f->fnx || !f->fny || !f->fnz || !f->fillX || !f->fillY || !f->fillZ || !f->have || !f->cur || !f->prev || !f->nxt
+    if (!f->fnx || !f->fny || !f->fnz || !f->fillX || !f->fillY || !f->fillZ || !f->have || !f->cur || !f->prev || !f->nxt || !f->curMat || !f->nxtMat
         || !f->bnext || !f->bprev || !f->binb || !f->bhead) { cmm_fld_destroy(f); return NULL; }
     for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->prev[i] = UNREACHED; f->nxt[i] = UNREACHED; }
 
@@ -157,7 +165,8 @@ void cmm_fld_destroy(cmm_fld *f) {
     if (!f) return;
     free(f->fnx); free(f->fny); free(f->fnz);
     free(f->fillX); free(f->fillY); free(f->fillZ); free(f->have);
-    free(f->cur); free(f->prev); free(f->nxt); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
+    free(f->cur); free(f->prev); free(f->nxt);
+    free(f->curMat); free(f->nxtMat); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
     free(f->order);
     free(f);
 }
@@ -280,7 +289,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
      * reads it while this runs. And binb must be reset every flood -- it is the "which bucket is
      * this cell in" index, and stale entries make bq_set unlink from lists that no longer exist,
      * which corrupts the queue and silently strands the flood one cell from its seed. */
-    for (long long i = 0; i < f->n; i++) { f->nxt[i] = UNREACHED; f->binb[i] = -1; }
+    for (long long i = 0; i < f->n; i++) { f->nxt[i] = UNREACHED; f->nxtMat[i] = 0; f->binb[i] = -1; }
     for (int c = 0; c <= MAX_Q; c++) f->bhead[c] = -1;
 
     f->nlx = lx; f->nly = ly; f->nlz = lz;
@@ -291,7 +300,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     if (!in_win(f, scx, scy, scz)) { f->reached = 0; return 0; }
 
     long long si = widx(f, scx, scy, scz);
-    f->nxt[si] = 0; bq_set(f, si, 0);
+    f->nxt[si] = 0; f->nxtMat[si] = 0; bq_set(f, si, 0);
 
     /* A step between cell centres is `step` blocks of detour; a diagonal is longer, and charging
      * the true length is what stops the flood from preferring staircase routes through corners. */
@@ -371,6 +380,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                         if (q > maxQ || q > MAX_Q) continue;
                         if (CUR[ni] <= q) continue;
                         CUR[ni] = q;
+                        f->nxtMat[ni] = f->nxtMat[i] + (int)(mat * Q_PER_DB + 0.5f);
                         bq_set(f, ni, q);
                     }
                 }
@@ -383,6 +393,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     /* Publish: the field just solved becomes current, the previous one stays available for the
      * caller's crossfade, and the oldest buffer is recycled for the next flood. */
     { int *old = f->prev; f->prev = f->cur; f->cur = f->nxt; f->nxt = old; }
+    { int *om = f->curMat; f->curMat = f->nxtMat; f->nxtMat = om; }
     f->clx = f->nlx; f->cly = f->nly; f->clz = f->nlz;
     f->reached = reached;
     return (int)reached;
@@ -458,6 +469,30 @@ float cmm_fld_sample_db_blended(cmm_fld *f, float x, float y, float z, float mix
     float a = excess_db(f, f->cur,  f->clx, f->cly, f->clz, x, y, z);
     float b = excess_db(f, f->prev, f->clx, f->cly, f->clz, x, y, z);
     return b + (a - b) * mix;
+}
+
+/* The MATERIAL half of the excess at a world position: how much of it is walls rather than the
+ * route going the long way round. Same interpolation as the total, over the same cells. */
+CMM_FLD_API float cmm_fld_sample_mat_db(cmm_fld *f, float x, float y, float z) {
+    if (!f) return 0.0f;
+    float s = (float)f->step;
+    float gx = x / s - 0.5f, gy = y / s - 0.5f, gz = z / s - 0.5f;
+    int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
+    float tx = gx - ix, ty = gy - iy, tz = gz - iz;
+    float acc = 0.0f, wsum = 0.0f;
+    for (int dy = 0; dy <= 1; dy++)
+    for (int dz = 0; dz <= 1; dz++)
+    for (int dx = 0; dx <= 1; dx++) {
+        float w = (dx ? tx : 1.0f - tx) * (dy ? ty : 1.0f - ty) * (dz ? tz : 1.0f - tz);
+        if (w <= 0.0f) continue;
+        int cx = ix + dx, cy = iy + dy, cz = iz + dz;
+        if (!in_win(f, cx, cy, cz)) continue;
+        long long i = widx(f, cx, cy, cz);
+        if (f->cur[i] == UNREACHED) continue;
+        acc += w * ((float)f->curMat[i] / Q_PER_DB);
+        wsum += w;
+    }
+    return wsum > 1e-6f ? acc / wsum : 0.0f;
 }
 
 long long cmm_fld_stat(cmm_fld *f, int what) {

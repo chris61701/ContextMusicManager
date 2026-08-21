@@ -86,6 +86,10 @@ CMM_FLD_API int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz);
  * a source walking toward you gets a curve and not a staircase. Unreachable reads as `maxDb`. */
 CMM_FLD_API float cmm_fld_sample_db(cmm_fld *f, float x, float y, float z);
 
+/* The MATERIAL half of the excess: how much is walls rather than the route going the long way
+ * round. Excess alone cannot distinguish them and they want opposite fixes. */
+CMM_FLD_API float cmm_fld_sample_mat_db(cmm_fld *f, float x, float y, float z);
+
 /* Blend factor for the crossfade between successive floods, 0..1 applied by the caller. The
  * listener moving is the only thing that shifts the whole field at once, and one flood interval
  * of blend covers it; a source moving is already smooth by the trilinear sample. */

@@ -252,19 +252,26 @@ namespace CMM
                 float extra = head > 0f ? (float)(head * (1.0 - Math.Pow(amp, 1.0 / fexp))) : 0f;
                 ptGain[k] = extra > 0f ? extra : 0f;
 
-                if (k == 0 || d < _dbgDist) { _dbgDist = d; _dbgExcess = excessDb; _dbgExtra = ptGain[k]; }
+                if (k == 0 || d < _dbgDist)
+                {
+                    _dbgDist = d; _dbgExcess = excessDb; _dbgExtra = ptGain[k];
+                    // Split it. A speaker quiet because of walls and one quiet because the route
+                    // wandered look identical in the total and want opposite fixes.
+                    _dbgMat = NativeField.cmm_fld_sample_mat_db(_f, sp.x, sp.y, sp.z);
+                }
             }
             return true;
         }
 
-        private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra;
+        private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra, _dbgMat;
 
         // Nearest published point, reset ON REPORT rather than per station — the exact bug that
         // made the previous model's diagnostic describe a speaker ninety blocks away for a week.
         internal static string DescribeNearest()
         {
             if (_dbgDist > 1e8f) return "no point";
-            string s = $"d={_dbgDist:0.0} excess={_dbgExcess:0.0}dB extra={_dbgExtra:0.0}blk";
+            string s = $"d={_dbgDist:0.0} excess={_dbgExcess:0.0}dB (wall {_dbgMat:0.0}, detour {Math.Max(0f, _dbgExcess - _dbgMat):0.0})"
+                     + $" extra={_dbgExtra:0.0}blk  {_dbgExcess / Math.Max(_dbgDist, 0.1f):0.00}dB/blk";
             _dbgDist = 1e9f;
             return s;
         }

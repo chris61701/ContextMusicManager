@@ -49,6 +49,10 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern float cmm_fld_sample_db_blended(IntPtr f, float x, float y, float z, float mix);
 
+        // The MATERIAL half of the excess: walls, as opposed to the route going the long way.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern float cmm_fld_sample_mat_db(IntPtr f, float x, float y, float z);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_fld_set_tuning(IntPtr f, float dbPerBlock, float maxDb);
 
