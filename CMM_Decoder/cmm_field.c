@@ -13,6 +13,12 @@ static long long now_us(void) { return (long long)clock() * (1000000LL / CLOCKS_
  * costs are small, bounded and mostly equal, which is exactly the case a monotone bucket queue is
  * for: no comparisons, no sift, and the whole solve is one linear sweep of the buckets. */
 #define Q_PER_DB   4
+/* Radius in BLOCKS of the seed sphere around the listener. Chosen by measuring the worst step in
+ * excess for a hundredth-of-a-block of listener movement (test_field: "listener moving"); see the
+ * seeding block in cmm_fld_solve for why a sphere and not the surrounding eight cells. */
+#ifndef CMM_SEED_R
+#define CMM_SEED_R 6.0f
+#endif
 #define MAX_Q      (120 * Q_PER_DB)      /* past this a cell is silent; the flood stops growing */
 #define UNREACHED  0x7fffffff
 
@@ -329,8 +335,105 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     int scx = b2c(bx, f->stepX), scy = b2c(by, f->stepY), scz = b2c(bz, f->stepZ);
     if (!in_win(f, scx, scy, scz)) { f->reached = 0; return 0; }
 
-    long long si = widx(f, scx, scy, scz);
-    f->nxt[si] = 0; f->nxtMat[si] = 0; bq_set(f, si, 0);
+    /* SEED THE EIGHT CELLS AROUND THE LISTENER, NOT THE ONE IT STANDS IN.
+     *
+     * The source end of this model has always been continuous: cmm_fld_sample_db interpolates
+     * across the eight cells surrounding the source, so a source walking toward you gets a curve
+     * and not a staircase. The LISTENER end had nothing of the kind. It picked the single cell
+     * containing the ear -- a nearest-neighbour lookup -- so the instant the ear crossed a cell
+     * boundary the flood started somewhere else and the WHOLE field changed at once.
+     *
+     * The ear is cameraTransform.position, which moves when the player turns (the camera is offset
+     * from the pivot it rotates about) and drifts with head bob while standing still. So the field
+     * could jump without the player going anywhere, which is "just turning around and not moving
+     * causes dips too". No amount of smoothing downstream fixes a discontinuous seed; it only
+     * turns a jump into a slow wander.
+     *
+     * Each of the eight starts at what it costs to GET there in a straight line -- its distance
+     * from the true listener position, at the detour rate. No special case for the cell the ear is
+     * actually in: giving that one zero would put a step back at every boundary. The result is
+     * continuous in the listener's sub-cell position, and open air still comes out at exactly zero
+     * excess, because the routed cost through the best-placed seed is the straight-line cost that
+     * excess_db subtracts back off.
+     *
+     * Cells whose geometry is still pending are skipped, the same rule the flood uses: not knowing
+     * is never the same as nothing being there. If that leaves nothing seeded -- the ear is in
+     * unread space -- fall back to the containing cell so the flood is never empty. */
+    {
+        /* THE LISTENER IS SPREAD ACROSS THE EIGHT CELLS AROUND IT, BY THE SAME WEIGHTS THE SOURCE
+         * END USES. This is the third attempt and the first that is both continuous and sound, so
+         * the two that failed are worth recording:
+         *
+         *   ONE CELL (the original). A nearest-neighbour lookup. The instant the ear crossed a
+         *   cell boundary the flood started somewhere else and the whole field moved. The ear is
+         *   cameraTransform.position, which shifts when the player TURNS -- the camera is offset
+         *   from the pivot it rotates about -- so the level could jump with the player standing
+         *   still. That is "just turning around and not moving causes dips too".
+         *
+         *   THE EIGHT SURROUNDING CELLS, each at its straight-line cost. Continuous in each seed's
+         *   COST, but not in the seed SET: crossing a boundary drops one cell and adds another,
+         *   and if the one that left was the gateway to a good route the field still moved. 1.4 dB
+         *   from four hundredths of a block.
+         *
+         *   A SPHERE of radius R around the ear, which fixes the set problem and measured well
+         *   (0.11 dB at R=12) -- and is wrong. A seed is a claim that sound reaches that cell over
+         *   a clear straight line, and at twelve blocks that line goes through walls. It would
+         *   have made every wall leak, and it would have measured beautifully doing it.
+         *
+         * What actually works is to notice that the eight weights ALREADY go to zero at the set
+         * boundary -- that is what makes trilinear interpolation continuous at the source end --
+         * and to charge each seed for its weight, as if it were an aperture: a cell holding
+         * fraction w of the listener costs -10*log10(w) dB to couple into. A cell entering or
+         * leaving does so at w = 0, which is an infinite charge, so it contributes nothing at the
+         * moment it appears and its influence rises smoothly from there. Nothing is seeded further
+         * than one cell away, so no seed claims a line it does not have.
+         *
+         * Normalised by the LARGEST weight rather than used raw: with the ear at a cell corner all
+         * eight weights are 1/8, and an un-normalised charge would put 9 dB of coupling loss on
+         * every one of them -- open air would read 9 dB down for standing in the wrong place. The
+         * best-placed seed always costs zero to couple into; the others pay for being off to one
+         * side of it. */
+        float gx = lx / (float)f->stepX - 0.5f;
+        float gy = ly / (float)f->stepY - 0.5f;
+        float gz = lz / (float)f->stepZ - 0.5f;
+        int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
+        float tx = gx - ix, ty = gy - iy, tz = gz - iz;
+        float w[8]; long long idx[8]; float dst[8];
+        int n = 0, ddx, ddy, ddz;
+        float wmax = 0.0f;
+        for (ddy = 0; ddy <= 1; ddy++)
+        for (ddz = 0; ddz <= 1; ddz++)
+        for (ddx = 0; ddx <= 1; ddx++) {
+            int cx = ix + ddx, cy = iy + ddy, cz = iz + ddz;
+            if (!in_win(f, cx, cy, cz)) continue;
+            long long i = widx(f, cx, cy, cz);
+            if (!f->have[i]) continue;               /* unread is opaque, never a seed */
+            float ww = (ddx ? tx : 1.0f - tx) * (ddy ? ty : 1.0f - ty) * (ddz ? tz : 1.0f - tz);
+            if (ww <= 0.0f) continue;
+            float ex2 = (cx + 0.5f) * f->stepX - lx;
+            float ey2 = (cy + 0.5f) * f->stepY - ly;
+            float ez2 = (cz + 0.5f) * f->stepZ - lz;
+            w[n] = ww; idx[n] = i;
+            dst[n] = sqrtf(ex2 * ex2 + ey2 * ey2 + ez2 * ez2);
+            if (ww > wmax) wmax = ww;
+            n++;
+        }
+        int seeded = 0, s;
+        for (s = 0; s < n; s++) {
+            float rel = w[s] / wmax;                 /* 1 for the best-placed seed */
+            float pen = -10.0f * log10f(rel);        /* couple-in loss, 0 dB at rel = 1 */
+            if (pen > 40.0f) continue;               /* far enough into the corner to not matter */
+            int q = (int)((dst[s] * f->dbPerBlock + pen) * Q_PER_DB + 0.5f);
+            if (q > MAX_Q) continue;
+            if (f->nxt[idx[s]] <= q) continue;
+            f->nxt[idx[s]] = q; f->nxtMat[idx[s]] = 0; bq_set(f, idx[s], q);
+            seeded++;
+        }
+        if (!seeded) {
+            long long si = widx(f, scx, scy, scz);
+            f->nxt[si] = 0; f->nxtMat[si] = 0; bq_set(f, si, 0);
+        }
+    }
 
     /* THE COST OF EACH OF THE 26 MOVES, in quarter-dB, precomputed. With cubic cells there were
      * only three distinct lengths (1, sqrt2, sqrt3 steps). With stepY != stepX the length depends
@@ -496,11 +599,58 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
  * reads a few dB just for being far away — and distance is the MIXER's job, which already has
  * both positions. Take the straight-line charge back out and what is left is EXCESS: what the
  * building added. Clear line of sight comes out at zero by construction rather than by tuning. */
+/* WHAT THE SAME MEASUREMENT WOULD HAVE READ IN OPEN AIR.
+ *
+ * The obvious reference is the straight line, |L-S| * dbPerBlock -- and it was, until the listener
+ * was spread over the eight surrounding cells to stop the field jumping when the player turns. A
+ * route now starts at a cell CENTRE and pays a coupling charge to get there, so even with nothing
+ * in the way it costs a little more than the straight line: measured, up to 0.9 dB of excess in
+ * open air, which is a permanent quiet with no cause a player can see. That is the same class of
+ * defect as the 29 dB one, just small enough to argue about.
+ *
+ * So the reference is not a straight line but the SAME SEEDING with nothing in the way: the best
+ * of the eight seeds, each paying its real coupling charge and then travelling free. Open air
+ * comes out at exactly zero by construction rather than by tuning, and every term that is an
+ * artifact of how the listener is spread cancels instead of being carried. Mirrors the seeding in
+ * cmm_fld_solve exactly -- if one changes, so must the other. */
+static float free_space_db(cmm_fld *f, float lx, float ly, float lz, float x, float y, float z) {
+    float gx = lx / (float)f->stepX - 0.5f;
+    float gy = ly / (float)f->stepY - 0.5f;
+    float gz = lz / (float)f->stepZ - 0.5f;
+    int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
+    float tx = gx - ix, ty = gy - iy, tz = gz - iz;
+    float wmax = 0.0f, best = 1e30f;
+    int ddx, ddy, ddz;
+    for (ddy = 0; ddy <= 1; ddy++)
+    for (ddz = 0; ddz <= 1; ddz++)
+    for (ddx = 0; ddx <= 1; ddx++) {
+        float ww = (ddx ? tx : 1.0f - tx) * (ddy ? ty : 1.0f - ty) * (ddz ? tz : 1.0f - tz);
+        if (ww > wmax) wmax = ww;
+    }
+    if (wmax <= 0.0f) return 0.0f;
+    for (ddy = 0; ddy <= 1; ddy++)
+    for (ddz = 0; ddz <= 1; ddz++)
+    for (ddx = 0; ddx <= 1; ddx++) {
+        float ww = (ddx ? tx : 1.0f - tx) * (ddy ? ty : 1.0f - ty) * (ddz ? tz : 1.0f - tz);
+        if (ww <= 0.0f) continue;
+        float pen = -10.0f * log10f(ww / wmax);
+        if (pen > 40.0f) continue;
+        float cxw = (ix + ddx + 0.5f) * f->stepX;
+        float cyw = (iy + ddy + 0.5f) * f->stepY;
+        float czw = (iz + ddz + 0.5f) * f->stepZ;
+        float ax = cxw - lx, ay = cyw - ly, az = czw - lz;
+        float bx2 = x - cxw, by2 = y - cyw, bz2 = z - czw;
+        float cost = sqrtf(ax*ax + ay*ay + az*az) * f->dbPerBlock + pen
+                   + sqrtf(bx2*bx2 + by2*by2 + bz2*bz2) * f->dbPerBlock;
+        if (cost < best) best = cost;
+    }
+    return best < 1e29f ? best : 0.0f;
+}
+
 static float excess_db(cmm_fld *f, const int *fld, float lx, float ly, float lz,
                        float x, float y, float z) {
     float routed = sample_field(f, fld, x, y, z);
-    float dx = x - lx, dy = y - ly, dz = z - lz;
-    float direct = sqrtf(dx * dx + dy * dy + dz * dz) * f->dbPerBlock;
+    float direct = free_space_db(f, lx, ly, lz, x, y, z);
     float e = routed - direct;
     if (e < 0.0f) e = 0.0f;
     if (e > f->maxDb) e = f->maxDb;

@@ -256,6 +256,35 @@ int main(int argc, char** argv) {
     ckf("a 1-block hole: between doorway and sealed", pin > door + 1.0f && pin < thru * 0.2f,
         "%.2f dB (doorway %.1f, sealed %.1f)", pin, door, thru);
 
+    /* ── AND THE SAME PROPERTY AT THE OTHER END: THE LISTENER MOVING IS SMOOTH ──────────
+     * The test below walks the SOURCE and was passing throughout, because the source end has
+     * always been interpolated across eight cells. The LISTENER end was a nearest-neighbour
+     * lookup: the flood was seeded from the single cell containing the ear, so crossing a cell
+     * boundary restarted it somewhere else and moved the entire field at once.
+     *
+     * That is worse than it sounds, because the ear is the CAMERA, and the camera moves when the
+     * player turns -- it is offset from the pivot it rotates about -- and drifts with head bob
+     * while standing still. So the level could jump with the player going nowhere. Reported as
+     * "just turning around and not moving causes dips too", and no amount of smoothing downstream
+     * can fix a discontinuous seed; it only turns a jump into a slow wander.
+     *
+     * Sub-cell steps on purpose: whole-cell steps would step over the very boundary that broke. */
+    {
+        float worstStep = 0, prevV = -1; float atX = 0;
+        for (int i = 0; i <= 200; i++) {
+            float ex = 30.0f + i * (8.0f / 200.0f);        /* walk the EAR, source fixed */
+            cmm_fld_solve(f, ex, 2.5f, 30.5f);
+            float v = cmm_fld_sample_db(f, 44.5f, 2.5f, 30.5f);
+            if (prevV >= 0) {
+                float d = fabsf(v - prevV);
+                if (d > worstStep) { worstStep = d; atX = ex; }
+            }
+            prevV = v;
+        }
+        ckf("listener moving: no step (dB per 0.04 blocks)", worstStep < 1.0f,
+            "worst %.2f dB at x=%.2f", worstStep, atX);
+    }
+
     /* ── THE PROPERTY THE WHOLE DESIGN IS FOR: a source moving is smooth ─────────────── */
     float worst = 0, prev = -1;
     for (int i = 0; i <= 240; i++) {

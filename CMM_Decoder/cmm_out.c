@@ -232,6 +232,28 @@ struct cmm_out {
  * you're mostly hearing"); wet level/pan stay slot-level (the room doesn't care which class). */
 static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2], float gR[2], float bright[2], float* wet, float* wetPan, int* domClass)
 {
+    /* ENERGY, not amplitude. Two speakers playing the SAME track were summed as amplitudes:
+     *
+     *     totalL += cos(theta)*att;   totalR += sin(theta)*att;
+     *
+     * A single point then has magnitude exactly att, but TWO points have |v1+v2| = 2cos(dTheta/2),
+     * and because equal-power pan confines theta to [0, pi/2], that is between 1.41 and 2.00 --
+     * ALWAYS above the 1.4 anti-clip cap below. So with two speakers audible the cap was
+     * permanently engaged, and its scale factor depended on the angle between them IN PAN SPACE.
+     * Pan position is a PROJECTION of the bearing onto the listener's right vector, so that angle
+     * changes as the listener turns even when nothing moves: up to 3 dB of gain riding on which
+     * way you face, applied hard, per render block, with no slew. Reported exactly as "just
+     * turning around and not moving causes dips too", with two speakers nearby.
+     *
+     * Summing energy instead makes the total invariant under rotation by construction:
+     *
+     *     mag^2 = sum(cL_i^2) + sum(cR_i^2) = sum(att_i^2)     -- no theta in it at all
+     *
+     * It is also the better physical model. These points carry the same signal, so in a real room
+     * they comb-filter, and averaged across frequency that is power addition (+3 dB for two equal
+     * speakers) rather than the +6 dB of coherent amplitude addition. A single point is unchanged:
+     * sqrt of one square is what it always was. */
+    float energyL[2] = { 0.0f, 0.0f }, energyR[2] = { 0.0f, 0.0f };
     float totalL[2] = { 0.0f, 0.0f }, totalR[2] = { 0.0f, 0.0f };
     int count = sl->ptCount, p;
     if (count > CMM_MAX_EMIT_PTS) count = CMM_MAX_EMIT_PTS;
@@ -315,8 +337,8 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2],
         float cL = cosf(theta) * att;
         float cR = sinf(theta) * att;
         int cls = sl->ptFlags[p] & 1;   /* v34: 0 = speaker, 1 = ham — independent colored signals */
-        totalL[cls] += cL;
-        totalR[cls] += cR;
+        energyL[cls] += cL * cL;
+        energyR[cls] += cR * cR;
 
         /* Track the loudest speaker PER CLASS; its EFFECTIVE distance sets that class's tone colour
          * (far/occluded = dull). The tone cue is measured against a FIXED reference distance
@@ -383,8 +405,12 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2],
         }
     }
     sl->prevPtCount = count;   /* point slots ≥ count are inactive → re-init from target when they return */
+    totalL[0] = sqrtf(energyL[0]); totalR[0] = sqrtf(energyR[0]);
+    totalL[1] = sqrtf(energyL[1]); totalR[1] = sqrtf(energyR[1]);
     /* Anti-clip magnitude cap on the TOTAL across classes (both sum into the same output), scaling
-     * both classes by the same factor so their balance is preserved. */
+     * both classes by the same factor so their balance is preserved. Still worth having for a
+     * roomful of speakers, but it can no longer PUMP with the listener's facing: the magnitude it
+     * tests is now sum(att^2) over the points, which has no bearing term in it. */
     {
         float tl = totalL[0] + totalL[1], tr = totalR[0] + totalR[1];
         float mag = sqrtf(tl*tl + tr*tr);
