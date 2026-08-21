@@ -56,9 +56,29 @@ namespace CMM
         // Short cells cost NOTHING in geometry reads — those track the block volume, which is
         // unchanged at ~930k for a full window — and multiply only the flood, 7 ms to ~21 ms, on
         // the scheduler thread at 3.3 Hz. test_field.c now sweeps every alignment.
-        private const int StepXZ = 3;
+        // TWO blocks wide, not three. A 3-wide cell cannot represent a 1-block wall around a small
+        // room -- the same failure the 3-block-TALL cell had against a 1-block floor, on the other
+        // axes. Measured on a bathroom-sized box with one door, listener inside, speaker nine
+        // blocks outside:
+        //
+        //     cell size    door open    door shut    difference
+        //      3x1x3          9.5 dB      11.6 dB       2.1 dB   <- shutting the door did nothing
+        //      2x1x2          9.3 dB      56.4 dB      47.1 dB
+        //      1x1x1          0.0 dB      56.8 dB      56.8 dB
+        //
+        // Reported as "I'm in a bathroom, and closing and opening the door does nothing".
+        //
+        // 1x1x1 is the right answer and costs 819 ms a flood, so it is not an answer. 2x1x2 over
+        // the audible range costs 36.9 ms against the 36.6 ms three-wide cells cost over a taller
+        // window -- the same money, paid for out of vertical extent (see BelowBlocks/AboveBlocks).
+        // Geometry reads do not change at all: they track the number of BLOCKS in the window, not
+        // the number of cells.
+        private const int StepXZ = 2;
         private const int StepY  = 1;
-        private const int BelowBlocks = 24, AboveBlocks = 24;
+        // What the finer horizontal grid is paid for with; was 24/24. Safe because a speaker
+        // outside the window now reads CLEAR rather than sealed (see sample_field in cmm_field.c),
+        // so the edge is a fade to "no opinion" rather than a cut-off.
+        private const int BelowBlocks = 16, AboveBlocks = 16;
 
         private static IntPtr _f = IntPtr.Zero;
         private static int _nx, _ny, _nz, _range;

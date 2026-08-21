@@ -650,6 +650,7 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
      * remove, so the interpolation now weighs only cells with an answer. If none of the eight has
      * one, the position really is unreachable and maxDb is the honest reply. */
     float acc = 0.0f, wsum = 0.0f;
+    int anyInWindow = 0;
     for (int dy = 0; dy <= 1; dy++)
     for (int dz = 0; dz <= 1; dz++)
     for (int dx = 0; dx <= 1; dx++) {
@@ -657,12 +658,24 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
         if (w <= 0.0f) continue;
         int cx = ix + dx, cy = iy + dy, cz = iz + dz;
         if (!in_win(f, cx, cy, cz)) continue;
+        anyInWindow = 1;
         int v = fld[widx(f, cx, cy, cz)];
         if (v == UNREACHED) continue;
         acc += w * ((float)v / Q_PER_DB);
         wsum += w;
     }
-    return wsum > 1e-6f ? acc / wsum : f->maxDb;
+    /* NOTHING REACHABLE and NOTHING EVEN IN THE WINDOW are different answers.
+     *
+     * An unreached cell inside the window means the geometry was read and no way through was
+     * found: maxDb is honest. A point entirely OUTSIDE the window means we never looked, and
+     * answering maxDb there declares a speaker silent on the strength of not having checked.
+     * Nothing occludes what has not been examined, so it reads clear and the mixer's distance
+     * falloff carries it alone.
+     *
+     * This is what makes it safe to spend window height on horizontal resolution: a speaker two
+     * storeys up now fades out of the field's opinion instead of being cut off by its edge. */
+    if (wsum <= 1e-6f) return anyInWindow ? f->maxDb : 0.0f;
+    return acc / wsum;
 }
 
 /* The routed cost includes the detour charge for the whole path, so a source in clear air still

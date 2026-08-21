@@ -16,9 +16,9 @@
 /* Cells are WIDE and SHORT, the shipped shape. A wall spans a cell's full height so coarse is
  * fine; a floor is one block thick with a storey of air above it, and a tall cell cannot
  * represent that -- see the ground-alignment case below, which is the reason for the shape. */
-#define SX 3
+#define SX 2
 #define SY 1
-#define SZ 3
+#define SZ 2
 static unsigned char solid[W][H][W];      /* 1 = a full opaque block */
 
 static int fails = 0, checks = 0;
