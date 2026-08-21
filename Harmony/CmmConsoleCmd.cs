@@ -47,6 +47,7 @@ namespace CMM
             "  cmm acoustics here       - level at the player, broken down by arrival\n" +
             "  cmm acoustics wall <n>   - how much material blocks (default 40.1, higher = more)\n" +
             "  cmm acoustics verb <n>   - room-sound level behind walls (default 7, lower = less)\n" +
+            "  cmm quiet [on|off]       - mute the per-second diagnostics (commands still answer)\n" +
             "  cmm field                - field occlusion: the two taste knobs, live\n" +
             "  cmm field detour <n>     - dB per block of detour (diffraction round a corner)\n" +
             "  cmm field wall <n>       - dB for a fully solid block\n" +
@@ -99,6 +100,25 @@ namespace CMM
                 return;
             }
 #endif
+
+            // cmm quiet [on|off] — mute the periodic diagnostics.
+            //
+            // The debug build prints a dozen lines a second (perf phases, stutters, probe rays,
+            // station sync, reverb state, the emitter path) and the game console has no pause and
+            // no scrollback worth the name. So the readouts meant to make a problem visible were
+            // burying the one number being looked for. A diagnostic you cannot read is not a
+            // diagnostic. Command REPLIES are unaffected -- `cmm field` still answers -- so the
+            // quiet console is the useful one while tuning by ear.
+            if (sub == "quiet")
+            {
+                bool q = _params.Count < 2 || _params[1].ToLowerInvariant() != "off";
+                CMMConfig.DebugLogging = !q;
+                CMMConfig.PerfTiming   = !q;
+                Out(q ? "periodic logging OFF. Commands still answer: try `cmm field`."
+                      + "  `cmm quiet off` puts it back."
+                      : "periodic logging back ON.");
+                return;
+            }
 
             if (sub == "field") { Out(FieldCommand(_params)); return; }
 
