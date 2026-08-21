@@ -86,7 +86,9 @@ namespace CMM
                 CMMConfigLoader.LoadSettings(ModPath);
                 // Re-read Sounds/ too: a swapped click file is heard without a restart, same
                 // contract as every other tunable in there.
-                PersonalRadio.LoadClickSamples(force: true);
+                // The click SOUNDS are read once and held in RAM, deliberately not swappable at
+                // runtime. The knobs around them ARE live, so re-push those.
+                PersonalRadio.LoadClickSamples();
                 ScriptHost.MarkConfigDirty();   // re-marshal cfg into Lua on the next scan tick
             }
 

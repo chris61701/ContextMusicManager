@@ -133,9 +133,15 @@
          Sounds/radio_dial.wav    one notch of the tuning dial
          Sounds/radio_power.wav   the power switch (both throws)
        Replace them with anything you like — mono or stereo, 8/16/24/32-bit PCM or float WAV.
-       They reload when this file does, so you can swap a file and hear it without restarting.
-       false goes back to the synthesized clicks, which are also what you get automatically if a
-       file is missing or unreadable: no sound file can break the radio, only quieten it.
+       They are read ONCE at startup and held in RAM (about 66 KB), so a swapped file needs a
+       restart; the settings around them are live either way. false goes back to the synthesized
+       clicks, which are also what you get automatically if a file is missing or unreadable: no
+       sound file can break the radio, only quieten it.
+
+       In game: `cmm sfx` shows what loaded, `cmm sfx test spin` fires eight detents in a row
+       (the only way to judge the variance), and `cmm sfx jitter <hz>` / `samples on|off` /
+       `vol <0..1>` turn these live for listening. Those are overrides, not saves — put the
+       value you settle on back in here.
 
        JitterHz is how far the playback RATE wanders from one firing to the next, either side of
        the file's own rate. One recording repeated verbatim is exactly what gives a UI sound away

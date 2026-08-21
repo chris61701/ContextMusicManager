@@ -46,7 +46,8 @@ namespace CMM
             "  cmm acoustics rebuild    - force a scene rebuild\n" +
             "  cmm acoustics here       - level at the player, broken down by arrival\n" +
             "  cmm acoustics wall <n>   - how much material blocks (default 40.1, higher = more)\n" +
-            "  cmm acoustics verb <n>   - room-sound level behind walls (default 7, lower = less)"
+            "  cmm acoustics verb <n>   - room-sound level behind walls (default 7, lower = less)\n" +
+            "  cmm sfx                  - radio clicks: test, jitter, samples on|off, vol"
 #if GV_V3
             + "\n" +
             "  cmm acsweep <poi|here>   - export a POI's acoustic voxel grid + parity\n" +
@@ -98,6 +99,11 @@ namespace CMM
             if (sub == "acoustics" || sub == "ac")
             {
                 Out(AcousticsCommand(_params));
+                return;
+            }
+            if (sub == "sfx")
+            {
+                Out(SfxCommand(_params));
                 return;
             }
 
@@ -258,6 +264,57 @@ namespace CMM
 #else
             return "native acoustics: not built into this game version";
 #endif
+        }
+
+        // ── cmm sfx ───────────────────────────────────────────────────────────────────
+        // The radio's clicks, live. The SOUNDS themselves are read once and held in RAM and are
+        // deliberately not swappable at runtime, but everything around them is worth turning while
+        // listening -- especially the rate variance, which can only be judged by firing several in
+        // a row, and `test spin` does that without touching the dial or the station.
+        //
+        //   cmm sfx                          what is loaded and what it is set to
+        //   cmm sfx test [dial|on|off|spin]  fire one, or eight in a row
+        //   cmm sfx jitter <hz>              playback-rate variance per firing (0 = identical)
+        //   cmm sfx samples on|off           the recorded files vs the synthesized fallback
+        //   cmm sfx vol <0..1>               RadioSfxVolume
+        //
+        // Nothing here writes to disk: these are live overrides for judging by ear, and the answer
+        // goes into radio.xml once you like it. Saying so in the reply matters -- a setting that
+        // silently vanishes on relog is worse than one that was never offered.
+        static string SfxCommand(List<string> p)
+        {
+            const string Keep = "\n  not saved - put it in radio.xml to keep it";
+            string a = p.Count > 1 ? p[1].ToLowerInvariant() : "";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var num = System.Globalization.NumberStyles.Float;
+
+            if (a == "jitter" && p.Count > 2 && float.TryParse(p[2], num, inv, out float hz))
+            {
+                float was = CMMConfig.RadioClickSampleJitterHz;
+                CMMConfig.RadioClickSampleJitterHz = hz < 0f ? 0f : hz;
+                PersonalRadio.LoadClickSamples();
+                return "click rate variance " + CMMConfig.RadioClickSampleJitterHz.ToString("0")
+                     + " Hz (was " + was.ToString("0") + ")"
+                     + (hz <= 0f ? " - every firing now identical" : "") + Keep;
+            }
+            if (a == "samples" && p.Count > 2)
+            {
+                CMMConfig.RadioClickSamples = p[2].ToLowerInvariant() == "on";
+                PersonalRadio.LoadClickSamples();
+                return "radio clicks: "
+                     + (CMMConfig.RadioClickSamples ? "RECORDED (Sounds/)" : "SYNTHESIZED") + Keep;
+            }
+            if (a == "vol" && p.Count > 2 && float.TryParse(p[2], num, inv, out float v))
+            {
+                CMMConfig.RadioSfxVolume = v < 0f ? 0f : v > 1f ? 1f : v;
+                return "RadioSfxVolume " + CMMConfig.RadioSfxVolume.ToString("0.##") + Keep;
+            }
+            if (a == "test")
+                return PersonalRadio.TestClick(p.Count > 2 ? p[2].ToLowerInvariant() : "dial");
+
+            return PersonalRadio.DescribeClicks()
+                 + "\n  usage: cmm sfx test [dial|on|off|spin] | jitter <hz> | samples on|off"
+                 + "\n         cmm sfx vol <0..1>";
         }
 
         static void Out(string s)

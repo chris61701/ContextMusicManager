@@ -133,7 +133,10 @@ All notable changes to Context Music Manager are documented here.
   spinning the dial sounds like a mechanism rather than one recording retriggered eight times.
   The synthesized clicks are still in the build and are still what you get if a file is missing or
   unreadable, or if you set `RadioClickSamples` to false: a sound file can quieten the radio, never
-  break it.
+  break it. The files are read once at startup and held in RAM, so swapping one needs a restart —
+  but everything around them turns live in game: **`cmm sfx`** shows what loaded,
+  **`cmm sfx test spin`** fires eight detents in a row (the only way to judge the variance), and
+  `cmm sfx jitter <hz>` / `samples on|off` / `vol <0..1>` adjust it while you listen.
 
 - **Radio and speaker settings moved to their own file, `Config/radio.xml`.** They were 64 of
   the 113 settings and well over half the file, which buried the ordinary music options

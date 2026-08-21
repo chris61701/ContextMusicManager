@@ -221,51 +221,128 @@ namespace CMM
         private static bool _sfxSamplesLoaded;
         private static string _sfxSamplesFrom;
 
-        internal static void LoadClickSamples(bool force = false)
+        // READ ONCE, HELD IN RAM, never re-read. Two files totalling 33 KB on disk and about 66 KB
+        // as floats -- there is nothing to gain by going back to the filesystem, and a path that
+        // re-reads is a path that can fail later, in front of a player, for a reason that has
+        // nothing to do with what they were doing. Deliberately NOT hot-swappable; the tunables
+        // around the sounds still are, which is where the tuning actually happens.
+        //
+        // The managed copies are kept so the recorded/synthesized toggle can flip back and forth
+        // without touching disk again.
+        private static readonly float[][] _sfxPcm = new float[3][];
+        private static readonly int[] _sfxRate = new int[3];
+        private static readonly string[] _sfxWhy = new string[3];
+
+        internal static void LoadClickSamples()
         {
-            string dir = ContextMusicManager.ModPath;
-            if (string.IsNullOrEmpty(dir)) return;
-            if (_sfxSamplesLoaded && !force && _sfxSamplesFrom == dir
-                && CMMConfig.RadioClickSamples) return;
             try
             {
                 CmmMixer mixer = CmmMixer.GetOrCreate();
-                mixer.SetSfxRateJitter(CMMConfig.RadioClickSampleJitterHz);
-                if (!CMMConfig.RadioClickSamples)
+                if (!_sfxSamplesLoaded)
                 {
-                    for (int k = 0; k < 3; k++) mixer.SetSfxSample(k, null, 0);
-                    _sfxSamplesLoaded = true; _sfxSamplesFrom = dir;
-                    CMMConfig.D("[CMM] radio clicks: synthesized (samples switched off).");
-                    return;
+                    string dir = ContextMusicManager.ModPath;
+                    if (string.IsNullOrEmpty(dir)) return;   // too early; retried on the next click
+                    string sounds = Path.Combine(dir, "Sounds");
+                    // One file serves both throws of the toggle; the per-kind Volume settings still
+                    // separate them, and a switch does not sound meaningfully different on and off.
+                    ReadInto(0, Path.Combine(sounds, "radio_power.wav"));
+                    ReadInto(1, Path.Combine(sounds, "radio_power.wav"));
+                    ReadInto(2, Path.Combine(sounds, "radio_dial.wav"));
+                    _sfxSamplesLoaded = true;
+                    _sfxSamplesFrom = dir;
                 }
-                string sounds = Path.Combine(dir, "Sounds");
-                // One file serves both throws of the toggle; the per-kind Volume settings still
-                // separate them, and a switch does not sound meaningfully different on and off.
-                LoadOne(mixer, 0, Path.Combine(sounds, "radio_power.wav"));
-                LoadOne(mixer, 1, Path.Combine(sounds, "radio_power.wav"));
-                LoadOne(mixer, 2, Path.Combine(sounds, "radio_dial.wav"));
-                _sfxSamplesLoaded = true; _sfxSamplesFrom = dir;
+                ApplySampleMode(mixer);
             }
             catch (Exception e) { CMMConfig.D($"[CMM] radio click samples failed: {e.Message}"); }
         }
 
-        private static void LoadOne(CmmMixer mixer, int kind, string path)
+        // Push the cached PCM (or nothing, for the synthesized fallback) plus the live rate
+        // variance. Cheap and idempotent, so a config change to either knob just calls it again.
+        private static void ApplySampleMode(CmmMixer mixer)
+        {
+            mixer.SetSfxRateJitter(CMMConfig.RadioClickSampleJitterHz);
+            for (int k = 0; k < 3; k++)
+            {
+                float[] pcm = CMMConfig.RadioClickSamples ? _sfxPcm[k] : null;
+                mixer.SetSfxSample(k, pcm, pcm != null ? _sfxRate[k] : 0);
+            }
+        }
+
+        private static void ReadInto(int kind, string path)
         {
             if (!File.Exists(path))
             {
-                mixer.SetSfxSample(kind, null, 0);
+                _sfxWhy[kind] = "missing";
                 CMMConfig.D($"[CMM] radio click sample missing, synthesizing kind {kind}: {path}");
                 return;
             }
             if (!ReadWav(path, out float[] pcm, out int rate) || pcm.Length < 2)
             {
-                mixer.SetSfxSample(kind, null, 0);
+                _sfxWhy[kind] = "unreadable";
                 Log.Warning($"[CMM] radio click sample unreadable, synthesizing kind {kind}: {path}");
                 return;
             }
-            mixer.SetSfxSample(kind, pcm, rate);
+            _sfxPcm[kind] = pcm; _sfxRate[kind] = rate; _sfxWhy[kind] = null;
             CMMConfig.D($"[CMM] radio click kind {kind}: {Path.GetFileName(path)} "
-                      + $"({pcm.Length} frames @ {rate} Hz, {1000.0 * pcm.Length / rate:0} ms)");
+                      + $"({pcm.Length} frames @ {rate} Hz, {1000.0 * pcm.Length / rate:0} ms, in RAM)");
+        }
+
+        // ── In-game readout + audition (cmm sfx) ────────────────────────────────────────────
+        // The tunables around the clicks are live, and the property that matters most — whether a
+        // run of detents sounds like a mechanism or like one recording retriggered — can only be
+        // judged by firing several in a row, which no amount of dialing lets you do on demand.
+        private static int _spinLeft;
+        private static float _spinNextAt;
+
+        // Serviced by the radio tick: fired back-to-back in one frame the eight would pile into a
+        // single noise rather than a run you can hear.
+        private static void SpinTick()
+        {
+            if (_spinLeft <= 0) return;
+            float now = Time.realtimeSinceStartup;
+            if (now < _spinNextAt) return;
+            _spinNextAt = now + 0.16f;
+            _spinLeft--;
+            Sfx(CmmMixer.SfxClickDial);
+        }
+
+        internal static string TestClick(string what)
+        {
+            LoadClickSamples();
+            switch (what)
+            {
+                case "on":   Sfx(CmmMixer.SfxClickOn);  return "fired: power ON";
+                case "off":  Sfx(CmmMixer.SfxClickOff); return "fired: power OFF";
+                case "spin": _spinLeft = 8; _spinNextAt = 0f;
+                             return "firing eight detents over ~1.3 s - listen for whether they differ";
+                default:     Sfx(CmmMixer.SfxClickDial); return "fired: dial detent";
+            }
+        }
+
+        internal static string DescribeClicks()
+        {
+            LoadClickSamples();
+            var sb = new System.Text.StringBuilder();
+            sb.Append("radio clicks: ").Append(CMMConfig.RadioClickSamples ? "RECORDED" : "SYNTHESIZED");
+            if (!CMMConfig.RadioSfxEnabled) sb.Append("   [RadioSfxEnabled false - silent]");
+            sb.Append("\n  volume:    ").Append(CMMConfig.RadioSfxVolume.ToString("0.##"));
+            sb.Append("\n  variance:  ").Append(CMMConfig.RadioClickSampleJitterHz.ToString("0"))
+              .Append(" Hz per firing")
+              .Append(CMMConfig.RadioClickSampleJitterHz <= 0f ? "  (every click identical)" : "");
+            string[] names = { "radio_power.wav", "radio_dial.wav" };
+            int[] kinds = { 0, 2 };
+            for (int i = 0; i < names.Length; i++)
+            {
+                int k = kinds[i];
+                sb.Append("\n  ").Append(names[i].PadRight(18));
+                if (_sfxPcm[k] != null)
+                    sb.Append(_sfxPcm[k].Length).Append(" frames @ ").Append(_sfxRate[k])
+                      .Append(" Hz  (").Append((1000.0 * _sfxPcm[k].Length / _sfxRate[k]).ToString("0"))
+                      .Append(" ms, in RAM)");
+                else
+                    sb.Append(_sfxWhy[k] ?? "not loaded").Append(" - synthesized instead");
+            }
+            return sb.ToString();
         }
 
         // Minimal RIFF/WAVE reader: 8/16/24/32-bit PCM and 32/64-bit float, any channel count,
@@ -329,7 +406,7 @@ namespace CMM
             try
             {
                 CmmMixer mixer = CmmMixer.GetOrCreate();
-                LoadClickSamples();   // no-op once loaded; picks up a config reload
+                LoadClickSamples();   // reads the files once; after that it just re-pushes the knobs
                 if (kind == CmmMixer.SfxTuningStatic)
                 {
                     // The static has its own level (-1 = inherit) and a live tone: pushing the
@@ -422,6 +499,7 @@ namespace CMM
         // ── Tick (4 Hz, called every frame from the keybinds Update on every version) ──────────
         internal static void Tick()
         {
+            SpinTick();   // services `cmm sfx test spin`
             // Async start results land on ANY frame (ahead of the 4 Hz throttle): the audio is
             // already playing the moment the worker's add returned — this is just bookkeeping,
             // but a stale orphan should be muted promptly.
