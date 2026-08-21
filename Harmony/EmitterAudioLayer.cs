@@ -291,6 +291,13 @@ namespace CMM
                             $"building={EmitterFieldCache.StatBuilding} built={EmitterFieldCache.StatBuilds} " +
                             $"lastBuildCpuMs={EmitterFieldCache.StatLastBuildMs:0} doorDrops={EmitterFieldCache.StatDoorDrops} " +
                             $"floodR={CMMConfig.WorldEmitterFloodRadius} range={CMMConfig.WorldEmitterRange:0}" +
+                            // RING HEALTH PER SLOT — queued frames / frames lost to starvation.
+                            // Nothing watched these. The music ring's counters (which the HUD does
+                            // show) say "underruns 0, queued at target" while a radio lane is
+                            // starving, because the lanes are separate rings and only the music one
+                            // was ever instrumented. If `u` climbs, the dip is the audio pipeline
+                            // and no occlusion setting will touch it.
+                            $" | rings {RingHealth()}" +
                             // The clamp counters, in the 1 Hz line, because they are the difference
                             // between "the model is quiet here" and "the model is switched off here"
                             // and I had to ask for them by hand three times before getting one.
@@ -492,6 +499,23 @@ namespace CMM
                 }
                 PushReverb(player);
             }
+        }
+
+        // Queued frames and starvation count for each live emitter slot, compactly.
+        private static string RingHealth()
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int s = 0; s < 8; s++)
+            {
+                int q = CmmMixer.EmitterRingStat(s, 0);
+                if (q < 0) continue;                       // no ring on this slot
+                int u = CmmMixer.EmitterRingStat(s, 1);
+                int p = CmmMixer.EmitterRingStat(s, 2);
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append('s').Append(s).Append('=').Append(q).Append('/').Append(u);
+                if (p > 0) sb.Append('/').Append(p).Append('p');
+            }
+            return sb.Length > 0 ? sb.ToString() : "none";
         }
 
         // The nearest published speaker POINT to a position, across every voiced station. Used by

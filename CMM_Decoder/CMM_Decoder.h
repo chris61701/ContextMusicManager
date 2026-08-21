@@ -400,6 +400,15 @@ CMM_API int cmm_out_avail(cmm_out* o);
 /* Frames currently queued for playback — the live cushion / output latency. The
  * producer targets a fill level from this rather than always topping the ring off. */
 CMM_API int cmm_out_queued(cmm_out* o);
+/* v43 — the EMITTER slot rings had no cushion of their own: the producer paces off the MUSIC
+ * ring's deficit and writes that same frame count to every slot, and the consumer drains both
+ * equally, so a slot that started empty stayed empty for its whole life. Music had 200 ms of
+ * protection against a late producer; the radios had one poll. Short reads were zero-filled with
+ * no counter, so every stat said "underruns 0" while the radios dropped out.
+ *   set_emitter_prime: cushion depth the slots should hold (pushed from the music ring's depth).
+ *   emitter_stat: 0 = frames queued, 1 = frames lost to starvation, 2 = times re-cushioned. */
+CMM_API void cmm_out_set_emitter_prime(cmm_out* o, int frames);
+CMM_API int  cmm_out_emitter_stat(cmm_out* o, int slot, int what);
 
 /* Request a flush: the next audio callback discards all queued frames, snapping the
  * cushion to empty (then it refills tight). Only raises a flag — safe from the

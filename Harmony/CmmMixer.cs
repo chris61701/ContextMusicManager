@@ -86,6 +86,11 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_points(long id, float[] xyz, float[] gains, int[] flags, int count);
 
+        // v43 — per-slot ring health. The music ring's counters said "underruns 0" while the
+        // radios were dropping out, because nothing watched these.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_mix_emitter_ring_stat(int slot, int what);
+
         // v42: drive emitter TONE from occlusion rather than from virtual distance. Off restores the
         // shipped behaviour exactly; the native acoustic model turns it on, because the number it
         // publishes is an attenuation whose worth in BLOCKS depends on where the listener stands.
@@ -351,6 +356,14 @@ namespace CMM
         // class — that point gets the HAM coloration; null = all speaker-class). Caller reuses the
         // buffers to avoid GC. All heard at once from the one decode. count 0 silences the voice's
         // spatial output until the next update.
+        // Per-slot ring health, for the 1 Hz emitter line. 0 = frames queued, 1 = frames lost to
+        // starvation, 2 = times re-cushioned. Returns -1 for a slot with no ring.
+        public static int EmitterRingStat(int slot, int what)
+        {
+            try { return NativeMix.cmm_mix_emitter_ring_stat(slot, what); }
+            catch { return -1; }
+        }
+
         public void SetEmitterPoints(long id, float[] xyz, float[] gains, int[] flags, int count)
         {
             NativeMix.cmm_mix_set_emitter_points(id, xyz, gains, flags, count);

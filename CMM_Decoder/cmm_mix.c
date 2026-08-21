@@ -671,6 +671,9 @@ static void pump_body(void) {
             queued = cmm_out_queued(dev);
             freeFrames = cmm_out_avail(dev);
             target = compute_fill_target_locked(queued);
+            /* Tell the slot rings how deep to sit. They are written from THIS deficit, so without
+             * being told they inherit zero cushion — see cmm_out_write_emitter. */
+            cmm_out_set_emitter_prime(dev, target);
             /* Buffer-health watermark for the HUD: only while actually producing (voices>0)
              * and outside the intentional post-flush empty window, so a context-change flush
              * isn't miscounted as an underrun. */
@@ -1858,6 +1861,16 @@ CMM_API void cmm_mix_hold_output(int hold) {
 
 /* DeepBuffer (load) / ExtraCushion (post-spawn grace) — see compute_fill_target_locked. */
 CMM_API void cmm_mix_set_cushion(int deep, int extra) { g_deep = deep ? 1 : 0; g_extra = extra ? 1 : 0; }
+
+/* v43 — one EMITTER slot's ring health: 0 = frames queued, 1 = frames zero-filled through
+ * starvation, 2 = times re-cushioned from empty. The music ring's counters above say nothing
+ * about these, which is how the radios dropped out for hours behind an "underruns 0" readout. */
+CMM_API int cmm_mix_emitter_ring_stat(int slot, int what) {
+    mix_lock(&g_lock);
+    int v = g_out ? cmm_out_emitter_stat(g_out, slot, what) : -1;
+    mix_unlock(&g_lock);
+    return v;
+}
 
 /* Ask the producer thread to reopen the output device (default endpoint changed). */
 CMM_API void cmm_mix_request_reinit(void) { g_reinitRequested = 1; }

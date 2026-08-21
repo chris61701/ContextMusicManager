@@ -86,6 +86,13 @@ struct cmm_out {
     struct cmm_emit_slot {
         ma_pcm_rb rb;               /* mono ring for this slot's dry signal */
         int       hasRing;          /* rb was initialised (uninit on close) */
+        /* STARVATION, COUNTED. A short read here used to be zero-filled in silence, with no
+         * counter anywhere: cmm_mix's g_underruns watches the MUSIC ring only, so every stat the
+         * game could print said "underruns 0, queued at target" while the radios were dropping
+         * out. Hours went into the occlusion model on the strength of a symptom this would have
+         * identified in one line. Anything that can silently produce silence gets a counter. */
+        volatile unsigned underFrames;   /* frames zero-filled because the ring was empty */
+        volatile unsigned primes;        /* times this slot was re-cushioned from empty */
         volatile int   ptCount;     /* speakers audible now (0 = this slot silent this block) */
         volatile float pts[CMM_MAX_EMIT_PTS * 3];
         volatile float gains[CMM_MAX_EMIT_PTS];   /* per-speaker occlusion VIRTUAL DISTANCE (extra blocks; 0 = clear) */
@@ -163,6 +170,8 @@ struct cmm_out {
      * the native acoustic model turns it on, because it publishes an occlusion whose worth in
      * BLOCKS varies with distance even when the occlusion itself does not. */
     int   emOcclTone;
+    volatile int emPrime;       /* cushion depth (frames) the slot rings should hold; see
+                                 * cmm_out_write_emitter for why they had none of their own */
     float emOcclFullDb;              /* occlusion (dB) at which the tone is fully dulled */
 
     /* Reverb (room reflections) — ONE shared pair of buses for every slot (reverb is a property of
@@ -717,7 +726,10 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                         got += n;
                     }
                 }
-                if (got < chunk) memset(sl->buf + got, 0, (size_t)(chunk - got) * sizeof(float));
+                if (got < chunk) {
+                    memset(sl->buf + got, 0, (size_t)(chunk - got) * sizeof(float));
+                    if (sl->hasRing) sl->underFrames += (unsigned)(chunk - got);
+                }
             }
             if (render) {
                 float* op = (float*)output + (size_t)base * o->channels;
@@ -1063,6 +1075,37 @@ int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames)
     if (!o || slot < 0 || slot >= CMM_MAX_EMIT_VOICES || !mono || frames <= 0) return 0;
     struct cmm_emit_slot* sl = &o->emSlots[slot];
     if (!sl->hasRing) return 0;
+
+    /* GIVE THE SLOT ITS OWN CUSHION.
+     *
+     * The producer decides how much to render from the MUSIC ring's deficit alone, then writes
+     * that same frame count to every active slot. The consumer drains both by the same amount
+     * every callback, so the difference between them is an INVARIANT, fixed at the moment the slot
+     * ring was last empty. A station's voice starts into an already-cushioned device -- music at
+     * ~200 ms, slot at zero -- so that slot then runs at ~zero cushion for its whole life. The
+     * music has 200 ms of protection against a late producer; the radios have one poll interval.
+     * Any hiccup -- a GC pause, a decode from the exFAT library, three stations wanting frames in
+     * the same tick -- lands as a hole in the radio and nothing at all in the music.
+     *
+     * And it re-arms: every track advance empties the lane and restarts the invariant.
+     *
+     * So when the ring is found EMPTY, pad it up to the same depth the music is running at before
+     * writing real audio. Self-healing rather than only-at-startup: whatever caused the lane to
+     * run dry, it gets its cushion back. Costs one buffer of latency on that lane, which matches
+     * what the music path has always had. */
+    if (o->emPrime > 0 && ma_pcm_rb_available_read(&sl->rb) == 0) {
+        ma_uint32 want = (ma_uint32)o->emPrime, done = 0;
+        while (done < want) {
+            ma_uint32 n = want - done;
+            void* wp = NULL;
+            if (ma_pcm_rb_acquire_write(&sl->rb, &n, &wp) != MA_SUCCESS || n == 0) break;
+            memset(wp, 0, (size_t)n * sizeof(float));
+            ma_pcm_rb_commit_write(&sl->rb, n);
+            done += n;
+        }
+        if (done) sl->primes++;
+    }
+
     int written = 0;
     while (written < frames) {
         ma_uint32 n = (ma_uint32)(frames - written);
@@ -1175,6 +1218,30 @@ void cmm_out_set_emitter_color(cmm_out* o, float drive, float staticLvl, float v
 
 /* Frames of free space available to write right now (for the producer to pace
  * how much it decodes/mixes per tick). */
+/* How deep the slots should be cushioned. Pushed by the producer each pass from the music ring's
+ * own depth, so the two stay matched without the slots needing their own pacing loop. */
+CMM_API void cmm_out_set_emitter_prime(cmm_out* o, int frames)
+{
+    if (!o) return;
+    if (frames < 0) frames = 0;
+    o->emPrime = frames;
+}
+
+/* Per-slot diagnostics: 0 = frames queued, 1 = frames zero-filled through starvation, 2 = times
+ * re-cushioned. The first number nobody had. */
+CMM_API int cmm_out_emitter_stat(cmm_out* o, int slot, int what)
+{
+    if (!o || slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return -1;
+    struct cmm_emit_slot* sl = &o->emSlots[slot];
+    if (!sl->hasRing) return -1;
+    switch (what) {
+        case 0: return (int)ma_pcm_rb_available_read(&sl->rb);
+        case 1: return (int)sl->underFrames;
+        case 2: return (int)sl->primes;
+        default: return -1;
+    }
+}
+
 CMM_API int cmm_out_avail(cmm_out* o)
 {
     if (!o) return 0;

@@ -134,6 +134,21 @@ namespace CMM
         {
 #if GV_V3
             string a = p.Count > 1 ? p[1].ToLowerInvariant() : "";
+
+            // cmm field occl on|off — THE BISECT, and it should have been the first thing built.
+            // With occlusion off every speaker publishes a clear line (extra distance 0) and you
+            // hear pure distance falloff. If a symptom survives that, it is not occlusion, and no
+            // amount of work on the field will touch it. Hours went into the field on the strength
+            // of a symptom that was never bisected against it.
+            if (a == "occl" && p.Count > 2)
+            {
+                bool on = p[2].ToLowerInvariant() == "on";
+                CMMConfig.WorldEmitterOcclusion = on;
+                return "emitter occlusion " + (on ? "ON" : "OFF — every speaker now publishes a "
+                     + "clear line; what you hear is distance alone")
+                     + ".\n  If a dip survives OFF, the cause is not occlusion.";
+            }
+
             if ((a == "detour" || a == "wall" || a == "pow" || a == "slew") && p.Count > 2
                 && float.TryParse(p[2], System.Globalization.NumberStyles.Float,
                                   System.Globalization.CultureInfo.InvariantCulture, out float v))
@@ -162,7 +177,10 @@ namespace CMM
                  + "     dB per second the level may change (0 = off, raw floods)"
                  + "\n  " + FieldOcclusion.Status()
                  + "\n  " + FieldOcclusion.DescribeNearest()
-                 + "\n  usage: cmm field detour|wall|pow|slew <n>   |   cmm acoustics ray";
+                 + "\n  occl   " + (CMMConfig.WorldEmitterOcclusion ? "ON" : "OFF")
+                 + "      master bypass — off = clear line for every speaker (the bisect)"
+                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew <n>"
+                 + "\n         cmm acoustics ray";
 #else
             return "field occlusion: not built into this game version";
 #endif
