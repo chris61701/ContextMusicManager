@@ -455,7 +455,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
         float gz = lz / (float)f->stepZ - 0.5f;
         int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
         float tx = gx - ix, ty = gy - iy, tz = gz - iz;
-        float w[8]; long long idx[8]; float dst[8];
+        float w[8]; long long idx[8]; float dst[8]; float mat0[8];
         int n = 0, ddx, ddy, ddz;
         float wmax = 0.0f;
         for (ddy = 0; ddy <= 1; ddy++)
@@ -470,7 +470,41 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
             float ex2 = (cx + 0.5f) * f->stepX - lx;
             float ey2 = (cy + 0.5f) * f->stepY - ly;
             float ez2 = (cz + 0.5f) * f->stepZ - lz;
-            w[n] = ww; idx[n] = i;
+            /* WHAT IT COSTS TO GET THERE. A seed is a claim that sound reaches that cell, and
+             * until now the claim was free: seeds paid distance and a coupling penalty, and never
+             * crossed a face. The eight cells around the ear span TWO cells on each axis -- four
+             * blocks -- so standing anywhere within about a block of a wall put a seed on the FAR
+             * SIDE of it, and the flood started outside the room. In a bathroom you are always
+             * within a block of a wall.
+             *
+             * Measured, sealed room with one door, only the listener's position changing:
+             *
+             *     listener 1.5 blocks from the wall   door open 9.3 -> shut 57.2   = 47.9 dB
+             *     listener 1.1 blocks from the wall   door open 5.8 -> shut  5.8   =  0.0 dB
+             *
+             * The door stopped mattering entirely, which is exactly the report. The offline gate
+             * missed it for one reason: every scene in it stands the listener in the middle of the
+             * room.
+             *
+             * A seed is at most one cell from the one holding the ear, so the cost is one move,
+             * charged with the same arithmetic the relax loop uses -- every face the move crosses,
+             * plus the interior of the cell entered, averaged over the axes actually moved along.
+             * Identical for a diagonal, which is what stops a seed slipping through the seam where
+             * two walls meet. */
+            float smat = 0.0f;
+            {
+                int mx2 = cx - scx, my2 = cy - scy, mz2 = cz - scz;
+                long long ci = widx(f, scx, scy, scz);
+                if (mx2 > 0) smat += f->fnx[i]; else if (mx2 < 0) smat += f->fnx[ci];
+                if (my2 > 0) smat += f->fny[i]; else if (my2 < 0) smat += f->fny[ci];
+                if (mz2 > 0) smat += f->fnz[i]; else if (mz2 < 0) smat += f->fnz[ci];
+                float fl = 0.0f; int fn = 0;
+                if (mx2) { fl += f->fillX[i]; fn++; }
+                if (my2) { fl += f->fillY[i]; fn++; }
+                if (mz2) { fl += f->fillZ[i]; fn++; }
+                if (fn) smat += fl / fn;
+            }
+            w[n] = ww; idx[n] = i; mat0[n] = smat;
             dst[n] = sqrtf(ex2 * ex2 + ey2 * ey2 + ez2 * ez2);
             if (ww > wmax) wmax = ww;
             n++;
@@ -480,10 +514,11 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
             float rel = w[s] / wmax;                 /* 1 for the best-placed seed */
             float pen = -10.0f * log10f(rel);        /* couple-in loss, 0 dB at rel = 1 */
             if (pen > 40.0f) continue;               /* far enough into the corner to not matter */
-            int q = (int)((dst[s] * f->dbPerBlock + pen) * Q_PER_DB + 0.5f);
+            int qm = (int)(mat0[s] * Q_PER_DB + 0.5f);
+            int q = (int)((dst[s] * f->dbPerBlock + pen + mat0[s]) * Q_PER_DB + 0.5f);
             if (q > MAX_Q) continue;
             if (f->nxt[idx[s]] <= q) continue;
-            f->nxt[idx[s]] = q; f->nxtMat[idx[s]] = 0; bq_set(f, idx[s], q);
+            f->nxt[idx[s]] = q; f->nxtMat[idx[s]] = qm; bq_set(f, idx[s], q);
             seeded++;
         }
         if (!seeded) {
@@ -751,6 +786,10 @@ static float free_space_db(cmm_fld *f, float lx, float ly, float lz, float x, fl
         float czw = (iz + ddz + 0.5f) * f->stepZ;
         float ax = cxw - lx, ay = cyw - ly, az = czw - lz;
         float bx2 = x - cxw, by2 = y - cyw, bz2 = z - czw;
+        /* No material term here on purpose: this is what the SAME seeding would cost with nothing
+         * in the way, and with nothing in the way every face transmits fully and the charge added
+         * above is 0 dB. So open air still cancels to exactly zero, and the new term shows up only
+         * where there is something to cross. */
         float cost = sqrtf(ax*ax + ay*ay + az*az) * f->dbPerBlock + pen
                    + sqrtf(bx2*bx2 + by2*by2 + bz2*bz2) * f->dbPerBlock;
         if (cost < best) best = cost;

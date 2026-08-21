@@ -218,6 +218,46 @@ int main(int argc, char** argv) {
     ckf("...and far less than the sealed wall", thru - door > 25.0f,
         "sealed %.1f vs doorway %.1f dB", thru, door);
 
+    /* ── A SHUT DOOR SEALS A ROOM FROM ANYWHERE IN IT, INCLUDING AGAINST THE WALL ───────
+     * Every scene in this file stands the listener in the middle of the room, and that single
+     * habit hid the defect that cost most of a night. The flood is seeded into the eight cells
+     * around the ear, which span two cells on each axis -- four blocks at the shipped size -- and
+     * seeds used to be charged distance only, never the faces crossed to reach them. So standing
+     * within about a block of a wall placed a seed on the FAR SIDE of it and the flood began
+     * outside the room:
+     *
+     *     listener 1.5 blocks from the wall   door open 9.3 -> shut 57.2   = 47.9 dB
+     *     listener 1.1 blocks from the wall   door open 5.8 -> shut  5.8   =  0.0 dB
+     *
+     * In a bathroom you are always within a block of a wall, so the door never did anything. The
+     * property is therefore not "a shut door seals a room" but "a shut door seals a room WHEREVER
+     * YOU ARE STANDING IN IT", and it is swept accordingly. */
+    {
+        float worstDelta = 1e9f; float atOff = 0;
+        for (int k = 0; k < 4; k++) {
+            float lx = 32.5f - k * 0.6f;                 /* walk the listener toward the wall */
+            float got[2];
+            for (int shut = 0; shut <= 1; shut++) {
+                memset(solid, 0, sizeof solid);
+                for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+                /* a sealed box around the listener, one door block in the -X wall */
+                for (int x = 29; x <= 35; x++) for (int z = 29; z <= 35; z++)
+                    for (int y = 1; y <= 6; y++) solid[x][y][z] = 1;
+                for (int x = 30; x <= 34; x++) for (int z = 30; z <= 34; z++)
+                    for (int y = 1; y <= 5; y++) solid[x][y][z] = 0;
+                if (!shut) { solid[29][1][32] = 0; solid[29][2][32] = 0; solid[29][3][32] = 0; }
+                cmm_fld_dirty(f, 32, 4, 32, 4 * W);
+                fill_all(f);
+                cmm_fld_solve(f, lx, 2.7f, 32.5f);
+                got[shut] = cmm_fld_sample_db(f, 22.5f, 2.5f, 32.5f);
+            }
+            float delta = got[1] - got[0];
+            if (delta < worstDelta) { worstDelta = delta; atOff = lx; }
+        }
+        ckf("a shut door seals from ANYWHERE in the room", worstDelta > 20.0f,
+            "worst open-vs-shut %.1f dB (listener x=%.1f) — was 0.0 against the wall", worstDelta, atOff);
+    }
+
     /* ── A DOOR MOVING MUST NOT MAKE THE ROOM VANISH WHILE WE RE-READ IT ────────────────
      * Anything that changes the world -- a door swinging, a block broken, a chunk arriving --
      * marks the cells around it for re-reading. Marking them used to CLEAR their geometry, and the
