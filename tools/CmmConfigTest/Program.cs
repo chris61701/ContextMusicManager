@@ -39,6 +39,9 @@ namespace CMM
                                      args.Contains("--accept"));
 
             Console.WriteLine();
+            _fail += XmlHealth.Run(repo);
+
+            Console.WriteLine();
             if (args.Contains("--dump"))
             {
                 string outDir = Path.Combine(Path.GetTempPath(), "cmmconfigtest");

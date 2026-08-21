@@ -36,7 +36,7 @@
     <GameVersion Condition="'$(GameVersion)' == ''">3.1.0 b14</GameVersion>
     <!-- Debug builds rewrite MusicPath in the deployed build/settings.dev.xml (the dev
          override file at the front of CMM's settings chain) to this; override with
-         -p:DebugMusicPath=... . Release ships no settings file at all -- CMM generates one
+         -p:DebugMusicPath=... . Release ships no settings file at all — CMM generates one
          on first run with the built-in default ("Music"). -->
     <DebugMusicPath Condition="'$(DebugMusicPath)' == ''">J:\7D2D Custom Music</DebugMusicPath>
     <!-- A plain Debug build (including the VS Build button, which never passes a target)
@@ -132,7 +132,10 @@
     <Content Include="Sounds\**\*" />
     <!-- settings.xml and radio.xml are NOT shipped: CMM writes them at first run and
          backfills what later versions add (see Harmony/CMMSettingsFile.cs). Shipping them
-         is what used to reset every user setting on update. -->
+         is what used to reset every user setting on update.
+         They are not in the repo either, so these Excludes match nothing today. They stay
+         as a guard: dropping a settings.xml into Config/ while debugging is an easy thing
+         to do, and without them the wildcard would package it silently. -->
     <Content Include="Config\**\*" Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -390,9 +393,11 @@
     <Message Importance="high" Text="[CMM] Building '$(Configuration)' against GameVersion '$(GameVersion)' ($(GameInstallDir))" />
   </Target>
 
-  <!-- Debug only: point the DEPLOYED settings.xml at the personal music library.
-       The committed Config/settings.xml keeps the release value ("Music"), so the
-       repo can never accidentally ship a machine-specific path. -->
+  <!-- Debug only: deploy the developer override file and point it at the personal music
+       library. There is no committed Config/settings.xml any more — CMM generates that at
+       first run — so the dev values live in build/settings.dev.xml, which is read FIRST in
+       CMM's settings chain and therefore shadows the generated file without touching it.
+       Only MusicPath is rewritten here, so the repo can never ship a machine-specific path. -->
   <Target Name="SetDebugSettings" AfterTargets="Build"
           Condition="'$(Configuration)' == 'Debug'">
     <!-- NO RemoveDir here any more. The deployed Config now contains files CMM OWNS —
@@ -503,14 +508,14 @@
   <!-- Copy a pre-built Debug payload from _CMMCopyFrom into THIS version's Mods folder
        (evaluated per-version: GameModsDir/OutputPath resolve from the child's GameVersion).
        Used by DebugFanout to deploy the same DLL to every install without recompiling.
-       Mirrors the source exactly: stale build artifacts and the old Config are cleared
-       first so nothing orphaned lingers. The mod folder holds only our deployed files
-       (the music library lives at MusicPath, elsewhere), so this never touches music. -->
+       Stale build artifacts are cleared first so nothing orphaned lingers. Config is NOT
+       cleared: it now holds files CMM owns and generates (settings.xml, radio.xml), and
+       each install's copy is that install's state. The mod folder otherwise holds only our
+       deployed files (the music library lives at MusicPath, elsewhere), so this never
+       touches music. -->
   <Target Name="CopyDeploy" Condition="'$(_CMMCopyFrom)' != ''">
     <Error Condition="!Exists('$(_CMMCopyFrom)')" Text="CopyDeploy: source payload not found at '$(_CMMCopyFrom)'." />
     <MakeDir Directories="$(GameModsDir)" />
-<!-- Config is NOT wiped: settings.xml / radio.xml are generated and owned by
-         CMM at runtime, and the fan-out must not destroy each install's copy. -->
     <ItemGroup>
       <_StaleDeployed Include="$(OutputPath)*.dll;$(OutputPath)*.pdb;$(OutputPath)*.dll.config" />
       <_CopyPayload Include="$(_CMMCopyFrom)**\*" />
