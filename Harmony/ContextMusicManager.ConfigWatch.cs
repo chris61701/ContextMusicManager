@@ -268,6 +268,16 @@ namespace CMM
             _cfgRadioTime    = StampOf(_cfgRadioPath);
         }
 
+        // OUR OWN WRITE, not a hand edit. The keybind-persisted settings (CombatMusicMuted)
+        // go through PersistSetting, which calls this straight after saving: re-stamping means
+        // the next poll sees no change and skips a full settings reload that could only ever
+        // read back the value we just wrote. Harmless if it is missed — the reload is
+        // idempotent — which is why the older coroutine fallback is left alone.
+        internal static void NoteConfigWritten()
+        {
+            try { _cfgSettingsTime = StampOf(_cfgSettingsPath); } catch { }
+        }
+
         internal static void ConfigWatchTick()
         {
             if (_functionallyDormant) return;   // A/B dormant arm

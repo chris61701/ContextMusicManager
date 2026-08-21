@@ -490,6 +490,19 @@ namespace CMM
         public static KeyCode KeyUndoBan          = KeyCode.End;   // unbans the last-banned track (25-deep, session)
         public static KeyCode KeyFavouriteTrack   = KeyCode.Insert;
         public static KeyCode KeyToggleCombatMusic = KeyCode.Home;
+        // COMBAT-MUSIC MUTE, PERSISTED. Alt+Home flips this and writes it straight back to
+        // Config/settings.xml, so "I don't want combat music" survives a restart instead of
+        // having to be pressed again every session. It is a real setting as well as a keybind:
+        // set it true here and the game starts muted with no keypress at all.
+        //
+        // Writing into the mod's OWN config file is deliberate — that is where a player looks
+        // for it — and it carries one cost worth stating plainly: a mod UPDATE replaces
+        // settings.xml and resets this to the shipped default. The alternative (a file under
+        // Cache/, where the track flags and the radio dial live) survives updates but is
+        // invisible, and this switch was asked for as configuration. If the file cannot be
+        // written at all — a mod manager's read-only overlay — CMMConfigLoader.PersistSetting
+        // says so and the toggle still works for the session.
+        public static bool CombatMusicMuted = false;
         // Shows/hides the persistent Now Playing overlay (top-left track + context
         // readout). NowPlayingEnabled below picks the state at launch.
         public static KeyCode KeyNowPlaying       = KeyCode.Keypad7;

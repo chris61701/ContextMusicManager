@@ -142,7 +142,11 @@
                               was already playing: the combat contexts resolve
                               through their fallback chains as if empty, and the
                               game's own Combat/Bloodmoon sections are held back
-                              too. Not saved — a restart resets it to on.
+                              too. SAVED: pressing it writes CombatMusicMuted
+                              below, so the choice survives a restart. Set that
+                              to true here and the game starts muted with no
+                              keypress at all. (A mod UPDATE replaces this file
+                              and resets it to the shipped default.)
        Keys use Unity KeyCode names (RightArrow, Delete, Home, F7, Keypad6, ...).
        By default all of these require Alt held so they don't collide with game or
        chat input, and none sit on letters — the game binds letters (D = strafe,
@@ -160,6 +164,10 @@
   <KeyUndoBan>End</KeyUndoBan>
   <KeyFavouriteTrack>Insert</KeyFavouriteTrack>
   <KeyToggleCombatMusic>Home</KeyToggleCombatMusic>
+  <!-- Combat music muted at launch. The Alt+Home toggle rewrites this line when you press
+       it; edit it by hand for the same effect. true = fights keep whatever music was
+       already playing, and the game's own Combat/Bloodmoon sections stay held back too. -->
+  <CombatMusicMuted>false</CombatMusicMuted>
   <KeyNowPlaying>Keypad7</KeyNowPlaying>
   <!-- Personal radio dial (in-game only, works on EVERY game version): the two keys step
        through Off → station → station → … → Off, wrapping both ways, so they give you

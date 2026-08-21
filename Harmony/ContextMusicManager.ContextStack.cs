@@ -211,16 +211,19 @@ namespace CMM
         private static readonly HashSet<string> _resolvingContexts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // ── Combat-music mute (keybind, session-only) ─────────────────────────
+        // ── Combat-music mute (keybind, persisted) ────────────────────────────
         // One switch for ALL combat contexts (Alt+Home by default). While muted,
         // every combat context resolves as if it had no files — the fallback chain
         // and the stack decide what plays through fights instead — and the linked
         // vanilla Combat/Bloodmoon sections are suppressed exactly like a
         // DisabledVanillaSections entry (see VanillaSectionSuppressed), so the
         // Combat_Low → VanillaIfPanicked handoff can't leak the game's own combat
-        // music back in. Deliberately NOT persisted: this is a mute-for-now control,
-        // not configuration — contexts.xml / DisabledVanillaSections are the durable
-        // knobs.
+        // music back in. PERSISTED (2026-08-20): the toggle writes CombatMusicMuted back
+        // to settings.xml, because "I don't want combat music" is a preference and not a
+        // mute-for-now — having to press it again every launch was the complaint. It was
+        // session-only before, on the reasoning that contexts.xml and
+        // DisabledVanillaSections were the durable knobs; those are per-context surgery,
+        // and this is one switch, so it earns its own.
         private static bool _combatMusicMuted;
 
         // Every context the mute covers: any whose NAME contains "combat"
@@ -235,6 +238,12 @@ namespace CMM
 
         // Returns true when combat music is muted AFTER the toggle.
         internal static bool ToggleCombatMusicMuted() => _combatMusicMuted = !_combatMusicMuted;
+
+        // Set it outright, from the loaded config. Separate from the toggle so a settings
+        // (re)load cannot flip the state by accident — a load says what the value IS, a
+        // keypress says it changed, and conflating the two is how a hot-reload ends up
+        // un-muting someone mid-fight.
+        internal static void SetCombatMusicMuted(bool muted) => _combatMusicMuted = muted;
 
         internal static bool IsUserDisabled(string contextName) =>
             _combatMusicMuted && _combatContexts.Contains(contextName);

@@ -392,15 +392,25 @@ namespace CMM
         // Blood_Moon_Combat — see RebuildCombatContextSet). While muted they resolve
         // through their fallback chains as if their folders were empty, and the
         // linked vanilla Combat/Bloodmoon sections are held back too — so a fight
-        // keeps whatever ambient/POI music was already playing. Session-only:
-        // nothing is persisted, a restart resets to on.
+        // keeps whatever ambient/POI music was already playing.
+        //
+        // PERSISTED: the new state is written straight back to Config/settings.xml as
+        // CombatMusicMuted, so it survives a restart. Someone who does not want combat music
+        // does not want it TODAY — being made to press this again every launch was the whole
+        // complaint. If the file cannot be written the toggle still applies, and the notice
+        // says "this session only" rather than quietly lying about having saved it.
         private void ToggleCombatMusic()
         {
             bool muted = ToggleCombatMusicMuted();
+            CMMConfig.CombatMusicMuted = muted;
+            bool saved = CMMConfigLoader.PersistSetting(ModPath, "CombatMusicMuted",
+                                                        muted ? "true" : "false");
             Log.Out($"[CMM] Combat music {(muted ? "OFF" : "ON")} " +
-                    $"({CombatContextCount} combat context(s) covered)");
-            ShowNotice(muted ? "Combat music off — fights keep the current music"
-                             : "Combat music back on",
+                    $"({CombatContextCount} combat context(s) covered)"
+                    + (saved ? " — saved to settings.xml" : " — NOT saved (this session only)"));
+            ShowNotice((muted ? "Combat music off — fights keep the current music"
+                              : "Combat music back on")
+                       + (saved ? "" : " (this session only)"),
                        fallbackTitle: "Combat music");
             ReResolveNow();
         }

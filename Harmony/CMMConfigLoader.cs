@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Xml;
 using MusicUtils.Enums;
 
@@ -105,6 +106,11 @@ namespace CMM
                 CMMConfig.KeyUndoBan           = ReadEnum<UnityEngine.KeyCode>(root, "KeyUndoBan",           CMMConfig.KeyUndoBan);
                 CMMConfig.KeyFavouriteTrack   = ReadEnum<UnityEngine.KeyCode>(root, "KeyFavouriteTrack",   CMMConfig.KeyFavouriteTrack);
                 CMMConfig.KeyToggleCombatMusic = ReadEnum<UnityEngine.KeyCode>(root, "KeyToggleCombatMusic", CMMConfig.KeyToggleCombatMusic);
+                // The MUTE STATE, not just the key. Read every load, including hot-reloads —
+                // which is safe precisely because the keybind writes the file: a reload can only
+                // ever read back the value the toggle just stored, so the two cannot disagree.
+                CMMConfig.CombatMusicMuted     = ReadBool(root, "CombatMusicMuted", CMMConfig.CombatMusicMuted);
+                ContextMusicManager.SetCombatMusicMuted(CMMConfig.CombatMusicMuted);
                 CMMConfig.KeyNowPlaying        = ReadEnum<UnityEngine.KeyCode>(root, "KeyNowPlaying",        CMMConfig.KeyNowPlaying);
                 CMMConfig.KeyRadioNext         = ReadEnum<UnityEngine.KeyCode>(root, "KeyRadioNext",         CMMConfig.KeyRadioNext);
                 CMMConfig.KeyRadioPrev         = ReadEnum<UnityEngine.KeyCode>(root, "KeyRadioPrev",         CMMConfig.KeyRadioPrev);
@@ -396,6 +402,99 @@ namespace CMM
         {
             string v = el.GetAttribute(attr);
             return float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float result) ? result : def;
+        }
+
+        // ── Writing one setting back to settings.xml ────────────────────────────────────────
+        // For settings a KEYBIND changes, so the change outlives the session. The file is a
+        // documented, hand-edited artifact — most of it is comments — so this must not rewrite
+        // it: PreserveWhitespace keeps every byte of formatting and every comment exactly where
+        // it was, and only the one element's text changes. A missing element is appended with
+        // the same indentation as its neighbours rather than jammed against the root tag.
+        //
+        // Returns false and logs a WARNING (not a silent swallow) when the file cannot be
+        // written — read-only media, a mod manager's overlay, an antivirus lock. The caller
+        // keeps the in-memory change, so the toggle still does what the player pressed it for;
+        // they are just told it will not survive the restart.
+        public static bool PersistSetting(string modPath, string name, string value)
+        {
+            string path = SettingsFile(modPath);
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    Log.Warning($"[CMM] cannot persist {name}: Config/settings.xml is missing.");
+                    return false;
+                }
+
+                var doc = new XmlDocument { PreserveWhitespace = true };
+                doc.Load(path);
+                XmlElement root = doc.DocumentElement;
+                if (root == null) { Log.Warning($"[CMM] cannot persist {name}: settings.xml has no root."); return false; }
+
+                var el = root.SelectSingleNode(name) as XmlElement;
+                if (el != null)
+                {
+                    if (el.InnerText == value) return true;      // already what we would write
+                    el.InnerText = value;
+                }
+                else
+                {
+                    // Append, matching the indentation of the last real element so a
+                    // hand-maintained file does not suddenly grow a ragged line.
+                    string indent = "  ";
+                    for (int i = root.ChildNodes.Count - 1; i >= 0; i--)
+                    {
+                        if (!(root.ChildNodes[i] is XmlElement)) continue;
+                        var ws = root.ChildNodes[i].PreviousSibling;
+                        if (ws != null && ws.NodeType == XmlNodeType.Whitespace)
+                        {
+                            const char LF = (char)10;   // no escape: this file is edited by tools
+                            int nl = ws.Value.LastIndexOf(LF);
+                            if (nl >= 0) indent = ws.Value.Substring(nl + 1);
+                        }
+                        break;
+                    }
+                    el = doc.CreateElement(name);
+                    el.InnerText = value;
+                    var pad = doc.CreateWhitespace(Environment.NewLine + indent);
+                    // Go in BEFORE the blank line that precedes </CMMSettings>, not after it:
+                    // appending at the very end puts the new element and the closing tag on the
+                    // same line. This is the branch every EXISTING install takes on first press,
+                    // so it is the one that has to look hand-written, not the shipped-file one.
+                    XmlNode trail = root.LastChild;
+                    if (trail != null && (trail.NodeType == XmlNodeType.Whitespace
+                                       || trail.NodeType == XmlNodeType.SignificantWhitespace))
+                    {
+                        root.InsertBefore(el, trail);
+                        root.InsertBefore(pad, el);
+                    }
+                    else { root.AppendChild(pad); root.AppendChild(el); }
+                }
+
+                // Save through an explicit writer, NOT doc.Save(path): that overload writes a
+                // UTF-8 BOM, and settings.xml ships without one. Nothing would break, but the
+                // file would silently differ from the shipped copy the first time anyone pressed
+                // the key, and a config file that rewrites itself in ways the author did not ask
+                // for is how trust in a config file is lost. NewLineHandling.None leaves the
+                // CRLFs exactly as they were read.
+                var xs = new XmlWriterSettings
+                {
+                    Encoding = new UTF8Encoding(false),
+                    NewLineHandling = NewLineHandling.None,
+                    Indent = false,               // PreserveWhitespace already carries the layout
+                };
+                using (var w = XmlWriter.Create(path, xs)) doc.Save(w);
+                // Tell the config watcher this write was ours, so it does not treat it as a
+                // hand edit and stage a reload of everything a moment later.
+                ContextMusicManager.NoteConfigWritten();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"[CMM] could not save {name} to Config/settings.xml ({ex.Message}). "
+                          + "The change applies for this session only.");
+                return false;
+            }
         }
     }
 }
