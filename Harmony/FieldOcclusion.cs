@@ -268,12 +268,27 @@ namespace CMM
                     // Split it. A speaker quiet because of walls and one quiet because the route
                     // wandered look identical in the total and want opposite fixes.
                     _dbgMat = NativeField.cmm_fld_sample_mat_db(_f, sp.x, sp.y, sp.z);
+                    _dbgPt = sp; _dbgPtValid = true;   // so `ray` can aim at THIS one
                 }
             }
             return true;
         }
 
         private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra, _dbgMat;
+
+        // WHERE the last reported nearest point was. Kept separately from _dbgDist because that
+        // one resets on report; this must survive between the 1 Hz line and someone typing a
+        // command after reading it. Without it `ray` aimed at the nearest SPEAKER, which in a POI
+        // is the one three blocks away that already sounds right — so the first ray dumped three
+        // cells of the working case while the 39-block speaker being complained about went
+        // unexamined. The diagnostic and the command have to be talking about the same object.
+        private static Vector3 _dbgPt;
+        private static bool _dbgPtValid;
+        internal static bool TryGetReportedPoint(out Vector3 p)
+        {
+            p = _dbgPt;
+            return _dbgPtValid;
+        }
 
         // Nearest published point, reset ON REPORT rather than per station — the exact bug that
         // made the previous model's diagnostic describe a speaker ninety blocks away for a week.

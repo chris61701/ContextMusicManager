@@ -232,7 +232,15 @@ namespace CMM
                 if (plr == null || wr == null) return "no player";
                 Vector3 rear = plr.getHeadPosition();
                 Vector3 rspk;
-                if (!EmitterAudioLayer.TryGetNearestSpeaker(rear, out rspk)) return "no speaker in range";
+                // Default to the point the `field nearest:` line is about, NOT the nearest
+                // speaker: inside a POI those are different objects, and the nearest one is
+                // usually the one already behaving. `ray speaker` asks for the old behaviour.
+                bool wantSpeaker = p.Count > 2 && p[2].ToLowerInvariant() == "speaker";
+                if (wantSpeaker || !FieldOcclusion.TryGetReportedPoint(out rspk))
+                {
+                    if (!EmitterAudioLayer.TryGetNearestSpeaker(rear, out rspk))
+                        return "no speaker in range";
+                }
                 return FieldOcclusion.DescribeRay(wr, rear, rspk);
             }
 
@@ -278,7 +286,7 @@ namespace CMM
                  + "\n  scene:     " + AcousticBridge.LastStatus
                  + "\n  saturated: " + AcousticBridge.SaturatedPoints + " point(s) clamped at last publish"
                  + "\n  model:     " + EmitterAudioLayer.PinName
-                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column|ray"
+                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column|ray [speaker]"
                  + "\n             cmm acoustics wall <n> | verb <n>|off | model auto|native|legacy";
 #else
             return "native acoustics: not built into this game version";
