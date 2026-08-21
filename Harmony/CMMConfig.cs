@@ -171,26 +171,26 @@ namespace CMM
         // heavy shell. A station change is a DETENT: a ball dropping into a groove — one bright
         // tick, a small tight shell, over in a few milliseconds. Reusing the toggle for the dial
         // is why turning the knob did not sound like turning a knob.
-        public static float  RadioClickOnHz        = 2600f;
-        public static float  RadioClickOnSnap      = 0.55f;
-        public static float  RadioClickOnLengthMs  = 16f;
-        public static float  RadioClickOnBody      = 0.42f;
-        public static float  RadioClickOnBodyHz    = 560f;
-        public static float  RadioClickOnDouble    = 0.55f;
+        public static float  RadioClickOnHz        = 8722f;
+        public static float  RadioClickOnSnap      = 0.72f;
+        public static float  RadioClickOnLengthMs  = 60f;
+        public static float  RadioClickOnBody      = 0.37f;
+        public static float  RadioClickOnBodyHz    = 5100f;
+        public static float  RadioClickOnDouble    = 0.8f;
         public static float  RadioClickOnVolume    = -1f;
-        public static float  RadioClickOffHz       = 2100f;
-        public static float  RadioClickOffSnap     = 0.5f;
-        public static float  RadioClickOffLengthMs = 18f;
-        public static float  RadioClickOffBody     = 0.42f;
-        public static float  RadioClickOffBodyHz   = 460f;
-        public static float  RadioClickOffDouble   = 0.5f;
+        public static float  RadioClickOffHz       = 8722f;
+        public static float  RadioClickOffSnap     = 0.7f;
+        public static float  RadioClickOffLengthMs = 68f;
+        public static float  RadioClickOffBody     = 0.4f;
+        public static float  RadioClickOffBodyHz   = 4350f;
+        public static float  RadioClickOffDouble   = 0.8f;
         public static float  RadioClickOffVolume   = -1f;
-        public static float  RadioClickDialHz       = 4200f;
-        public static float  RadioClickDialSnap     = 0.8f;
-        public static float  RadioClickDialLengthMs = 24f;
-        public static float  RadioClickDialBody     = 0.3f;
-        public static float  RadioClickDialBodyHz   = 950f;
-        public static float  RadioClickDialDouble   = 0.15f;
+        public static float  RadioClickDialHz       = 8187f;
+        public static float  RadioClickDialSnap     = 0.84f;
+        public static float  RadioClickDialLengthMs = 44f;
+        public static float  RadioClickDialBody     = 0.5f;
+        public static float  RadioClickDialBodyHz   = 5949f;
+        public static float  RadioClickDialDouble   = 0.52f;
         public static float  RadioClickDialVolume   = -1f;
         // How much each firing differs from the last, 0..1, shared by all three. No two detents
         // on a real mechanism are identical, and a fixed waveform repeated on every notch is the

@@ -287,13 +287,13 @@ static volatile float g_sfxStaticCrackle = 0.8f;
  * dull thud), SNAP 0..1 (the bright-noise-ping vs low-thump balance: 1 = all snap, 0 = all
  * thud), and length ms (the thump's decay constant; the ping decays 4× faster and the voice
  * runs ~3.3× this). Defaults reproduce the v35 hardcoded clicks. */
-static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 2600.0f, 2100.0f, 4200.0f };
-static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.55f, 0.50f, 0.80f };
-static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 16.0f, 18.0f, 24.0f };
+static volatile float g_sfxClickHz[SFX_CLICK_KINDS]    = { 8722.0f, 8722.0f, 8187.0f };
+static volatile float g_sfxClickSnap[SFX_CLICK_KINDS]  = { 0.72f, 0.70f, 0.84f };
+static volatile float g_sfxClickLenMs[SFX_CLICK_KINDS] = { 60.0f, 68.0f, 44.0f };
 /* v39 — detent character: body-knock mix / its ring pitch / second-strike level (0 = single). */
-static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.42f, 0.42f, 0.30f };
-static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 560.0f, 460.0f, 950.0f };
-static volatile float g_sfxClickDouble[SFX_CLICK_KINDS] = { 0.55f, 0.50f, 0.15f };
+static volatile float g_sfxClickBody[SFX_CLICK_KINDS]   = { 0.37f, 0.40f, 0.50f };
+static volatile float g_sfxClickBodyHz[SFX_CLICK_KINDS] = { 5100.0f, 4350.0f, 5949.0f };
+static volatile float g_sfxClickDouble[SFX_CLICK_KINDS] = { 0.80f, 0.80f, 0.52f };
 /* How much each firing differs from the last, 0..1. A detent is a physical event and no two are
  * identical; a fixed waveform repeated on every notch is the thing that gives a UI sound away as
  * a sound EFFECT. Jitters pitch, level, the shell balance and the spacing of the second impact,
@@ -1274,7 +1274,12 @@ static void sfx_capture_click_tone(sfx_voice* v, int which) {
     if (snap < 0.0f) snap = 0.0f; else if (snap > 1.0f) snap = 1.0f;
     if (ms < 5.0f) ms = 5.0f; else if (ms > 120.0f) ms = 120.0f;
     if (body < 0.0f) body = 0.0f; else if (body > 1.0f) body = 1.0f;
-    if (bodyHz < 200.0f) bodyHz = 200.0f; else if (bodyHz > 3000.0f) bodyHz = 3000.0f;
+    /* Ceiling raised 3000 -> 9000. Real small switches resonate far higher than the old clamp
+     * allowed: measured on two reference recordings, a mouse switch's dominant mode sits at
+     * 6.9 kHz and a keyboard-style click at 2.4 kHz, where the model could not place a shell at
+     * all. The clamp was quietly deciding the character, which is the worst kind of limit --
+     * invisible, and it makes every OTHER knob look like the problem. */
+    if (bodyHz < 200.0f) bodyHz = 200.0f; else if (bodyHz > 9000.0f) bodyHz = 9000.0f;
     if (dbl < 0.0f) dbl = 0.0f; else if (dbl > 1.0f) dbl = 1.0f;
     /* PER-FIRE VARIATION. Drawn once, here, so every parameter of one click moves together and
      * the result is a slightly different object each time rather than a smeared average. */

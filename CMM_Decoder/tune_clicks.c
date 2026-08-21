@@ -41,15 +41,18 @@ static const float LO[7]    = { 300.f, 0.f,   5.f, 0.f,   200.f, 0.f,  0.f };
 static const float HI[7]    = { 16000.f, 1.f, 120.f, 1.f, 8000.f, 1.f, 1.f };
 
 /* [kind][0..5] + a shared vary */
+/* Fitted to two reference recordings the author supplied -- a mouse switch for the dial and a
+ * keyboard-style click for the power toggle -- by searching the parameter space for the closest
+ * match on octave-band energy, spectral centroid and ring time. */
 static float P[3][6] = {
-    { 2600.f, 0.55f, 16.f, 0.42f, 560.f, 0.55f },
-    { 2100.f, 0.50f, 18.f, 0.42f, 460.f, 0.50f },
-    { 4200.f, 0.80f, 24.f, 0.30f, 950.f, 0.15f },
+    { 8722.f, 0.72f, 60.f, 0.37f, 5100.f, 0.80f },
+    { 8722.f, 0.70f, 68.f, 0.40f, 4350.f, 0.80f },
+    { 8187.f, 0.84f, 44.f, 0.50f, 5949.f, 0.52f },
 };
 static const float DEF[3][6] = {
-    { 2600.f, 0.55f, 16.f, 0.42f, 560.f, 0.55f },
-    { 2100.f, 0.50f, 18.f, 0.42f, 460.f, 0.50f },
-    { 4200.f, 0.80f, 24.f, 0.30f, 950.f, 0.15f },
+    { 8722.f, 0.72f, 60.f, 0.37f, 5100.f, 0.80f },
+    { 8722.f, 0.70f, 68.f, 0.40f, 4350.f, 0.80f },
+    { 8187.f, 0.84f, 44.f, 0.50f, 5949.f, 0.52f },
 };
 static float vary = 0.5f;
 
@@ -57,13 +60,13 @@ static float vary = 0.5f;
  * one of them instead of from nowhere. Order is by brightness, which is the axis that turned out
  * to matter: the shipped A puts 92% of its energy in one band at 926 Hz, and D spreads a third
  * of it above 3 kHz. */
-static const char* PRESET_NAME[5] = { "A current", "C mid", "E plastic", "B metallic", "D ratchet" };
+static const char* PRESET_NAME[5] = { "fitted", "darker", "old A", "brighter", "ratchet" };
 static const float PRESET[5][6] = {
-    {  4200.f, 0.80f, 24.f, 0.30f,  950.f, 0.15f },
-    {  6500.f, 0.78f, 24.f, 0.34f, 1600.f, 0.30f },
-    {  7000.f, 0.62f, 26.f, 0.45f, 1800.f, 0.45f },
-    {  9000.f, 0.80f, 24.f, 0.30f, 2400.f, 0.30f },
-    { 11000.f, 0.72f, 26.f, 0.40f, 3200.f, 0.60f },
+    {  8187.f, 0.84f, 44.f, 0.50f, 5949.f, 0.52f },   /* the fit to your mouse-click reference */
+    {  7000.f, 0.80f, 36.f, 0.45f, 3400.f, 0.45f },
+    {  4200.f, 0.80f, 24.f, 0.30f,  950.f, 0.15f },   /* where this started, for comparison */
+    { 10000.f, 0.86f, 44.f, 0.52f, 7200.f, 0.55f },
+    {  9000.f, 0.78f, 50.f, 0.55f, 6400.f, 0.85f },
 };
 
 static void push(void) {

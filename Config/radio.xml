@@ -85,19 +85,19 @@
          Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
                     release then the stop landing — the mechanical "cl-ick"). 0 = single.
          Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. -->
-  <RadioClickOnHz>2600</RadioClickOnHz>
-  <RadioClickOnSnap>0.55</RadioClickOnSnap>
-  <RadioClickOnLengthMs>16</RadioClickOnLengthMs>
-  <RadioClickOnBody>0.42</RadioClickOnBody>
-  <RadioClickOnBodyHz>560</RadioClickOnBodyHz>
-  <RadioClickOnDouble>0.55</RadioClickOnDouble>
+  <RadioClickOnHz>8722</RadioClickOnHz>
+  <RadioClickOnSnap>0.72</RadioClickOnSnap>
+  <RadioClickOnLengthMs>60</RadioClickOnLengthMs>
+  <RadioClickOnBody>0.37</RadioClickOnBody>
+  <RadioClickOnBodyHz>5100</RadioClickOnBodyHz>
+  <RadioClickOnDouble>0.8</RadioClickOnDouble>
   <RadioClickOnVolume>-1</RadioClickOnVolume>
-  <RadioClickOffHz>2100</RadioClickOffHz>
-  <RadioClickOffSnap>0.5</RadioClickOffSnap>
-  <RadioClickOffLengthMs>18</RadioClickOffLengthMs>
-  <RadioClickOffBody>0.42</RadioClickOffBody>
-  <RadioClickOffBodyHz>460</RadioClickOffBodyHz>
-  <RadioClickOffDouble>0.5</RadioClickOffDouble>
+  <RadioClickOffHz>8722</RadioClickOffHz>
+  <RadioClickOffSnap>0.7</RadioClickOffSnap>
+  <RadioClickOffLengthMs>68</RadioClickOffLengthMs>
+  <RadioClickOffBody>0.4</RadioClickOffBody>
+  <RadioClickOffBodyHz>4350</RadioClickOffBodyHz>
+  <RadioClickOffDouble>0.8</RadioClickOffDouble>
   <RadioClickOffVolume>-1</RadioClickOffVolume>
 
   <!-- ── The DIAL DETENT: turning the tuning knob one station ───────────────────────────────
@@ -106,12 +106,12 @@
        a low heavy shell, the RadioClickOn/Off* sets above. Turning the knob one notch is a
        DETENT — a ball dropping into a groove: one bright tick, a small tight shell, gone in a
        few milliseconds. Same six controls, aimed somewhere else entirely. -->
-  <RadioClickDialHz>4200</RadioClickDialHz>
-  <RadioClickDialSnap>0.8</RadioClickDialSnap>
-  <RadioClickDialLengthMs>24</RadioClickDialLengthMs>
-  <RadioClickDialBody>0.3</RadioClickDialBody>
-  <RadioClickDialBodyHz>950</RadioClickDialBodyHz>
-  <RadioClickDialDouble>0.15</RadioClickDialDouble>
+  <RadioClickDialHz>8187</RadioClickDialHz>
+  <RadioClickDialSnap>0.84</RadioClickDialSnap>
+  <RadioClickDialLengthMs>44</RadioClickDialLengthMs>
+  <RadioClickDialBody>0.5</RadioClickDialBody>
+  <RadioClickDialBodyHz>5949</RadioClickDialBodyHz>
+  <RadioClickDialDouble>0.52</RadioClickDialDouble>
   <RadioClickDialVolume>-1</RadioClickDialVolume>
 
   <!-- How much each firing differs from the last, 0..1, shared by all three clicks. No two
