@@ -64,19 +64,35 @@ static float faceT(int cx, int cy, int cz, int axis) {
     if (FACE_RULE == 1) return best;
     return sqrtf(mean * best);
 }
-static float cellFill(int cx, int cy, int cz) {
-    int s = 0, n = 0;
-    for (int a = 0; a < STEP; a++) for (int b = 0; b < STEP; b++) for (int c = 0; c < STEP; c++) {
-        s += isSolid(cx*STEP+a, cy*STEP+b, cz*STEP+c); n++;
+/* Transmission through the cell's MIDDLE PLANE perpendicular to `axis` -- what stands across a
+ * route passing through the cell. Directional, because a floor blocks vertical travel through a
+ * cell and not horizontal, and charging it for both is what made the open air outdoors quiet. */
+static float midT(int cx, int cy, int cz, int axis) {
+    int h = STEP / 2;
+    float acc = 0, best = 0; int n = 0;
+    for (int a = 0; a < STEP; a++)
+    for (int b = 0; b < STEP; b++) {
+        int x, y, z;
+        if (axis == 0)      { x = cx*STEP + h; y = cy*STEP + a; z = cz*STEP + b; }
+        else if (axis == 1) { x = cx*STEP + a; y = cy*STEP + h; z = cz*STEP + b; }
+        else                { x = cx*STEP + a; y = cy*STEP + b; z = cz*STEP + h; }
+        float t = isSolid(x, y, z) ? 0.0f : 1.0f;
+        acc += t; if (t > best) best = t;
+        n++;
     }
-    return n ? (float)s / n : 1.0f;
+    if (!n) return 0.0f;
+    float mean = acc / n;
+    if (FACE_RULE == 0) return mean;
+    if (FACE_RULE == 1) return best;
+    return sqrtf(mean * best);
 }
 
 static void fill_all(cmm_fld *f) {
     int cx, cy, cz, guard = 0;
     while (cmm_fld_next_pending(f, &cx, &cy, &cz) && guard++ < 400000)
-        cmm_fld_set_cell(f, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
-                         cellFill(cx, cy, cz));
+        cmm_fld_set_cell(f, cx, cy, cz,
+                         faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
+                         midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2));
 }
 
 int main(int argc, char** argv) {
@@ -95,6 +111,17 @@ int main(int argc, char** argv) {
     float far  = cmm_fld_sample_db(f, 50.5f, 4.5f, 32.5f);
     ckf("open air, 4 blocks: no excess", near < 1.0f, "%.2f dB (want ~0)", near);
     ckf("open air, 18 blocks: no excess", far  < 1.5f, "%.2f dB (want ~0)", far);
+
+    /* ── STANDING ON THE GROUND, IN THE OPEN ────────────────────────────────────────────
+     * The earlier open-air checks float the listener and the source four blocks up, where nothing
+     * is nearby. Real speakers and real players are on the FLOOR, so the route hugs it -- and a
+     * cell containing the floor is partly solid. If the model charges for that, everything sounds
+     * muffled outdoors for no reason anyone can see, which is what "the music is comparatively
+     * quiet" is. Sound travelling OVER a floor must not be attenuated BY the floor. */
+    float ground = cmm_fld_sample_db(f, 44.5f, 1.5f, 32.5f);
+    cmm_fld_solve(f, 32.5f, 1.5f, 32.5f);
+    ground = cmm_fld_sample_db(f, 44.5f, 1.5f, 32.5f);
+    ckf("on the ground, open air, 12 blocks", ground < 1.5f, "%.2f dB (want ~0)", ground);
 
     /* ── a wall right across, no way round: must be a lot ────────────────────────────── */
     for (int y = 1; y < H; y++) for (int z = 0; z < W; z++) solid[40][y][z] = 1;

@@ -123,8 +123,9 @@ namespace CMM
         private static void FillCell(World world, int cx, int cy, int cz)
         {
             int bx = cx * Step, by = cy * Step, bz = cz * Step;
-            float sumAll = 0f;
+            int h = Step / 2;
             float sumX = 0f, maxX = 0f, sumY = 0f, maxY = 0f, sumZ = 0f, maxZ = 0f;
+            float mSumX = 0f, mMaxX = 0f, mSumY = 0f, mMaxY = 0f, mSumZ = 0f, mMaxZ = 0f;
             int face = Step * Step;
 
             for (int dy = 0; dy < Step; dy++)
@@ -133,18 +134,25 @@ namespace CMM
                     {
                         int x = bx + dx, y = by + dy, z = bz + dz;
                         float t = Transmission(world, x, y, z);
-                        sumAll += t;
                         // The cell's own boundary layer stands for the face it shares with the
                         // neighbour below it on that axis. Using only this cell's blocks halves
                         // the reads: whichever cell contains the wall is the one that reports it.
                         if (dx == 0) { sumX += t; if (t > maxX) maxX = t; }
                         if (dy == 0) { sumY += t; if (t > maxY) maxY = t; }
                         if (dz == 0) { sumZ += t; if (t > maxZ) maxZ = t; }
+                        // ...and the MIDDLE plane perpendicular to each axis: what stands across a
+                        // route passing through, which is what catches a wall sitting inside a cell
+                        // rather than on its edge. Directional, because a floor blocks vertical
+                        // travel through a cell and not horizontal — charging it for both made the
+                        // open air outdoors read 3.2 dB down for no reason a player could see.
+                        if (dx == h) { mSumX += t; if (t > mMaxX) mMaxX = t; }
+                        if (dy == h) { mSumY += t; if (t > mMaxY) mMaxY = t; }
+                        if (dz == h) { mSumZ += t; if (t > mMaxZ) mMaxZ = t; }
                     }
 
             NativeField.cmm_fld_set_cell(_f, cx, cy, cz,
-                Face(sumX / face, maxX), Face(sumY / face, maxY), Face(sumZ / face, maxZ),
-                1f - sumAll / (face * Step));
+                Face(sumX / face, maxX),   Face(sumY / face, maxY),   Face(sumZ / face, maxZ),
+                Face(mSumX / face, mMaxX), Face(mSumY / face, mMaxY), Face(mSumZ / face, mMaxZ));
         }
 
         // HOW MUCH GETS THROUGH A CELL FACE. The geometric mean of the area fraction and the best

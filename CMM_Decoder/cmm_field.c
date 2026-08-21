@@ -25,7 +25,14 @@ struct cmm_fld {
      * neighbour, as dB (0 = open). Kept in dB rather than as the linear fraction the setter takes
      * because the flood adds it, and converting once on the way in beats a log per relaxation. */
     float *fnx, *fny, *fnz;
-    float *fill;                    /* how solid the cell's own interior is, as dB to cross it */
+    /* v2 — the interior obstruction is DIRECTIONAL. One number for "how solid is this cell" made
+     * sound travelling OVER a floor be attenuated BY the floor: a cell containing the ground is a
+     * third solid, so every horizontal step near the ground paid for it, and the open air outdoors
+     * came out 3.2 dB down for no reason a player could see. What matters is what stands across
+     * the route, so each axis stores the obstruction of the cell's MIDDLE PLANE perpendicular to
+     * it -- a floor blocks vertical travel through the cell and not horizontal, which is what a
+     * floor does. */
+    float *fillX, *fillY, *fillZ;
     unsigned char *have;            /* 0 = geometry still pending: treated as opaque, never open */
 
     /* Flood results. `cur` is the field just solved, `prev` the one before, so the caller can
@@ -96,7 +103,9 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
     f->fnx  = (float *)malloc(sizeof(float) * f->n);
     f->fny  = (float *)malloc(sizeof(float) * f->n);
     f->fnz  = (float *)malloc(sizeof(float) * f->n);
-    f->fill = (float *)malloc(sizeof(float) * f->n);
+    f->fillX = (float *)malloc(sizeof(float) * f->n);
+    f->fillY = (float *)malloc(sizeof(float) * f->n);
+    f->fillZ = (float *)malloc(sizeof(float) * f->n);
     f->have = (unsigned char *)calloc(f->n, 1);
     f->cur  = (int *)malloc(sizeof(int) * f->n);
     f->prev = (int *)malloc(sizeof(int) * f->n);
@@ -105,7 +114,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
     f->bprev= (int *)malloc(sizeof(int) * f->n);
     f->binb = (int *)malloc(sizeof(int) * f->n);
     f->bhead= (int *)malloc(sizeof(int) * (MAX_Q + 1));
-    if (!f->fnx || !f->fny || !f->fnz || !f->fill || !f->have || !f->cur || !f->prev || !f->nxt
+    if (!f->fnx || !f->fny || !f->fnz || !f->fillX || !f->fillY || !f->fillZ || !f->have || !f->cur || !f->prev || !f->nxt
         || !f->bnext || !f->bprev || !f->binb || !f->bhead) { cmm_fld_destroy(f); return NULL; }
     for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->prev[i] = UNREACHED; f->nxt[i] = UNREACHED; }
 
@@ -146,7 +155,8 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int step) {
 
 void cmm_fld_destroy(cmm_fld *f) {
     if (!f) return;
-    free(f->fnx); free(f->fny); free(f->fnz); free(f->fill); free(f->have);
+    free(f->fnx); free(f->fny); free(f->fnz);
+    free(f->fillX); free(f->fillY); free(f->fillZ); free(f->have);
     free(f->cur); free(f->prev); free(f->nxt); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
     free(f->order);
     free(f);
@@ -208,13 +218,18 @@ int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz) {
 }
 
 void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
-                      float tnx, float tny, float tnz, float fill) {
+                      float tnx, float tny, float tnz,
+                      float midX, float midY, float midZ) {
     if (!f || !in_win(f, cx, cy, cz)) return;
     long long i = widx(f, cx, cy, cz);
-    f->fnx[i]  = t_db(tnx);
-    f->fny[i]  = t_db(tny);
-    f->fnz[i]  = t_db(tnz);
-    f->fill[i] = t_db(fill >= 1.0f ? 0.0f : 1.0f - fill);   /* fill 1 = solid = no transmission */
+    f->fnx[i]   = t_db(tnx);
+    f->fny[i]   = t_db(tny);
+    f->fnz[i]   = t_db(tnz);
+    /* mid* are TRANSMISSIONS through the cell's middle plane perpendicular to each axis, in the
+     * same units as the faces: 1 = you can walk through it, 0 = solid. */
+    f->fillX[i] = t_db(midX);
+    f->fillY[i] = t_db(midY);
+    f->fillZ[i] = t_db(midZ);
     if (!f->have[i]) { f->have[i] = 1; if (f->pending > 0) f->pending--; }
 }
 
@@ -295,7 +310,8 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     const int ey = ((f->oy % f->ny) + f->ny) % f->ny;
     const int ez = ((f->oz % f->nz) + f->nz) % f->nz;
     const int NX = f->nx, NY = f->ny, NZ = f->nz;
-    const float *FNX = f->fnx, *FNY = f->fny, *FNZ = f->fnz, *FILL = f->fill;
+    const float *FNX = f->fnx, *FNY = f->fny, *FNZ = f->fnz;
+    const float *FLX = f->fillX, *FLY = f->fillY, *FLZ = f->fillZ;
     const unsigned char *HAVE = f->have;
     int *CUR = f->nxt;
 
@@ -336,10 +352,18 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                          * through the seam where two walls meet -- the thin-slab leak the old model
                          * had a whole class of bugs around. Each face is named on its own cell's
                          * negative side, so which cell owns it depends on the direction of travel. */
-                        float mat = FILL[ni];
+                        float mat = 0.0f;
                         if (dx > 0) mat += FNX[ni]; else if (dx < 0) mat += mFromX;
                         if (dy > 0) mat += FNY[ni]; else if (dy < 0) mat += mFromY;
                         if (dz > 0) mat += FNZ[ni]; else if (dz < 0) mat += mFromZ;
+                        /* ...and whatever stands ACROSS the route inside the cell being entered.
+                         * Averaged over the axes the step actually moves along, so a diagonal is
+                         * charged for the planes it genuinely crosses rather than for all three. */
+                        { float fl = 0.0f; int fn = 0;
+                          if (dx) { fl += FLX[ni]; fn++; }
+                          if (dy) { fl += FLY[ni]; fn++; }
+                          if (dz) { fl += FLZ[ni]; fn++; }
+                          if (fn) mat += fl / fn; }
 
                         int nd = (dx ? 1 : 0) + (dy ? 1 : 0) + (dz ? 1 : 0);
                         int q = c + (nd == 1 ? qStep : nd == 2 ? qStep2 : qStep3)

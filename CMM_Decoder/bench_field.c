@@ -16,7 +16,7 @@ static void run(int STEP, int NX, int NY, int NZ) {
         s = s * 1664525u + 1013904223u;
         int wall = ((s >> 16) & 15) == 0;                    /* ~6% of cells are wall */
         float t = wall ? 0.02f : 1.0f;
-        cmm_fld_set_cell(f, cx, cy, cz, t, 1.0f, t, wall ? 0.9f : 0.0f);
+        cmm_fld_set_cell(f, cx, cy, cz, t, 1.0f, t, t, 1.0f, t);
         filled++;
     }
     printf("cells %lld  filled %d\n", cmm_fld_stat(f, 0), filled);

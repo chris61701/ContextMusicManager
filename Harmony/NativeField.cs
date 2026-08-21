@@ -14,7 +14,7 @@ namespace CMM
         private const string Dll = "CMM_Decoder";
 
         // Checked on first use so a stale DLL fails with a number rather than inside the flood.
-        internal const int ExpectedAbi = 1;
+        internal const int ExpectedAbi = 2;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_fld_abi();
@@ -33,7 +33,8 @@ namespace CMM
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_fld_set_cell(IntPtr f, int cx, int cy, int cz,
-                                                     float tnx, float tny, float tnz, float fill);
+                                                     float tnx, float tny, float tnz,
+                                                     float midX, float midY, float midZ);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_fld_dirty(IntPtr f, int bx, int by, int bz, int radiusBlocks);

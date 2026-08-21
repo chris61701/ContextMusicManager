@@ -45,7 +45,7 @@ extern "C" {
 #endif
 
 /* Bumped on any breaking change; the managed side checks it on load. */
-#define CMM_FLD_ABI 1
+#define CMM_FLD_ABI 2
 CMM_FLD_API int cmm_fld_abi(void);
 
 typedef struct cmm_fld cmm_fld;
@@ -63,12 +63,15 @@ CMM_FLD_API int cmm_fld_recentre(cmm_fld *f, int bx, int by, int bz);
  * most is filled first and a half-read window is still usable close in. */
 CMM_FLD_API int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz);
 
-/* Report one cell. tnx/tny/tnz are transmission through the faces this cell shares with its
- * -X/-Y/-Z neighbours, as a linear energy fraction in 0..1 (1 = open air, 0 = sealed). `fill` is
- * how solid the cell's own interior is, 0..1, which is what stops a route from cutting through
- * the middle of a wall thicker than one cell. */
+/* Report one cell, all six numbers as linear transmission in 0..1 (1 = open air, 0 = sealed).
+ * tnx/tny/tnz are the faces this cell shares with its -X/-Y/-Z neighbours. midX/midY/midZ are the
+ * cell's MIDDLE PLANE perpendicular to each axis -- what stands across a route passing through,
+ * which is what stops one cutting through a wall that sits inside a cell rather than on its edge.
+ * Directional (ABI 2) because a single "how solid is this cell" made sound travelling OVER a
+ * floor be attenuated BY the floor: outdoors came out 3.2 dB down for no visible reason. */
 CMM_FLD_API void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
-                                  float tnx, float tny, float tnz, float fill);
+                                  float tnx, float tny, float tnz,
+                                  float midX, float midY, float midZ);
 
 /* Mark the cells covering a block region as needing geometry again (a door swung, a wall broke,
  * a chunk arrived). Cheap: it only queues a re-read, it never touches the field. */
