@@ -728,7 +728,15 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                 }
                 if (got < chunk) {
                     memset(sl->buf + got, 0, (size_t)(chunk - got) * sizeof(float));
-                    if (sl->hasRing) sl->underFrames += (unsigned)(chunk - got);
+                    /* ONLY COUNT A SLOT THAT IS SUPPOSED TO BE MAKING SOUND. An IDLE slot's ring is
+                     * empty by design -- the producer writes only lanes whose station produced
+                     * audio -- so counting every zero-fill made the counter climb forever on the
+                     * five unused slots and read 11 million frames of "starvation" on a machine
+                     * that sounded fine. A number that is always alarming is the same as no number
+                     * at all, which is precisely the failure this counter was added to end.
+                     * ptCount > 0 is the relay's own "this slot is audible this block" flag. */
+                    if (sl->hasRing && sl->ptCount > 0)
+                        sl->underFrames += (unsigned)(chunk - got);
                 }
             }
             if (render) {
