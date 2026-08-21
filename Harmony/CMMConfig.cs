@@ -230,6 +230,20 @@ namespace CMM
         // the model has beyond the shared material curve -- everything else comes from the blocks.
         public static bool   WorldEmitterFieldOcclusion = false;
         public static float  WorldEmitterFieldDetourDb  = 0.35f;
+        // What one block of material is worth, as dB = WallDb * loss^WallPow.
+        //
+        // DERIVED FROM THE SHIPPED MODEL, not invented. The field first borrowed the native
+        // model's curve, which was calibrated against a spec band saying a shut wood DOOR should
+        // be 4-9 dB down -- so it charged 6 dB for a wood WALL where the shipped model charges 20,
+        // and walls audibly barely existed ("occlusion on field seems almost broken"). Fitted
+        // instead to what the shipped model actually does at range 60, eight blocks out:
+        //
+        //     one wood block      -20.2 dB        one concrete block   -50.5 dB
+        //
+        // which gives WallDb 59.5 and WallPow 1.56. Both hot-reload, so they can be turned by ear
+        // against `cmm acoustics model auto` in the same spot.
+        public static float  WorldEmitterFieldWallDb    = 59.5f;
+        public static float  WorldEmitterFieldWallPow   = 1.56f;
 
         public static bool   WorldEmitterNativeAcoustics   = true;
         // Occlusion (dB) at which the emitter tone reaches full dullness, when the native acoustic

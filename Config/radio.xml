@@ -267,6 +267,16 @@
   <WorldEmitterFieldOcclusion>false</WorldEmitterFieldOcclusion>
   <WorldEmitterFieldDetourDb>0.35</WorldEmitterFieldDetourDb>
 
+  <!-- What one block of material is worth to the field model: dB = WallDb * loss^WallPow, where
+       loss is the shared block reader's answer (0 = air, 0.5 = wood, 0.9 = concrete, 1 = metal).
+       Fitted to what the SHIPPED model actually does at range 60, eight blocks out - one wood
+       block -20.2 dB, one concrete block -50.5 dB - because that is the occlusion people like.
+       Raise WallDb for heavier walls everywhere; raise WallPow to spread light and heavy
+       materials further apart. Both hot-reload, so you can turn them while listening and A/B
+       against `cmm acoustics model auto` from the same spot. -->
+  <WorldEmitterFieldWallDb>59.5</WorldEmitterFieldWallDb>
+  <WorldEmitterFieldWallPow>1.56</WorldEmitterFieldWallPow>
+
   <WorldEmitterNativeAcoustics>false</WorldEmitterNativeAcoustics>
   <WorldEmitterOcclusionFullDb>8</WorldEmitterOcclusionFullDb>
   <!-- Bounce-energy carry: the around-corner reverb is graded by the ENERGY surviving the route's

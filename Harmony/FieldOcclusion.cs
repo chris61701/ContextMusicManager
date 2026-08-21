@@ -173,16 +173,22 @@ namespace CMM
             return v <= 0f ? 0f : Mathf.Sqrt(v);
         }
 
-        // One block's transmission as a linear energy fraction, through the SAME material curve the
-        // rest of the mod uses (dB = scale * loss^power), so a wood wall is worth here exactly what
-        // it is worth everywhere else. CellLoss is the shared block reader: per-instance shapes,
-        // door state, damage, water, terrain density — the game's own answer rather than ours.
+        // One block's transmission as a linear energy fraction. CellLoss is the shared block reader
+        // — per-instance shapes, door state, damage, water, terrain density — so this asks the
+        // game's own answer for what a block IS, and only decides what it is WORTH.
+        //
+        // Worth is fitted to the shipped model rather than borrowed from the native one. Borrowing
+        // was the obvious move and it was wrong: that curve is calibrated to a spec band about
+        // DOORS (4-9 dB), so a wood wall came out at 6 dB against the 20 dB the model people
+        // actually like. Two models agreeing on a constant is worth nothing if the constant is
+        // measuring different things.
         private static float Transmission(World world, int x, int y, int z)
         {
             BlockValue bv = world.GetBlock(x, y, z);
             float loss = EmitterAcoustics.DebugCellLoss(bv, world, x, y, z);
             if (loss <= 0.0001f) return 1f;
-            float db = (float)(NativeAcoustics.DbMat * Math.Pow(loss, NativeAcoustics.MatPow));
+            float db = (float)(CMMConfig.WorldEmitterFieldWallDb
+                             * Math.Pow(loss, CMMConfig.WorldEmitterFieldWallPow));
             if (db <= 0f) return 1f;
             if (db > 120f) db = 120f;
             return Mathf.Pow(10f, -db / 10f);
