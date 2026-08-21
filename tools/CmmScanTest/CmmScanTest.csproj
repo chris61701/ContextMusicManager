@@ -32,6 +32,11 @@
   <!-- Real types, linked so the model can't drift from shipped code. -->
   <ItemGroup>
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\MusicRoots.cs"     Link="linked\MusicRoots.cs" />
+    <Compile Include="..\..\Harmony\SourceScan.cs"     Link="linked\SourceScan.cs" />
+    <Compile Include="..\..\Harmony\PlaylistSource.cs" Link="linked\PlaylistSource.cs" />
+    <Compile Include="..\..\Harmony\AudioDecoder.cs"   Link="linked\AudioDecoder.cs" />
+    <Compile Include="..\..\Harmony\NativeAudio.cs"    Link="linked\NativeAudio.cs" />
   </ItemGroup>
 
   <!-- contexts.xml parsing (XDocument) — not in the SDK-style net48 default set. -->

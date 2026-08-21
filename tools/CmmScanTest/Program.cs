@@ -21,7 +21,7 @@ using CMM;   // real Contexts type (linked DataStructures.cs)
 //
 // The HELPERS region below is copied VERBATIM from
 // Harmony/ContextMusicManager.AudioPlayer.cs (lines ~1604-1717) so this tests the
-// shipped algorithm. AudioDecoder.IsSupported is copied from AudioDecoder.cs:41-52.
+// shipped algorithm -- and now LINKS it rather than copying it (see the block below).
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace CmmScanTest
@@ -253,12 +253,24 @@ namespace CmmScanTest
         }
 
         // ════════════════════════════════════════════════════════════════════════
-        // VERBATIM COPY — from Harmony/ContextMusicManager.AudioPlayer.cs (~1604-1717).
-        // Keep in sync if the originals change. Only the container statics below
-        // (MusicDirectory / contexts / GetContext / _invalidFiles) stand in for the
-        // ContextMusicManager partial class.
+        // NO LONGER A COPY.
+        //
+        // This block used to be a hand-ported duplicate of the resolution and
+        // enumeration logic, and it had drifted: its claim rule was missing the
+        // IsPlaylist guards the shipped one has, and its enumeration skipped the
+        // flat-folder .m3u union entirely. So the harness was grading a model that
+        // does not ship -- which is exactly the failure that cost a night on the
+        // acoustics work.
+        //
+        // The pure helpers now live in MusicRoots and SourceScan, both Unity-free
+        // and both LINKED into this project. What is left here is the container the
+        // ContextMusicManager partial provides in the game.
         // ════════════════════════════════════════════════════════════════════════
-        static string MusicDirectory;
+        static string MusicDirectory
+        {
+            get => MusicRoots.Primary;
+            set { MusicRoots.SetPrimary(value); MusicRoots.SetAddons(new MusicRoot[0]); }
+        }
         static readonly Dictionary<string, Contexts> contexts =
             new Dictionary<string, Contexts>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _invalidFiles =
@@ -266,77 +278,30 @@ namespace CmmScanTest
         static Contexts GetContext(string name) =>
             name != null && contexts.TryGetValue(name, out var c) ? c : null;
 
-        private static readonly string[] _noClaimPrefixes = new string[0];
-
         private static SearchOption SearchOptionFor(Contexts ctx) =>
             ctx != null && ctx.IncludeSubfolders
                 ? SearchOption.AllDirectories
                 : SearchOption.TopDirectoryOnly;
 
         private static string[] GetClaimedSubtreePrefixes(string contextName)
-        {
-            Contexts self = GetContext(contextName);
-            if (self == null || string.IsNullOrEmpty(self.Source) || !self.IncludeSubfolders)
-                return _noClaimPrefixes;
-
-            string selfDir = NormalizedContextDir(self.Source);
-            if (selfDir == null) return _noClaimPrefixes;
-            string selfPrefix = selfDir + Path.DirectorySeparatorChar;
-
-            List<string> prefixes = null;
-            foreach (Contexts other in contexts.Values)
-            {
-                if (other == self || string.IsNullOrEmpty(other.Source)) continue;
-                if (string.Equals(other.Context, self.Context, StringComparison.OrdinalIgnoreCase)) continue;
-
-                string otherDir = NormalizedContextDir(other.Source);
-                if (otherDir == null) continue;
-                if (otherDir.Length > selfDir.Length &&
-                    otherDir.StartsWith(selfPrefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    (prefixes ?? (prefixes = new List<string>()))
-                        .Add(otherDir + Path.DirectorySeparatorChar);
-                }
-            }
-            return prefixes == null ? _noClaimPrefixes : prefixes.ToArray();
-        }
-
-        private static bool IsClaimedByDeeperContext(string file, string[] claimedPrefixes)
-        {
-            if (claimedPrefixes.Length == 0) return false;
-            string full;
-            try { full = Path.GetFullPath(file); }
-            catch { return false; }
-            foreach (string p in claimedPrefixes)
-                if (full.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
-        }
+            => MusicRoots.ClaimPrefixes(GetContext(contextName), contexts.Values);
 
         private static string NormalizedContextDir(string ctxPath)
-        {
-            try
-            {
-                return Path.GetFullPath(Path.Combine(MusicDirectory, ctxPath))
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            }
-            catch { return null; }
-        }
+            => MusicRoots.Combine(MusicRoots.Primary, ctxPath);
 
+        // The REAL pool: loose supported files unioned with what any top-level .m3u
+        // lists (flat only), minus anything a deeper context owns.
         private static string[] EnumerateContextFiles(Contexts ctx, string dir)
         {
-            string[] claimed = GetClaimedSubtreePrefixes(ctx.Context);
-            return Directory.GetFiles(dir, "*", SearchOptionFor(ctx))
-                .Where(f => IsSupported(f)
-                            && !_invalidFiles.Contains(f)
-                            && !IsClaimedByDeeperContext(f, claimed))
-                .ToArray();
+            if (!Directory.Exists(dir)) return new string[0];
+            string[] pool = SourceScan.EnumerateFolderPoolRaw(
+                dir, ctx.IncludeSubfolders, GetClaimedSubtreePrefixes(ctx.Context), out _);
+            return _invalidFiles.Count == 0
+                ? pool
+                : pool.Where(f => !_invalidFiles.Contains(f)).ToArray();
         }
 
-        // Copied from Harmony/AudioDecoder.cs:41-52.
-        private static readonly HashSet<string> _supportedExts =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".mp4", ".aac", ".m4v", ".3gp", ".mkv", ".webm" };
-        static bool IsSupported(string filePath) => _supportedExts.Contains(Path.GetExtension(filePath));
+        static bool IsSupported(string filePath) => AudioDecoder.IsSupported(filePath);
 
         // ════════════════════════════════════════════════════════════════════════
         // Harness plumbing
