@@ -416,7 +416,11 @@ namespace CMM
                 Vector3 e = _ear;
                 if (NativeField.cmm_fld_solve(f, e.x, e.y, e.z) < 0) Discarded++;
                 // A door is waiting on this result. Do not let it sit for the next 4 Hz tick.
-                else if (door) EmitterAudioLayer.RequestImmediatePublish();
+                else if (door)
+                {
+                    EmitterAudioLayer.RequestImmediatePublish();
+                    EmitterAudioLayer.ReportDoorLatency();
+                }
             }
             catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }
             finally { System.Threading.Interlocked.Exchange(ref _flooding, 0); }

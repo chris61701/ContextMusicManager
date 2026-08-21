@@ -119,6 +119,20 @@ namespace CMM
         // up to 250 ms of the door already being shut before it could be heard. Thread-safe by
         // being a bool the main thread clears; a missed write costs one tick, never correctness.
         internal static void RequestImmediatePublish() { _forceRefresh = true; }
+
+        // MEASURE the door, do not estimate it. Every latency number I have produced tonight has
+        // been arithmetic over a chain I did not time, and the chain has surprised me each round.
+        // Logged once per door, on the first flood that lands after the latch: latch to field, in
+        // milliseconds, with the frame time beside it so a slow frame is not read as slow code.
+        internal static void ReportDoorLatency()
+        {
+            if (_doorEventAt < 0f) return;
+            float ms = (Time.realtimeSinceStartup - _doorEventAt) * 1000f;
+            _doorEventAt = -999f;                       // once per door, not once per flood
+            if (ms >= 0f && ms < 5000f)
+                Log.Out($"[CMM] door -> occlusion: {ms:0} ms (latch to published field, "
+                      + $"frame {Time.unscaledDeltaTime * 1000f:0} ms)");
+        }
         private static float _nextReverbLog;           // throttle for the reverb diagnostic (DebugLogging only)
 
         // ── Path / stability summary (DebugLogging only) ────────────────────────────────────────
