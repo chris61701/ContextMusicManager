@@ -88,6 +88,23 @@ namespace CMM
         // relative path, and every one of those steps is invisible from in-game.
         // With no argument: the roots. With a context name: what each root contributes
         // to it, which is what actually settles the question.
+        // Make every context re-evaluate whether it has files. Used by `cmm scan`, where
+        // the add-on folder list may have just changed under contexts that are not in the
+        // watch set and would otherwise keep their old answer until they became relevant.
+        internal static void InvalidateAllPresence()
+        {
+            _contextsWithFilesDirty = true;
+            foreach (string name in contexts.Keys) _presenceDirty.Add(name);
+        }
+
+        internal static bool HasRecursiveContexts()
+        {
+            foreach (Contexts c in contexts.Values)
+                if (c != null && c.IncludeSubfolders && !c.IsPlaylist
+                    && !string.IsNullOrEmpty(c.Source)) return true;
+            return false;
+        }
+
         internal static string RootsReport(string contextFilter)
         {
             var sb = new System.Text.StringBuilder();

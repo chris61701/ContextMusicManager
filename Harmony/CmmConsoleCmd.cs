@@ -34,9 +34,13 @@ namespace CMM
         const string Desc = "Context Music Manager controls";
         const string Help =
             "Usage:\n" +
+            "  cmm scan                 - look for music folders in installed mods again,\n" +
+            "                             and re-scan everything. Use after adding or\n" +
+            "                             removing a music pack while the game is running.\n" +
+            "  cmm roots                - which music folders are in use, and from which mod\n" +
+            "  cmm roots <context>      - what each folder contributes to one context\n" +
             "  cmm rescan <context>     - re-scan one subfolder context now\n" +
-            "  cmm rescan all           - re-scan every subfolder context now\n" +
-            "  cmm rescan               - same as 'all'\n" +
+            "  cmm rescan all           - same as 'cmm scan'\n" +
             "  cmm nativeplay <context> - (experimental) play a track via CMM's own\n" +
             "                             audio output, off Unity's threads\n" +
             "  cmm nativenext           - crossfade to another track in that context\n" +
@@ -77,9 +81,22 @@ namespace CMM
                 // itself is fixed for the session, but a Music folder can be added to an
                 // installed mod while the game runs, and this is the only thing that looks
                 // for one -- discovery is deliberately not on a timer.
+                int before = MusicRoots.AddonCount;
                 int n = MusicRootsDiscovery.Discover(ContextMusicManager.ModPath);
-                string target = _params.Count > 1 ? _params[1] : "all";
-                Out($"music roots: 1 primary + {n} add-on. " + ContextMusicManager.RescanCommand(target));
+                // Flat contexts need no explicit rescan: the folder list is rebuilt from
+                // MusicRoots on the next watch tick and the new folder changes the signature,
+                // so they reconcile within ~2 s on their own. This just makes presence
+                // re-evaluate every context rather than only the ones being watched.
+                ContextMusicManager.InvalidateAllPresence();
+                string msg = $"music folders: 1 primary + {n} add-on"
+                           + (n == before ? " (unchanged)" : $" (was {before})")
+                           + ". Flat contexts reconcile within ~2 s.";
+                if (_params.Count > 1 || ContextMusicManager.HasRecursiveContexts())
+                {
+                    string target = _params.Count > 1 ? _params[1] : "all";
+                    msg += " " + ContextMusicManager.RescanCommand(target);
+                }
+                Out(msg);
                 return;
             }
             if (sub == "roots")
