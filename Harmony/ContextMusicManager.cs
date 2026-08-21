@@ -1,4 +1,4 @@
-﻿
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -64,7 +64,7 @@ namespace CMM
         public static float StalenessCheckInterval = 5f;
         public static float TrackEndPollInterval = 0.25f;
         public static float CrossFadeDuration = 2f;
-        public static float TrackTransitionFadeDuration = 6f;
+        public static float TrackTransitionFadeDuration = 5f;
 
         // Graceful, deliberate fade for the menu↔game boundary (entering a world, exiting
         // back to the menu) — intentionally longer than the in-game CrossFadeDuration.

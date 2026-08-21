@@ -25,7 +25,7 @@ namespace CMM
         public static readonly HashSet<SectionType> DisabledVanillaSections =
             new HashSet<SectionType>();
 
-        public static float VolumeModifier = 1.0f;
+        public static float VolumeModifier = 0.5f;
 
         // ── The game's "Overall Volume" slider ────────────────────────────────
         // The game applies this pref as `AudioListener.volume` (GameOptionsManager), a Unity-side
@@ -120,8 +120,8 @@ namespace CMM
         //   exactly like a context source — the pool the station loops through.
         //   Range: the emitter starts/stops as the NEAREST detected speaker crosses this
         //   distance (game units) from the listener.
-        public static bool   WorldEmitterEnabled = false;
-        public static string WorldEmitterSource  = "";
+        public static bool   WorldEmitterEnabled = true;
+        public static string WorldEmitterSource  = "Radio";
         public static float  WorldEmitterRange   = 60f;
         //   Volume: the world emitters' OWN trim (0..1), multiplied onto the Ambient and Overall
         //   sliders to form the emitter master. DELIBERATELY SEPARATE from the Radio context's
@@ -135,7 +135,7 @@ namespace CMM
         // Placement ("birth") ramp for a speaker that APPEARS while its station is already
         // playing (just placed, or streamed in with a chunk). < 0 ⇒ inherit the start fade
         // (the Radio context's fadeintime, else WorldEmitterFade). 0 = pop in instantly.
-        public static float  WorldEmitterBirthFade = -1f;
+        public static float  WorldEmitterBirthFade = 0f;
         // Broadcast anchor window (seconds). Station schedules re-anchor at every multiple of this:
         // a join walks track lengths forward from the current window's anchor (~window/4min header
         // opens, pool-size independent). Longer = rarer re-anchor jumps, slightly costlier joins.
@@ -211,8 +211,8 @@ namespace CMM
         // steeper just past the plateau / more responsive per metre, <1 gentler). Muffle = distance
         // low-pass strength 0..1 (0 = no dulling with distance, higher = duller far away).
         public static float  WorldEmitterMinDistance = 1f;
-        public static float  WorldEmitterFalloff     = 4f;
-        public static float  WorldEmitterMuffle      = 0.7f;
+        public static float  WorldEmitterFalloff     = 2.5f;
+        public static float  WorldEmitterMuffle      = 0.9f;
         // Stereo width 0..1: how hard a left/right speaker pans. 1 = full pan (far ear can go silent);
         // lower keeps the sound in BOTH ears (a source at 90° is still heard on the far side, quieter).
         public static float  WorldEmitterStereoWidth = 0.8f;
@@ -342,7 +342,7 @@ namespace CMM
         public static float  WorldEmitterFieldWallDb    = 59.5f;
         public static float  WorldEmitterFieldWallPow   = 1.56f;
 
-        public static bool   WorldEmitterNativeAcoustics   = true;
+        public static bool   WorldEmitterNativeAcoustics   = false;
         // Occlusion (dB) at which the emitter tone reaches full dullness, when the native acoustic
         // model is driving. 8 dB is about what the shipped model's virtual distance produced for a
         // wall at mid range, so a wall keeps sounding like a wall.
@@ -359,9 +359,9 @@ namespace CMM
         //    (a sealed thick vault goes dead), smoothstepped in from 55% so the dead-zone edge isn't a cliff.
         //    A long OPEN-AIR detour has zero solid cost, so it never triggers this. Denser materials reach
         //    HardStop in fewer blocks (metal ~2½, stone ~3, wood ~5 walls at the defaults).
-        public static float  WorldEmitterOcclusionWallDistance = 18f;
+        public static float  WorldEmitterOcclusionWallDistance = 35f;
         public static float  WorldEmitterOcclusionMaxDistance  = 30f;
-        public static float  WorldEmitterOcclusionHardStop      = 48f;
+        public static float  WorldEmitterOcclusionHardStop      = 68f;
         // Cap (virtual blocks/second) on how fast a speaker's occlusion may RISE from MOVEMENT — walking
         // out a doorway / behind a thick wall can flip the routed cost from near-clear to fully-blocked in
         // one 4 Hz tick, and the native glide is deliberately fast for big jumps (door tuning), so the dry
@@ -383,7 +383,7 @@ namespace CMM
         // falls out of the box → BoundaryBlend straight-lines the remainder through the wall → dry drops →
         // reverb blooms. Hot-reloadable: dial 1 (reverb-forward) ↔ 24 (routing-forward) live to taste.
         public static bool   WorldEmitterPathRouting = true;
-        public static int    WorldEmitterFloodRadius = 8;
+        public static int    WorldEmitterFloodRadius = 32;
         // FIELD CACHE ("Phase 2", 2026-07-11): occlusion from ONE CACHED cost field PER SPEAKER
         // (seeded at the static speaker, box filled — no node budget) instead of re-flooding
         // around the moving ear each tick. The listener samples a stationary field ⇒ walking is
@@ -551,7 +551,7 @@ namespace CMM
         // Whether squad-shared combat requires the other player to be an ally (in your
         // party or an ACL friend). When false, ANY nearby living player's fight counts as
         // yours. Defaults to true (party/friend only), matching the original behavior.
-        public static bool CombatShareRequireAlly = true;
+        public static bool CombatShareRequireAlly = false;
         // Distance (game units) from a bedroll or land-claim that counts as "home".
         public static float HomeDetectRange = 70f;
         // Health fraction (0–1) below which combat escalates to Low_Health_Panic.
@@ -623,7 +623,7 @@ namespace CMM
 
         // Set to false in Config/settings.xml to silence verbose console output.
         // Log.Warning and Log.Error always emit regardless of this flag.
-        public static bool DebugLogging = true;
+        public static bool DebugLogging = false;
         public static void D(string msg) { if (DebugLogging) Log.Out(msg); }
 
         // ── Perf instrumentation (see CMMPerf) ─────────────────────────────────
