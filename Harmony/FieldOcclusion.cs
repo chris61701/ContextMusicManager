@@ -64,6 +64,13 @@ namespace CMM
         private static int _nx, _ny, _nz, _range;
         private static Vector3 _ear;              // captured on the main thread, read by the flood
         private static bool _earValid;
+        // How often the world is re-read even when nothing said it changed. See the rolling
+        // re-read in FrameStep for why this exists at all.
+        private const float NearRefreshSec = 1.0f, FarRefreshSec = 10f;
+        private const int   NearRefreshBlocks = 12;
+        private static float _nearRefreshAt, _farRefreshAt;
+        internal static int NearRefreshes, FarRefreshes;
+
         private static Vector3i _centre;          // block position the window was last centred on
         private static bool _centreValid;
         internal static int Recentres;            // how often the window actually had to move
@@ -82,7 +89,8 @@ namespace CMM
             return $"cells {tot} ({StepXZ}x{StepY}x{StepXZ}-block, {_nx}x{_ny}x{_nz}), "
                  + (pend > 0 ? $"reading {100.0 * (tot - pend) / Math.Max(tot, 1):0}%, " : "read complete, ")
                  + $"reached {Reached}, flood {LastSolveUs / 1000.0:0.0} ms, "
-                 + $"{Discarded} discarded, {Recentres} recentres";
+                 + $"{Discarded} discarded, {Recentres} recentres, "
+                 + $"{NearRefreshes}+{FarRefreshes} rereads";
         }
 
         // ── Lifetime ────────────────────────────────────────────────────────────────────────────
@@ -130,6 +138,7 @@ namespace CMM
                     Log.Warning("[CMM] field: flood still running at reset — arena leaked rather than freed under it.");
             }
             _earValid = false; Discarded = 0; _centreValid = false; Recentres = 0;
+            _nearRefreshAt = _farRefreshAt = 0f; NearRefreshes = FarRefreshes = 0;
             _slew.Clear();
         }
 
@@ -165,6 +174,40 @@ namespace CMM
                 _centre = new Vector3i(ebx, eby, ebz);
                 _centreValid = true;
                 Recentres++;
+            }
+
+            // ── ROLLING RE-READ ────────────────────────────────────────────────────────────
+            // The field only learns the world changed when something TELLS it: a door swing on the
+            // falling edge, or the window scrolling as the player walks. Stand still and open a
+            // door whose animation the hook does not catch and those cells keep the reading they
+            // had when you walked in -- for as long as you stand there. Reported exactly so:
+            // opening and closing a bathroom door changed nothing at all.
+            //
+            // That is one hook standing between the model and every geometry change in the game:
+            // block damage, another mod's blocks, a peer's edits in multiplayer, a chunk quietly
+            // swapping under us. The explicit door invalidation stays because it is instant; this
+            // is the net under it, and it depends on nothing.
+            //
+            // Two rings, because they want different rates. The near ring is small enough to
+            // re-read in about a tenth of a second, so a door beside you lands within one period.
+            // The far pass costs a full window read and only has to catch things you are not
+            // standing next to. Both ride the same per-frame budget as every other read; marking
+            // cells dirty is cheap and they keep answering with what they last knew until the
+            // reader gets to them.
+            float nowRr = Time.realtimeSinceStartup;
+            if (nowRr - _nearRefreshAt >= NearRefreshSec)
+            {
+                _nearRefreshAt = nowRr;
+                Invalidate(new Vector3i(Mathf.FloorToInt(_ear.x), Mathf.FloorToInt(_ear.y),
+                                        Mathf.FloorToInt(_ear.z)), NearRefreshBlocks);
+                NearRefreshes++;
+            }
+            if (nowRr - _farRefreshAt >= FarRefreshSec)
+            {
+                _farRefreshAt = nowRr;
+                Invalidate(new Vector3i(Mathf.FloorToInt(_ear.x), Mathf.FloorToInt(_ear.y),
+                                        Mathf.FloorToInt(_ear.z)), _range);
+                FarRefreshes++;
             }
 
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
