@@ -12,18 +12,27 @@ namespace CMM
     // Split out of MusicRoots because this half needs the game's mod list and
     // MusicRoots must stay Unity-free so the offline harnesses can link it.
     //
-    // Runs once at launch and again on `cmm scan`. Not on a timer: the game's mod
-    // list is fixed for the session — mods cannot be installed while it runs — so
-    // re-probing would only ever find the same set. A pack's folder VANISHING needs
-    // no discovery either, because a folder that is not there contributes no tracks
-    // and its absence is already part of the change signature.
+    // Runs at launch and again on `cmm scan`. Not on a timer.
     //
-    // Uses ModManager.GetLoadedMods() rather than listing a Mods directory, for two
-    // reasons: the game loads from TWO roots (the user-data Mods folder and the one
-    // in the install directory) and this covers both, and it reflects what the game
-    // actually accepted — a mod with a broken ModInfo.xml never loads, so it should
-    // not contribute music either. Verified identical (name, arity, List<Mod>) on
-    // A20, A21, 2.6, 3.0 and 3.1.
+    // TWO PASSES, because the loaded-mod list alone is not enough.
+    //
+    //   1. ModManager.GetLoadedMods() — every mod the game accepted. Gives Mod.Path
+    //      directly and covers BOTH mod roots (the user-data one and the one in the
+    //      install directory), which listing a single directory would not. Verified
+    //      identical (name, arity, List<Mod>) on A20, A21, 2.6, 3.0 and 3.1.
+    //
+    //   2. The mod ROOTS those paths sit in, listed directly. The loaded list is
+    //      fixed when the game starts, so a pack dropped in while it runs is invisible
+    //      to pass 1 forever — and "restart the game" is a poor answer when the thing
+    //      you added is a folder of music files. A music pack is DATA: the game not
+    //      having loaded it means its code did not run, and a music pack has no code.
+    //      So a folder is taken if it holds a ModInfo.xml (the same marker the game
+    //      requires, so removing that file still disables it) and a Music folder.
+    //
+    // The roots come from the loaded mods' own parents rather than a game API, because
+    // ModsBasePath is private before 2.6. That finds every root with at least one
+    // loaded mod in it, which in practice is all of them — CMM itself is in one, and
+    // TFP_Harmony is usually in the other.
     // ─────────────────────────────────────────────────────────────────────────
     internal static class MusicRootsDiscovery
     {
@@ -66,10 +75,13 @@ namespace CMM
         internal static int Discover(string modPath)
         {
             var found = new List<MusicRoot>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var modRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 string ownMusic = MusicRoots.Normalize(Path.Combine(modPath, MusicFolderName));
 
+                // ── pass 1: what the game loaded ──────────────────────────────
                 foreach (Mod m in ModManager.GetLoadedMods())
                 {
                     if (m == null) continue;
@@ -91,14 +103,61 @@ namespace CMM
                     try { exists = Directory.Exists(music); } catch { continue; }
                     if (!exists) continue;
 
+                    if (!seen.Add(music)) continue;
                     found.Add(new MusicRoot { Path = music, Label = NameOf(m) });
-                    if (found.Count >= MaxAddonRoots)
+                    if (found.Count >= MaxAddonRoots) break;
+                }
+
+                // The roots those mods live in — the parent of each mod folder.
+                foreach (Mod m in ModManager.GetLoadedMods())
+                {
+                    try
                     {
-                        Log.Warning($"[CMM] more than {MaxAddonRoots} mods carry a {MusicFolderName} "
-                                  + "folder; ignoring the rest. Raise MaxAddonRoots if this is real.");
-                        break;
+                        string mp = m?.Path;
+                        if (string.IsNullOrEmpty(mp)) continue;
+                        string parent = Path.GetDirectoryName(MusicRoots.Normalize(mp));
+                        if (!string.IsNullOrEmpty(parent)) modRoots.Add(parent);
+                    }
+                    catch { }
+                }
+
+                // ── pass 2: mods added since the game started ─────────────────
+                int hot = 0;
+                foreach (string root in modRoots)
+                {
+                    if (found.Count >= MaxAddonRoots) break;
+                    string[] candidates;
+                    try { candidates = Directory.GetDirectories(root); } catch { continue; }
+                    Array.Sort(candidates, StringComparer.OrdinalIgnoreCase);
+                    foreach (string cand in candidates)
+                    {
+                        if (found.Count >= MaxAddonRoots) break;
+                        try
+                        {
+                            // Same marker the game itself requires, so deleting ModInfo.xml
+                            // still disables a pack exactly the way it always has.
+                            if (!File.Exists(Path.Combine(cand, "ModInfo.xml"))) continue;
+                            string music = MusicRoots.Normalize(Path.Combine(cand, MusicFolderName));
+                            if (string.Equals(music, ownMusic, StringComparison.OrdinalIgnoreCase)) continue;
+                            if (!Directory.Exists(music)) continue;
+                            if (!seen.Add(music)) continue;          // already found by pass 1
+                            found.Add(new MusicRoot
+                            {
+                                Path = music,
+                                Label = Path.GetFileName(cand) + " (not loaded)",
+                            });
+                            hot++;
+                        }
+                        catch { }
                     }
                 }
+                if (hot > 0)
+                    Log.Out($"[CMM] {hot} music folder(s) found in mods the game has NOT loaded "
+                          + "(added since startup). Their music plays; any code they carry does not "
+                          + "until the game is restarted.");
+                if (found.Count >= MaxAddonRoots)
+                    Log.Warning($"[CMM] hit the {MaxAddonRoots}-folder limit; ignoring any further "
+                              + $"{MusicFolderName} folders.");
             }
             catch (Exception ex)
             {
