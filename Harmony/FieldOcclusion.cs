@@ -278,6 +278,20 @@ namespace CMM
             catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }
         }
 
+        // Every cell needs reading again: a knob that changes what a BLOCK is worth invalidates
+        // all of the stored geometry, not a region of it. Costs one window refill, amortised at
+        // the usual per-frame budget, so the field stays usable (and conservative) while it runs.
+        internal static void RereadAll()
+        {
+            if (_f == IntPtr.Zero || !_earValid) return;
+            try
+            {
+                NativeField.cmm_fld_dirty(_f, Mathf.FloorToInt(_ear.x), Mathf.FloorToInt(_ear.y),
+                                          Mathf.FloorToInt(_ear.z), _range * 2 + 64);
+            }
+            catch { }
+        }
+
         // A door swung, a wall came down, a chunk arrived: mark those cells for re-reading. Cheap —
         // it queues work, it never touches the field. The next flood picks up whatever has been
         // re-read by then, which is why there is no "settling" state to get wrong.

@@ -47,6 +47,10 @@ namespace CMM
             "  cmm acoustics here       - level at the player, broken down by arrival\n" +
             "  cmm acoustics wall <n>   - how much material blocks (default 40.1, higher = more)\n" +
             "  cmm acoustics verb <n>   - room-sound level behind walls (default 7, lower = less)\n" +
+            "  cmm field                - field occlusion: the two taste knobs, live\n" +
+            "  cmm field detour <n>     - dB per block of detour (diffraction round a corner)\n" +
+            "  cmm field wall <n>       - dB for a fully solid block\n" +
+            "  cmm acoustics ray        - the route to the nearest speaker, cell by cell\n" +
             "  cmm sfx                  - radio clicks: test, jitter, samples on|off, vol"
 #if GV_V3
             + "\n" +
@@ -96,6 +100,8 @@ namespace CMM
             }
 #endif
 
+            if (sub == "field") { Out(FieldCommand(_params)); return; }
+
             if (sub == "acoustics" || sub == "ac")
             {
                 Out(AcousticsCommand(_params));
@@ -108,6 +114,55 @@ namespace CMM
             }
 
             Out("unknown subcommand '" + _params[0] + "'.\n" + Help);
+        }
+
+        // ── cmm field [detour|wall|pow] <n> ───────────────────────────────────────
+        // The field has exactly two pieces of TASTE in it, and taste is a listening judgement --
+        // it has to be made in game, on the same speaker, seconds apart. Every previous attempt to
+        // settle these from a log cost days and landed on the wrong number.
+        //
+        //   detour  what a block of going-the-long-way-round costs. This stands in for
+        //           DIFFRACTION: sound bending round a corner loses far more than the extra
+        //           metres, and at 0.35 a four-block detour was 1.4 dB where the real thing is
+        //           10-15. Safe to raise -- excess is material + (pathLength - straightLine) x
+        //           detour, so it scales ONLY genuine detour and open air stays at 0.
+        //   wall    what a fully solid block is worth, before the shape exponent.
+        //   pow     the shape of the partial-block curve.
+        //
+        // Nothing is written to disk: put the value you settle on into Config/radio.xml.
+        static string FieldCommand(List<string> p)
+        {
+#if GV_V3
+            string a = p.Count > 1 ? p[1].ToLowerInvariant() : "";
+            if ((a == "detour" || a == "wall" || a == "pow") && p.Count > 2
+                && float.TryParse(p[2], System.Globalization.NumberStyles.Float,
+                                  System.Globalization.CultureInfo.InvariantCulture, out float v))
+            {
+                string was;
+                if (a == "detour") { was = CMMConfig.WorldEmitterFieldDetourDb.ToString("0.00"); CMMConfig.WorldEmitterFieldDetourDb = v; }
+                else if (a == "wall") { was = CMMConfig.WorldEmitterFieldWallDb.ToString("0.0"); CMMConfig.WorldEmitterFieldWallDb = v; }
+                else { was = CMMConfig.WorldEmitterFieldWallPow.ToString("0.00"); CMMConfig.WorldEmitterFieldWallPow = v; }
+                // wall/pow change what each BLOCK is worth, so the stored geometry is now wrong and
+                // has to be read again; detour is used by the flood alone and lands by itself.
+                if (a != "detour") FieldOcclusion.RereadAll();
+                return "field " + a + ": " + was + " -> " + v.ToString("0.00")
+                     + (a == "detour" ? "  (next flood, ~0.3 s)"
+                                      : "  (re-reading the world, a second or two)")
+                     + "\n  " + FieldOcclusion.Status();
+            }
+            return "field occlusion knobs — dial these by ear while the music plays:"
+                 + "\n  detour " + CMMConfig.WorldEmitterFieldDetourDb.ToString("0.00")
+                 + "   dB per block of going the long way round (diffraction round a corner)"
+                 + "\n  wall   " + CMMConfig.WorldEmitterFieldWallDb.ToString("0.0")
+                 + "     dB for a fully solid block"
+                 + "\n  pow    " + CMMConfig.WorldEmitterFieldWallPow.ToString("0.00")
+                 + "   shape of the partial-block curve"
+                 + "\n  " + FieldOcclusion.Status()
+                 + "\n  " + FieldOcclusion.DescribeNearest()
+                 + "\n  usage: cmm field detour|wall|pow <n>   |   cmm acoustics ray";
+#else
+            return "field occlusion: not built into this game version";
+#endif
         }
 
         // ── cmm acoustics ─────────────────────────────────────────────────────────────
