@@ -661,7 +661,22 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
         anyInWindow = 1;
         int v = fld[widx(f, cx, cy, cz)];
         if (v == UNREACHED) continue;
-        acc += w * ((float)v / Q_PER_DB);
+        /* SUM ENERGY, NOT DECIBELS.
+         *
+         * Averaging the eight surrounding cells in dB says that an open cell at 0 dB and a cell
+         * inside a wall at 30 dB, half and half, is 15 dB. Physically it is about 3: the sound
+         * comes through the opening and barely notices the wall. Decibels are a logarithm, and
+         * averaging logarithms is averaging the wrong quantity -- the same mistake, in a different
+         * place, as summing two speakers' pan gains as amplitudes instead of powers.
+         *
+         * It shows up wherever a source sits NEXT TO geometry, which in practice is every speaker
+         * in the game, because they are mounted on walls. Measured: a speaker on a wall of an
+         * otherwise empty room read a flat 4.3-4.6 dB of occlusion from anywhere in the room, with
+         * clear line of sight and nothing between, and the number hardly moved as you walked up to
+         * it. Reported as "it sounds the same even if I'm 2 blocks away". At 1x1x1 cells the same
+         * scene reads 0.2-0.6 dB, which is the giveaway: it was never the geometry, it was the
+         * cells around it being blended the wrong way. */
+        acc += w * powf(10.0f, -((float)v / Q_PER_DB) * 0.1f);
         wsum += w;
     }
     /* NOTHING REACHABLE and NOTHING EVEN IN THE WINDOW are different answers.
@@ -675,7 +690,12 @@ static float sample_field(cmm_fld *f, const int *fld, float x, float y, float z)
      * This is what makes it safe to spend window height on horizontal resolution: a speaker two
      * storeys up now fades out of the field's opinion instead of being cut off by its edge. */
     if (wsum <= 1e-6f) return anyInWindow ? f->maxDb : 0.0f;
-    return acc / wsum;
+    {
+        float lin = acc / wsum;
+        if (lin <= 1e-12f) return f->maxDb;
+        float db = -10.0f * log10f(lin);
+        return db > f->maxDb ? f->maxDb : db;
+    }
 }
 
 /* The routed cost includes the detour charge for the whole path, so a source in clear air still

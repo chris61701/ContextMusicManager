@@ -336,11 +336,32 @@ int main(int argc, char** argv) {
             "worst %.2f dB at x=%.2f", worstStep, atX);
     }
 
-    /* ── THE PROPERTY THE WHOLE DESIGN IS FOR: a source moving is smooth ─────────────── */
+    /* ── THE PROPERTY THE WHOLE DESIGN IS FOR: a source moving is smooth ───────────────
+     * THROUGH THE OPENING, at z=30.5, which is where the hole in this scene is. It used to sweep
+     * z=32.5 while calling itself "through the doorway", so it actually walked the source straight
+     * into solid wall -- where a fast change is CORRECT, not a defect. It passed anyway because
+     * blending the surrounding cells in dB smeared the wall crossing into a ramp, and it started
+     * failing the moment that blend was corrected to sum energy. A test that only passes while a
+     * neighbouring bug is present is worse than no test.
+     *
+     * And on a DOORWAY, not the pinhole scene it inherited by being last in the file. A source
+     * squeezing through a single 1x1 hole genuinely changes fast -- 8 dB a block -- and holding
+     * that up as a smoothness failure would be measuring the sharpest geometry in the suite and
+     * calling the answer wrong. The property worth guarding is that an ordinary opening, the thing
+     * players actually walk through, produces a curve. */
+    {
+        memset(solid, 0, sizeof solid);
+        for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+        for (int y = 1; y < H; y++) for (int z = 0; z < W; z++) solid[40][y][z] = 1;
+        for (int y = 1; y <= 4; y++) for (int z = 30; z <= 31; z++) solid[40][y][z] = 0;
+        cmm_fld_dirty(f, 32, 8, 32, 4 * W);
+        fill_all(f);
+        cmm_fld_solve(f, 32.5f, 2.5f, 30.5f);
+    }
     float worst = 0, prev = -1;
     for (int i = 0; i <= 240; i++) {
-        float x = 34.0f + i * (14.0f / 240.0f);          /* walk a source through the doorway */
-        float v = cmm_fld_sample_db(f, x, 2.5f, 32.5f);
+        float x = 34.0f + i * (14.0f / 240.0f);          /* walk a source through the opening */
+        float v = cmm_fld_sample_db(f, x, 2.5f, 30.5f);
         if (prev >= 0) { float d = fabsf(v - prev) / (14.0f / 240.0f); if (d > worst) worst = d; }
         prev = v;
     }
