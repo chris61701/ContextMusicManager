@@ -31,9 +31,47 @@
 #ifdef _WIN32
   #include <windows.h>
   typedef CRITICAL_SECTION mix_mutex;
-  static void mix_mutex_init(mix_mutex* m) { InitializeCriticalSection(m); }
-  static void mix_lock(mix_mutex* m)       { EnterCriticalSection(m); }
-  static void mix_unlock(mix_mutex* m)     { LeaveCriticalSection(m); }
+  /* ONE-SHOT INIT, and not an optimisation.
+   *
+   * A CRITICAL_SECTION cannot be statically initialised, so g_lock used to come into
+   * existence inside cmm_mix_start. Every exported function that locks was therefore
+   * unsafe to call before the mixer had started: EnterCriticalSection on zeroed memory
+   * is undefined behaviour, and on Windows it faults deep inside ntdll rather than
+   * raising anything the managed side can catch. A game died exactly that way -- the
+   * emitter layer's 1 Hz diagnostic asked all 8 ring slots for their depth on a spawn
+   * where nothing had ever played, so the mixer had never started.
+   *
+   * Guarding 20 call sites would have left the 21st. Initialising on first use fixes
+   * the class. InitOnceExecuteOnce is an atomic load once initialised, and the audio
+   * callback never takes this lock (cmm_out has no locks at all), so nothing that has
+   * to be fast pays for it. */
+  static CRITICAL_SECTION g_mixCs;
+  /* 0 = not created, 1 = being created, 2 = ready. Interlocked rather than
+   * InitOnceExecuteOnce: that one needs _WIN32_WINNT >= 0x0600 and mingw's headers do
+   * not expose it here, so it compiled as an implicit declaration -- the compiler
+   * inventing a prototype for a function it had never seen. It linked and appeared to
+   * work, which is the worst possible outcome for a lock initialiser.
+   * The loser of the race spins; the window is one InitializeCriticalSection, and it
+   * can only ever happen once in the process. */
+  static volatile LONG g_mixCsState = 0;
+  static CRITICAL_SECTION* mix_cs(void) {
+      if (g_mixCsState != 2) {
+          if (InterlockedCompareExchange((LONG volatile*)&g_mixCsState, 1, 0) == 0) {
+              InitializeCriticalSection(&g_mixCs);
+              InterlockedExchange((LONG volatile*)&g_mixCsState, 2);
+          } else {
+              while (g_mixCsState != 2) Sleep(0);
+          }
+      }
+      return &g_mixCs;
+  }
+  /* The mix_mutex parameter is vestigial on Windows: there is exactly one mixer mutex in
+   * the process (g_lock), and routing every caller through mix_cs() is what makes
+   * "locked before start" impossible by construction. Kept in the signature so the
+   * POSIX branch and every call site stay identical. */
+  static void mix_mutex_init(mix_mutex* m) { (void)m; (void)mix_cs(); }
+  static void mix_lock(mix_mutex* m)       { (void)m; EnterCriticalSection(mix_cs()); }
+  static void mix_unlock(mix_mutex* m)     { (void)m; LeaveCriticalSection(mix_cs()); }
   static void mix_sleep_ms(int ms)         { Sleep((DWORD)ms); }
   static int  mix_now_ms(void)             { return (int)GetTickCount(); }
 #else
@@ -41,9 +79,13 @@
   #include <unistd.h>
   #include <time.h>
   typedef pthread_mutex_t mix_mutex;
-  static void mix_mutex_init(mix_mutex* m) { pthread_mutex_init(m, NULL); }
-  static void mix_lock(mix_mutex* m)       { pthread_mutex_lock(m); }
-  static void mix_unlock(mix_mutex* m)     { pthread_mutex_unlock(m); }
+  /* Same guarantee as the Windows branch above, for free: a pthread mutex CAN be
+   * statically initialised, so the single process-wide mixer mutex is valid from load
+   * and no caller can enter it before it exists. */
+  static pthread_mutex_t g_mixPm = PTHREAD_MUTEX_INITIALIZER;
+  static void mix_mutex_init(mix_mutex* m) { (void)m; }
+  static void mix_lock(mix_mutex* m)       { (void)m; pthread_mutex_lock(&g_mixPm); }
+  static void mix_unlock(mix_mutex* m)     { (void)m; pthread_mutex_unlock(&g_mixPm); }
   static void mix_sleep_ms(int ms)         { usleep((useconds_t)ms * 1000); }
   static int  mix_now_ms(void) {
       struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);

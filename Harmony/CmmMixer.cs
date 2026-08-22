@@ -258,6 +258,14 @@ namespace CMM
             if (rc != 0)
                 Log.Warning($"[CMM] Native mixer start failed (rc={rc}, err={err}) — custom audio will not play.");
             else
+            {
+                // The native g_lock is a CRITICAL_SECTION created INSIDE cmm_mix_start. Entering
+                // it before that is undefined behaviour, and on Windows it faults inside ntdll
+                // rather than throwing anything managed. Nothing that locks may be called until
+                // this is set. See EmitterRingStat.
+                _nativeStarted = true;
+            }
+            if (rc == 0)
                 Log.Out($"[CMM] Native mixer started{(Headless ? " (headless)" : "")}: {BusRate}Hz {BusChannels}ch, " +
                         $"ring {tight * 1000 / BusRate}–{max * 1000 / BusRate}ms (adaptive).");
 
@@ -356,10 +364,27 @@ namespace CMM
         // class — that point gets the HAM coloration; null = all speaker-class). Caller reuses the
         // buffers to avoid GC. All heard at once from the one decode. count 0 silences the voice's
         // spatial output until the next update.
+        // True once cmm_mix_start has actually run, which is the moment the native g_lock
+        // becomes a valid CRITICAL_SECTION. Volatile: set on whichever thread first creates
+        // the mixer, read from the frame loop.
+        static volatile bool _nativeStarted;
+        internal static bool NativeStarted => _nativeStarted;
+
         // Per-slot ring health, for the 1 Hz emitter line. 0 = frames queued, 1 = frames lost to
         // starvation, 2 = times re-cushioned. Returns -1 for a slot with no ring.
+        //
+        // MUST NOT be called before the mixer has started. cmm_mix_emitter_ring_stat takes
+        // g_lock, and g_lock is a CRITICAL_SECTION initialised inside cmm_mix_start -- entering
+        // it beforehand is undefined behaviour that faults inside ntdll. The try/catch below is
+        // no protection at all against that: an access violation in native code is not a
+        // managed exception, so nothing catches it and the process dies.
+        //
+        // This is exactly how the game died on a spawn where the mixer had never started: the
+        // emitter layer's 1 Hz diagnostic line calls this for all 8 slots regardless of whether
+        // anything is playing, so a session that only ever used vanilla audio still reached it.
         public static int EmitterRingStat(int slot, int what)
         {
+            if (!_nativeStarted) return -1;      // no mixer, therefore no rings, and no lock to take
             try { return NativeMix.cmm_mix_emitter_ring_stat(slot, what); }
             catch { return -1; }
         }
