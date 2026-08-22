@@ -88,21 +88,11 @@ namespace CMM
         // which on a ten-thousand-track folder is milliseconds of main thread and a
         // fresh 80 KB array, three times, for an identical answer.
         //
-        // Only cached when NO ban or favourite flags are in play. Those come from
-        // keybinds and can change at any moment, and TrackRotation deliberately knows
-        // nothing about the store they live in, so it cannot tell when they have. With
-        // no flags set — the overwhelmingly common case — the answer depends on exactly
-        // three things, all checked by reference or counter.
-        //
-        // KEYING ON ARRAY IDENTITY IS ONLY SAFE BECAUSE ContextCache.directorySnapshot is
-        // always REPLACED, never edited in place — every writer (the crawler's partial
-        // publishes, the watch diff, the presence scan, the missing-file prune, the
-        // config reload) assigns a freshly built array, which is also what makes the
-        // snapshot lock-free for the reader threads. If anything ever starts mutating one
-        // in place, this cache goes stale silently and the bag starts handing out tracks
-        // that are no longer in the folder.
-        private string[] _cachePool, _cacheOut;
+        // See Weigh() for what this caches and why it is safe to key on array identity.
+        private string[] _cachePool;
         private string   _cacheAvoid;
+        private int      _cacheMemory;
+        private int      _cacheKeep, _cachePlayable;
         private int      _version;          // bumped whenever what has played changes
         private int      _cacheVersion = -1;
 
@@ -139,84 +129,34 @@ namespace CMM
             if (c <= 1) _plays.Remove(old); else _plays[old] = c - 1;
         }
 
-        // The tracks this context may play right now: `pool` minus what it has already
-        // used up this cycle, minus banned tracks, minus `avoid` (the track just
-        // played). Returns `pool` itself — no allocation — whenever nothing is filtered
-        // out, which is every pick of a folder with no bans and nothing played yet.
+        // The tracks this context may play right now, MATERIALISED — and nothing in the mod
+        // calls it. It is the harness's oracle: Select walks the pool without ever building
+        // this list, so CmmRotationTest pins the two together by drawing from Select twenty
+        // thousand times and asserting the reachable set is exactly what this returns. Both
+        // go through Keeps(), so they cannot disagree about the RULE; the test is what stops
+        // them disagreeing about the traversal.
         //
-        // The avoid filter is FUSED IN rather than applied by the caller afterwards.
-        // Done separately it costs a second full-array copy on every pick, which at a
-        // ten-thousand-track folder is 80 KB of garbage and a millisecond of main
-        // thread for nothing.
+        // Select does not use it because at a hundred thousand tracks this array is 781 KB,
+        // measured, on every pick — over the 85 KB large-object-heap threshold, which is
+        // reached at about 10,600 tracks. Music folders that big are exactly what the
+        // recursive crawler exists for.
+        //
+        // Unlike Select this never refills a spent pass: it is a question, not a move.
         internal string[] Eligible(string[] pool, int memory, string avoid,
                                    TrackFlag banned, TrackFlag favourite, int favouriteAllowance)
         {
             if (pool == null || pool.Length == 0) return pool;
 
-            bool cacheable = banned == null && favourite == null;
-            if (cacheable && _cacheVersion == _version
-                && ReferenceEquals(pool, _cachePool) && ReferenceEquals(avoid, _cacheAvoid))
-                return _cacheOut;
-
-            int keep, playable;
-            Count(pool, memory, avoid, banned, favourite, favouriteAllowance, out keep, out playable);
-
-            // Nothing left to play but something COULD be played: the cycle is spent, so
-            // refill. `playable` counts tracks that are neither banned nor the just-played
-            // one, and it is what stops the counter spinning on a folder where nothing
-            // else exists to switch to — one unbanned track, or one track full stop.
-            if (keep == 0 && playable > 0 && memory != Off)
-            {
-                Reset();
-                Cycle++;
-                Count(pool, memory, avoid, banned, favourite, favouriteAllowance, out keep, out playable);
-            }
-
-            string[] outp;
-            if (keep == 0 || keep == pool.Length)
-            {
-                // keep == 0: all banned, or the pool is nothing but `avoid` — the caller's
-                // roll deals with both. keep == pool.Length: nothing was filtered, so hand
-                // back the original rather than copying it.
-                outp = pool;
-            }
-            else
-            {
-                outp = new string[keep];
-                int n = 0;
-                for (int i = 0; i < pool.Length && n < keep; i++)
-                    if (Keeps(pool[i], memory, avoid, banned, favourite, favouriteAllowance)) outp[n++] = pool[i];
-            }
-
-            if (cacheable)
-            {
-                _cachePool = pool; _cacheAvoid = avoid; _cacheOut = outp; _cacheVersion = _version;
-            }
-            return outp;
-        }
-
-        // keep     = pickable right now (not banned, not `avoid`, still under allowance)
-        // playable = would be pickable if the cycle refilled (not banned, not `avoid`)
-        private void Count(string[] pool, int memory, string avoid,
-                           TrackFlag banned, TrackFlag favourite, int favouriteAllowance,
-                           out int keep, out int playable)
-        {
-            keep = 0; playable = 0;
-            // Fresh cycle with no bans and no avoid: everything qualifies, and skipping
-            // the per-track dictionary probe is what keeps a big folder cheap.
-            if (_plays.Count == 0 && banned == null && avoid == null)
-            {
-                keep = playable = pool.Length;
-                return;
-            }
+            int keep = 0;
             for (int i = 0; i < pool.Length; i++)
-            {
-                string f = pool[i];
-                if (banned != null && banned(f)) continue;
-                if (avoid != null && string.Equals(f, avoid, StringComparison.OrdinalIgnoreCase)) continue;
-                playable++;
-                if (memory == Off || UnderAllowance(f, favourite, favouriteAllowance)) keep++;
-            }
+                if (Keeps(pool[i], memory, avoid, banned, favourite, favouriteAllowance)) keep++;
+            if (keep == pool.Length) return pool;   // nothing filtered; hand back the original
+
+            var outp = new string[keep];
+            int n = 0;
+            for (int i = 0; i < pool.Length && n < keep; i++)
+                if (Keeps(pool[i], memory, avoid, banned, favourite, favouriteAllowance)) outp[n++] = pool[i];
+            return outp;
         }
 
         private bool Keeps(string f, int memory, string avoid,
@@ -239,15 +179,26 @@ namespace CMM
                                  int favouriteAllowance)
         {
             if (pool == null) return 0;
-            int keep, playable;
-            Count(pool, memory, null, banned, favourite, favouriteAllowance, out keep, out playable);
+            int keep = 0;
+            for (int i = 0; i < pool.Length; i++)
+                if (Keeps(pool[i], memory, null, banned, favourite, favouriteAllowance)) keep++;
             return keep;
         }
 
         // ── The whole RandomNoRepeat selection ────────────────────────────────
-        // Bag + one-track avoid + cycle seam in one filter, then the weighted roll.
-        // Returns null only when every track in the pool is banned, which the caller
-        // treats as an empty folder.
+        // Bag + one-track avoid + cycle seam + weighted roll, and NOTHING IS ALLOCATED.
+        //
+        // The obvious shape — filter the pool into a candidates array, then roll over it —
+        // costs one array copy per pick, which is fine at a few hundred tracks and is not
+        // fine at a hundred thousand: 781 KB, measured, on every pick. Anything over about
+        // 10,600 tracks puts that copy on the LARGE OBJECT HEAP, which is only reclaimed by
+        // a gen2 collection and is not compacted. Music folders that big are exactly what
+        // the recursive crawler exists for, so the array is never built at all. Instead:
+        // one pass to total the eligible weight, a draw, and a second pass to walk to the
+        // track that draw landed on.
+        //
+        // The eligibility RULE is shared with Eligible() below (both go through Keeps), so
+        // the two cannot drift on what counts as playable — only on how they traverse.
         internal string Select(string[] pool, int memory, string avoid,
                                TrackFlag banned, TrackFlag favourite, float favouriteWeight,
                                TrackRng rng)
@@ -257,19 +208,97 @@ namespace CMM
             // refill on every play would just spin the cycle counter.
             if (pool.Length == 1) return (banned != null && banned(pool[0])) ? null : pool[0];
 
-            string[] candidates = Eligible(pool, memory, avoid, banned, favourite,
-                                           Allowance(favouriteWeight));
+            int allowance = Allowance(favouriteWeight);
+            float w = favouriteWeight < 1f ? 1f : favouriteWeight;
 
-            // No retry needed on a null. Eligible either filtered the banned tracks out of
-            // `candidates` — in which case the roll cannot come up empty — or handed back
-            // the whole pool untouched, and the roll's own ban handling is then the only
-            // thing that can return null. Either way a null here means the folder really is
-            // entirely banned, which the caller treats as an empty one.
+            double total;
+            int keep, playable;
+            Weigh(pool, memory, avoid, banned, favourite, allowance, w, out keep, out playable, out total);
+
+            // Nothing left to play but something COULD be played: the pass is spent, refill.
+            // `playable` ignores the bag, so it is what distinguishes "this pass is done"
+            // from "there is genuinely nothing else in this folder to switch to" — the
+            // latter must not spin the counter.
+            if (keep == 0 && playable > 0 && memory != Off)
+            {
+                Reset();
+                Cycle++;
+                Weigh(pool, memory, avoid, banned, favourite, allowance, w, out keep, out playable, out total);
+            }
+
+            // Still nothing: every track is banned, or the only unbanned one is the track
+            // already playing. Re-weigh ignoring both the bag and the avoid so that lone
+            // track replays rather than the context falling silent; a zero here means the
+            // folder really is entirely banned, which the caller treats as an empty one.
+            if (keep == 0)
+            {
+                Weigh(pool, Off, null, banned, favourite, allowance, w, out keep, out playable, out total);
+                if (keep == 0) return null;
+                return Walk(pool, Off, null, banned, favourite, allowance, w, total, rng);
+            }
+            return Walk(pool, memory, avoid, banned, favourite, allowance, w, total, rng);
+        }
+
+        // Pass 1: how many tracks are playable, and what do their weights add up to.
+        // `total` is the roll's denominator — each favourite counts favouriteWeight×.
+        private void Weigh(string[] pool, int memory, string avoid,
+                           TrackFlag banned, TrackFlag favourite, int allowance, float w,
+                           out int keep, out int playable, out double total)
+        {
+            // Cached across the picks of one track change: the staged pin, the pre-staged
+            // advance and the play itself all ask, and nothing that decides the answer moves
+            // between them. Only when no flags are set — those come from keybinds and this
+            // class deliberately cannot see the store they live in.
             //
-            // The case that used to need the retry (everything except the playing track is
-            // banned) now falls out of Eligible: keep lands at 0, there is nothing to
-            // refill to, and the pool comes back whole so the roll replays that one track.
-            return Roll(candidates, rng, banned, favourite, favouriteWeight);
+            // Keying on array identity is only safe because ContextCache.directorySnapshot
+            // is always REPLACED, never edited in place: every writer (the crawler's partial
+            // publishes, the watch diff, the presence scan, the missing-file prune, the
+            // config reload) assigns a freshly built array, which is also what makes the
+            // snapshot lock-free for its readers.
+            bool cacheable = banned == null && favourite == null;
+            if (cacheable && _cacheVersion == _version && _cacheMemory == memory
+                && ReferenceEquals(pool, _cachePool) && ReferenceEquals(avoid, _cacheAvoid))
+            {
+                keep = _cacheKeep; playable = _cachePlayable; total = _cacheKeep;
+                return;
+            }
+
+            keep = 0; playable = 0; total = 0.0;
+            for (int i = 0; i < pool.Length; i++)
+            {
+                string f = pool[i];
+                if (banned != null && banned(f)) continue;
+                if (avoid != null && string.Equals(f, avoid, StringComparison.OrdinalIgnoreCase)) continue;
+                playable++;
+                if (memory != Off && !UnderAllowance(f, favourite, allowance)) continue;
+                keep++;
+                total += (favourite != null && favourite(f)) ? w : 1.0;
+            }
+
+            if (cacheable)
+            {
+                _cachePool = pool; _cacheAvoid = avoid; _cacheMemory = memory;
+                _cacheKeep = keep; _cachePlayable = playable; _cacheVersion = _version;
+            }
+        }
+
+        // Pass 2: walk to the track the draw landed on. `last` covers the floating-point
+        // edge where the roll lands exactly on the total.
+        private string Walk(string[] pool, int memory, string avoid,
+                            TrackFlag banned, TrackFlag favourite, int allowance, float w,
+                            double total, TrackRng rng)
+        {
+            double roll = rng() * total;
+            string last = null;
+            for (int i = 0; i < pool.Length; i++)
+            {
+                string f = pool[i];
+                if (!Keeps(f, memory, avoid, banned, favourite, allowance)) continue;
+                last = f;
+                roll -= (favourite != null && favourite(f)) ? w : 1.0;
+                if (roll < 0.0) return f;
+            }
+            return last;
         }
 
         // A favourite's turns per pass. FavouriteWeight is a float because it is a weight

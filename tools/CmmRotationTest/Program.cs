@@ -57,6 +57,8 @@ internal static class Program
 
         Section("Allocation");
         FreshCycleReturnsThePoolItself();
+        SelectAllocatesNothing();
+        SelectAndEligibleAgree();
         CacheDoesNotGoStale();
 
         EdgeCases.Run();
@@ -434,51 +436,116 @@ internal static class Program
         string[] off = rot.Eligible(pool, TrackRotation.Off, null, null, null, 1);
         Check("memory=0 hands back the pool itself, no copy", ReferenceEquals(off, pool));
 
-        // The avoid filter is fused into the same pass, so a pick mid-cycle allocates
-        // ONE array rather than one for the bag and another for the avoid.
         rot.Commit(pool[0], TrackRotation.WholePool);
         string[] mid = rot.Eligible(pool, TrackRotation.WholePool, pool[1], null, null, 1);
-        Check("mid-pass, bag and avoid come out of one array",
+        Check("bag and avoid are filtered in one pass",
               mid.Length == pool.Length - 2 && !mid.Contains(pool[0]) && !mid.Contains(pool[1]),
               mid.Length + " of " + pool.Length);
     }
 
-    // The eligible-set cache is the one piece of state that can go stale and produce a
-    // WRONG pick rather than a slow one, so every way it can be invalidated is asserted.
+    // THE POINT OF THE WHOLE TWO-PASS SHAPE. Building a candidate array costs one copy of
+    // the pool per pick; past ~10,600 tracks that copy is over the 85 KB large-object-heap
+    // threshold, so a big music folder would drop an LOH object on every track change —
+    // 781 KB at a hundred thousand tracks, measured. Select walks the pool instead. This
+    // asserts the result directly rather than trusting the code to have stayed that way.
+    static void SelectAllocatesNothing()
+    {
+        string[] pool = Pool(50000);
+        var rot = new TrackRotation();
+        string last = null;
+        for (int i = 0; i < 20; i++)   // warm up: JIT, dictionary growth, first-pass state
+        {
+            last = rot.Select(pool, TrackRotation.WholePool, last, null, null, 3f, Rng(i));
+            rot.Commit(last, TrackRotation.WholePool);
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 200; i++)
+            rot.Select(pool, TrackRotation.WholePool, last, null, null, 3f, Rng(500 + i));
+        long perPick = (GC.GetAllocatedBytesForCurrentThread() - before) / 200;
+        Console.WriteLine($"      50,000-track folder, 200 picks: {perPick} bytes allocated per pick");
+        Check("a pick over a 50,000-track folder allocates essentially nothing",
+              perPick < 256, perPick + " bytes");
+
+        // And with a ban set present, where the count cannot be cached at all.
+        var banned = new HashSet<string> { pool[7] };
+        rot.Select(pool, TrackRotation.WholePool, last, p => banned.Contains(p), null, 3f, Rng(9));
+        before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 200; i++)
+            rot.Select(pool, TrackRotation.WholePool, last, p => banned.Contains(p), null, 3f, Rng(600 + i));
+        perPick = (GC.GetAllocatedBytesForCurrentThread() - before) / 200;
+        Check("...and still nothing when bans are in play", perPick < 256, perPick + " bytes");
+    }
+
+    // Select walks the pool and Eligible materialises it. They share the eligibility rule
+    // but not the traversal, so this pins them together: everything Select can return must
+    // be in Eligible, and everything in Eligible must be reachable by Select.
+    static void SelectAndEligibleAgree()
+    {
+        string[] pool = Pool(40);
+        var favs = new HashSet<string> { pool[3], pool[9] };
+        var bans = new HashSet<string> { pool[1], pool[2] };
+        TrackFlag ban = p => bans.Contains(p), fav = p => favs.Contains(p);
+        var rot = new TrackRotation();
+        for (int i = 0; i < 7; i++) rot.Commit(pool[10 + i], TrackRotation.WholePool);
+
+        string avoid = pool[20];
+        var expected = new HashSet<string>(
+            rot.Eligible(pool, TrackRotation.WholePool, avoid, ban, fav, TrackRotation.Allowance(3f)));
+        var actual = new HashSet<string>();
+        for (int i = 0; i < 20000; i++)
+            actual.Add(rot.Select(pool, TrackRotation.WholePool, avoid, ban, fav, 3f, Rng(7000 + i)));
+
+        Check("Select never returns anything Eligible excludes",
+              actual.All(expected.Contains),
+              string.Join(",", actual.Where(a => !expected.Contains(a)).Select(System.IO.Path.GetFileName)));
+        Check("Select can reach every track Eligible includes",
+              expected.All(actual.Contains),
+              string.Join(",", expected.Where(e => !actual.Contains(e)).Select(System.IO.Path.GetFileName)));
+        Check("neither of them counted the banned or avoided tracks",
+              !expected.Contains(pool[1]) && !expected.Contains(pool[2]) && !expected.Contains(avoid));
+    }
+
+    // The cached eligible COUNT is the one piece of state that can go stale and produce a
+    // wrong pick rather than a slow one, so every way it can be invalidated is asserted —
+    // through behaviour, since the count itself is not observable from outside.
     static void CacheDoesNotGoStale()
     {
         string[] pool = Pool(100);
         var rot = new TrackRotation();
         rot.Commit(pool[0], TrackRotation.WholePool);
 
-        string[] a = rot.Eligible(pool, TrackRotation.WholePool, pool[1], null, null, 1);
-        string[] b = rot.Eligible(pool, TrackRotation.WholePool, pool[1], null, null, 1);
-        Check("an identical repeat pick reuses the array (no recompute, no garbage)",
-              ReferenceEquals(a, b));
-
+        // A play must be visible to the very next pick.
         rot.Commit(pool[2], TrackRotation.WholePool);
-        string[] c = rot.Eligible(pool, TrackRotation.WholePool, pool[1], null, null, 1);
-        Check("a play invalidates it", !ReferenceEquals(a, c) && !c.Contains(pool[2]));
+        var seen = new HashSet<string>();
+        for (int i = 0; i < 4000; i++)
+            seen.Add(rot.Select(pool, TrackRotation.WholePool, pool[1], null, null, 3f, Rng(8000 + i)));
+        Check("a play invalidates the cached count", !seen.Contains(pool[2]) && !seen.Contains(pool[0]));
+        Check("and the avoid is honoured on every one of 4000 picks", !seen.Contains(pool[1]));
 
-        string[] d = rot.Eligible(pool, TrackRotation.WholePool, pool[3], null, null, 1);
-        Check("a different avoid invalidates it", !c.Contains(pool[1]) && !d.Contains(pool[3]));
-
-        string[] grown = pool.Concat(new[] { "new.ogg" }).ToArray();
-        string[] g = rot.Eligible(grown, TrackRotation.WholePool, pool[3], null, null, 1);
-        Check("a rescanned pool invalidates it", g.Contains("new.ogg"));
+        // A rescanned pool must be picked up even though nothing has played since.
+        string[] grown = pool.Concat(new[] { "brand_new.ogg" }).ToArray();
+        var seen2 = new HashSet<string>();
+        for (int i = 0; i < 4000; i++)
+            seen2.Add(rot.Select(grown, TrackRotation.WholePool, pool[1], null, null, 3f, Rng(9000 + i)));
+        Check("a rescanned pool invalidates it", seen2.Contains("brand_new.ogg"));
 
         rot.Reset();
-        string[] r = rot.Eligible(grown, TrackRotation.WholePool, pool[3], null, null, 1);
-        Check("a reset invalidates it", r.Contains(pool[0]) && r.Contains(pool[2]));
+        var seen3 = new HashSet<string>();
+        for (int i = 0; i < 4000; i++)
+            seen3.Add(rot.Select(grown, TrackRotation.WholePool, pool[1], null, null, 3f, Rng(9500 + i)));
+        Check("a reset invalidates it", seen3.Contains(pool[0]) && seen3.Contains(pool[2]));
 
-        // With flags in play the cache is skipped outright — it cannot see a keypress
-        // toggling a ban, so it must never answer from memory.
-        var banned = new HashSet<string>();
-        string[] f1 = rot.Eligible(grown, TrackRotation.WholePool, null, p => banned.Contains(p), null, 1);
-        banned.Add(pool[5]);
-        string[] f2 = rot.Eligible(grown, TrackRotation.WholePool, null, p => banned.Contains(p), null, 1);
-        Check("banning a track mid-pass takes effect on the very next pick",
-              f1.Contains(pool[5]) && !f2.Contains(pool[5]));
+        // Changing the MEMORY invalidates it too — the same pool and the same plays give a
+        // different answer under a window than under the whole pool.
+        var rot2 = new TrackRotation();
+        for (int i = 0; i < 30; i++) rot2.Commit(pool[i], 5);
+        string wholePool = rot2.Select(pool, TrackRotation.WholePool, null, null, null, 3f, Rng(9900));
+        bool windowCanReturnAnEarlyTrack = false;
+        for (int i = 0; i < 2000 && !windowCanReturnAnEarlyTrack; i++)
+            if (Array.IndexOf(pool, rot2.Select(pool, 5, null, null, null, 3f, Rng(9910 + i))) < 25)
+                windowCanReturnAnEarlyTrack = true;
+        Check("switching the memory setting invalidates it", windowCanReturnAnEarlyTrack);
     }
 
     // ── What it actually changes ─────────────────────────────────────────────
