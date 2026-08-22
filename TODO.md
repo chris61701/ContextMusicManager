@@ -57,6 +57,27 @@ verification — emitters are excluded there anyway.
 
 ## Audio engine — the remaining list (set 2026-08-21)
 
+- [ ] **A half block or a shut door in YOUR OWN cell does not occlude you** *(reported
+  2026-08-21 after the corner fix)*. Stand where a half block is — you are in the open half,
+  the sound is beyond the solid half — and it plays as though the block were not there. Same
+  standing on the closed side of a shut door, inside the door's own cell.
+  - **Why.** Cells are one block. `CellNumbers` gives a cell ONE number per face, so a half
+    block makes its cell equally blocking from every direction; it cannot say "the material is
+    at x=0.5 within me, and which side you are on decides whether you are behind it". A door
+    leaf is the same shape of problem — a plane inside a cell.
+  - **And the listener's own cell is seeded**, so whatever material is in it is bypassed
+    entirely. The seeds were made to pay one move (`7329a66`), but that charges the move OUT of
+    the cell, not the material standing INSIDE it between you and the source.
+  - So the failure is worst exactly where it is most noticeable: you are touching the thing
+    that should be blocking you.
+  - **Candidate directions**, none costed yet: charge the listener's own cell's material along
+    the direction of travel at seed time; or give the seed sphere sub-cell awareness so a seed
+    on the far side of in-cell material pays for it; or resolve the listener's immediate
+    neighbourhood at half-cell scale and leave the rest coarse. The first is cheapest and
+    probably enough, since the complaint is always about the cell you are standing in.
+  - Related but distinct from the diagonal corner leak (`99edffb`) — that was routes passing
+    BETWEEN cells, this is material INSIDE one.
+
 - [ ] **Port the occlusion output shaping into the field.** THE LAST THING the audio engine
   needs. The per-door gap tuning (`WorldEmitterDoorGapOverrides`, hand-tuned per door type
   2026-07-08) was calibrated through `EmitterAcoustics.ShapeOcclusion`, and the field replaced

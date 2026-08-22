@@ -112,6 +112,36 @@ Do not port anything until the numbers feel right in the lab.
   cut-off" is the same soft-mute stage, driven by distance/occlusion instead of dial
   detuning. Build the chain once and drive its `S` from either source.
 
+## What to actually test at the bench
+
+Run in this order — each answers something the next depends on.
+
+1. **Load four real tracks** from folders you actually listen to, not the demo tones. The demo
+   stations exist so the dial can be felt before anything is loaded; they are not what the
+   numbers should be settled against.
+2. **Sweep slowly across one station and back**, and decide the single most important thing:
+   does the music arrive *dull and mono under the hiss*, or does it arrive clean and merely
+   quiet? If it is the latter, high-cut and blend are doing nothing and the whole thing reads
+   as a volume fade. Fix that before touching anything else.
+3. **Park between two adjacent stations** and listen for the flutter. Real receivers wobble
+   between two signals of equal strength. If it is absent it will sound like a dead zone; if it
+   is overdone it sounds broken. `RadioDialFlutterDb` / `RadioDialFlutterHz`.
+4. **Then set the capture ratio.** Sweep from one station to its neighbour: you should get one,
+   then noise, then the other — never both at once. 3–4 dB is real; higher blends them.
+5. **Then station spacing.** Wide = clean stations with dead air between, narrow = a crowded
+   band. This decides whether the dial feels like a city or a back road.
+6. **Only then the dial feel** — nudge per press, hold-sweep rate, seek glide. These are
+   comfort, and settling them before the sound is settled wastes the pass.
+7. **Export and paste** the block into `Config/radio.xml`.
+
+Two questions to answer while you are there, because they change what gets built:
+
+- Should the dial REST between stations, or spring to the nearest? Resting is more authentic
+  and gives you a noise-only position; springing is kinder with a keyboard.
+- Should `Alt+PgUp/PgDn` keep its current "next station" meaning with the transition swept, or
+  become a genuine continuous dial? The lab does both — set the nudge large and the glide long
+  for the first, small and short for the second.
+
 ## Open questions for the bench session
 
 - Is a continuous dial right at all, or should stations stay on detented steps with only
