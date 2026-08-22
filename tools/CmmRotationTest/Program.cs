@@ -62,7 +62,9 @@ internal static class Program
         CacheDoesNotGoStale();
 
         EdgeCases.Run();
+        Frequency.Run();
         LiveFiles.Run();
+        LiveChurn.Run();
 
         Section("What it actually changes");
         HowSoonDoesATrackComeBack();
