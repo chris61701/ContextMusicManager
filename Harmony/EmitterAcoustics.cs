@@ -932,7 +932,16 @@ namespace CMM
             // a long session across many POIs should not accumulate for ever. Dropping the lot is
             // fine — each one is re-learned the next time its door is stood in or opened.
             if (_leafPlanes.Count > 1024) _leafPlanes.Clear();
+            bool isNew = !_leafPlanes.ContainsKey(parent);
             _leafPlanes[parent] = new LeafPlane { Type = type, Min = wmin, Max = wmax };
+            if (isNew && CMMConfig.DebugLogging)
+            {
+                Vector3 e = wmax - wmin;
+                Block lb = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
+                CMMConfig.D($"[CMM] Aperture learned {(lb != null ? lb.GetBlockName() : "?")} at {parent} " +
+                            $"extent {e.x:0.00}x{e.y:0.00}x{e.z:0.00} " +
+                            $"world {wmin.x:0.00},{wmin.y:0.00},{wmin.z:0.00} -> {wmax.x:0.00},{wmax.y:0.00},{wmax.z:0.00}");
+            }
         }
 
         // The reader's one entry point for "where is this door's material, inside this cell".
@@ -1166,7 +1175,11 @@ namespace CMM
         private static readonly Dictionary<Vector3i, DoorAnim> _doors = new Dictionary<Vector3i, DoorAnim>();
         private static readonly HashSet<int> _doorTypes = new HashSet<int>();   // block types the hook has seen animate
         private static readonly List<Vector3i> _doorPrune = new List<Vector3i>();
-        private static int _doorCellsBlended;   // diagnostic: cells the door branch blended last tick
+        private static int _doorCellsBlended;       // door-branch cell reads, THIS tick (still counting)
+        private static int _doorCellsBlendedPrev;   // ...and the finished count, which is the one to print:
+                                                    // DoorTrace is emitted from inside RefreshDoorAnim, which
+                                                    // has just zeroed the live counter, so printing that always
+                                                    // read `cells=0` and looked like the branch never ran.
 
         // The door hook can fire OFF the main thread (7D2D runs door animation/physics on job threads), so it
         // must NOT touch _doors/_doorTypes directly — doing so raced RefreshDoorAnim's enumeration and the
@@ -1302,7 +1315,7 @@ namespace CMM
         // the top of ComputeOcclusion, before any CellLoss. Main-thread only.
         private static void RefreshDoorAnim(World world)
         {
-            _doorCellsBlended = 0;
+            _doorCellsBlendedPrev = _doorCellsBlended; _doorCellsBlended = 0;
             // Drain any registrations the hook queued (possibly off-thread) into the main-thread collections.
             lock (_doorLock)
             {
@@ -1416,7 +1429,7 @@ namespace CMM
                             $"t={Time.realtimeSinceStartup - da.StartedAt:0.000}s nt={t:0.000} len={swingLen:0.00}s " +
                             $"span={da.Span:0.##}m gap={physical * Mathf.Max(1f, da.Span):0.00}m " +
                             $"thresh={(da.Opening ? da.GapFullOpen : da.GapFull):0.00}/{da.GapClosed:0.00} open={da.Openness:0.000} " +
-                            $"cells={_doorCellsBlended}");
+                            $"at {parent} cells={_doorCellsBlendedPrev}");
             }
             return swingNt < 1f;   // still animating until the swing clip completes
         }

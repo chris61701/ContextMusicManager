@@ -583,10 +583,19 @@ namespace CMM
                                              Face(nX, 0f), Face(nY, 0f), Face(nZ, 0f),
                                              Face(pX, 0f), Face(pY, 0f), Face(pZ, 0f));
             if (CMMConfig.DebugLogging)
+            {
                 EarCellWhy = "cell " + cx + "," + cy + "," + cz + "  " + why
                            + "\n     published  -X " + Db(Face(nX, 0f)) + "  -Y " + Db(Face(nY, 0f))
                            + "  -Z " + Db(Face(nZ, 0f)) + "   +X " + Db(Face(pX, 0f))
                            + "  +Y " + Db(Face(pY, 0f)) + "  +Z " + Db(Face(pZ, 0f)) + "   (dB)";
+                // ONE LINE PER FRAME, BUT ONLY WHILE A DOOR IS MOVING. `cmm acoustics ray` can
+                // only ever sample this by hand, and a normal door's whole swing is 0.53 s — you
+                // cannot type during it, so the one case everybody keeps asking about has never
+                // actually been looked at. It costs nothing outside a swing, and a swing is
+                // ~30 frames. Pairs line-for-line with DoorTrace, which carries `open` and `nt`.
+                if (EmitterAcoustics.AnyDoorAnimating)
+                    CMMConfig.D("[CMM] EarTrace " + EarCellWhy.Replace("\n", " | "));
+            }
         }
 
         private static string Db(float t)
