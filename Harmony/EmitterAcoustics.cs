@@ -855,17 +855,34 @@ namespace CMM
             // door's colliders when a player is standing in the doorway (AnimatorDoorState's
             // obstacle check), which is how you can stand exactly where the leaf is. We want the
             // geometry, not whether it is currently pushing anybody.
+            //
+            // PICK THE LEAF; DO NOT UNION THE WHOLE PREFAB. Unioning is right for a plain door,
+            // whose prefab is one plate — and wrong for anything with a frame, rails or a housing,
+            // because the union of a plate and its two side rails is a BOX, and a box is on both
+            // sides of you at once. That is the isotropic lump the ear split exists to remove,
+            // reintroduced by the measurement. A 3x3 roll-up door has rails; an interior door does
+            // not, which is exactly the pair that behaved differently in game.
+            //
+            // A leaf is recognisable on its own: thin one way, broad the other two. A rail is thin
+            // TWO ways and fails. So take the biggest single collider that is leaf-shaped, and only
+            // fall back to the union when nothing looks like a leaf at all.
             bool any = false; Bounds acc = new Bounds();
+            bool anyLeaf = false; Bounds leaf = new Bounds(); float leafArea = -1f;
             for (int i = 0; i < cols.Length; i++)
             {
                 if (cols[i] == null) continue;
                 Bounds wb = cols[i].bounds;                 // world, in RENDER space
                 if (wb.size.sqrMagnitude <= 1e-6f) continue;
                 if (!any) { acc = wb; any = true; } else acc.Encapsulate(wb);
+                if (!IsLeafShaped(wb.size)) continue;
+                Vector3 e = wb.size;                        // plate area = the two broad extents
+                float area = (e.x * e.y * e.z) / Mathf.Max(1e-4f, Mathf.Min(e.x, Mathf.Min(e.y, e.z)));
+                if (area > leafArea) { leafArea = area; leaf = wb; anyLeaf = true; }
             }
             if (!any) return false;
-            wmin = acc.min + Origin.position;               // render space -> world blocks
-            wmax = acc.max + Origin.position;
+            Bounds use = anyLeaf ? leaf : acc;
+            wmin = use.min + Origin.position;               // render space -> world blocks
+            wmax = use.max + Origin.position;
             return true;
         }
 
@@ -922,9 +939,12 @@ namespace CMM
         // deriving the axis from rotation could only ever produce a vertical plane — a shut hatch
         // that does not block a floor), it keeps the deliberate prefab offsets, and it rejects a
         // prefab whose collider union swallowed the frame rather than recording the frame as a door.
-        private static bool IsThinLeaf(Vector3 wmin, Vector3 wmax)
+        private static bool IsThinLeaf(Vector3 wmin, Vector3 wmax) => IsLeafShaped(wmax - wmin);
+
+        // Thin ONE way, broad the other TWO. A leaf passes; a rail, a post or a handle is thin two
+        // ways and fails; a frame or a housing is broad three ways and fails.
+        private static bool IsLeafShaped(Vector3 e)
         {
-            Vector3 e = wmax - wmin;
             float big = -1f, mid = -1f, small = float.MaxValue;
             for (int k = 0; k < 3; k++)
             {
