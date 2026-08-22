@@ -1,0 +1,523 @@
+<title>CMM Tune Lab — the sound between stations</title>
+<style>
+  :root {
+    --bg: #14100c; --panel: #1e1811; --edge: #3a2f22; --ink: #f0e6d8; --dim: #a4917a;
+    --faint: #6d5f4c; --lamp: #ffb454; --lamp-dim: #6b4a1e; --sig: #6fd08c; --noise: #d4715e;
+    --font: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font);
+         font-size: 13px; line-height: 1.5; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 22px 18px 60px; }
+  h1 { font-size: 17px; margin: 0 0 2px; letter-spacing: .2px; font-weight: 600; }
+  .sub { color: var(--dim); margin: 0 0 20px; font-size: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 6px;
+          padding: 14px 16px; margin-bottom: 14px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim);
+       margin: 0 0 12px; font-weight: 600; }
+  h2 em { text-transform: none; letter-spacing: 0; color: var(--faint); font-style: normal;
+          font-weight: 400; margin-left: 8px; }
+  button { font-family: var(--font); font-size: 12px; background: #2a2117; color: var(--ink);
+           border: 1px solid var(--edge); border-radius: 4px; padding: 7px 13px; cursor: pointer; }
+  button:hover { border-color: var(--lamp-dim); background: #332818; }
+  button.on { background: var(--lamp); color: #1a1208; border-color: var(--lamp); font-weight: 600; }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grid { display: grid; grid-template-columns: 150px 1fr 74px; gap: 7px 12px; align-items: center; }
+  .grid label { color: var(--dim); font-size: 12px; }
+  .grid output { text-align: right; color: var(--lamp); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--lamp); }
+  canvas { width: 100%; height: 118px; display: block; border-radius: 4px; background: #100d09; }
+  .drop { border: 1px dashed var(--edge); border-radius: 5px; padding: 14px; text-align: center;
+          color: var(--dim); cursor: pointer; font-size: 12px; }
+  .drop:hover, .drop.over { border-color: var(--lamp); color: var(--ink); }
+  .drop b { color: var(--ink); }
+  pre { background: #100d09; border: 1px solid var(--edge); border-radius: 4px; padding: 11px;
+        overflow-x: auto; font-size: 12px; color: var(--sig); margin: 0; }
+  .note { color: var(--faint); font-size: 11.5px; margin: 9px 0 0; }
+  .ab { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 9px;
+        border: 1px solid var(--lamp-dim); border-radius: 5px; background: #241a0f; }
+  .ab .slot { padding: 4px 16px; border-radius: 3px; color: var(--faint); font-weight: 600; }
+  .ab .slot.live { background: var(--lamp); color: #1a1208; }
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; vertical-align: 2px;
+         letter-spacing: .04em; }
+  .tag.ship { background: #23402c; color: var(--sig); }
+  .tag.prop { background: #402823; color: var(--noise); }
+  kbd { background: #2a2117; border: 1px solid var(--edge); border-radius: 3px; padding: 1px 5px;
+        font-size: 11px; }
+</style>
+
+<div class="wrap">
+<h1>Tune Lab — the sound between stations</h1>
+<p class="sub">
+  Loops the exact thing the game does: fade the station out, roll static while the next one opens,
+  fade it in. The static generator is ported sample-for-sample out of <code>cmm_mix.c</code>, so a
+  number settled here is the same number in the game.
+</p>
+
+<div class="card">
+  <canvas id="scope"></canvas>
+  <div class="row" style="margin-top:11px">
+    <button id="btnLoop">▶ Loop the sequence</button>
+    <button id="btnOnce">Once</button>
+    <span id="phase" style="color:var(--dim)">idle</span>
+    <span style="flex:1"></span>
+    <label style="color:var(--dim)">volume</label>
+    <input type="range" id="vol" min="0" max="1" step="0.01" value="0.7" style="width:110px">
+  </div>
+</div>
+
+<div class="card">
+  <div class="ab">
+    <span class="slot live" id="slotA">A</span>
+    <span style="color:var(--dim)">press <kbd>space</kbd> to swap, mid-loop</span>
+    <span class="slot" id="slotB">B</span>
+  </div>
+  <div class="row" style="margin-top:9px;justify-content:center">
+    <button id="btnAtoB">Copy A over B</button>
+    <button id="btnBtoA">Copy B over A</button>
+    <button id="btnReset">Back to the shipped values</button>
+  </div>
+  <p class="note">
+    The swap does not restart the loop — you hear the change at the same point in the same
+    movement, which is the only way to judge one variable at a time.
+  </p>
+</div>
+
+<div class="card">
+  <h2>The static <em>these four are in the game today</em></h2>
+  <div class="grid" id="gridStatic"></div>
+  <p class="note">
+    Between stations there is no carrier, so the noise comes out <b>flat</b> and de-emphasis tilts
+    it down above its corner: a dark, full-bodied <b>roar</b>. A weak station is the opposite — a
+    bright thin hiss. Low cut is clamped to 50 Hz in the C, so anything under that reads as 50.
+  </p>
+</div>
+
+<div class="card">
+  <h2>The sequence <em>timings, in milliseconds</em></h2>
+  <div class="grid" id="gridSeq"></div>
+  <p class="note">
+    Shipped: fade out 250 ms (<code>ManualSkipFadeDuration</code>), static pinged every 250 ms and
+    seamless, open+seek measured at 50–130 ms for a mid-file mp3 but longer in practice. Load time
+    is the one you cannot control in the game — so find out how long is tolerable.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Tuning in and out <em>not built yet — this is what it would sound like</em></h2>
+  <div class="grid" id="gridRecv"></div>
+  <p class="note">
+    Today the station is a plain volume fade. A real receiver goes <b>dull and mono</b> on the way
+    out and arrives dull and mono under the noise before opening up. Set both to 0 to hear exactly
+    what ships now; raise them to hear what building it would buy.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Audio</h2>
+  <div class="drop" id="dropMusic"><b>Drop a music file here</b> — the station being tuned<br>
+    <span id="musicName" style="font-size:11px">using a synthesised stand-in</span></div>
+  <div class="drop" id="dropRef" style="margin-top:9px"><b>Drop a reference recording here</b> —
+    a real radio being tuned<br><span id="refName" style="font-size:11px">none loaded</span></div>
+  <div class="row" style="margin-top:9px">
+    <button id="btnRef" disabled>Play the reference <kbd>R</kbd></button>
+    <span class="note" style="margin:0">
+      freesound.org/people/kwahmah_02/sounds/316811/ — an old Sony, swept across the UK band.
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Settled values</h2>
+  <pre id="export"></pre>
+  <div class="row" style="margin-top:9px">
+    <button id="btnCopy">Copy</button>
+    <span class="note" style="margin:0">Paste into <code>Config/settings.xml</code>. Hot-reloads —
+      lands on the very next ping, even mid-hash.</span>
+  </div>
+</div>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+// ── THE DSP, LIFTED OUT OF cmm_mix.c ────────────────────────────────────────────────────────────
+// Every line below has a counterpart in the C, and it is written to match sample-for-sample rather
+// than to be idiomatic JavaScript. That is the whole point of this file: the last bench used Web
+// Audio biquads (12 dB/oct) where the game uses one-poles (6 dB/oct), so five of its parameters
+// could never have transferred. Here they do.
+//
+//   sfx_capture_static_tone : kLo/kHi, and the clamps
+//   render_sfx_add          : the LCG, the one-pole pair, the crackle sample-and-hold
+//   sfx_arm                 : len 0.40s, attack 0.010s, release 0.090s
+const WORKLET = `
+class TuneProc extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.p = null; this.rng = 22222 >>> 0;
+    this.lo = 0; this.hi = 0; this.modLev = 1; this.modCur = 0; this.modHold = 0;
+    this.mLo = [0, 0];                       // the receiver's dulling one-pole, per channel
+    this.t = 0; this.phase = "play"; this.running = false; this.once = false;
+    this.port.onmessage = e => {
+      const d = e.data;
+      if (d.p) this.p = d.p;
+      if (d.cmd === "start") { this.running = true; this.once = !!d.once; this.t = 0; this.phase = "out"; }
+      if (d.cmd === "stop")  { this.running = false; this.phase = "play"; this.t = 0; }
+    };
+  }
+  // sfx_capture_static_tone, clamps included
+  coef(hz, rate) { return 1 - Math.exp(-6.2831853 * hz / rate); }
+
+  process(inputs, outputs) {
+    const out = outputs[0], inp = inputs[0];
+    const n = out[0].length, rate = sampleRate, p = this.p;
+    if (!p) { for (const c of out) c.fill(0); return true; }
+
+    let lo = p.lowHz  < 50 ? 50 : (p.lowHz  > 4000  ? 4000  : p.lowHz);
+    let hi = p.highHz < 400 ? 400 : (p.highHz > 12000 ? 12000 : p.highHz);
+    if (hi < lo + 100) hi = lo + 100;
+    const kLo = this.coef(lo, rate), kHi = this.coef(hi, rate);
+    const crackle = p.crackle < 0 ? 0 : (p.crackle > 1 ? 1 : p.crackle);
+
+    const outN = p.outMs * rate / 1000, loadN = p.loadMs * rate / 1000, inN = p.inMs * rate / 1000;
+    const holdN = p.holdMs * rate / 1000;
+    const ATK = 0.010 * rate, REL = 0.090 * rate;      // the static voice's own envelope
+
+    for (let i = 0; i < n; i++) {
+      // ── where we are in the sequence ──
+      let sig = 1, stat = 0;
+      if (this.running) {
+        const t = this.t;
+        if (t < outN) {                                   // fading the old station out
+          sig = 1 - t / outN;
+          stat = Math.min(1, t / ATK);
+        } else if (t < loadN) {                           // waiting for the new one to open
+          sig = 0; stat = Math.min(1, t / ATK);
+        } else if (t < loadN + inN) {                     // the new one arriving
+          sig = (t - loadN) / inN;
+          const rem = loadN + inN - t;
+          stat = rem < REL ? rem / REL : 1;
+        } else if (t < loadN + inN + holdN) {
+          sig = 1; stat = 0;
+        } else {
+          this.t = 0;
+          if (this.once) { this.running = false; this.phase = "play"; }
+          continue;
+        }
+        this.t++;
+      }
+
+      // ── the static: render_sfx_add, SFX_KIND_STATIC ──
+      this.rng = (Math.imul(this.rng, 1664525) + 1013904223) >>> 0;
+      const noise = (this.rng | 0) * (1 / 2147483648);
+      this.lo += kLo * (noise - this.lo);
+      const bp = noise - this.lo;
+      this.hi += kHi * (bp - this.hi);
+      let x = this.hi * 0.9;
+      if (crackle > 0.001) {
+        if (--this.modHold <= 0) {
+          this.rng = (Math.imul(this.rng, 1664525) + 1013904223) >>> 0;
+          const u = (this.rng >>> 8) * (1 / 16777216);
+          this.modCur = u * u;
+          this.rng = (Math.imul(this.rng, 1664525) + 1013904223) >>> 0;
+          const uh = (this.rng >>> 8) * (1 / 16777216);
+          this.modHold = Math.max(1, (0.003 + 0.027 * uh) * rate | 0);
+        }
+        this.modLev += (this.modCur - this.modLev) * 0.02;
+        x *= 1 - crackle * (1 - this.modLev);
+      }
+      x *= stat * p.staticVol;
+
+      // ── the station, through the receiver ──
+      // NOT IN THE GAME YET. sig drives a one-pole dulling and a stereo collapse, so a station
+      // leaves and arrives the way a receiver does instead of just changing volume. A one-pole,
+      // deliberately, because that is the only kind of filter this codebase has.
+      const dull = p.dull, mono = p.mono;
+      let l = inp && inp[0] ? inp[0][i] : 0;
+      let r = inp && inp[1] ? inp[1][i] : l;
+      if (dull > 0.001) {
+        // full signal -> wide open; no signal -> down at the floor
+        const fc = 500 + (16000 - 500) * Math.pow(sig, 1 - 0.75 * dull);
+        const k = this.coef(Math.min(fc, rate * 0.45), rate);
+        this.mLo[0] += k * (l - this.mLo[0]); l = this.mLo[0];
+        this.mLo[1] += k * (r - this.mLo[1]); r = this.mLo[1];
+      }
+      if (mono > 0.001) {
+        const w = 1 - mono * (1 - sig);            // width collapses as the signal goes
+        const m = (l + r) * 0.5, s = (l - r) * 0.5 * w;
+        l = m + s; r = m - s;
+      }
+      const g = sig * p.musicVol;
+      out[0][i] = (l * g + x) * p.master;
+      if (out[1]) out[1][i] = (r * g + x) * p.master;
+    }
+    this.port.postMessage({ phase: this.phase, t: this.t });
+    return true;
+  }
+}
+registerProcessor("tune", TuneProc);
+`;
+
+// ── Parameters ──────────────────────────────────────────────────────────────────────────────────
+// Shipped values are the ones in CMMConfig.cs. Anything marked proposed does not exist in the game.
+const SHIPPED = {
+  lowHz: 50, highHz: 2100, crackle: 0.8, staticVol: 0.5,
+  outMs: 250, loadMs: 700, inMs: 250, holdMs: 2200,
+  dull: 0, mono: 0, musicVol: 0.8, master: 0.7,
+};
+const CONTROLS = {
+  gridStatic: [
+    ["lowHz",     "Low cut",        50, 4000, 1,    v => v.toFixed(0) + " Hz"],
+    ["highHz",    "Top cap",       400, 12000, 10,  v => v.toFixed(0) + " Hz"],
+    ["crackle",   "Sputter",         0, 1, 0.01,    v => v.toFixed(2)],
+    ["staticVol", "Static level",    0, 1, 0.01,    v => v.toFixed(2)],
+  ],
+  gridSeq: [
+    ["outMs",  "Fade out",     0, 1500, 10, v => v.toFixed(0) + " ms"],
+    ["loadMs", "Load time",   50, 3000, 10, v => v.toFixed(0) + " ms"],
+    ["inMs",   "Fade in",      0, 1500, 10, v => v.toFixed(0) + " ms"],
+    ["holdMs", "Play for",   500, 6000, 50, v => v.toFixed(0) + " ms"],
+  ],
+  gridRecv: [
+    ["dull", "Goes dull",  0, 1, 0.01, v => v.toFixed(2)],
+    ["mono", "Goes mono",  0, 1, 0.01, v => v.toFixed(2)],
+  ],
+};
+let A = Object.assign({}, SHIPPED), B = Object.assign({}, SHIPPED), live = "A";
+const P = () => (live === "A" ? A : B);
+
+// ── Audio graph ─────────────────────────────────────────────────────────────────────────────────
+let ctx = null, node = null, srcNode = null, musicBuf = null, refBuf = null, refSrc = null;
+let started = false, looping = false;
+
+async function ensure() {
+  if (ctx) return true;
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const url = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
+  try {
+    await ctx.audioWorklet.addModule(url);
+    node = new AudioWorkletNode(ctx, "tune", { numberOfInputs: 1, outputChannelCount: [2] });
+  } catch (e) {
+    alert("This browser would not load the audio worklet:\n" + e.message +
+          "\n\nTry Chrome or Edge. Firefox is fine too; Safari on file:// is not.");
+    return false;
+  }
+  URL.revokeObjectURL(url);
+  node.port.onmessage = e => { lastPhase = e.data; };
+  node.connect(ctx.destination);
+  push();
+  return true;
+}
+
+// One looping source feeding the worklet. Restarted only when the file changes, never on a
+// parameter edit — an edit must never interrupt what is being judged.
+function wireMusic() {
+  if (!ctx || !node) return;
+  if (srcNode) { try { srcNode.stop(); } catch {} srcNode.disconnect(); srcNode = null; }
+  const buf = musicBuf || synthBuffer();
+  srcNode = ctx.createBufferSource();
+  srcNode.buffer = buf; srcNode.loop = true;
+  srcNode.connect(node);
+  srcNode.start();
+}
+
+// A stand-in so the page makes a noise before anything is dropped on it. Deliberately busy —
+// a sustained pad hides the dulling, and a bare sine hides the stereo collapse.
+function synthBuffer() {
+  const sr = ctx.sampleRate, len = sr * 4, b = ctx.createBuffer(2, len, sr);
+  const notes = [220, 277.18, 329.63, 440, 554.37];
+  for (let c = 0; c < 2; c++) {
+    const d = b.getChannelData(c);
+    for (let i = 0; i < len; i++) {
+      const t = i / sr, beat = Math.floor(t * 2) % notes.length;
+      const f = notes[(beat + c * 2) % notes.length];
+      const env = Math.exp(-((t * 2) % 1) * 3.2);
+      let v = 0;
+      for (let h = 1; h <= 7; h += 2) v += Math.sin(2 * Math.PI * f * h * t) / h;
+      d[i] = v * env * 0.16 + Math.sin(2 * Math.PI * 5200 * t) * env * env * 0.03 * (c ? -1 : 1);
+    }
+  }
+  return b;
+}
+
+function push() { if (node) node.port.postMessage({ p: P() }); }
+let lastPhase = { phase: "idle", t: 0 };
+
+// ── Controls ────────────────────────────────────────────────────────────────────────────────────
+const els = {};
+for (const [gridId, list] of Object.entries(CONTROLS)) {
+  const grid = document.getElementById(gridId);
+  for (const [key, label, min, max, step, fmt] of list) {
+    const l = document.createElement("label"); l.textContent = label;
+    const r = document.createElement("input");
+    r.type = "range"; r.min = min; r.max = max; r.step = step;
+    const o = document.createElement("output");
+    r.addEventListener("input", () => {
+      P()[key] = parseFloat(r.value); o.textContent = fmt(P()[key]); push(); updateExport();
+    });
+    grid.append(l, r, o);
+    els[key] = { r, o, fmt };
+  }
+}
+function paint() {
+  for (const k in els) {
+    els[k].r.value = String(P()[k]);
+    els[k].o.textContent = els[k].fmt(P()[k]);
+  }
+  document.getElementById("slotA").classList.toggle("live", live === "A");
+  document.getElementById("slotB").classList.toggle("live", live === "B");
+  updateExport();
+}
+
+const exportEl = document.getElementById("export");
+function updateExport() {
+  const p = P();
+  exportEl.textContent =
+`<!-- Tuning static. Settled by ear in tools/CmmTuneLab. -->
+<RadioStaticLowHz>${p.lowHz.toFixed(0)}</RadioStaticLowHz>
+<RadioStaticHighHz>${p.highHz.toFixed(0)}</RadioStaticHighHz>
+<RadioStaticCrackle>${p.crackle.toFixed(2)}</RadioStaticCrackle>
+<RadioStaticVolume>${p.staticVol.toFixed(2)}</RadioStaticVolume>` +
+(p.dull > 0.001 || p.mono > 0.001
+  ? `\n\n<!-- NOT BUILT YET. If these sound worth having, they become the receiver ramp on
+     the station's fade-out and fade-in: a one-pole dulling and a stereo collapse,
+     both driven by the same 0..1 the fade already uses.
+     goes dull ${p.dull.toFixed(2)}   goes mono ${p.mono.toFixed(2)} -->`
+  : "");
+}
+
+// ── Transport ───────────────────────────────────────────────────────────────────────────────────
+const btnLoop = document.getElementById("btnLoop");
+async function go(once) {
+  if (!(await ensure())) return;
+  if (ctx.state === "suspended") await ctx.resume();
+  if (!started) { wireMusic(); started = true; }
+  node.port.postMessage({ cmd: "start", once });
+}
+btnLoop.addEventListener("click", async () => {
+  looping = !looping;
+  btnLoop.classList.toggle("on", looping);
+  btnLoop.textContent = looping ? "■ Stop" : "▶ Loop the sequence";
+  if (looping) await go(false); else node && node.port.postMessage({ cmd: "stop" });
+});
+document.getElementById("btnOnce").addEventListener("click", () => go(true));
+document.getElementById("vol").addEventListener("input", e => {
+  A.master = B.master = parseFloat(e.target.value); push();
+});
+
+// ── A/B ─────────────────────────────────────────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.code === "Space") { e.preventDefault(); live = live === "A" ? "B" : "A"; paint(); push(); }
+  if (e.key === "r" || e.key === "R") playRef();
+});
+document.getElementById("btnAtoB").addEventListener("click", () => { B = Object.assign({}, A); paint(); push(); });
+document.getElementById("btnBtoA").addEventListener("click", () => { A = Object.assign({}, B); paint(); push(); });
+document.getElementById("btnReset").addEventListener("click", () => {
+  Object.assign(P(), SHIPPED); paint(); push();
+});
+
+// ── Files ───────────────────────────────────────────────────────────────────────────────────────
+function dropZone(id, nameId, onBuf) {
+  const z = document.getElementById(id), nm = document.getElementById(nameId);
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = "audio/*"; input.style.display = "none";
+  document.body.appendChild(input);
+  const take = async file => {
+    if (!(await ensure())) return;
+    nm.textContent = "decoding " + file.name + "…";
+    try {
+      const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+      nm.textContent = file.name + "  (" + buf.duration.toFixed(1) + "s)";
+      onBuf(buf);
+    } catch (err) { nm.textContent = "could not decode " + file.name; }
+  };
+  z.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => input.files[0] && take(input.files[0]));
+  ["dragenter", "dragover"].forEach(ev => z.addEventListener(ev, e => {
+    e.preventDefault(); z.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach(ev => z.addEventListener(ev, e => {
+    e.preventDefault(); z.classList.remove("over");
+  }));
+  z.addEventListener("drop", e => e.dataTransfer.files[0] && take(e.dataTransfer.files[0]));
+}
+dropZone("dropMusic", "musicName", b => { musicBuf = b; if (started) wireMusic(); });
+dropZone("dropRef", "refName", b => { refBuf = b; document.getElementById("btnRef").disabled = false; });
+
+// The reference plays STRAIGHT to the speakers, bypassing everything. It is the target, not
+// another setting to compare against.
+function playRef() {
+  if (!refBuf || !ctx) return;
+  if (refSrc) { try { refSrc.stop(); } catch {} refSrc = null; return; }
+  refSrc = ctx.createBufferSource();
+  refSrc.buffer = refBuf;
+  const g = ctx.createGain(); g.gain.value = P().master;
+  refSrc.connect(g).connect(ctx.destination);
+  refSrc.onended = () => { refSrc = null; };
+  refSrc.start();
+}
+document.getElementById("btnRef").addEventListener("click", playRef);
+
+// ── Scope ───────────────────────────────────────────────────────────────────────────────────────
+// Draws the sequence as a timeline with a playhead, so what you hear has a picture. The two
+// curves are the station's level and the static's, which are the only two things happening.
+const cv = document.getElementById("scope"), g2 = cv.getContext("2d");
+function sizeCanvas() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, r.width * dpr); cv.height = Math.max(1, r.height * dpr);
+  g2.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", sizeCanvas);
+function draw() {
+  requestAnimationFrame(draw);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  const p = P(), total = p.outMs + Math.max(0, p.loadMs - p.outMs) + p.inMs + p.holdMs;
+  const T = p.loadMs + p.inMs + p.holdMs;
+  g2.clearRect(0, 0, w, h);
+  g2.fillStyle = "#100d09"; g2.fillRect(0, 0, w, h);
+
+  const xOf = ms => (ms / T) * w, yOf = v => h - 10 - v * (h - 24);
+  // phase bands
+  const bands = [[0, p.outMs, "#2a2015"], [p.outMs, p.loadMs, "#33231a"],
+                 [p.loadMs, p.loadMs + p.inMs, "#2a2015"]];
+  for (const [a, b, col] of bands) {
+    if (b <= a) continue;
+    g2.fillStyle = col; g2.fillRect(xOf(a), 8, xOf(b) - xOf(a), h - 18);
+  }
+  const curve = (fn, col) => {
+    g2.beginPath(); g2.strokeStyle = col; g2.lineWidth = 1.8;
+    for (let i = 0; i <= w; i++) { const ms = (i / w) * T, v = fn(ms);
+      i ? g2.lineTo(i, yOf(v)) : g2.moveTo(i, yOf(v)); }
+    g2.stroke();
+  };
+  curve(ms => ms < p.outMs ? 1 - ms / p.outMs
+             : ms < p.loadMs ? 0
+             : ms < p.loadMs + p.inMs ? (ms - p.loadMs) / p.inMs : 1, "var(--sig)");
+  curve(ms => {
+    if (ms >= p.loadMs + p.inMs) return 0;
+    const atk = Math.min(1, ms / 10), rem = p.loadMs + p.inMs - ms;
+    return Math.min(atk, rem < 90 ? rem / 90 : 1) * p.staticVol;
+  }, "var(--noise)");
+
+  if (lastPhase && lastPhase.t && ctx) {
+    const ms = lastPhase.t / ctx.sampleRate * 1000;
+    g2.strokeStyle = "var(--lamp)"; g2.lineWidth = 1;
+    g2.beginPath(); g2.moveTo(xOf(ms), 4); g2.lineTo(xOf(ms), h - 4); g2.stroke();
+  }
+  g2.fillStyle = "#6d5f4c"; g2.font = "11px " + getComputedStyle(document.body).fontFamily;
+  g2.fillText("station", 8, 20); g2.fillStyle = "#d4715e"; g2.fillText("static", 62, 20);
+  document.getElementById("phase").textContent =
+    looping ? "looping — " + Math.round(T) + " ms per pass" : "idle";
+}
+
+document.getElementById("btnCopy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(exportEl.textContent); } catch {}
+});
+
+sizeCanvas(); paint(); draw();
+})();
+</script>

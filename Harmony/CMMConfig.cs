@@ -178,7 +178,9 @@ namespace CMM
         // out was a midrange "shhh" with no body: neither the roar nor the hiss, which is why it
         // read as synthetic. Drop the low cut and the same code produces the real thing.
         public static float  RadioStaticVolume  = -1f;
-        public static float  RadioStaticLowHz   = 40f;     // was 350 — the body of the roar lives here
+        public static float  RadioStaticLowHz   = 50f;     // was 350 — the body of the roar lives here.
+                                                           // 50 is the C's own floor (sfx_capture_static_tone
+                                                           // clamps it), so anything lower reads as 50.
         public static float  RadioStaticHighHz  = 2100f;   // the de-emphasis corner, -6 dB/oct above
         // Sputter. Not decoration: below the FM threshold the noise instantaneously overtakes the
         // carrier and each overtake is a phase step the demodulator turns into a CLICK. They start
