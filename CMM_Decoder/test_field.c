@@ -34,6 +34,19 @@ static void ckf(const char *name, int ok, const char *fmt, ...) {
     ck(name, ok, buf);
 }
 
+/* AN EXPECTED FAILURE: a property we want, against a defect we have not fixed yet.
+ *
+ * The alternative -- weakening the assertion until it passes -- is what the pinhole check below
+ * had to do, and the cost is that the gap stops being visible. This keeps the real property
+ * written down and measured on every run without turning the suite red, and it goes HARD RED the
+ * moment it starts passing, which is the prompt to promote it to an ordinary check. */
+static int xfails = 0, xpasses = 0;
+static void ckxf(const char *name, int ok, const char *fmt, ...) {
+    char buf[256]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    printf("  %-46s %s   %s\n", name, ok ? "XPASS" : "xfail", buf);
+    if (ok) xpasses++; else xfails++;
+}
+
 static int isSolid(int x, int y, int z) {
     if (x < 0 || x >= W || y < 0 || y >= H || z < 0 || z >= W) return 1;   /* outside = opaque */
     return solid[x][y][z];
@@ -430,6 +443,108 @@ int main(int argc, char** argv) {
     }
     ckf("moving source: no step (dB per block)", worst < 6.0f, "worst %.2f dB/block", worst);
 
+    /* ── TWO WALLS MEETING AT A CORNER: THE DIAGONAL SEAM ───────────────────────────
+     * A diagonal move enters NEITHER of the two cells it passes between, so it read both their
+     * faces as open and paid nothing -- sound went straight through a corner you cannot walk or
+     * see through. Fixed by charging the SHOULDERS of a diagonal (the cheaper of the two cells a
+     * two-step route would have had to cross), on an in-game measurement alone:
+     *
+     *     four sides blocked, corners open    excess  1.0 dB
+     *     corners filled in as well           excess 21.7 dB
+     *
+     * That fix had no scene in this file. This is it, and it is built to isolate the SEAM and
+     * nothing else: two half-plane walls run to the edges of the world, so the only direct join
+     * between the two quadrants is the one diagonal at their corner and every other route has to
+     * cross a full wall. Both wall cells are reachable only from their negative side, which keeps
+     * the separate defect below out of this measurement. */
+    {
+        memset(solid, 0, sizeof solid);
+        for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+        for (int y = 1; y < H; y++) {
+            for (int z = 0; z <= 32; z++) solid[33][y][z] = 1;    /* wall A: x=33, running -Z */
+            for (int x = 0; x <= 32; x++) solid[x][y][33] = 1;    /* wall B: z=33, running -X */
+        }
+        cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+        cmm_fld_recentre(g, 32, 4, 32);
+        { int cx, cy, cz, guard = 0;
+          while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
+            cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
+                                            midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+        cmm_fld_solve(g, 32.5f, 2.5f, 32.5f);                     /* ear in the -X/-Z quadrant */
+        float seam = cmm_fld_sample_db(g, 33.5f, 2.5f, 33.5f);    /* diagonally across the corner */
+        float same = cmm_fld_sample_db(g, 30.5f, 2.5f, 30.5f);    /* same quadrant: must be open */
+        cmm_fld_destroy(g);
+        ckf("same quadrant is open (the scene is sane)", same < 1.0f, "%.2f dB", same);
+        ckf("a corner seam is not a way through", seam > 40.0f,
+            "%.1f dB across the diagonal — 0 without the shoulder charge", seam);
+    }
+
+    /* ── A ROUTE MUST NOT ENTER A SOLID BLOCK FOR FREE ──────────────────────────────
+     * KNOWN DEFECT, and the reason for the change these two checks were written to drive.
+     *
+     * A cell's material is stored on its three NEGATIVE faces, on the rule that whichever cell
+     * contains the wall is the one that reports it. The face between C and C+X therefore belongs
+     * to C+X, so for the block sitting in C:
+     *
+     *     entering C from -X   charges C's own face      -- correct
+     *     entering C from +X   charges C+X's face (air)  -- FREE
+     *     leaving  C toward +X charges C+X's face (air)  -- FREE
+     *
+     * A route that enters through one positive face and leaves through another pays NOTHING AT
+     * ALL for the block it just walked through. A plane wall survives it because you always reach
+     * a plane from its negative side, which is why every wall check in this file passes. Any wall
+     * you can get AROUND to the far side of does not: the speaker below is walled in on four
+     * sides with only the corners open, and the route goes in through the +X face of one side
+     * block and out through that same block's +Z face. Two straight moves, neither charged -- so
+     * the shoulder rule above never even gets a chance to fire.
+     *
+     * Same root cause as a half block or a shut door failing to block from the cell you are
+     * standing in: the model records WHAT material a cell holds and throws away WHERE. The fix is
+     * six directional numbers per cell instead of three -- material per half-voxel, charged on
+     * the halves a move actually crosses -- after which both of these become ordinary checks. */
+    {
+        memset(solid, 0, sizeof solid);
+        for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+        for (int y = 1; y < H; y++) solid[36][y][32] = 1;         /* one lone block, air all round */
+        cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+        cmm_fld_recentre(g, 32, 4, 32);
+        { int cx, cy, cz, guard = 0;
+          while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
+            cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
+                                            midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+        cmm_fld_solve(g, 32.5f, 2.5f, 32.5f);
+        float inside = cmm_fld_sample_db(g, 36.5f, 2.5f, 32.5f);
+        cmm_fld_destroy(g);
+        ckxf("a lone solid block costs a wall to enter", inside > 20.0f,
+             "%.2f dB inside the block — reached free through its +X face", inside);
+    }
+    {
+        float got[2];
+        for (int corners = 0; corners <= 1; corners++) {
+            memset(solid, 0, sizeof solid);
+            for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+            for (int y = 1; y < H; y++) {
+                solid[35][y][32] = 1; solid[37][y][32] = 1;       /* the four sides */
+                solid[36][y][31] = 1; solid[36][y][33] = 1;
+                if (corners) {                                    /* ...and the four corners */
+                    solid[35][y][31] = 1; solid[35][y][33] = 1;
+                    solid[37][y][31] = 1; solid[37][y][33] = 1;
+                }
+            }
+            cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+            cmm_fld_recentre(g, 32, 4, 32);
+            { int cx, cy, cz, guard = 0;
+              while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
+                cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
+                                                midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+            cmm_fld_solve(g, 32.5f, 2.5f, 32.5f);                      /* ear outside, 4 blocks off */
+            got[corners] = cmm_fld_sample_db(g, 36.5f, 2.5f, 32.5f);   /* the boxed-in speaker */
+            cmm_fld_destroy(g);
+        }
+        ckxf("walling a speaker in seals it, corners or not", fabsf(got[1] - got[0]) < 6.0f,
+             "corners open %.1f vs filled %.1f dB — in game 1.0 vs 21.7", got[0], got[1]);
+    }
+
     /* ── and it never vanishes: unreachable reads as silent, not as absent ───────────── */
     memset(solid, 1, sizeof solid);                       /* seal the listener in solid rock */
     for (int y = 1; y <= 2; y++) solid[32][y][32] = 0;
@@ -443,5 +558,7 @@ int main(int argc, char** argv) {
            cmm_fld_stat(f, 0), cmm_fld_stat(f, 2), cmm_fld_stat(f, 3));
     cmm_fld_destroy(f);
     printf("\n%d/%d checks passed\n", checks - fails, checks);
-    return fails ? 1 : 0;
+    if (xfails)  printf("%d known defect(s) still open (xfail)\n", xfails);
+    if (xpasses) printf("%d expected failure(s) now PASS \u2014 promote them\n", xpasses);
+    return (fails || xpasses) ? 1 : 0;
 }
