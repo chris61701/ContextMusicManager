@@ -224,7 +224,7 @@ namespace CMM
 
             _ear = EmitterAudioLayer.ListenerWorldPos(player);
             _earValid = true;
-            PublishEarCell(world);
+            PublishEarCell(world, player);
 
             // RECENTRE ON A DRIFT, NOT ON EVERY STEP. A recentre changes what every index means,
             // so a flood in progress when one lands is thrown away — and with one-block-tall cells
@@ -485,7 +485,25 @@ namespace CMM
         // would not go directional have now been wrong; the answer is to print the decision.
         internal static string EarCellWhy = "not published yet";
 
-        private static void PublishEarCell(World world)
+        // WHICH SIDE OF A DOOR YOU ARE ON IS A QUESTION ABOUT YOUR BODY, NOT YOUR CAMERA.
+        //
+        // Measured standing in a shut doorway with the speaker one room away:
+        //
+        //     ear cell -355,40,2233  at 0.52,0.68,0.70  interiorHouseDoorWhite CHILD  LEAF on X
+        //        published  -X 20.2   +X  .
+        //
+        // The leaf plane is at 0.50 and the camera was at 0.52. TWO CENTIMETRES decided a twenty
+        // decibel difference — and the camera is the worst possible thing to decide it with,
+        // because it is offset from the pivot the player rotates about and drifts with head bob.
+        // Standing still and turning round could flip it. That is the same discontinuity the
+        // listener seeding had to be rebuilt to avoid ("just turning around and not moving causes
+        // dips too"), arriving again by a different route.
+        //
+        // The BODY cannot be within centimetres of a shut leaf: the leaf has a collider and pushes
+        // it out. So its side is unambiguous, stable while standing, and it is what the player
+        // means when they say which room they are in. Camera for everything else — it is the ear —
+        // and body for this one binary.
+        private static void PublishEarCell(World world, EntityPlayerLocal player)
         {
             int cx = Mathf.FloorToInt(_ear.x / StepXZ), cy = Mathf.FloorToInt(_ear.y / StepY),
                 cz = Mathf.FloorToInt(_ear.z / StepXZ);
@@ -495,6 +513,7 @@ namespace CMM
             float t = 1f;
             float[] cov = EmitterAcoustics.FullCover;
             string why = "AIR (nothing in your cell)";
+            float bodySide = -1f;
             if (StepXZ == 1 && StepY == 1)          // one block per cell: the cell IS the block
             {
                 BlockValue bv = world.GetBlock(cx, cy, cz);
@@ -504,14 +523,28 @@ namespace CMM
                     if (t < 1f)
                     {
                         Block b = bv.Block;
-                        Bounds[] leaf = EmitterAcoustics.EarLeafBounds(b, bv, world, cx, cy, cz);
-                        cov = leaf != null
-                            ? EmitterAcoustics.CoverSplitAtBounds(leaf, fx, fy, fz)
-                            : EmitterAcoustics.CoverSplitAt(b, bv, fx, fy, fz);
+                        Bounds[] leaf = EmitterAcoustics.EarLeafBounds(b, bv, world, cx, cy, cz,
+                                                                       out int leafAxis);
+                        if (leaf != null)
+                        {
+                            // The split plane on the leaf's own axis comes from the BODY. Anywhere
+                            // clear of the leaf this agrees with the camera; within a few
+                            // centimetres of it, which is exactly where a player stands in a
+                            // doorway, only the body is stable enough to decide.
+                            Vector3 body = player.position;
+                            float[] fr = { fx, fy, fz };
+                            int cell = leafAxis == 0 ? cx : leafAxis == 1 ? cy : cz;
+                            float bw = leafAxis == 0 ? body.x : leafAxis == 1 ? body.y : body.z;
+                            fr[leafAxis] = Mathf.Clamp01(bw - cell);
+                            bodySide = fr[leafAxis];
+                            cov = EmitterAcoustics.CoverSplitAtBounds(leaf, fr[0], fr[1], fr[2]);
+                        }
+                        else cov = EmitterAcoustics.CoverSplitAt(b, bv, fx, fy, fz);
                         why = (b != null ? b.GetBlockName() : "?") + (bv.ischild ? " CHILD" : "")
                             + "  t=" + t.ToString("0.000")
                             + (leaf != null
-                               ? "  LEAF on " + (leaf[0].size.x < 0.5f ? "X" : leaf[0].size.y < 0.5f ? "Y" : "Z")
+                               ? "  LEAF on " + (leafAxis == 0 ? "X" : leafAxis == 1 ? "Y" : "Z")
+                                 + " split at " + bodySide.ToString("0.00") + " (body)"
                                : "  NO LEAF");
                     }
                 }

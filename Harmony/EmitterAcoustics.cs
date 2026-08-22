@@ -811,8 +811,10 @@ namespace CMM
         // that hold the frame are not. Cheapest axis wins. Asked of the world because rotation
         // encodings for model entities differ across the supported game versions, and this
         // project has twice been caught asking a block a question it answers with a default.
-        internal static Bounds[] EarLeafBounds(Block b, BlockValue bv, World world, int x, int y, int z)
+        internal static Bounds[] EarLeafBounds(Block b, BlockValue bv, World world, int x, int y, int z,
+                                               out int leafAxis)
         {
+            leafAxis = -1;
             if (b == null || !IsSwingingLeaf(b, bv.type)) return null;
             if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return null;  // open
             // THE SIDE YOU ARE ON DECIDES, NOT THE ANIMATION. This used to switch itself off the
@@ -842,6 +844,7 @@ namespace CMM
                 if (sum < bestSum) { bestSum = sum; bestAxis = axis; }
             }
             if (bestAxis < 0) return null;
+            leafAxis = bestAxis;
             // A SHEET, NOT A SLAB. At 0.45..0.55 there is a tenth of a block in which you are on
             // BOTH sides of the leaf at once, and walking through it wobbles. A sheet gives a
             // clean flip at the moment you cross, and behaves the same running through as running
