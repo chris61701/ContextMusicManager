@@ -481,6 +481,10 @@ namespace CMM
         // Split at the ear and the material is wholly behind you or wholly ahead. Which also makes
         // the ORIGINAL complaint stronger, not just this one: standing on the closed side of a
         // door you now get the whole leaf where the halfway split gave you half of it.
+        // What the last PublishEarCell actually decided. Three separate guesses about why a door
+        // would not go directional have now been wrong; the answer is to print the decision.
+        internal static string EarCellWhy = "not published yet";
+
         private static void PublishEarCell(World world)
         {
             int cx = Mathf.FloorToInt(_ear.x / StepXZ), cy = Mathf.FloorToInt(_ear.y / StepY),
@@ -490,6 +494,7 @@ namespace CMM
 
             float t = 1f;
             float[] cov = EmitterAcoustics.FullCover;
+            string why = "AIR (nothing in your cell)";
             if (StepXZ == 1 && StepY == 1)          // one block per cell: the cell IS the block
             {
                 BlockValue bv = world.GetBlock(cx, cy, cz);
@@ -503,6 +508,11 @@ namespace CMM
                         cov = leaf != null
                             ? EmitterAcoustics.CoverSplitAtBounds(leaf, fx, fy, fz)
                             : EmitterAcoustics.CoverSplitAt(b, bv, fx, fy, fz);
+                        why = (b != null ? b.GetBlockName() : "?") + (bv.ischild ? " CHILD" : "")
+                            + "  t=" + t.ToString("0.000")
+                            + (leaf != null
+                               ? "  LEAF on " + (leaf[0].size.x < 0.5f ? "X" : leaf[0].size.y < 0.5f ? "Y" : "Z")
+                               : "  NO LEAF");
                     }
                 }
             }
@@ -516,7 +526,16 @@ namespace CMM
             NativeField.cmm_fld_set_ear_cell(_f, cx, cy, cz,
                                              Face(nX, 0f), Face(nY, 0f), Face(nZ, 0f),
                                              Face(pX, 0f), Face(pY, 0f), Face(pZ, 0f));
+            EarCellWhy = "cell " + cx + "," + cy + "," + cz
+                       + "  at " + fx.ToString("0.00") + "," + fy.ToString("0.00") + "," + fz.ToString("0.00")
+                       + "  " + why
+                       + "\n     published  -X " + Db(Face(nX, 0f)) + "  -Y " + Db(Face(nY, 0f))
+                       + "  -Z " + Db(Face(nZ, 0f)) + "   +X " + Db(Face(pX, 0f))
+                       + "  +Y " + Db(Face(pY, 0f)) + "  +Z " + Db(Face(pZ, 0f)) + "   (dB)";
         }
+
+        private static string Db(float t)
+            => t >= 0.9999f ? " . " : (t <= 1e-12f ? "99.0" : (-10f * Mathf.Log10(t)).ToString("0.0"));
 
         // ── Scheduler thread: the flood ─────────────────────────────────────────────────────────
         // Pure arithmetic over the native arena; touches no game API, which is what makes it safe
@@ -798,6 +817,7 @@ namespace CMM
               .Append(" -> speaker ").Append(spk.ToCultureInvariantString())
               .Append("   d=").Append(total.ToString("0.0"))
               .Append("   detour ").Append(per.ToString("0.00")).Append(" dB/blk")
+              .Append("\n  ear cell: ").Append(EarCellWhy)
               .Append("\n   dist  routed   ideal   excess    wall  |  -X   -Y   -Z    +X   +Y   +Z  (dB loss)");
 
             int steps = Mathf.Clamp(Mathf.CeilToInt(total / StepY * 2f), 1, 160);
