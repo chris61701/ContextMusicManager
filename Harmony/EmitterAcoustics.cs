@@ -661,12 +661,49 @@ namespace CMM
             // almost none do. Asking would return "full" from a DEFAULT rather than from evidence,
             // and it is better to say so here than to look like a measurement. Doors therefore
             // stay full-voxel, which is also what keeps the shut-door calibration where it is.
-            if (b == null || b.shape == null || b.shape is BlockShapeModelEntity) return FullCover;
+            if (b == null || b.shape == null) return FullCover;
+            if (b.shape is BlockShapeModelEntity) return ModelEntityCover(b, bv);
             if (b.shape.IsSolidCube) return FullCover;
             int key = (bv.type << 6) | (bv.rotation & 63);
             if (_coverCache.TryGetValue(key, out float[] hit)) return hit;
             float[] cov = ComputeCover(b, bv);
             _coverCache[key] = cov;
+            return cov;
+        }
+
+        // ── A MODEL ENTITY'S OPACITY IS THE ONLY EXTENT SIGNAL IT HAS ───────────────────────────
+        // Its real geometry is in a Unity prefab, so GetBounds returns a default cube and there is
+        // nothing to measure. But the game already carries a number for how much of the voxel is
+        // actually filled, because it has to light the thing: lightOpacity.
+        //
+        // Measured with `cmm acoustics column` in a POI, which is what settled this:
+        //
+        //     plantAloePottedCornerPurple   loss 0.700   mat earth   opa 0     <- light goes through
+        //     cntBookcaseFull               loss 0.500   mat wood    opa 255
+        //     cntStore...BookShelfSpeaker   loss 0.080   mat cloth   opa 4
+        //
+        // A decorative aloe was pricing ABOVE a bookcase — 34 dB of occlusion from a pot plant at
+        // the shipped wall curve, measured at 31.6 dB excess with one in the way. It falls to the
+        // plain SolidLoss at the bottom of CellLoss and gets charged its POT: earth, 0.7. The
+        // material table has a plant rule and never reaches it, because the game says this block
+        // is made of soil, and it is.
+        //
+        // Opacity separates them where nothing else does. The rule this replaces — "a model entity
+        // that stops light is matter, whatever Collide says" — was right and is kept; this is the
+        // other half of it, that one which does NOT stop light is not matter either.
+        //
+        // DOORS ARE EXEMPT. They are the calibrated case (the whole native model is fitted to a
+        // 4-9 dB shut door), their leaf really does fill its doorway, and a leaf that read a low
+        // opacity would silently unblock every door in the game. Not worth the risk for a class
+        // that has an answer already.
+        private static readonly Dictionary<int, float[]> _entityCoverCache = new Dictionary<int, float[]>();
+        private static float[] ModelEntityCover(Block b, BlockValue bv)
+        {
+            if (b.lightOpacity >= 255 || IsSwingingLeaf(b, bv.type)) return FullCover;
+            if (_entityCoverCache.TryGetValue(bv.type, out float[] hit)) return hit;
+            float o = b.lightOpacity <= 0 ? 0f : b.lightOpacity / 255f;
+            float[] cov = { o, o, o, o, o, o, o, o, o };
+            _entityCoverCache[bv.type] = cov;
             return cov;
         }
 
