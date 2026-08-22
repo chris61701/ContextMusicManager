@@ -27,49 +27,44 @@ static float rule(float mean,float best){
     return sqrtf(mean*best);
 }
 
-/* A cell's NEGATIVE face on `axis`: the slab of blocks at offset 0 along that axis, spanning the
- * cell's full extent on the other two. Anisotropic, so the counts differ per axis. */
-static float faceT(int cx,int cy,int cz,int axis){
-    int bx=cx*SX, by=cy*SY, bz=cz*SZ;
-    float acc=0,best=0; int n=0;
-    int ea = axis==0?SY:SX, eb = axis==2?SY:SZ;   /* extents of the face */
-    for(int a=0;a<ea;a++) for(int b=0;b<eb;b++){
-        int x,y,z,px,py,pz;
-        if(axis==0){ x=bx;      y=by+a; z=bz+b; px=x-1; py=y; pz=z; }
-        else if(axis==1){ x=bx+a; y=by;  z=bz+b; px=x; py=y-1; pz=z; }
-        else { x=bx+a; y=by+b; z=bz;            px=x; py=y; pz=z-1; }
-        float t=(isSolid(x,y,z)||isSolid(px,py,pz))?0.f:1.f;
-        acc+=t; if(t>best)best=t; n++;
-    }
-    return n?rule(acc/n,best):0.f;
-}
-
-/* The cell's MIDDLE plane perpendicular to `axis` — what stands across a route passing through.
- * Only meaningful when the cell is at least 2 blocks deep on that axis: at depth 1 the cell IS its
- * own face, there is nothing between the two faces to catch, and charging it would double every
- * move along that axis. */
-static float midT(int cx,int cy,int cz,int axis){
+/* THE MATERIAL IN ONE HALF OF A CELL, as a linear transmission (1 = nothing there, 0 = sealed) —
+ * the model cmm_field has taken since ABI 4. A move charges the half it leaves through plus the
+ * half it enters through, so the pair on an axis has to compose back to the cell's own material:
+ * both halves hold something => each reports sqrt(T), only one does => that one reports T.
+ *
+ * Kept in step with test_field.c's halfT, which is the graded one. Note this probe used to ask
+ * BOTH sides of a face (`isSolid(x,y,z) || isSolid(px,py,pz)`) where the field asks only the
+ * cell's own blocks — that made everything read as sealing better than it does. Own cell only. */
+static float halfT(int cx,int cy,int cz,int axis,int positive){
     int step = axis==0?SX:axis==1?SY:SZ;
-    if(step<2) return 1.f;
-    int bx=cx*SX, by=cy*SY, bz=cz*SZ, h=step/2;
-    float acc=0,best=0; int n=0;
+    int nHi = (step+1)/2 - 1, pLo = step - (step+1)/2;
+    int bx=cx*SX, by=cy*SY, bz=cz*SZ;
     int ea = axis==0?SY:SX, eb = axis==2?SY:SZ;
+    int nCol=0, blkNeg=0, blkPos=0, blkAny=0;
     for(int a=0;a<ea;a++) for(int b=0;b<eb;b++){
-        int x,y,z;
-        if(axis==0){ x=bx+h; y=by+a; z=bz+b; }
-        else if(axis==1){ x=bx+a; y=by+h; z=bz+b; }
-        else { x=bx+a; y=by+b; z=bz+h; }
-        float t=isSolid(x,y,z)?0.f:1.f;
-        acc+=t; if(t>best)best=t; n++;
+        int hitN=0, hitP=0;
+        for(int d=0;d<step;d++){
+            int x,y,z;
+            if(axis==0){ x=bx+d; y=by+a; z=bz+b; }
+            else if(axis==1){ x=bx+a; y=by+d; z=bz+b; }
+            else { x=bx+a; y=by+b; z=bz+d; }
+            if(isSolid(x,y,z)){ if(d<=nHi) hitN=1; if(d>=pLo) hitP=1; }
+        }
+        nCol++; blkNeg+=hitN; blkPos+=hitP; if(hitN||hitP) blkAny++;
     }
-    return n?rule(acc/n,best):0.f;
+    if(!nCol) return 0.f;
+    int mine = positive?blkPos:blkNeg, other = positive?blkNeg:blkPos;
+    if(!mine) return 1.f;
+    float T = rule((float)(nCol-blkAny)/(float)nCol, blkAny<nCol?1.f:0.f);
+    return other ? sqrtf(T) : T;
 }
 
 static void fill_all(cmm_fld*f){
     int cx,cy,cz,g=0;
     while(cmm_fld_next_pending(f,&cx,&cy,&cz)&&g++<8000000)
-        cmm_fld_set_cell(f,cx,cy,cz,faceT(cx,cy,cz,0),faceT(cx,cy,cz,1),faceT(cx,cy,cz,2),
-                                    midT(cx,cy,cz,0), midT(cx,cy,cz,1), midT(cx,cy,cz,2));
+        cmm_fld_set_cell(f,cx,cy,cz,
+                         halfT(cx,cy,cz,0,0), halfT(cx,cy,cz,1,0), halfT(cx,cy,cz,2,0),
+                         halfT(cx,cy,cz,0,1), halfT(cx,cy,cz,1,1), halfT(cx,cy,cz,2,1));
 }
 
 static int GY = 20;

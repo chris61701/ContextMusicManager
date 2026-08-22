@@ -82,71 +82,60 @@ static int FACE_RULE = 0;
  * openFraction^this, not openFraction: linear area is too generous, and a face is now 1x3
  * sub-blocks rather than 3x3, so a one-block hole went from a ninth of it to a third. */
 static float APERTURE_POW = 1.0f;
-static float faceT(int cx, int cy, int cz, int axis) {
+/* THE MATERIAL IN ONE HALF OF A CELL, as a linear transmission (1 = nothing there, 0 = sealed).
+ *
+ * Mirrors what FieldOcclusion.CellNumbers hands the game's field, and the mirroring is the point:
+ * this harness once consulted BOTH sides of a face where the game consults only one, so it graded
+ * a model that seals better than the one that ships and hid a defect that cost a night. A harness
+ * kinder than production is worse than no harness.
+ *
+ * A column of the cross-section counts as blocked in a half if ANY sub-block in that half's slab
+ * is solid -- thickness does not enter into it, a sliver plate blocks like a full block of the
+ * same stuff. What the halves record is WHERE the material is, not how much of it there is.
+ *
+ * THE SPLIT is the part that is easy to get wrong. A route passing straight through crosses BOTH
+ * halves and pays the sum, so the pair has to compose back to the cell's own material or every
+ * wall in the world doubles. Both halves hold material => each reports sqrt(T). Only one holds it
+ * => that one reports T and the other reports 1, which is what makes a half block cost a whole
+ * wall to cross and nothing at all to stand beside. */
+static float halfT(int cx, int cy, int cz, int axis, int positive) {
+    int step = axis == 0 ? SX : axis == 1 ? SY : SZ;
+    int nHi  = (step + 1) / 2 - 1;        /* negative half = slab [0, nHi]     */
+    int pLo  = step - (step + 1) / 2;     /* positive half = slab [pLo, step-1] */
     int bx = cx*SX, by = cy*SY, bz = cz*SZ;
     int ea = axis == 0 ? SY : SX, eb = axis == 2 ? SY : SZ;
-    float acc = 0, best = 0; int n = 0;
+    int nCol = 0, blkNeg = 0, blkPos = 0, blkAny = 0;
     for (int a = 0; a < ea; a++)
     for (int b = 0; b < eb; b++) {
-        int x, y, z, px, py, pz;
-        if (axis == 0)      { x = bx;     y = by + a; z = bz + b; px = x-1; py = y; pz = z; }
-        else if (axis == 1) { x = bx + a; y = by;     z = bz + b; px = x; py = y-1; pz = z; }
-        else                { x = bx + a; y = by + b; z = bz;     px = x; py = y; pz = z-1; }
-        /* THIS CELL'S OWN boundary block, and not the neighbour's.
-         *
-         * It used to be `isSolid(x,y,z) || isSolid(px,py,pz)`, which is NOT what the game does:
-         * FieldOcclusion.CellNumbers reads only the cell's own layer, on the rule that whichever
-         * cell contains the wall is the one that reports it. Consulting both sides makes every
-         * face more blocking than the shipped one, so this whole suite was grading a model that
-         * seals better than the one that ships -- and it hid the defect that cost a night. The
-         * same bathroom read a 47.9 dB door here and 2.4 dB in the game. A harness that is kinder
-         * than production is worse than no harness. */
-        (void)px; (void)py; (void)pz;
-        int blocked = isSolid(x, y, z);
-        float t = blocked ? 0.0f : 1.0f;
-        acc += t; if (t > best) best = t;
-        n++;
+        int hitN = 0, hitP = 0;
+        for (int d = 0; d < step; d++) {
+            int x, y, z;
+            if (axis == 0)      { x = bx + d; y = by + a; z = bz + b; }
+            else if (axis == 1) { x = bx + a; y = by + d; z = bz + b; }
+            else                { x = bx + a; y = by + b; z = bz + d; }
+            if (isSolid(x, y, z)) { if (d <= nHi) hitN = 1; if (d >= pLo) hitP = 1; }
+        }
+        nCol++; blkNeg += hitN; blkPos += hitP; if (hitN || hitP) blkAny++;
     }
-    if (!n) return 0.0f;
-    float mean = acc / n;
-    if (FACE_RULE == 1) return best;
-    if (FACE_RULE == 2) return sqrtf(mean * best);
-    return (mean <= 0.0f || mean >= 1.0f) ? mean : powf(mean, APERTURE_POW);
-}
-/* Transmission through the cell's MIDDLE PLANE perpendicular to `axis` -- what stands across a
- * route passing through the cell. Directional, because a floor blocks vertical travel through a
- * cell and not horizontal, and charging it for both is what made the open air outdoors quiet. */
-static float midT(int cx, int cy, int cz, int axis) {
-    int step = axis == 0 ? SX : axis == 1 ? SY : SZ;
-    /* At depth 1 the cell IS its own face: there is nothing between the two faces for a middle
-     * plane to catch, and charging one would double every move along that axis. */
-    if (step < 2) return 1.0f;
-    int bx = cx*SX, by = cy*SY, bz = cz*SZ, h = step / 2;
-    int ea = axis == 0 ? SY : SX, eb = axis == 2 ? SY : SZ;
-    float acc = 0, best = 0; int n = 0;
-    for (int a = 0; a < ea; a++)
-    for (int b = 0; b < eb; b++) {
-        int x, y, z;
-        if (axis == 0)      { x = bx + h; y = by + a; z = bz + b; }
-        else if (axis == 1) { x = bx + a; y = by + h; z = bz + b; }
-        else                { x = bx + a; y = by + b; z = bz + h; }
-        float t = isSolid(x, y, z) ? 0.0f : 1.0f;
-        acc += t; if (t > best) best = t;
-        n++;
-    }
-    if (!n) return 0.0f;
-    float mean = acc / n;
-    if (FACE_RULE == 1) return best;
-    if (FACE_RULE == 2) return sqrtf(mean * best);
-    return (mean <= 0.0f || mean >= 1.0f) ? mean : powf(mean, APERTURE_POW);
+    if (!nCol) return 0.0f;
+    int mine  = positive ? blkPos : blkNeg;
+    int other = positive ? blkNeg : blkPos;
+    if (!mine) return 1.0f;                       /* nothing in this half: free to cross */
+    float mean = (float)(nCol - blkAny) / (float)nCol;
+    float best = blkAny < nCol ? 1.0f : 0.0f;
+    float T;
+    if (FACE_RULE == 1)      T = best;
+    else if (FACE_RULE == 2) T = sqrtf(mean * best);
+    else                     T = (mean <= 0.0f || mean >= 1.0f) ? mean : powf(mean, APERTURE_POW);
+    return other ? sqrtf(T) : T;                  /* split so the two halves compose back to T */
 }
 
 static void fill_all(cmm_fld *f) {
     int cx, cy, cz, guard = 0;
     while (cmm_fld_next_pending(f, &cx, &cy, &cz) && guard++ < 400000)
         cmm_fld_set_cell(f, cx, cy, cz,
-                         faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
-                         midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2));
+                         halfT(cx,cy,cz,0,0), halfT(cx,cy,cz,1,0), halfT(cx,cy,cz,2,0),
+                         halfT(cx,cy,cz,0,1), halfT(cx,cy,cz,1,1), halfT(cx,cy,cz,2,1));
 }
 
 int main(int argc, char** argv) {
@@ -198,10 +187,7 @@ int main(int argc, char** argv) {
                 for (int yy = 0; yy <= gy; yy++) solid[x][yy][z] = 1;
             cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
             cmm_fld_recentre(g, 32, gy + 2, 32);
-            { int cx, cy, cz, guard = 0;
-              while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
-                cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
-                                                midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+            fill_all(g);
             cmm_fld_solve(g, 32.5f, gy + 1 + 1.7f, 32.5f);
             for (int d = 6; d <= 24; d += 6) {
                 float v = cmm_fld_sample_db(g, 32.5f + d, gy + 1.5f, 32.5f);
@@ -357,8 +343,9 @@ int main(int argc, char** argv) {
     // So the assertion is reduced to what is still true and still worth guarding: a hole is
     // nothing like a sealed wall, and a sealed wall stays sealed.
     ckf("a 1-block hole is not a sealed wall", pin < thru * 0.2f,
-        "%.2f dB (doorway %.1f, sealed %.1f) — no aperture-size term: a hole reads as an opening",
-        pin, door, thru);
+        "%.2f dB (doorway %.1f, sealed %.1f)", pin, door, thru);
+    ckxf("...and a 1-block hole is not a doorway either", pin - door > 3.0f,
+         "hole %.2f vs doorway %.2f dB — no aperture-size term in the model", pin, door);
 
     /* ── EVERY BUFFER MUST ACTUALLY GET FLOODED ────────────────────────────────────────
      * There are three field buffers: the one being sampled, the one being built, and the previous
@@ -466,10 +453,7 @@ int main(int argc, char** argv) {
         }
         cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
         cmm_fld_recentre(g, 32, 4, 32);
-        { int cx, cy, cz, guard = 0;
-          while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
-            cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
-                                            midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+        fill_all(g);
         cmm_fld_solve(g, 32.5f, 2.5f, 32.5f);                     /* ear in the -X/-Z quadrant */
         float seam = cmm_fld_sample_db(g, 33.5f, 2.5f, 33.5f);    /* diagonally across the corner */
         float same = cmm_fld_sample_db(g, 30.5f, 2.5f, 30.5f);    /* same quadrant: must be open */
@@ -480,43 +464,44 @@ int main(int argc, char** argv) {
     }
 
     /* ── A ROUTE MUST NOT ENTER A SOLID BLOCK FOR FREE ──────────────────────────────
-     * KNOWN DEFECT, and the reason for the change these two checks were written to drive.
+     * These two were written as expected failures against the model that shipped, and the change
+     * to six half-voxels per cell (ABI 4) is what turned them green. Kept as ordinary checks now,
+     * with what they caught, because it is the kind of defect that comes back the moment somebody
+     * decides one number per cell would be simpler.
      *
-     * A cell's material is stored on its three NEGATIVE faces, on the rule that whichever cell
-     * contains the wall is the one that reports it. The face between C and C+X therefore belongs
-     * to C+X, so for the block sitting in C:
+     * A cell's material used to be stored on its three NEGATIVE faces, on the rule that whichever
+     * cell contains the wall is the one that reports it. The face between C and C+X therefore
+     * belonged to C+X, so for the block sitting in C:
      *
-     *     entering C from -X   charges C's own face      -- correct
-     *     entering C from +X   charges C+X's face (air)  -- FREE
-     *     leaving  C toward +X charges C+X's face (air)  -- FREE
+     *     entering C from -X   charged C's own face      -- correct
+     *     entering C from +X   charged C+X's face (air)  -- FREE
+     *     leaving  C toward +X charged C+X's face (air)  -- FREE
      *
-     * A route that enters through one positive face and leaves through another pays NOTHING AT
-     * ALL for the block it just walked through. A plane wall survives it because you always reach
-     * a plane from its negative side, which is why every wall check in this file passes. Any wall
-     * you can get AROUND to the far side of does not: the speaker below is walled in on four
-     * sides with only the corners open, and the route goes in through the +X face of one side
-     * block and out through that same block's +Z face. Two straight moves, neither charged -- so
-     * the shoulder rule above never even gets a chance to fire.
+     * A route that entered through one positive face and left through another paid NOTHING AT ALL
+     * for the block it had just walked through. A plane wall survived it, because a plane is
+     * always reached from its negative side -- which is why every other wall check in this file
+     * passed throughout. Any wall you can get AROUND did not: the speaker below is walled in on
+     * four sides with only its corners open, and the route went in through the +X face of one
+     * side block and out through that same block's +Z face. Two straight moves, neither charged,
+     * so the shoulder rule above never even got a chance to fire.
+     *
+     *     lone block, stood inside          0.10 dB  ->  58.60
+     *     boxed speaker, corners open        0.1 dB  ->   58.6   (corners filled: 58.6 both ways)
      *
      * Same root cause as a half block or a shut door failing to block from the cell you are
-     * standing in: the model records WHAT material a cell holds and throws away WHERE. The fix is
-     * six directional numbers per cell instead of three -- material per half-voxel, charged on
-     * the halves a move actually crosses -- after which both of these become ordinary checks. */
+     * standing in: the model recorded WHAT material a cell held and threw away WHERE. */
     {
         memset(solid, 0, sizeof solid);
         for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
         for (int y = 1; y < H; y++) solid[36][y][32] = 1;         /* one lone block, air all round */
         cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
         cmm_fld_recentre(g, 32, 4, 32);
-        { int cx, cy, cz, guard = 0;
-          while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
-            cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
-                                            midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+        fill_all(g);
         cmm_fld_solve(g, 32.5f, 2.5f, 32.5f);
         float inside = cmm_fld_sample_db(g, 36.5f, 2.5f, 32.5f);
         cmm_fld_destroy(g);
-        ckxf("a lone solid block costs a wall to enter", inside > 20.0f,
-             "%.2f dB inside the block — reached free through its +X face", inside);
+        ckf("a lone solid block costs a wall to enter", inside > 20.0f,
+            "%.2f dB inside the block — was 0.10, reached free through its +X face", inside);
     }
     {
         float got[2];
@@ -533,16 +518,13 @@ int main(int argc, char** argv) {
             }
             cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
             cmm_fld_recentre(g, 32, 4, 32);
-            { int cx, cy, cz, guard = 0;
-              while (cmm_fld_next_pending(g, &cx, &cy, &cz) && guard++ < 400000)
-                cmm_fld_set_cell(g, cx, cy, cz, faceT(cx,cy,cz,0), faceT(cx,cy,cz,1), faceT(cx,cy,cz,2),
-                                                midT(cx,cy,cz,0),  midT(cx,cy,cz,1),  midT(cx,cy,cz,2)); }
+            fill_all(g);
             cmm_fld_solve(g, 32.5f, 2.5f, 32.5f);                      /* ear outside, 4 blocks off */
             got[corners] = cmm_fld_sample_db(g, 36.5f, 2.5f, 32.5f);   /* the boxed-in speaker */
             cmm_fld_destroy(g);
         }
-        ckxf("walling a speaker in seals it, corners or not", fabsf(got[1] - got[0]) < 6.0f,
-             "corners open %.1f vs filled %.1f dB — in game 1.0 vs 21.7", got[0], got[1]);
+        ckf("walling a speaker in seals it, corners or not", fabsf(got[1] - got[0]) < 6.0f,
+            "corners open %.1f vs filled %.1f dB — was 0.1 vs 58.6", got[0], got[1]);
     }
 
     /* ── and it never vanishes: unreachable reads as silent, not as absent ───────────── */

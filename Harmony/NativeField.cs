@@ -14,7 +14,7 @@ namespace CMM
         private const string Dll = "CMM_Decoder";
 
         // Checked on first use so a stale DLL fails with a number rather than inside the flood.
-        internal const int ExpectedAbi = 3;
+        internal const int ExpectedAbi = 4;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_fld_abi();
@@ -33,9 +33,12 @@ namespace CMM
         internal static extern int cmm_fld_next_pending(IntPtr f, out int cx, out int cy, out int cz);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        // Six HALF-VOXELS: the material in the cell's -X/-Y/-Z half and in its +X/+Y/+Z half,
+        // as linear transmissions. See cmm_field.h — the pair on an axis must compose back to the
+        // cell's own material or every wall in the world doubles.
         internal static extern void cmm_fld_set_cell(IntPtr f, int cx, int cy, int cz,
                                                      float tnx, float tny, float tnz,
-                                                     float midX, float midY, float midZ);
+                                                     float tpx, float tpy, float tpz);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_fld_dirty(IntPtr f, int bx, int by, int bz, int radiusBlocks);

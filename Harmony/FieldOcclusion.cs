@@ -300,10 +300,9 @@ namespace CMM
             catch (Exception e) { CMMConfig.D($"[CMM] field read failed: {e.Message}"); }
         }
 
-        // One coarse cell, from the blocks underneath it. Reads StepXZ*StepY*StepXZ blocks — 9 at
-        // 3x1x3 — and derives six numbers: how much gets through each of its three negative faces,
-        // and what stands across its interior on each axis (which is what stops a route cutting
-        // through the middle of a wall thicker than one cell).
+        // One coarse cell, from the blocks underneath it, as six HALF-VOXELS: the material
+        // standing in the cell's -X/-Y/-Z half and in its +X/+Y/+Z half. A move charges the half
+        // it leaves through plus the half it enters through.
         private static readonly float[] _cellScratch = new float[6];
         private static void FillCell(World world, int cx, int cy, int cz)
         {
@@ -313,51 +312,72 @@ namespace CMM
                 _cellScratch[3], _cellScratch[4], _cellScratch[5]);
         }
 
-        // The six numbers themselves, split out so the ray dump below reports exactly what the
-        // reader stores rather than a second copy of the arithmetic that could drift from it.
+        // THE SIX HALVES, split out so the ray dump below reports exactly what the reader stores
+        // rather than a second copy of the arithmetic that could drift from it.
+        //
+        // o[0..2] = the material in the cell's -X/-Y/-Z half, o[3..5] = its +X/+Y/+Z half.
+        //
+        // WHAT REPLACED WHAT. This used to report three FACES and three MIDDLE PLANES, and a
+        // cell's material lived on its three negative faces only — the face between C and C+X
+        // belonged to C+X. So a route could enter the block sitting in C through C's +X face and
+        // leave through its +Z face and pay nothing at all for it, because both of those faces
+        // belong to the AIR cells next door. A plane wall survived that (you always reach a plane
+        // from its negative side); a speaker walled in with its corners open did not — 0.1 dB
+        // against 58.6 with the corners filled. Same reason a half block or a shut door did not
+        // block from the cell you were standing in.
+        //
+        // THICKNESS DOES NOT ENTER INTO IT. A column of the cross-section is blocked by the most
+        // blocking thing in it, not by the product along it: a sliver plate blocks like a full
+        // block of the same material. Two separate CELLS in a row still charge twice, so a wall
+        // being thicker still occludes more — that is between cells, not inside one.
+        //
+        // THE SPLIT is the part that is easy to get wrong. A route passing straight through the
+        // cell crosses BOTH halves and pays the sum, so the pair has to compose back to the cell's
+        // own material. Both halves hold material ⇒ each reports sqrt(T); only one holds it ⇒ that
+        // one reports T and the other reports 1. That is what makes a half block cost a whole wall
+        // to cross and nothing at all to stand beside, and getting it wrong doubles every wall in
+        // the world.
         private static void CellNumbers(World world, int cx, int cy, int cz, float[] o)
         {
             int bx = cx * StepXZ, by = cy * StepY, bz = cz * StepXZ;
-            int hx = StepXZ / 2, hy = StepY / 2, hz = StepXZ / 2;
-            float sumX = 0f, maxX = 0f, sumY = 0f, maxY = 0f, sumZ = 0f, maxZ = 0f;
-            float mSumX = 0f, mMaxX = 0f, mSumY = 0f, mMaxY = 0f, mSumZ = 0f, mMaxZ = 0f;
-            // Each plane has its OWN sub-block count now that the cell is not a cube: the X and Z
-            // faces are StepY x StepXZ, the Y face is StepXZ x StepXZ. Dividing all six by one
-            // number was correct only while the cell was cubic.
-            float nFaceXZ = StepY * StepXZ;      // the -X and -Z faces, and their middle planes
-            float nFaceY  = StepXZ * StepXZ;     // the -Y face, and its middle plane
-
-            for (int dy = 0; dy < StepY; dy++)
-                for (int dz = 0; dz < StepXZ; dz++)
-                    for (int dx = 0; dx < StepXZ; dx++)
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int step = axis == 1 ? StepY : StepXZ;
+                int nHi = (step + 1) / 2 - 1;      // negative half = slab [0, nHi]
+                int pLo = step - (step + 1) / 2;   // positive half = slab [pLo, step-1]
+                // The cross-section perpendicular to this axis. Each plane has its own sub-block
+                // count now that the cell is not a cube: X and Z are StepY x StepXZ, Y is
+                // StepXZ x StepXZ. Dividing all of them by one number was right only for a cube.
+                int ea = axis == 0 ? StepY : StepXZ;
+                int eb = axis == 2 ? StepY : StepXZ;
+                float sumNeg = 0f, sumPos = 0f, sumAny = 0f;
+                int cols = 0;
+                for (int a = 0; a < ea; a++)
+                    for (int b = 0; b < eb; b++)
                     {
-                        int x = bx + dx, y = by + dy, z = bz + dz;
-                        float t = Transmission(world, x, y, z);
-                        // The cell's own boundary layer stands for the face it shares with the
-                        // neighbour below it on that axis. Using only this cell's blocks halves
-                        // the reads: whichever cell contains the wall is the one that reports it.
-                        if (dx == 0) { sumX += t; if (t > maxX) maxX = t; }
-                        if (dy == 0) { sumY += t; if (t > maxY) maxY = t; }
-                        if (dz == 0) { sumZ += t; if (t > maxZ) maxZ = t; }
-                        // ...and the MIDDLE plane perpendicular to each axis: what stands across a
-                        // route passing through, which catches a wall sitting inside a cell rather
-                        // than on its edge. Directional, because a floor blocks vertical travel
-                        // through a cell and not horizontal.
-                        if (dx == hx) { mSumX += t; if (t > mMaxX) mMaxX = t; }
-                        if (dy == hy) { mSumY += t; if (t > mMaxY) mMaxY = t; }
-                        if (dz == hz) { mSumZ += t; if (t > mMaxZ) mMaxZ = t; }
+                        float tn = 1f, tp = 1f;
+                        for (int d = 0; d < step; d++)
+                        {
+                            int x, y, z;
+                            if (axis == 0)      { x = bx + d; y = by + a; z = bz + b; }
+                            else if (axis == 1) { x = bx + a; y = by + d; z = bz + b; }
+                            else                { x = bx + a; y = by + b; z = bz + d; }
+                            float t = Transmission(world, x, y, z);
+                            if (d <= nHi && t < tn) tn = t;    // most blocking thing in this half
+                            if (d >= pLo && t < tp) tp = t;
+                        }
+                        sumNeg += tn; sumPos += tp;
+                        sumAny += tn < tp ? tn : tp;           // the cell's own, both halves
+                        cols++;
                     }
-
-            o[0] = Face(sumX / nFaceXZ, maxX);
-            o[1] = Face(sumY / nFaceY,  maxY);
-            o[2] = Face(sumZ / nFaceXZ, maxZ);
-            // A MIDDLE PLANE ONLY EXISTS IF THE CELL IS AT LEAST 2 BLOCKS DEEP ON THAT AXIS. At
-            // depth 1 the cell IS its own face — there is nothing between the two faces to catch —
-            // and charging one anyway would double the cost of every move along that axis. With
-            // StepY = 1 that is the Y axis, so vertical travel is charged by the faces alone.
-            o[3] = StepXZ >= 2 ? Face(mSumX / nFaceXZ, mMaxX) : 1f;
-            o[4] = StepY  >= 2 ? Face(mSumY / nFaceY,  mMaxY) : 1f;
-            o[5] = StepXZ >= 2 ? Face(mSumZ / nFaceXZ, mMaxZ) : 1f;
+                if (cols == 0) { o[axis] = 1f; o[axis + 3] = 1f; continue; }
+                float meanNeg = sumNeg / cols, meanPos = sumPos / cols;
+                float T = Face(sumAny / cols, 0f);
+                bool hasNeg = meanNeg < 0.9999f, hasPos = meanPos < 0.9999f;
+                float split = (hasNeg && hasPos) ? Mathf.Sqrt(T) : T;
+                o[axis]     = hasNeg ? split : 1f;
+                o[axis + 3] = hasPos ? split : 1f;
+            }
         }
 
         // HOW MUCH GETS THROUGH A CELL FACE: the AREA FRACTION. Decided by measurement, not by
@@ -687,7 +707,7 @@ namespace CMM
               .Append(" -> speaker ").Append(spk.ToCultureInvariantString())
               .Append("   d=").Append(total.ToString("0.0"))
               .Append("   detour ").Append(per.ToString("0.00")).Append(" dB/blk")
-              .Append("\n   dist  routed   ideal   excess    wall  |  -X   -Y   -Z   midX midY midZ  (dB loss)");
+              .Append("\n   dist  routed   ideal   excess    wall  |  -X   -Y   -Z    +X   +Y   +Z  (dB loss)");
 
             int steps = Mathf.Clamp(Mathf.CeilToInt(total / StepY * 2f), 1, 160);
             var seen = new Vector3i(int.MinValue, int.MinValue, int.MinValue);

@@ -66,18 +66,41 @@ struct cmm_fld {
     long long n;
     int ox, oy, oz;                 /* world CELL coords of the window's minimum corner */
 
-    /* Geometry, indexed toroidally. Transmission through the face shared with the -X/-Y/-Z
-     * neighbour, as dB (0 = open). Kept in dB rather than as the linear fraction the setter takes
-     * because the flood adds it, and converting once on the way in beats a log per relaxation. */
-    float *fnx, *fny, *fnz;
-    /* v2 — the interior obstruction is DIRECTIONAL. One number for "how solid is this cell" made
-     * sound travelling OVER a floor be attenuated BY the floor: a cell containing the ground is a
-     * third solid, so every horizontal step near the ground paid for it, and the open air outdoors
-     * came out 3.2 dB down for no reason a player could see. What matters is what stands across
-     * the route, so each axis stores the obstruction of the cell's MIDDLE PLANE perpendicular to
-     * it -- a floor blocks vertical travel through the cell and not horizontal, which is what a
-     * floor does. */
-    float *fillX, *fillY, *fillZ;
+    /* Geometry, indexed toroidally, as dB of loss (0 = open). Kept in dB rather than as the
+     * linear fraction the setter takes because the flood ADDS it, and converting once on the way
+     * in beats a log per relaxation.
+     *
+     * SIX HALF-VOXELS (v4), not three faces. Each axis stores the material standing in the cell's
+     * negative half and in its positive half, and a move charges the half it leaves through plus
+     * the half it enters through. See cmm_fld_set_cell in the header for what this replaced and
+     * why -- in short, material used to live on the three negative faces only, so a route could
+     * enter a solid block through one positive face and leave through another and pay nothing.
+     *
+     * DIRECTIONAL for the reason the middle planes were, and this subsumes them: a floor blocks
+     * vertical travel through a cell and not horizontal, and one number for "how solid is this
+     * cell" made sound travelling OVER a floor be attenuated BY the floor -- open air outdoors
+     * came out 3.2 dB down for no reason a player could see.
+     *
+     * INTERLEAVED AND QUANTISED, six int16 quarter-dB per cell. Both of those are for speed, not
+     * tidiness: doubling the numbers a move charges doubles the geometry the flood streams, and
+     * this is the hot loop. Min of four alternating runs, bench_field open field, 139k cells all
+     * reached:
+     *
+     *     three faces, three float arrays     83 ms    1.7 MB of geometry   <- what this replaced
+     *     six halves,  interleaved float     108 ms    3.3 MB
+     *     six halves,  interleaved int16     101 ms    1.7 MB               <- shipped
+     *
+     * Six separate float arrays -- the naive port -- measured about half again as slow as the
+     * interleaved one: a move reads up to three of the six for the cell it enters, and six
+     * half-megabyte streams miss cache three times where one 12-byte run misses once.
+     *
+     * Quarter-dB is the unit the flood already settles in (Q_PER_DB), so storing it that way also
+     * takes a float multiply and a rounding conversion out of the inner loop. int16 holds
+     * MAX_Q = 4000 quarter-dB with room to spare, and t_q clamps there anyway.
+     *
+     * The honest bottom line: about 22% more than the three-face model, for twice the numbers and
+     * the three defects it fixes. The flood runs on the scheduler thread, not Unity's. */
+    short *m6;                   /* [cell*6 + CM_*]: -X -Y -Z +X +Y +Z, quarter-dB */
     /* NEVER READ vs NEEDS RE-READING. These are not the same thing and conflating them cost a
      * 15 dB drop-out every time a door moved.
      *
@@ -151,12 +174,43 @@ static inline int in_win(const cmm_fld *f, int cx, int cy, int cz) {
         && cy >= f->oy && cy < f->oy + f->ny
         && cz >= f->oz && cz < f->oz + f->nz;
 }
+/* Where each half sits in the interleaved six. */
+#define CM_NX 0
+#define CM_NY 1
+#define CM_NZ 2
+#define CM_PX 3
+#define CM_PY 4
+#define CM_PZ 5
+
+/* HOW SOLID ONE SHOULDER CELL IS: the most blocking of its six halves. The question a shoulder
+ * answers is whether a two-step route could have got through this cell AT ALL, so its worst
+ * direction is the right one to ask about -- and corners are made of whole blocks, whose six
+ * halves all agree anyway. Unread space counts as solid, the same rule the move itself uses. */
+static inline int sh_solid(const short *M6, const unsigned char *HAVE, int maxQdb,
+                           int NX, int NY, int NZ, int shx, int shy, int shz) {
+    if (shx < 0) shx += NX; else if (shx >= NX) shx -= NX;
+    if (shy < 0) shy += NY; else if (shy >= NY) shy -= NY;
+    if (shz < 0) shz += NZ; else if (shz >= NZ) shz -= NZ;
+    long long k = (long long)shx + (long long)NX * ((long long)shz + (long long)NZ * shy);
+    if (!HAVE[k]) return maxQdb;
+    const short *m = M6 + k * 6;
+    int best = m[0];
+    for (int q = 1; q < 6; q++) if (m[q] > best) best = m[q];
+    return best;
+}
+
 /* Linear transmission fraction -> dB of loss, clamped. 0 (sealed) becomes "silent", not infinity. */
 static inline float t_db(float t) {
     if (t >= 1.0f)   return 0.0f;
     if (t <= 1e-7f)  return (float)MAX_Q / Q_PER_DB;
     float d = -10.0f * log10f(t);
     return d > (float)MAX_Q / Q_PER_DB ? (float)MAX_Q / Q_PER_DB : d;
+}
+
+/* ...and straight to the quarter-dB the flood settles in, which is how it is stored. */
+static inline short t_q(float t) {
+    int q = (int)(t_db(t) * Q_PER_DB + 0.5f);
+    return (short)(q > MAX_Q ? MAX_Q : q);
 }
 
 /* Block coordinate -> cell index on one axis. Floor division, because block -1 belongs to cell -1
@@ -174,12 +228,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
     f->n = (long long)nx * ny * nz;
     f->dbPerBlock = 0.35f;                     /* what a block of DETOUR costs */
     f->maxDb = 60.0f;
-    f->fnx  = (float *)malloc(sizeof(float) * f->n);
-    f->fny  = (float *)malloc(sizeof(float) * f->n);
-    f->fnz  = (float *)malloc(sizeof(float) * f->n);
-    f->fillX = (float *)malloc(sizeof(float) * f->n);
-    f->fillY = (float *)malloc(sizeof(float) * f->n);
-    f->fillZ = (float *)malloc(sizeof(float) * f->n);
+    f->m6 = (short *)malloc(sizeof(short) * 6 * f->n);
     f->have = (unsigned char *)calloc(f->n, 1);
     f->dirty = (unsigned char *)calloc(f->n, 1);
     f->cur  = (int *)malloc(sizeof(int) * f->n);
@@ -191,7 +240,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
     f->bprev= (int *)malloc(sizeof(int) * f->n);
     f->binb = (int *)malloc(sizeof(int) * f->n);
     f->bhead= (int *)malloc(sizeof(int) * (MAX_Q + 1));
-    if (!f->fnx || !f->fny || !f->fnz || !f->fillX || !f->fillY || !f->fillZ || !f->have || !f->dirty || !f->cur || !f->prev || !f->nxt || !f->curMat || !f->nxtMat
+    if (!f->m6 || !f->have || !f->dirty || !f->cur || !f->prev || !f->nxt || !f->curMat || !f->nxtMat
         || !f->bnext || !f->bprev || !f->binb || !f->bhead) { cmm_fld_destroy(f); return NULL; }
     for (long long i = 0; i < f->n; i++) { f->cur[i] = UNREACHED; f->prev[i] = UNREACHED; f->nxt[i] = UNREACHED; }
 
@@ -238,8 +287,7 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
 
 void cmm_fld_destroy(cmm_fld *f) {
     if (!f) return;
-    free(f->fnx); free(f->fny); free(f->fnz);
-    free(f->fillX); free(f->fillY); free(f->fillZ); free(f->have); free(f->dirty);
+    free(f->m6); free(f->have); free(f->dirty);
     free(f->cur); free(f->prev); free(f->nxt);
     free(f->curMat); free(f->nxtMat); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
     free(f->order);
@@ -305,17 +353,15 @@ int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz) {
 
 void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
                       float tnx, float tny, float tnz,
-                      float midX, float midY, float midZ) {
+                      float tpx, float tpy, float tpz) {
     if (!f || !in_win(f, cx, cy, cz)) return;
     long long i = widx(f, cx, cy, cz);
-    f->fnx[i]   = t_db(tnx);
-    f->fny[i]   = t_db(tny);
-    f->fnz[i]   = t_db(tnz);
-    /* mid* are TRANSMISSIONS through the cell's middle plane perpendicular to each axis, in the
-     * same units as the faces: 1 = you can walk through it, 0 = solid. */
-    f->fillX[i] = t_db(midX);
-    f->fillY[i] = t_db(midY);
-    f->fillZ[i] = t_db(midZ);
+    /* The material in each half of the cell, as a transmission: 1 = nothing there, 0 = sealed.
+     * The caller has already split each axis across its two halves so the pair composes back to
+     * the cell's own material -- see the header. */
+    short *m = f->m6 + i * 6;
+    m[CM_NX] = t_q(tnx); m[CM_NY] = t_q(tny); m[CM_NZ] = t_q(tnz);
+    m[CM_PX] = t_q(tpx); m[CM_PY] = t_q(tpy); m[CM_PZ] = t_q(tpz);
     int wasNeed = (!f->have[i] || f->dirty[i]);
     f->have[i] = 1; f->dirty[i] = 0;
     if (wasNeed && f->pending > 0) f->pending--;
@@ -455,7 +501,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
         float gz = lz / (float)f->stepZ - 0.5f;
         int ix = (int)floorf(gx), iy = (int)floorf(gy), iz = (int)floorf(gz);
         float tx = gx - ix, ty = gy - iy, tz = gz - iz;
-        float w[8]; long long idx[8]; float dst[8]; float mat0[8];
+        float w[8]; long long idx[8]; float dst[8]; int mat0[8];
         int n = 0, ddx, ddy, ddz;
         float wmax = 0.0f;
         for (ddy = 0; ddy <= 1; ddy++)
@@ -491,18 +537,23 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
              * plus the interior of the cell entered, averaged over the axes actually moved along.
              * Identical for a diagonal, which is what stops a seed slipping through the seam where
              * two walls meet. */
-            float smat = 0.0f;
+                int smat = 0;                 /* quarter-dB, same unit as the store */
             {
+                /* Leaving the cell holding the ear and entering the seed: the half we leave
+                 * through plus the half we enter through, exactly as the relax loop charges
+                 * a move. The containing cell itself moves nowhere and pays nothing -- and it
+                 * does not need to, because the flood's FIRST STEP out of it now crosses its
+                 * own half, which is what makes a half block or a shut door block from the
+                 * cell you are standing in. */
                 int mx2 = cx - scx, my2 = cy - scy, mz2 = cz - scz;
-                long long ci = widx(f, scx, scy, scz);
-                if (mx2 > 0) smat += f->fnx[i]; else if (mx2 < 0) smat += f->fnx[ci];
-                if (my2 > 0) smat += f->fny[i]; else if (my2 < 0) smat += f->fny[ci];
-                if (mz2 > 0) smat += f->fnz[i]; else if (mz2 < 0) smat += f->fnz[ci];
-                float fl = 0.0f; int fn = 0;
-                if (mx2) { fl += f->fillX[i]; fn++; }
-                if (my2) { fl += f->fillY[i]; fn++; }
-                if (mz2) { fl += f->fillZ[i]; fn++; }
-                if (fn) smat += fl / fn;
+                const short *mo = f->m6 + widx(f, scx, scy, scz) * 6;   /* the cell left  */
+                const short *mn = f->m6 + i * 6;                        /* the cell entered */
+                if (mx2 > 0)      smat += mo[CM_PX] + mn[CM_NX];
+                else if (mx2 < 0) smat += mo[CM_NX] + mn[CM_PX];
+                if (my2 > 0)      smat += mo[CM_PY] + mn[CM_NY];
+                else if (my2 < 0) smat += mo[CM_NY] + mn[CM_PY];
+                if (mz2 > 0)      smat += mo[CM_PZ] + mn[CM_NZ];
+                else if (mz2 < 0) smat += mo[CM_NZ] + mn[CM_PZ];
             }
             w[n] = ww; idx[n] = i; mat0[n] = smat;
             dst[n] = sqrtf(ex2 * ex2 + ey2 * ey2 + ez2 * ez2);
@@ -514,8 +565,8 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
             float rel = w[s] / wmax;                 /* 1 for the best-placed seed */
             float pen = -10.0f * log10f(rel);        /* couple-in loss, 0 dB at rel = 1 */
             if (pen > 40.0f) continue;               /* far enough into the corner to not matter */
-            int qm = (int)(mat0[s] * Q_PER_DB + 0.5f);
-            int q = (int)((dst[s] * f->dbPerBlock + pen + mat0[s]) * Q_PER_DB + 0.5f);
+            int qm = mat0[s];
+            int q = (int)((dst[s] * f->dbPerBlock + pen) * Q_PER_DB + 0.5f) + mat0[s];
             if (q > MAX_Q) continue;
             if (f->nxt[idx[s]] <= q) continue;
             f->nxt[idx[s]] = q; f->nxtMat[idx[s]] = qm; bq_set(f, idx[s], q);
@@ -567,8 +618,8 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     const int ey = ((f->oy % f->ny) + f->ny) % f->ny;
     const int ez = ((f->oz % f->nz) + f->nz) % f->nz;
     const int NX = f->nx, NY = f->ny, NZ = f->nz;
-    const float *FNX = f->fnx, *FNY = f->fny, *FNZ = f->fnz;
-    const float *FLX = f->fillX, *FLY = f->fillY, *FLZ = f->fillZ;
+    const short *M6 = f->m6;
+    const int maxQdb = (int)(f->maxDb * Q_PER_DB + 0.5f);
     const unsigned char *HAVE = f->have;
     int *CUR = f->nxt;
 
@@ -585,7 +636,8 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
             int rx = sx - ex; if (rx < 0) rx += NX;
             int ry = sy - ey; if (ry < 0) ry += NY;
             int rz = sz - ez; if (rz < 0) rz += NZ;
-            const float mFromX = FNX[i], mFromY = FNY[i], mFromZ = FNZ[i];
+            /* The six halves of the cell we are leaving, hoisted out of the 26-neighbour loop. */
+            const short *mo = M6 + i * 6;
 
             for (int dy = -1; dy <= 1; dy++) {
                 int ry2 = ry + dy; if (ry2 < 0 || ry2 >= NY) continue;
@@ -604,31 +656,27 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                          * have not got to yet. Not knowing is never the same as nothing being there. */
                         if (!HAVE[ni]) continue;
 
-                        /* Crossing the faces between the two cells. A diagonal move crosses more
-                         * than one, and charging all of them is what keeps a route from slipping
-                         * through the seam where two walls meet -- the thin-slab leak the old model
-                         * had a whole class of bugs around. Each face is named on its own cell's
-                         * negative side, so which cell owns it depends on the direction of travel. */
-                        float mat = 0.0f;
-                        if (dx > 0) mat += FNX[ni]; else if (dx < 0) mat += mFromX;
-                        if (dy > 0) mat += FNY[ni]; else if (dy < 0) mat += mFromY;
-                        if (dz > 0) mat += FNZ[ni]; else if (dz < 0) mat += mFromZ;
-                        /* ...and whatever stands ACROSS the route inside the cell being entered.
-                         * Averaged over the axes the step actually moves along, so a diagonal is
-                         * charged for the planes it genuinely crosses rather than for all three. */
-                        /* SUM the interior planes crossed; do not average them, and do not count
-                         * an axis that has no interior plane to cross.
+                        /* THE MATERIAL THIS MOVE ACTUALLY GOES THROUGH: the half of THIS cell it
+                         * leaves through, plus the half of the NEXT cell it enters through, on
+                         * every axis the move travels along.
                          *
-                         * Averaging meant a three-axis diagonal divided its obstruction by three --
-                         * and one of those three was Y, whose middle plane does not exist at
-                         * stepY == 1 and always reads fully open. So 12 dB of corner became 4, and
-                         * every route out of a sealed room left through a corner in one diagonal
-                         * hop. Averaging also made a diagonal CHEAPER than either of the straight
-                         * moves it replaces, which is backwards: crossing two planes is more
-                         * obstruction than crossing one, not the mean of them. */
-                        { if (dx && f->stepX >= 2) mat += FLX[ni];
-                          if (dy && f->stepY >= 2) mat += FLY[ni];
-                          if (dz && f->stepZ >= 2) mat += FLZ[ni]; }
+                         * Both ends, which is the whole point of halves. Charging only the entered
+                         * cell -- which is what naming each face on its own cell's negative side
+                         * amounted to -- let a route walk into a solid block through one positive
+                         * face and out through another and pay nothing at all for it.
+                         *
+                         * SUMMED across axes, not averaged. A diagonal crosses more material than
+                         * either of the straight moves it replaces, so averaging made it CHEAPER
+                         * than them, which is backwards: 12 dB of corner became 4, and every route
+                         * out of a sealed room left through a corner in one diagonal hop. */
+                        const short *mn = M6 + ni * 6;
+                        int mat = 0;
+                        if (dx > 0)      mat += mo[CM_PX] + mn[CM_NX];
+                        else if (dx < 0) mat += mo[CM_NX] + mn[CM_PX];
+                        if (dy > 0)      mat += mo[CM_PY] + mn[CM_NY];
+                        else if (dy < 0) mat += mo[CM_NY] + mn[CM_PY];
+                        if (dz > 0)      mat += mo[CM_PZ] + mn[CM_NZ];
+                        else if (dz < 0) mat += mo[CM_NZ] + mn[CM_PZ];
 
                         /* THE SHOULDERS OF A DIAGONAL.
                          *
@@ -657,33 +705,38 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                          * into a wall. Cheaper-of-the-two is also the physical answer: sound takes
                          * the easier way past, not the average of the two ways.
                          *
+                         * HOW SOLID A SHOULDER IS = the most blocking of its six halves. The
+                         * question a shoulder answers is whether a two-step route could have got
+                         * through this cell at all, so the cell's worst direction is the right
+                         * one to ask about -- and for a full block, which is what corners are made
+                         * of, all six agree anyway.
+                         *
                          * Unread space counts as solid, the same rule the move itself uses. */
                         if ((dx && dz) || (dx && dy) || (dy && dz)) {
-                            float corner = 0.0f;
-                            int shx, shy, shz; long long shk; float sa = 0.0f, sb = 0.0f, sm;
-                            #define CMM_SH(_X,_Y,_Z, _OUT)                                                                        shx = (_X); shy = (_Y); shz = (_Z);                                                               if (shx < 0) shx += NX; else if (shx >= NX) shx -= NX;                                            if (shy < 0) shy += NY; else if (shy >= NY) shy -= NY;                                            if (shz < 0) shz += NZ; else if (shz >= NZ) shz -= NZ;                                            shk = (long long)shx                                                                                  + (long long)NX * ((long long)shz + (long long)NZ * shy);                                     if (!HAVE[shk]) (_OUT) = f->maxDb;                                                                else { (_OUT) = FNX[shk];                                                                                if (FNY[shk] > (_OUT)) (_OUT) = FNY[shk];                                                         if (FNZ[shk] > (_OUT)) (_OUT) = FNZ[shk]; }
+                            int corner = 0, sa, sb, sm;
                             if (dx && dz) {
-                                CMM_SH(sx + dx, sy, sz, sa) CMM_SH(sx, sy, sz + dz, sb)
+                                sa = sh_solid(M6, HAVE, maxQdb, NX, NY, NZ, sx + dx, sy, sz);
+                                sb = sh_solid(M6, HAVE, maxQdb, NX, NY, NZ, sx, sy, sz + dz);
                                 sm = sa < sb ? sa : sb; if (sm > corner) corner = sm;
                             }
                             if (dx && dy) {
-                                CMM_SH(sx + dx, sy, sz, sa) CMM_SH(sx, sy + dy, sz, sb)
+                                sa = sh_solid(M6, HAVE, maxQdb, NX, NY, NZ, sx + dx, sy, sz);
+                                sb = sh_solid(M6, HAVE, maxQdb, NX, NY, NZ, sx, sy + dy, sz);
                                 sm = sa < sb ? sa : sb; if (sm > corner) corner = sm;
                             }
                             if (dy && dz) {
-                                CMM_SH(sx, sy + dy, sz, sa) CMM_SH(sx, sy, sz + dz, sb)
+                                sa = sh_solid(M6, HAVE, maxQdb, NX, NY, NZ, sx, sy + dy, sz);
+                                sb = sh_solid(M6, HAVE, maxQdb, NX, NY, NZ, sx, sy, sz + dz);
                                 sm = sa < sb ? sa : sb; if (sm > corner) corner = sm;
                             }
-                            #undef CMM_SH
                             mat += corner;
                         }
 
-                        int q = c + qmove[dx + 1][dy + 1][dz + 1]
-                                  + (int)(mat * Q_PER_DB + 0.5f);
+                        int q = c + qmove[dx + 1][dy + 1][dz + 1] + mat;
                         if (q > maxQ || q > MAX_Q) continue;
                         if (CUR[ni] <= q) continue;
                         CUR[ni] = q;
-                        f->nxtMat[ni] = f->nxtMat[i] + (int)(mat * Q_PER_DB + 0.5f);
+                        f->nxtMat[ni] = f->nxtMat[i] + mat;
                         bq_set(f, ni, q);
                     }
                 }

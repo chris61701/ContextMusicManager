@@ -45,7 +45,7 @@ extern "C" {
 #endif
 
 /* Bumped on any breaking change; the managed side checks it on load. */
-#define CMM_FLD_ABI 3
+#define CMM_FLD_ABI 4
 CMM_FLD_API int cmm_fld_abi(void);
 
 typedef struct cmm_fld cmm_fld;
@@ -74,15 +74,35 @@ CMM_FLD_API int cmm_fld_recentre(cmm_fld *f, int bx, int by, int bz);
  * most is filled first and a half-read window is still usable close in. */
 CMM_FLD_API int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz);
 
-/* Report one cell, all six numbers as linear transmission in 0..1 (1 = open air, 0 = sealed).
- * tnx/tny/tnz are the faces this cell shares with its -X/-Y/-Z neighbours. midX/midY/midZ are the
- * cell's MIDDLE PLANE perpendicular to each axis -- what stands across a route passing through,
- * which is what stops one cutting through a wall that sits inside a cell rather than on its edge.
- * Directional (ABI 2) because a single "how solid is this cell" made sound travelling OVER a
- * floor be attenuated BY the floor: outdoors came out 3.2 dB down for no visible reason. */
+/* Report one cell as SIX HALF-VOXELS, each a linear transmission in 0..1 (1 = open, 0 = sealed):
+ * the material standing in the cell's -X/-Y/-Z half and in its +X/+Y/+Z half. A move charges the
+ * two halves it actually crosses -- the half it leaves through and the half it enters through.
+ *
+ * WHY HALVES AND NOT FACES (ABI 4). Before this, a cell's material lived on its three NEGATIVE
+ * faces, on the rule that whichever cell contains the wall reports it. The face between C and C+X
+ * therefore belonged to C+X, so for the block sitting in C: entering from -X charged C's own face
+ * (right), entering from +X charged C+X's face, which is air (FREE), and leaving toward +X was
+ * free for the same reason. A route entering through one positive face and leaving through
+ * another paid NOTHING for the block it walked through.
+ *
+ * A plane wall survived that, because a plane is always reached from its negative side -- which is
+ * why it went unnoticed. Any wall you can get AROUND did not: a speaker walled in on four sides
+ * with its corners open measured 0.1 dB against 58.6 dB with the corners filled, the route going
+ * in through the +X face of one side block and out through that same block's +Z face.
+ *
+ * The same throwing-away of WHERE is why a half block or a shut door did not block from the cell
+ * you were standing in. Halves fix all three at once, and cost three more array reads per move.
+ *
+ * THE CONTRACT THE CALLER MUST KEEP. The two halves on an axis COMPOSE: a route passing straight
+ * through the cell crosses both and pays the sum, and that sum must be the cell's own material.
+ * So split it -- if both halves hold material each reports sqrt(T), if only one holds it that one
+ * reports T and the other reports 1. Get this wrong and every solid wall in the world doubles.
+ *
+ * Thickness does not enter into it: a sliver plate and a full block of the same material block the
+ * same. What the halves record is WHERE the material is, not how much of it there is. */
 CMM_FLD_API void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
                                   float tnx, float tny, float tnz,
-                                  float midX, float midY, float midZ);
+                                  float tpx, float tpy, float tpz);
 
 /* Mark the cells covering a block region as needing geometry again (a door swung, a wall broke,
  * a chunk arrived). Cheap: it only queues a re-read, it never touches the field. */
