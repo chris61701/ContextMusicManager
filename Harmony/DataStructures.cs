@@ -38,12 +38,24 @@ namespace CMM
         public readonly List<string> playHistory = new List<string>();
         public int historyIndex = -1;   // cursor: index of the playing track, -1 = empty
 
+        // ── Anti-repeat rotation ───────────────────────────────────────────────
+        // What this context has played THIS CYCLE, so every track gets a turn before
+        // any track gets a second one. Driven from CommitToHistory below rather than
+        // from the pick, because picking is not playing — see TrackRotation's header.
+        internal readonly TrackRotation rotation = new TrackRotation();
+
         // Record `file` as the track now playing. A forward/backward REPLAY (the file
         // is the cursor's neighbour — a Prev/Next keypress or a mid-history
         // auto-advance) just moves the cursor; landing on the cursor itself (context
         // resume / convergence re-assert) is a no-op. A genuinely new track drops any
         // forward (rewound-past) entries and appends, like a browser history.
-        public void CommitToHistory(string file)
+        //
+        // `noRepeatMemory` is CMMConfig.TrackNoRepeatMemory, passed in rather than read
+        // here so this stays a plain data structure the offline harnesses can link and
+        // drive directly. Only the APPEND path commits to the rotation: a resume or a
+        // Prev/Next replay is the user navigating what already played, and must not
+        // spend a fresh slot in the bag.
+        public void CommitToHistory(string file, int noRepeatMemory = TrackRotation.WholePool)
         {
             if (string.IsNullOrEmpty(file)) return;
             if (HistoryAt(historyIndex, file)) return;
@@ -54,6 +66,7 @@ namespace CMM
             playHistory.Add(file);
             if (playHistory.Count > MaxPlayHistory) playHistory.RemoveAt(0);
             historyIndex = playHistory.Count - 1;
+            rotation.Commit(file, noRepeatMemory);
         }
 
         // The nearest entry BEHIND the cursor that still exists on disk, or null at the

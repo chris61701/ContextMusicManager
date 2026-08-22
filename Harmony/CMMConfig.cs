@@ -621,7 +621,17 @@ namespace CMM
         public static float UserTrimStep = 0.1f;
         // How much more often a favourited track is picked in the random track orders
         // (weight multiplier; 1 = no preference). Sequential order ignores favourites.
+        // Under RandomNoRepeat it is also the number of turns a favourite gets per pass
+        // through the library — see TrackRotation, which would otherwise flatten a
+        // favourite to one play per cycle like everything else.
         public static float FavouriteWeight = 3f;
+
+        // How many recently played tracks a context refuses to repeat, under the
+        // RandomNoRepeat order. -1 = the whole pool: every track plays once before any
+        // track plays twice. 0 = the pre-1.0.5 behaviour, which despite the mode's name
+        // only ever excluded the single track just played. N = remember the last N.
+        // Per context, session-only. See TrackRotation.
+        public static int TrackNoRepeatMemory = TrackRotation.WholePool;
         // Crossfade used by the MANUAL next/prev/ban skips (seconds). A keypress should
         // switch fast regardless of the context's fadeintime / TrackTransitionFadeDuration,
         // which still govern automatic advances and context changes.

@@ -149,6 +149,32 @@ All notable changes to Context Music Manager are documented here.
 
 ### Changed
 
+- **A big library now sounds like a big library: every track plays before any track repeats.**
+  `RandomNoRepeat` — the default track order — has always been weaker than its name suggests.
+  It excluded exactly one track, the one just playing, so on a 200-track folder a song could
+  come back within a handful of picks; measured over 400 runs, the old behaviour repeated
+  something after an average of 18 tracks, and as soon as 3. Now each context deals from a
+  shuffled bag: every eligible track gets a turn before any track gets a second one, and the
+  folder reshuffles once it runs out. Hearing the same song twice in an evening is far more
+  noticeable than any amount of variety is pleasing, which is the whole reason to have a
+  large soundtrack in the first place.
+  - Counted **per context** and **per session**. Each context works through its own folder, and
+    the pass starts fresh each launch — the first track of a session is drawn from everything
+    either way, so nothing is gained by remembering it across restarts.
+  - **Adding music takes effect immediately** — new tracks are eligible the moment they are
+    seen and get their turn in the pass already running. Removing music does not disturb it.
+  - **Favourites still mean something.** A strict bag would quietly flatten the favourite
+    keybind to one play per pass like everything else, so a favourite gets `FavouriteWeight`
+    turns per pass (3 by default) instead of one. Banned tracks are skipped without stalling
+    the pass.
+  - **Resuming a context, or walking back through Prev/Next, costs nothing.** Only a genuinely
+    new track spends a turn, so re-entering a context does not eat into the pass.
+  - Tunable with `<TrackNoRepeatMemory>`: `-1` (default) is the whole folder; `0` restores the
+    old one-track behaviour exactly; any other number remembers that many recent tracks.
+    Applies to `RandomNoRepeat` only — `Random` and `Sequential` are unchanged.
+  - `cmm rotation` shows how far each context is through its pass and how many tracks are
+    still to come; `cmm rotation reset` starts them over.
+
 - **CMM writes its own config files instead of shipping them.** `settings.xml`, `radio.xml`
   and `contexts.xml` are no longer in the download; they are created on first run with the
   documented defaults, exactly as before. The point is what happens on the NEXT update:

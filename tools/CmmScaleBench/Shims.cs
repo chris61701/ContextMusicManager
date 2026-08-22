@@ -19,5 +19,8 @@ namespace UnityEngine
         public static void InitState(int seed) => _r = new System.Random(seed);
         // UnityEngine.Random.Range(int, int) is max-EXCLUSIVE, same as System.Random.Next.
         public static int Range(int minInclusive, int maxExclusive) => _r.Next(minInclusive, maxExclusive);
+        // The float overload is max-INCLUSIVE in Unity. NextDouble is not, but the one
+        // caller (TrackRotation's rng) guards the 1.0 endpoint anyway.
+        public static float Range(float min, float max) => min + (float)_r.NextDouble() * (max - min);
     }
 }

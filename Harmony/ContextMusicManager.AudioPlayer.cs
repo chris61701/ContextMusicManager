@@ -17,9 +17,11 @@ namespace CMM
     public partial class ContextMusicManager
     {
         // ── PickNextFile ──────────────────────────────────────────────────────
-        // UNIFORM random selection over the whole eligible folder (RandomNoRepeat also
-        // excludes avoidFile), except for the user's keybind flags: banned tracks are
-        // excluded and favourites are weighted up (see PickRandomHonouringFlags).
+        // Random selection over the eligible folder, honouring the user's keybind flags:
+        // banned tracks are excluded and favourites are weighted up. Under RandomNoRepeat
+        // it also runs the anti-repeat rotation, so a track waits for the rest of the
+        // folder to have a turn before it comes round again — see TrackRotation, which
+        // owns the whole of that path.
         // There is deliberately NO bias toward already-measured tracks: under on-demand scanning only a tiny handful of a context's files are
         // ever measured (the menu prewarm measures one per context), so biasing toward
         // them collapsed every pick onto that one track — the "same track out of 3000"
@@ -486,7 +488,7 @@ namespace CMM
             if (fadeOverride >= 0f) fade = fadeOverride;   // manual skip: keypress-fast, not context-slow
 
             // ── Cache bookkeeping (main thread, before dispatch) ──
-            cache.CommitToHistory(file);
+            cache.CommitToHistory(file, CMMConfig.TrackNoRepeatMemory);
             cache.playingFile        = file;
             cache.lastPlayedFile     = file;
 #if CMM_DEBUG_HUD
@@ -671,7 +673,7 @@ namespace CMM
                 && string.Equals(_nativeActiveContext, ps.Context, StringComparison.OrdinalIgnoreCase)
                 && cacheMap.TryGetValue(ps.Context, out ContextCache cache))
             {
-                cache.CommitToHistory(ps.NextFile);
+                cache.CommitToHistory(ps.NextFile, CMMConfig.TrackNoRepeatMemory);
                 cache.playingFile        = ps.NextFile;
                 cache.lastPlayedFile     = ps.NextFile;
 #if CMM_DEBUG_HUD
@@ -949,62 +951,96 @@ namespace CMM
                         return pick;
                     }
                 case TrackOrderMode.RandomNoRepeat:
-                    {
-                        if (files.Length == 1)
-                            return LoudnessStore.IsBannedPath(files[0]) ? null : files[0];
-                        string[] candidates = avoidFile != null
-                            ? files.Where(f => f != avoidFile).ToArray()
-                            : files;
-                        if (candidates.Length == 0) candidates = files;
-                        string pick = PickRandomHonouringFlags(candidates);
-                        // Everything except the avoided (current) track is banned: retry
-                        // with the full pool so the sole unbanned track — the current one —
-                        // replays rather than a banned pick or silence.
-                        if (pick == null && candidates != files)
-                            pick = PickRandomHonouringFlags(files);
-                        return pick;
-                    }
+                    // Bag → one-track avoid → cycle seam → weighted roll, all of it in
+                    // TrackRotation so the offline harness exercises this exact code.
+                    return cache.rotation.Select(files, CMMConfig.TrackNoRepeatMemory, avoidFile,
+                                                 BannedFlag, FavouriteFlag, CMMConfig.FavouriteWeight,
+                                                 UnityRng);
                 default:
-                    {
-                        return PickRandomHonouringFlags(files);
-                    }
+                    // Plain Random: no memory at all, just the flags.
+                    return TrackRotation.Roll(files, UnityRng, BannedFlag, FavouriteFlag,
+                                              CMMConfig.FavouriteWeight);
             }
         }
 
-        // Random pick honouring the keybind-set track flags: banned tracks are excluded
-        // and each favourite counts FavouriteWeight× in the roll. Returns null when
-        // every candidate is banned — the caller (and the resolver, via the ban-aware
-        // ContextHasFiles) treats that like an empty folder and falls back. When no
-        // flags exist anywhere (the common case) this is the same single uniform roll
-        // as before; with flags it's one O(n) pass of zero-alloc HashSet checks.
-        private static string PickRandomHonouringFlags(string[] candidates)
+        // The weighted roll this used to describe now lives in TrackRotation.Roll — same
+        // rules (banned excluded, each favourite counting FavouriteWeight× in the draw,
+        // null when every candidate is banned so the resolver falls back as it does for an
+        // empty folder), moved there so the bag and the roll could be tested together.
+        //
+        // Ban/favourite lookups and the random source handed to the rotation as delegates,
+        // so TrackRotation stays dependency-free and the offline harness can drive it with
+        // its own flags and a fixed seed. Cached in statics — a method group converts to a
+        // NEW delegate object every time it is used as an argument, and this is on the pick
+        // path. The flags are null when no flag of that kind exists anywhere (the common
+        // case), which lets the rotation skip the test entirely.
+        private static readonly TrackFlag _bannedFlag    = LoudnessStore.IsBannedPath;
+        private static readonly TrackFlag _favouriteFlag = LoudnessStore.IsFavouritePath;
+        private static readonly TrackRng  UnityRng       = () => UnityEngine.Random.Range(0f, 1f);
+        private static TrackFlag BannedFlag    => LoudnessStore.BannedCount    > 0 ? _bannedFlag    : null;
+        private static TrackFlag FavouriteFlag => LoudnessStore.FavouriteCount > 0 ? _favouriteFlag : null;
+        private static int FavouriteAllowance() => TrackRotation.Allowance(CMMConfig.FavouriteWeight);
+
+        // ── cmm rotation ──────────────────────────────────────────────────────
+        // Anti-repeat is invisible by construction: it changes WHICH track is picked,
+        // never whether one is. There is no symptom to look at when it goes wrong and
+        // no way to hear that it is working without listening for an hour. So this is
+        // the readout — how far each context is through its pass and how many tracks
+        // are still owed a turn — and `reset` puts every context back to a full bag so
+        // the behaviour can be watched from the start without relaunching.
+        internal static string RotationReport(string arg)
         {
-            bool anyBan = LoudnessStore.BannedCount > 0;
-            bool anyFav = LoudnessStore.FavouriteCount > 0;
-            if (!anyBan && !anyFav)
-                return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+            int memory = CMMConfig.TrackNoRepeatMemory;
+            var sb = new System.Text.StringBuilder();
 
-            float favWeight = CMMConfig.FavouriteWeight < 1f ? 1f : CMMConfig.FavouriteWeight;
-            int eligible = 0, favs = 0;
-            for (int i = 0; i < candidates.Length; i++)
+            if (!string.IsNullOrEmpty(arg) && arg.Equals("reset", StringComparison.OrdinalIgnoreCase))
             {
-                if (anyBan && LoudnessStore.IsBannedPath(candidates[i])) continue;
-                eligible++;
-                if (anyFav && LoudnessStore.IsFavouritePath(candidates[i])) favs++;
+                int n = 0;
+                foreach (ContextCache c in cacheMap.Values) { c.rotation.Reset(); c.rotation.Cycle = 1; n++; }
+                return "anti-repeat: reset " + n + " context(s) — every track is eligible again.";
             }
-            if (eligible == 0) return null;   // all banned → resolve like an empty folder
 
-            double roll = UnityEngine.Random.Range(0f, 1f)
-                          * ((eligible - favs) + favs * (double)favWeight);
-            string last = null;
-            for (int i = 0; i < candidates.Length; i++)
+            sb.Append("anti-repeat: ");
+            if (GlobalTrackOrder != TrackOrderMode.RandomNoRepeat)
+                sb.Append("INACTIVE — GlobalTrackOrder is ").Append(GlobalTrackOrder)
+                  .Append(", and only RandomNoRepeat rotates.");
+            else if (memory == TrackRotation.Off)
+                sb.Append("OFF (TrackNoRepeatMemory=0) — only the track just played is avoided.");
+            else if (memory < 0)
+                sb.Append("whole pool — every track plays once before any track repeats.");
+            else
+                sb.Append("window of ").Append(memory).Append(" — a track returns once ")
+                  .Append(memory).Append(" others have played.");
+
+            TrackFlag ban = BannedFlag, fav = FavouriteFlag;
+            int allowance = FavouriteAllowance();
+            if (fav != null && allowance > 1)
+                sb.Append("  favourites get ").Append(allowance).Append(" turns per pass.");
+
+            string filter = string.IsNullOrEmpty(arg) ? null : arg;
+            int shown = 0;
+            foreach (var kv in cacheMap)
             {
-                if (anyBan && LoudnessStore.IsBannedPath(candidates[i])) continue;
-                last = candidates[i];
-                roll -= (anyFav && LoudnessStore.IsFavouritePath(candidates[i])) ? favWeight : 1.0;
-                if (roll < 0.0) return candidates[i];
+                string[] pool = kv.Value.directorySnapshot;
+                if (pool == null || pool.Length == 0) continue;
+                if (filter != null && !kv.Key.Equals(filter, StringComparison.OrdinalIgnoreCase)) continue;
+                // Contexts nobody has played yet are noise in the common case; the
+                // explicit per-context query still shows them.
+                if (filter == null && kv.Value.rotation.Plays == 0 && kv.Value.rotation.Cycle == 1) continue;
+
+                TrackRotation r = kv.Value.rotation;
+                sb.Append(CMMSettingsWriter.NL).Append("  ").Append(kv.Key.PadRight(22))
+                  .Append(" pass ").Append(r.Cycle)
+                  .Append("   ").Append(r.RemainingIn(pool, memory, ban, fav, allowance))
+                  .Append(" of ").Append(pool.Length).Append(" still to come")
+                  .Append("   (").Append(r.Plays).Append(" played this pass)");
+                shown++;
             }
-            return last;   // fp edge (roll landed exactly on the total)
+            if (shown == 0)
+                sb.Append(CMMSettingsWriter.NL).Append(filter != null
+                    ? "  no context named '" + filter + "', or it has no tracks loaded yet."
+                    : "  nothing has played yet this session.");
+            return sb.ToString();
         }
 
         // ── Memory summary ────────────────────────────────────────────────────

@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmRotationTest — the anti-repeat harness.
+
+       Drives the REAL selection: TrackRotation.cs is linked, not copied, and it
+       is the same file the game runs. That is why the whole random path (bag,
+       one-track avoid, cycle seam, ban/favourite weighting) was moved into that
+       file rather than left inline in PickNextFile — a hand-ported copy of a
+       rotation is exactly the kind of thing that passes its own tests forever
+       while the shipped behaviour drifts away underneath it.
+
+       ContextCache is linked too, because "a resume must not spend a slot in the
+       bag" is a property of CommitToHistory's replay detection, not of the
+       rotation on its own, and it can only be tested through the real thing.
+
+       Shims.cs supplies the two UnityEngine stand-ins DataStructures.cs names.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmRotationTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="Shims.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs"  Link="linked\TrackRotation.cs" />
+    <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+  </ItemGroup>
+
+</Project>

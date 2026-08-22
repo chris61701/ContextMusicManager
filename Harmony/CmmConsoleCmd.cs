@@ -39,6 +39,10 @@ namespace CMM
             "                             removing a music pack while the game is running.\n" +
             "  cmm roots                - which music folders are in use, and from which mod\n" +
             "  cmm roots <context>      - what each folder contributes to one context\n" +
+            "  cmm rotation             - anti-repeat: how far each context is through\n" +
+            "                             its pass, and how many tracks are still to come\n" +
+            "  cmm rotation <context>   - the same for one context, played or not\n" +
+            "  cmm rotation reset       - start every context's pass over\n" +
             "  cmm rescan <context>     - re-scan one subfolder context now\n" +
             "  cmm rescan all           - same as 'cmm scan'\n" +
             "  cmm nativeplay <context> - (experimental) play a track via CMM's own\n" +
@@ -105,6 +109,11 @@ namespace CMM
             if (sub == "roots")
             {
                 Out(ContextMusicManager.RootsReport(_params.Count > 1 ? _params[1] : null));
+                return;
+            }
+            if (sub == "rotation" || sub == "shuffle")
+            {
+                Out(ContextMusicManager.RotationReport(_params.Count > 1 ? _params[1] : null));
                 return;
             }
             if (sub == "nativeplay")

@@ -1,6 +1,6 @@
 # CMM settings baseline — the last released schema.
 # Regenerate with: dotnet run -- --accept   (only after a real CurrentSchema bump)
-schema=2
+schema=3
 AddonMusicScanEnabled|Bool|true
 CombatCooldown|Float|10.0
 CombatExitDelay|Float|2.0
@@ -82,6 +82,7 @@ RadioStaticVolume|Float|-1.0
 ReverseFadeReclaim|Bool|true
 StalenessCheckInterval|Float|5.0
 TrackEndPollInterval|Float|0.25
+TrackNoRepeatMemory|Int|-1
 TrackTransitionFadeDuration|Float|5.0
 UserTrimStep|Float|0.1
 VolumeModifier|Float|0.5

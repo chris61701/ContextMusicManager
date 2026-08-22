@@ -28,6 +28,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs" Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\PlaylistSource.cs"  Link="linked\PlaylistSource.cs" />
     <Compile Include="..\..\Harmony\SourceScan.cs"      Link="linked\SourceScan.cs" />
     <Compile Include="..\..\Harmony\AudioDecoder.cs"    Link="linked\AudioDecoder.cs" />

@@ -32,6 +32,7 @@
   <!-- Real types, linked so the model can't drift from shipped code. -->
   <ItemGroup>
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs" Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\MusicRoots.cs"     Link="linked\MusicRoots.cs" />
     <Compile Include="..\..\Harmony\SourceScan.cs"     Link="linked\SourceScan.cs" />
     <Compile Include="..\..\Harmony\PlaylistSource.cs" Link="linked\PlaylistSource.cs" />

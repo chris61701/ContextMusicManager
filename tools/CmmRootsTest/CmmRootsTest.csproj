@@ -39,6 +39,7 @@
     <Compile Include="..\..\Harmony\AudioDecoder.cs"   Link="linked\AudioDecoder.cs" />
     <Compile Include="..\..\Harmony\NativeAudio.cs"    Link="linked\NativeAudio.cs" />
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs" Link="linked\TrackRotation.cs" />
   </ItemGroup>
 
   <!-- Never decoded here (IsSupported is pure managed), but present so a stray

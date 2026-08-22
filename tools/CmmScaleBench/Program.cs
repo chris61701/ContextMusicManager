@@ -73,9 +73,17 @@ namespace CmmScaleBench
 
             string repoRoot = FindRepoRoot();
             string contextsXml = repoRoot == null ? null : Path.Combine(repoRoot, "Config", "contexts.xml");
+            // contexts.xml stopped shipping in 1.0.5 — CMM writes it at first run — so the
+            // repo copy this bench was built around no longer exists. Fall back to a
+            // DEPLOYED one, which is the generated article and therefore the more honest
+            // input anyway.
+            if (contextsXml == null || !File.Exists(contextsXml))
+                contextsXml = FindDeployedContextsXml();
             if (contextsXml == null || !File.Exists(contextsXml))
             {
-                Console.WriteLine("FATAL: could not locate Config/contexts.xml from the repo root.");
+                Console.WriteLine("FATAL: no contexts.xml. The repo no longer ships one (it is generated at");
+                Console.WriteLine("       first run), and no deployed copy was found under a game install.");
+                Console.WriteLine("       Launch the game once, or pass --out with a hand-made Config/contexts.xml.");
                 return 1;
             }
 
@@ -214,9 +222,9 @@ namespace CmmScaleBench
         {
             Console.WriteLine("══ CPU (in-memory, swept by folder size — per-pick / per-tick main-thread cost) ══");
             Console.WriteLine("   (PickNextFile runs once PER TRACK CHANGE; FileWatch diff runs once per mtime change of a watched folder)\n");
-            Console.WriteLine($"   {"files",8} | {"PickNextFile (RandomNoRepeat)",-34} | {"FileWatch diff (no change)",-30}");
-            Console.WriteLine($"   {"",8} | {"per pick",12} {"alloc/pick",12} | {"per diff",12} {"alloc/diff",12}");
-            Console.WriteLine("   " + new string('─', 80));
+            Console.WriteLine($"   {"files",8} | {"pick: memory=0 (pre-1.0.5)",-25} | {"pick: whole-pool bag",-25} | {"FileWatch diff (no change)",-25}");
+            Console.WriteLine($"   {"",8} | {"per pick",12} {"alloc",11} | {"per pick",12} {"alloc",11} | {"per diff",12} {"alloc",11}");
+            Console.WriteLine("   " + new string('─', 106));
 
             const int iters = 200;
             foreach (int n in sweep)
@@ -226,17 +234,24 @@ namespace CmmScaleBench
                 if (invalidPct > 0)
                     foreach (var f in snapshot.Where((_, i) => i % 100 < invalidPct)) _invalidFiles.Add(f);
 
-                // ── PickNextFile ──
-                UnityEngine.Random.InitState(7);
-                // warm up JIT
-                for (int w = 0; w < 5; w++) PickNextFile_Selection(snapshot, snapshot[w % n]);
-                GcDelta gcP = GcDelta.Start();
-                var swP = Stopwatch.StartNew();
-                for (int it = 0; it < iters; it++)
-                    PickNextFile_Selection(snapshot, snapshot[it % n]);
-                swP.Stop();
-                double pickMs = swP.Elapsed.TotalMilliseconds / iters;
-                double pickAllocKb = gcP.Bytes() / 1024.0 / iters;
+                // ── PickNextFile, old behaviour vs the bag ──
+                var pickMs = new double[2];
+                var pickAllocKb = new double[2];
+                int[] modes = { TrackRotation.Off, TrackRotation.WholePool };
+                for (int m = 0; m < modes.Length; m++)
+                {
+                    UnityEngine.Random.InitState(7);
+                    var rot = new TrackRotation();
+                    for (int w = 0; w < 5; w++)   // warm up JIT
+                        PickNextFile_Selection(rot, modes[m], snapshot, snapshot[w % n]);
+                    GcDelta gcP = GcDelta.Start();
+                    var swP = Stopwatch.StartNew();
+                    for (int it = 0; it < iters; it++)
+                        PickNextFile_Selection(rot, modes[m], snapshot, snapshot[it % n]);
+                    swP.Stop();
+                    pickMs[m] = swP.Elapsed.TotalMilliseconds / iters;
+                    pickAllocKb[m] = gcP.Bytes() / 1024.0 / iters;
+                }
 
                 // ── FileWatchLoop diff (steady state: current == previous, the common tick) ──
                 string[] previous = snapshot;
@@ -250,7 +265,9 @@ namespace CmmScaleBench
                 double diffMs = swD.Elapsed.TotalMilliseconds / iters;
                 double diffAllocKb = gcD.Bytes() / 1024.0 / iters;
 
-                Console.WriteLine($"   {n,8:N0} | {pickMs,9:F3} ms {pickAllocKb,9:F1} KB | {diffMs,9:F3} ms {diffAllocKb,9:F1} KB");
+                Console.WriteLine($"   {n,8:N0} | {pickMs[0],9:F3} ms {pickAllocKb[0],8:F1} KB "
+                                + $"| {pickMs[1],9:F3} ms {pickAllocKb[1],8:F1} KB "
+                                + $"| {diffMs,9:F3} ms {diffAllocKb,8:F1} KB");
             }
 
             Console.WriteLine("\n   Reading this: multiply 'per pick' by your real transition rate (CmmSession");
@@ -272,10 +289,26 @@ namespace CmmScaleBench
         // VERBATIM-ISH copies of the shipped main-thread routines under test.
         // ════════════════════════════════════════════════════════════════════════
 
-        // PickNextFile selection branch — ContextMusicManager.AudioPlayer.cs:1764-1791.
-        // (Snapshot is non-null here, so we exercise the steady-state path: the
-        // _invalidFiles filter copy + the RandomNoRepeat avoidFile .Where().ToArray().)
-        static string PickNextFile_Selection(string[] snapshot, string avoidFile)
+        // PickNextFile's selection branch. Only the _invalidFiles filter is reproduced
+        // here (it belongs to PickNextFile, which is Unity-bound); the SELECTION itself
+        // calls the shipped TrackRotation, linked into this project. It used to be a
+        // hand-copied "verbatim-ish" transcription, which meant the bench could keep
+        // reporting a cost for code the game no longer ran.
+        //
+        // Committing each pick matters: a bag that is never spent stays a single
+        // no-allocation array hand-back, so a bench that only picked would measure the
+        // cheapest possible case and call it the steady state.
+        static readonly TrackRng _benchRng = () => UnityEngine.Random.Range(0f, 1f);
+
+        // GlobalTrackOrder == RandomNoRepeat. `memory` picks which behaviour is being
+        // measured: 0 is what shipped before 1.0.5 (avoid one track), -1 is the bag.
+        //
+        // Committing every pick is the WORST case and not what the game does — a track
+        // change picks three or four times and plays once, and the repeats hit the
+        // eligible-set cache. Measured this way because an upper bound is the useful
+        // number for a stall hunt.
+        static string PickNextFile_Selection(TrackRotation rot, int memory,
+                                             string[] snapshot, string avoidFile)
         {
             string[] files = snapshot;
             if (_invalidFiles.Count > 0)
@@ -283,13 +316,9 @@ namespace CmmScaleBench
 
             if (files.Length == 0) return null;
 
-            // GlobalTrackOrder == RandomNoRepeat (the shipped default).
-            if (files.Length == 1) return files[0];
-            string[] candidates = avoidFile != null
-                ? files.Where(f => f != avoidFile).ToArray()
-                : files;
-            if (candidates.Length == 0) candidates = files;
-            return candidates[UnityEngine.Random.Range(0, candidates.Length)];
+            string pick = rot.Select(files, memory, avoidFile, null, null, 3f, _benchRng);
+            rot.Commit(pick, memory);
+            return pick;
         }
 
         // FileWatchLoop slow-path diff — ContextMusicManager.cs:703-749. Everything
@@ -450,6 +479,26 @@ namespace CmmScaleBench
             var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
             for (int i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
                 if (File.Exists(Path.Combine(dir.FullName, "ContextMusicManager.csproj"))) return dir.FullName;
+            return null;
+        }
+
+        // The generated contexts.xml from any install CMM has been deployed to.
+        static string FindDeployedContextsXml()
+        {
+            var roots = new List<string>();
+            string appdata = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (!string.IsNullOrEmpty(appdata))
+                roots.Add(Path.Combine(appdata, "7DaysToDie", "Mods", "ContextMusicManager", "Config"));
+            foreach (string drive in new[] { "C:", "D:", "E:", "H:" })
+            {
+                roots.Add(drive + @"\_Games\Steam\steamapps\common\7 Days To Die\Mods\ContextMusicManager\Config");
+                roots.Add(drive + @"\_Games\7D2D Server\Mods\ContextMusicManager\Config");
+            }
+            foreach (string r in roots)
+            {
+                string p = Path.Combine(r, "contexts.xml");
+                try { if (File.Exists(p)) return p; } catch { }
+            }
             return null;
         }
 

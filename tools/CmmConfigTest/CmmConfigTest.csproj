@@ -39,6 +39,7 @@
     <Compile Include="..\..\Harmony\CMMSettingsWriter.cs" Link="linked\CMMSettingsWriter.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsFile.cs"   Link="linked\CMMSettingsFile.cs" />
     <Compile Include="..\..\Harmony\DataStructures.cs"     Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs"     Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\CMMContextsSchema.cs"  Link="linked\CMMContextsSchema.cs" />
     <Compile Include="..\..\Harmony\CMMContextsFile.cs"    Link="linked\CMMContextsFile.cs" />
   </ItemGroup>

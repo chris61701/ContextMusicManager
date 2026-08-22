@@ -29,6 +29,7 @@
        Decision layer (ScriptHost + GameState + data model) and decode stack. -->
   <ItemGroup>
     <Compile Include="..\..\Harmony\DataStructures.cs"  Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs"  Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\GameState.cs"        Link="linked\GameState.cs" />
     <Compile Include="..\..\Harmony\ScriptHost.cs"       Link="linked\ScriptHost.cs" />
     <Compile Include="..\..\Harmony\AudioDecoder.cs"     Link="linked\AudioDecoder.cs" />

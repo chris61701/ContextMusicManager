@@ -139,8 +139,15 @@ verification — emitters are excluded there anyway.
 
 ## Music library
 
-- [ ] **Scan registered / add-on music directories at startup** *(requested 2026-08-20 by a
-  soundtrack author; called "the single feature I'd request")*. Today a soundtrack has to be
+- [x] **Scan registered / add-on music directories at startup** *(requested 2026-08-20 by a
+  soundtrack author; called "the single feature I'd request")*. **Built and confirmed in-game
+  2026-08-21.** No registration file in the end — the convention IS `<mod>/Music`, mirroring the
+  same tree, so a pack is just an ordinary mod. `cmm roots` / `cmm roots <ctx>` / `cmm scan`.
+  `subfolders="true"` applies to the primary only; playlist and absolute sources are never
+  extended; same-named stations merge. Everything under "has to get right" below is covered,
+  and the folder-membership fold in `ContextWatchSignature` is the part that mattered. Original
+  problem statement kept for the record:
+  Today a soundtrack has to be
   copied INTO CMM's own music folder, so every soundtrack update means manually overwriting
   files inside CMM. That makes CMM and the soundtrack one blob on disk, which is exactly what
   a mod manager cannot cope with.
@@ -157,7 +164,25 @@ verification — emitters are excluded there anyway.
     listing fallback); and a root that disappears must degrade to "those tracks are gone", not
     to an error.
 
-- [ ] **Track cooldown / anti-repeat over the whole pool** *(requested 2026-08-20, same source)*.
+- [x] **Track cooldown / anti-repeat over the whole pool** *(requested 2026-08-20, same source)*.
+  **Built 2026-08-21**, `Harmony/TrackRotation.cs`, offline harness `tools/CmmRotationTest`
+  (51 checks), in-game test pending. The bag, as asked: `TrackNoRepeatMemory` defaults to -1
+  = the whole folder, 0 = the old behaviour exactly, N = a recency window. Every "has to get
+  right" below is covered — favourites get `FavouriteWeight` turns per pass instead of being
+  flattened to one, bans skip without stalling a pass, added music is eligible at once, and
+  the pass is per context and session-only (deliberately not persisted). `cmm rotation`.
+  - **The load-bearing decision: commit at PLAY, not at pick.** Three of the six
+    `PickNextFile` callers are speculative (the staged pin, the pre-staged advance, the
+    missing-file replacement walk) and their picks are routinely discarded — a bag consumed
+    at pick time would drain without a note being heard. The commit hangs off
+    `ContextCache.CommitToHistory`'s existing replay detection, which is also what makes
+    "a resume must not spend a slot" true for free.
+  - The WHOLE random path (bag, avoid, seam, weighted roll) moved into TrackRotation so the
+    harness links it. `PickRandomHonouringFlags` is gone; `CmmScaleBench`'s hand-ported copy
+    of the selection is gone with it.
+  - Cost, measured (`CmmScaleBench`): per pick, 3000-track folder 0.40 ms → 1.54 ms, same
+    allocation. Once per track change, and repeat picks inside one change hit a cache.
+  - Original problem statement kept for the record:
   With a large library, hearing the same track twice in a short window is far more noticeable
   than any amount of variety is pleasing. The ask: every eligible song plays once before
   anything reshuffles, so a big soundtrack FEELS as big as it is.

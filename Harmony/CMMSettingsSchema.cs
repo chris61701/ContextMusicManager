@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 2;
+        internal const int CurrentSchema = 3;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -158,6 +158,20 @@ from zero. false = the older reload-from-resume behaviour."),
             Gap(),
             Cmt(@"Track pick order within a context folder: Random, RandomNoRepeat, Sequential"),
             E("GlobalTrackOrder",                    "ContextMusicManager.GlobalTrackOrder",        @"RandomNoRepeat"),
+            Cmt(@"How many recently played tracks a context refuses to repeat (RandomNoRepeat only).
+
+  -1  every track in the folder plays once before any track plays again. When
+      it runs out the folder reshuffles and a new pass begins. This is what
+      makes a big library actually FEEL big, and it is the default.
+   0  only the track that just played is avoided. This was the old behaviour:
+      on a 200-track folder a song could still come back almost immediately.
+   N  remember the last N tracks and avoid those.
+
+Counted per context and per session -- it starts fresh each launch, and each
+context keeps its own pass. Adding music makes the new tracks eligible at once;
+removing some does not disturb the pass. Favourited tracks get FavouriteWeight
+turns per pass instead of one, so favouriting still means something."),
+            I("TrackNoRepeatMemory",                 "CMMConfig.TrackNoRepeatMemory",               -1, since: 3),
 
             Gap(),
             Cmt(@"── Disable parts of the game's Dynamic Music System (DMS) ───────────
