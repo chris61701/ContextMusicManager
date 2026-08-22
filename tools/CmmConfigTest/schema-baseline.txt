@@ -1,6 +1,6 @@
 # CMM settings baseline — the last released schema.
 # Regenerate with: dotnet run -- --accept   (only after a real CurrentSchema bump)
-schema=3
+schema=4
 AddonMusicScanEnabled|Bool|true
 CombatCooldown|Float|10.0
 CombatExitDelay|Float|2.0
@@ -101,10 +101,13 @@ WorldEmitterFade|Float|1.0
 WorldEmitterFalloff|Float|2.5
 WorldEmitterFieldAperturePow|Float|1.0
 WorldEmitterFieldCache|Bool|true
+WorldEmitterFieldCeilingDb|Float|45.0
 WorldEmitterFieldDetourDb|Float|1.5
+WorldEmitterFieldHardStopDb|Float|60.0
 WorldEmitterFieldOcclusion|Bool|true
 WorldEmitterFieldRadius|Int|48
 WorldEmitterFieldRefresh|Float|60.0
+WorldEmitterFieldShaping|Bool|true
 WorldEmitterFieldSlewDb|Float|40.0
 WorldEmitterFieldWallDb|Float|59.5
 WorldEmitterFieldWallPow|Float|1.56

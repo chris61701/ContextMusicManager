@@ -347,6 +347,12 @@ namespace CMM
         // against `cmm acoustics model auto` in the same spot.
         public static float  WorldEmitterFieldWallDb    = 59.5f;
         public static float  WorldEmitterFieldWallPow   = 1.56f;
+        // The two bends ShapeOcclusion puts on the shipped model, ported to the field in dB.
+        // See FieldOcclusion.Shape. Shaping=false is exactly the straight line the field used
+        // before, so the whole change is one setting away from being undone.
+        public static bool   WorldEmitterFieldShaping   = true;
+        public static float  WorldEmitterFieldCeilingDb = 45f;
+        public static float  WorldEmitterFieldHardStopDb = 60f;
 
         public static bool   WorldEmitterNativeAcoustics   = false;
         // Occlusion (dB) at which the emitter tone reaches full dullness, when the native acoustic

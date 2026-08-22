@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 3;
+        internal const int CurrentSchema = 4;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -653,6 +653,32 @@ materials further apart. Both hot-reload, so you can turn them while listening a
 against `cmm acoustics model auto` from the same spot."),
             F("WorldEmitterFieldWallDb",             "CMMConfig.WorldEmitterFieldWallDb",           59.5f),
             F("WorldEmitterFieldWallPow",            "CMMConfig.WorldEmitterFieldWallPow",          1.56f),
+
+            Gap(),
+            Cmt(@"── How occlusion is SHAPED before you hear it ─────────────────────
+Two bends, both taken from the older model, where the per-door numbers were
+originally tuned. Without them the field applies occlusion as a straight line,
+which lands the extremes about right and makes everything in the middle -- a
+door, most usefully -- read as ""slightly quieter"" rather than ""shut"".
+
+  Shaping    : false restores the straight line exactly, so this whole change
+               is one setting away from being undone.
+  CeilingDb  : occlusion saturates toward this, so however far around the sound
+               has to travel there is always an audible floor. Stand behind a
+               crate and you still hear it. Going the long way can never silence
+               a speaker -- only material can.
+  HardStopDb : how much MATERIAL silences a speaker outright, eased in from 55%
+               of it. This is what a sealed room is. Deliberately unreachable by
+               distance alone.
+
+For scale, at the wall settings above: a shut wooden door measures about 20 dB
+of material, two of them about 40, a concrete wall about 50. The defaults leave
+one wood door heavily muffled but present and a concrete wall gone. Those are a
+listening judgement, not a calculation -- all three hot-reload, so change them
+while the game runs and hear it."),
+            B("WorldEmitterFieldShaping",            "CMMConfig.WorldEmitterFieldShaping",          true,  since: 4),
+            F("WorldEmitterFieldCeilingDb",          "CMMConfig.WorldEmitterFieldCeilingDb",        45f,   since: 4),
+            F("WorldEmitterFieldHardStopDb",         "CMMConfig.WorldEmitterFieldHardStopDb",       60f,   since: 4),
 
             Gap(),
             Cmt(@"HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.

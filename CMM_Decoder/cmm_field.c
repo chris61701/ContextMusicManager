@@ -630,6 +630,54 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                           if (dy && f->stepY >= 2) mat += FLY[ni];
                           if (dz && f->stepZ >= 2) mat += FLZ[ni]; }
 
+                        /* THE SHOULDERS OF A DIAGONAL.
+                         *
+                         * Two blocks that meet only at their corner seal that corner in the world
+                         * -- you cannot walk or see between them -- and sound went straight past.
+                         * Measured in game, standing beside a speaker and walling it in:
+                         *
+                         *     four sides blocked, corners open    excess  1.0 dB
+                         *     corners filled in as well           excess 21.7 dB
+                         *
+                         * Twenty decibels from four corner blocks, because the route was not
+                         * going THROUGH anything -- it was going BETWEEN two things.
+                         *
+                         * Why the flood allowed it: a cell's faces are its own blocks, on the rule
+                         * that whichever cell contains the wall is the one that reports it. That
+                         * holds for a straight move, which always enters or leaves the wall's
+                         * cell. A DIAGONAL ENTERS NEITHER. It reads the faces of the two AIR cells
+                         * it travels between, both open, and pays nothing at all.
+                         *
+                         * So charge the SHOULDERS: the cells a two-step route would have had to
+                         * pass through, taking the CHEAPER of the two. Both solid means the corner
+                         * is sealed and the diagonal inherits a wall's worth. Either one open
+                         * means there is a genuine way round, and the diagonal stays free -- which
+                         * is not a nicety. Every OUTSIDE corner in the game has one solid shoulder
+                         * and one of open air, and charging those would turn every street corner
+                         * into a wall. Cheaper-of-the-two is also the physical answer: sound takes
+                         * the easier way past, not the average of the two ways.
+                         *
+                         * Unread space counts as solid, the same rule the move itself uses. */
+                        if ((dx && dz) || (dx && dy) || (dy && dz)) {
+                            float corner = 0.0f;
+                            int shx, shy, shz; long long shk; float sa = 0.0f, sb = 0.0f, sm;
+                            #define CMM_SH(_X,_Y,_Z, _OUT)                                                                        shx = (_X); shy = (_Y); shz = (_Z);                                                               if (shx < 0) shx += NX; else if (shx >= NX) shx -= NX;                                            if (shy < 0) shy += NY; else if (shy >= NY) shy -= NY;                                            if (shz < 0) shz += NZ; else if (shz >= NZ) shz -= NZ;                                            shk = (long long)shx                                                                                  + (long long)NX * ((long long)shz + (long long)NZ * shy);                                     if (!HAVE[shk]) (_OUT) = f->maxDb;                                                                else { (_OUT) = FNX[shk];                                                                                if (FNY[shk] > (_OUT)) (_OUT) = FNY[shk];                                                         if (FNZ[shk] > (_OUT)) (_OUT) = FNZ[shk]; }
+                            if (dx && dz) {
+                                CMM_SH(sx + dx, sy, sz, sa) CMM_SH(sx, sy, sz + dz, sb)
+                                sm = sa < sb ? sa : sb; if (sm > corner) corner = sm;
+                            }
+                            if (dx && dy) {
+                                CMM_SH(sx + dx, sy, sz, sa) CMM_SH(sx, sy + dy, sz, sb)
+                                sm = sa < sb ? sa : sb; if (sm > corner) corner = sm;
+                            }
+                            if (dy && dz) {
+                                CMM_SH(sx, sy + dy, sz, sa) CMM_SH(sx, sy, sz + dz, sb)
+                                sm = sa < sb ? sa : sb; if (sm > corner) corner = sm;
+                            }
+                            #undef CMM_SH
+                            mat += corner;
+                        }
+
                         int q = c + qmove[dx + 1][dy + 1][dz + 1]
                                   + (int)(mat * Q_PER_DB + 0.5f);
                         if (q > maxQ || q > MAX_Q) continue;

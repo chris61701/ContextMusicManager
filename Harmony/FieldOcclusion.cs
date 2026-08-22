@@ -473,6 +473,58 @@ namespace CMM
             catch { /* a failed invalidation costs freshness, never correctness */ }
         }
 
+        // ── The two bends the field never had ───────────────────────────────────────────────────
+        //
+        // ShapeOcclusion (EmitterAcoustics) puts two curves on the shipped model's occlusion, and
+        // the per-door gap numbers were hand-tuned THROUGH them. The field replaced that stage with
+        // a straight line, which is why doors read as "slightly quieter" instead of "shut" — the
+        // endpoints land right and the middle, where a door lives, does not.
+        //
+        //   SOFT KNEE. Total occlusion saturates toward a ceiling, so however far the route has to
+        //   wander there is always an audible floor. Stand behind a crate and you still hear it.
+        //   Detour alone must never silence a speaker.
+        //
+        //   HARD STOP, ON MATERIAL ONLY. Enough measured SOLID drives true silence. This is what a
+        //   sealed room is, and it is deliberately not reachable by detour: going the long way is
+        //   not the same as being walled in, and pricing them the same is what made a winding
+        //   corridor cut in and out.
+        //
+        // In dB, not the virtual blocks ShapeOcclusion works in. The field's whole contract is that
+        // occlusion is a dB value reproduced exactly and independent of range — that was the fix for
+        // "high Range almost ignores occlusion" — so the shaping has to live in the same units.
+        //
+        // The material half comes from the field's own split (the `wall X, detour Y` in the
+        // diagnostic), so the gate sees only what the flood actually measured as solid.
+        //
+        // Reference points at the shipped WallDb 59.5 / WallPow 1.56, for whoever tunes this next:
+        //   shut wooden door   loss 0.50  ->  20.2 dB material
+        //   concrete wall      loss 0.90  ->  50.6 dB
+        //   two wood doors                ->  40.4 dB
+        // Defaults are set so one wood door is heavily muffled but present, and a concrete wall is
+        // gone. Those are taste, they are hot-reloadable, and they should be settled by ear.
+        private static float Shape(float totalDb, Vector3 sp)
+        {
+            if (!CMMConfig.WorldEmitterFieldShaping) return totalDb;
+
+            float ceil = CMMConfig.WorldEmitterFieldCeilingDb;
+            float audible = ceil > 0.01f
+                          ? ceil * (float)Math.Tanh(totalDb / ceil)
+                          : totalDb;
+
+            float stop = CMMConfig.WorldEmitterFieldHardStopDb;
+            if (stop <= 0.01f) return audible;
+
+            float matDb = NativeField.cmm_fld_sample_mat_db(_f, sp.x, sp.y, sp.z);
+            if (matDb < 0f) matDb = 0f;
+            // Smoothstepped in from 55%, the same shape and the same fraction ShapeOcclusion uses,
+            // so the two models bend alike even though they count in different units.
+            float t = Mathf.Clamp01((matDb - stop * 0.55f) / (stop - stop * 0.55f));
+            float gate = t * t * (3f - 2f * t);
+            // 120 dB is the floor the inversion below clamps amplitude at, so a full gate lands
+            // exactly on silence rather than merely near it.
+            return audible + gate * 120f;
+        }
+
         // ── Publishing ──────────────────────────────────────────────────────────────────────────
         // Fill ptGain with the extra virtual distance that reproduces the field's occlusion at each
         // speaker point. The field carries EXCESS attenuation only — what the building adds over a
@@ -495,6 +547,8 @@ namespace CMM
                 Vector3 sp = new Vector3(pts[k * 3], pts[k * 3 + 1], pts[k * 3 + 2]);
                 float excessDb = NativeField.cmm_fld_sample_db(_f, sp.x, sp.y, sp.z);
                 if (excessDb < 0f) excessDb = 0f;
+                float rawDb = excessDb;
+                excessDb = Shape(excessDb, sp);
 
                 // SLEW IT, IN dB, BEFORE THE INVERSION.
                 //
@@ -547,7 +601,7 @@ namespace CMM
                 // minimum correct here.
                 if (d < _dbgDist)
                 {
-                    _dbgDist = d; _dbgExcess = excessDb; _dbgExtra = ptGain[k];
+                    _dbgDist = d; _dbgExcess = excessDb; _dbgExtra = ptGain[k]; _dbgRaw = rawDb;
                     // Split it. A speaker quiet because of walls and one quiet because the route
                     // wandered look identical in the total and want opposite fixes.
                     _dbgMat = NativeField.cmm_fld_sample_mat_db(_f, sp.x, sp.y, sp.z);
@@ -579,7 +633,7 @@ namespace CMM
             for (int i = 0; i < _slewDrop.Count; i++) _slew.Remove(_slewDrop[i]);
         }
 
-        private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra, _dbgMat;
+        private static float _dbgDist = 1e9f, _dbgExcess, _dbgExtra, _dbgMat, _dbgRaw;
 
         // WHERE the last reported nearest point was. Kept separately from _dbgDist because that
         // one resets on report; this must survive between the 1 Hz line and someone typing a
@@ -600,7 +654,8 @@ namespace CMM
         internal static string DescribeNearest()
         {
             if (_dbgDist > 1e8f) return "no point";
-            string s = $"d={_dbgDist:0.0} excess={_dbgExcess:0.0}dB (wall {_dbgMat:0.0}, detour {Math.Max(0f, _dbgExcess - _dbgMat):0.0})"
+            string s = $"d={_dbgDist:0.0} excess={_dbgExcess:0.0}dB (wall {_dbgMat:0.0}, detour {Math.Max(0f, _dbgRaw - _dbgMat):0.0})"
+                     + (CMMConfig.WorldEmitterFieldShaping ? $" raw={_dbgRaw:0.0}dB" : "")
                      + $" extra={_dbgExtra:0.0}blk  {_dbgExcess / Math.Max(_dbgDist, 0.1f):0.00}dB/blk";
             _dbgDist = 1e9f;
             return s;
