@@ -163,9 +163,27 @@ namespace CMM
         //   StaticLowHz   = low cut — lower = fuller/warmer body, higher = thinner.
         //   StaticHighHz  = top cap — higher = brighter hiss, lower = duller rumble.
         //   StaticCrackle = 0..1 sputter depth — 0 = smooth "shhh", 1 = full radio crackle.
+        //
+        // THE SOUND BETWEEN STATIONS IS A ROAR, NOT A HISS, AND THE LOW CUT WAS KILLING IT.
+        // FM makes two different noises and they are not interchangeable. With a carrier present
+        // (a weak station) the demodulator's noise rises with frequency, and de-emphasis flattens
+        // it into the bright thin HISS everyone pictures. With NO carrier — which is what tuning
+        // between stations is — the noise comes out FLAT, and de-emphasis then tilts it down above
+        // its corner. That is a dark, full-bodied ROAR, and it is the louder of the two.
+        //
+        // The filter here is already the right shape for it: a one-pole highpass at LowHz into a
+        // one-pole lowpass at HighHz, and -6 dB/oct above the corner is exactly what de-emphasis
+        // does. HighHz 2000 was already within a whisker of the real 50 us corner (3183 Hz US-75us
+        // is 2122). The error was LowHz 350, which threw away everything below it — so what came
+        // out was a midrange "shhh" with no body: neither the roar nor the hiss, which is why it
+        // read as synthetic. Drop the low cut and the same code produces the real thing.
         public static float  RadioStaticVolume  = -1f;
-        public static float  RadioStaticLowHz   = 350f;
-        public static float  RadioStaticHighHz  = 2000f;
+        public static float  RadioStaticLowHz   = 40f;     // was 350 — the body of the roar lives here
+        public static float  RadioStaticHighHz  = 2100f;   // the de-emphasis corner, -6 dB/oct above
+        // Sputter. Not decoration: below the FM threshold the noise instantaneously overtakes the
+        // carrier and each overtake is a phase step the demodulator turns into a CLICK. They start
+        // as isolated ticks and merge into a rattle as the signal goes. 0.8 is a lot of rattle —
+        // right for the dead middle of the band, possibly too much as a constant bed.
         public static float  RadioStaticCrackle = 0.8f;
         // Power-click character, one set per click (all hot-reload — heard on the next dial):
         //   Hz       = tone cap — higher = bright tick, lower = dull thud.

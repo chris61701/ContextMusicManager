@@ -452,8 +452,8 @@ mid-hash — so dial between stations while editing and hear each change immedia
   StaticCrackle : 0..1 sputter depth. 0 = smooth ""shhh""; 1 = full pops-and-sputter radio
                   crackle (random dropouts a few ms to ~30 ms long)."),
             F("RadioStaticVolume",                   "CMMConfig.RadioStaticVolume",                 -1f),
-            F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  350f),
-            F("RadioStaticHighHz",                   "CMMConfig.RadioStaticHighHz",                 2000f),
+            F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  40f),
+            F("RadioStaticHighHz",                   "CMMConfig.RadioStaticHighHz",                 2100f),
             F("RadioStaticCrackle",                  "CMMConfig.RadioStaticCrackle",                0.8f),
             Cmt(@"Power-click character, one set per click (all hot-reload — heard on the next dial):
 Hz       : tone cap (300..10000) — higher = bright tick, lower = dull thud.
