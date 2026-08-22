@@ -120,6 +120,12 @@ namespace CMM
         //   exactly like a context source — the pool the station loops through.
         //   Range: the emitter starts/stops as the NEAREST detected speaker crosses this
         //   distance (game units) from the listener.
+        // Read music from OTHER mods' Music folders as well as MusicPath. On by default:
+        // a music pack shipped as its own mod is the whole point, and a pack that silently
+        // does nothing until you find a setting is worse than no feature. Set false to
+        // restrict CMM to the single folder MusicPath names.
+        public static bool   AddonMusicScanEnabled = true;
+
         public static bool   WorldEmitterEnabled = true;
         public static string WorldEmitterSource  = "Radio";
         public static float  WorldEmitterRange   = 60f;

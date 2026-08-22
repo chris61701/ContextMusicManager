@@ -12,6 +12,7 @@ namespace CMM
     internal static class CMMConfig
     {
         internal static bool DebugLogging = false;
+        internal static bool AddonMusicScanEnabled = true;
         internal static void D(string s) { if (DebugLogging) Console.WriteLine(s); }
         // AudioDecoder reads these; nothing here decodes.
         internal static bool LoudnessNormalizationEnabled = false;

@@ -74,6 +74,16 @@ namespace CMM
         // Rebuilds the add-on root list. Main thread. Returns how many were found.
         internal static int Discover(string modPath)
         {
+            if (!CMMConfig.AddonMusicScanEnabled)
+            {
+                // Hard off: MusicPath and nothing else. Clearing rather than skipping matters
+                // on a hot-reload -- turning it off must drop the folders already in use, not
+                // merely stop looking for new ones.
+                MusicRoots.SetAddons(new MusicRoot[0]);
+                CMMConfig.D("[CMM] add-on music scanning is off (AddonMusicScanEnabled=false).");
+                return 0;
+            }
+
             var found = new List<MusicRoot>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var modRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

@@ -30,6 +30,7 @@ namespace CMM
     internal static class CMMConfig
     {
         internal static bool DebugLogging = false;
+        internal static bool AddonMusicScanEnabled = true;
         internal static void D(string s) { if (DebugLogging) Console.WriteLine(s); }
         internal static bool LoudnessNormalizationEnabled = false;
         internal static int  NativeOutputRingMs = 200;

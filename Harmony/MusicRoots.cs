@@ -212,6 +212,8 @@ namespace CMM
             var sb = new System.Text.StringBuilder();
             sb.Append("music roots: ").Append(r.Length)
               .Append(" (1 primary + ").Append(r.Length - 1).Append(" add-on)");
+            if (!CMMConfig.AddonMusicScanEnabled)
+                sb.Append("   [add-on scanning is OFF - AddonMusicScanEnabled=false]");
             for (int i = 0; i < r.Length; i++)
             {
                 sb.Append(CMMSettingsWriter.NL).Append("  [").Append(i).Append("] ").Append(r[i].Path);

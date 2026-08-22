@@ -6,6 +6,30 @@ All notable changes to Context Music Manager are documented here.
 
 ### Added
 
+- **Music packs can ship as their own mods.** CMM now reads its music from your `MusicPath`
+  folder AND the `Music` folder of every installed mod, treating all of them as one folder
+  per context. A soundtrack author can publish a pack as an ordinary mod instead of asking
+  people to copy files over CMM's install — so it survives updating CMM, and it works with
+  MO2, Vortex and Wabbajack like any other mod. Packs mirror the same tree: a pack supplying
+  POI_T3 ships `Music/poi/t3/`, and a folder matching no context is simply ignored. Several
+  packs can feed the same context; identically named files from different packs are all kept
+  (they are different tracks). Radio stations with the same folder name merge into one
+  station holding both pools. Everything else behaves as it always did — adding, removing or
+  editing files in a pack is picked up within about two seconds, exactly like your own
+  folder, and a pack whose folder disappears simply stops contributing.
+  - `cmm roots` lists which folders are in use and which mod each came from;
+    `cmm roots <context>` breaks down what each folder contributes to one context, which is
+    the fastest way to answer "why isn't my pack playing".
+  - `cmm scan` looks for music folders again — for a pack added while the game is running.
+    It finds packs the game itself has not loaded, too: a music pack is data, so there is no
+    reason to make you restart for one. (Any *code* such a mod carries still needs a restart.)
+  - Add-on folders are always read flat. `subfolders="true"` applies only to the folder
+    `MusicPath` points at, so a pack cannot accidentally pull in a nested context's music.
+  - Playlist (`.m3u`) and absolute-path sources name one exact place and are never extended
+    by packs.
+  - Off with `<AddonMusicScanEnabled>false</AddonMusicScanEnabled>`, which restricts CMM to
+    `MusicPath` alone.
+
 - **Radio dial sounds.** The personal radio now sounds like a physical device: a click when
   it powers on, a lower clunk when it powers off, and a static "searching" hash while
   dialing between stations or joining one that's still tuning in — the static rolls for
@@ -124,6 +148,28 @@ All notable changes to Context Music Manager are documented here.
   All fields are change-gated in the marshal, so steady-state resolve allocations stay ~0.
 
 ### Changed
+
+- **CMM writes its own config files instead of shipping them.** `settings.xml`, `radio.xml`
+  and `contexts.xml` are no longer in the download; they are created on first run with the
+  documented defaults, exactly as before. The point is what happens on the NEXT update:
+  previously the archive overwrote them, so every setting you had chosen — and every context
+  you had added or retuned — was silently reset. Now your files are yours. Updating writes in
+  only the settings a new version has ADDED, appended at the end under a banner saying which
+  version added them, and leaves everything else untouched.
+  - When a DEFAULT changes between versions, the new value is applied only if you were still
+    on the old default. If you had changed that setting, your value stands. Comparison is on
+    the parsed value, so `0.50` and `0.5` are recognised as the same untouched setting.
+  - A setting you delete stays deleted, and goes back to following CMM's built-in default.
+  - Three settings that had always existed in code but were never written into the file are
+    now documented there: `ReverseFadeReclaim`, `NativeScheduler` and `NativePreStageAdvance`.
+  - Files are only ever written at startup, never while you have them open for editing.
+- **The Music folder tree is created by the mod, not by the installer.** The per-context
+  folders (with a `.ContextName` placeholder naming each one) are now created at launch under
+  whatever `MusicPath` points at, rather than being baked into the archive. They therefore
+  appear where your music actually lives instead of only inside the mod folder, and contexts
+  you add yourself get folders too. Strictly additive: it never writes into a folder that
+  already exists, never deletes, and skips the job entirely if `MusicPath` points at a drive
+  that is not currently attached.
 
 - **The rebuilt world-emitter occlusion is now the default.** One acoustic field is flooded
   outward from the listener a few times a second and read by every speaker, replacing the

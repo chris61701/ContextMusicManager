@@ -1,6 +1,7 @@
 # CMM settings baseline — the last released schema.
 # Regenerate with: dotnet run -- --accept   (only after a real CurrentSchema bump)
-schema=1
+schema=2
+AddonMusicScanEnabled|Bool|true
 CombatCooldown|Float|10.0
 CombatExitDelay|Float|2.0
 CombatHighEnemyThreshold|Int|4

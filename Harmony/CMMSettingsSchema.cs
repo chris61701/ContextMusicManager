@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 1;
+        internal const int CurrentSchema = 2;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -93,6 +93,14 @@ namespace CMM
             Gap(),
             Cmt(@"How loud CMM tracks play relative to the game's music slider (0.0–1.0)"),
             F("VolumeModifier",                      "CMMConfig.VolumeModifier",                    0.5f),
+
+            Gap(),
+            Cmt(@"Also read music from every OTHER installed mod's Music folder, not just the one
+MusicPath names. That is what lets a soundtrack ship as its own mod instead of being
+copied over CMM's install. Packs mirror the same tree, so a pack supplying POI_T3 has
+Music/poi/t3/. `cmm roots` shows which folders are in use; `cmm scan` looks again after
+adding one. false = use MusicPath and nothing else."),
+            B("AddonMusicScanEnabled",                "CMMConfig.AddonMusicScanEnabled",             true, since: 2),
 
             Gap(),
             Cmt(@"Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.

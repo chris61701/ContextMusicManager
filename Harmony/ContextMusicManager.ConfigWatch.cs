@@ -89,7 +89,14 @@ namespace CMM
                 // The click SOUNDS are read once and held in RAM, deliberately not swappable at
                 // runtime. The knobs around them ARE live, so re-push those.
                 PersonalRadio.LoadClickSamples();
-                ScriptHost.MarkConfigDirty();   // re-marshal cfg into Lua on the next scan tick
+                ScriptHost.MarkConfigDirty();
+                // AddonMusicScanEnabled may have just flipped. Re-running discovery covers both
+                // directions -- off clears the add-on folders, on finds them again -- and
+                // marking presence dirty makes every context re-evaluate against the new set
+                // rather than keeping a pool built from folders that are no longer in play.
+                MusicRootsDiscovery.Discover(ModPath);
+                InvalidateAllPresence();
+                RadioStationCatalog.ForceRebuild();   // re-marshal cfg into Lua on the next scan tick
             }
 
             if (contextsChanged)
