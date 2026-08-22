@@ -798,60 +798,82 @@ namespace CMM
             return cov;
         }
 
-        // WHERE A BLOCK'S GEOMETRY ACTUALLY IS, or null for "it fills its voxel".
+        // ── THE DOOR LEAF, MEASURED RATHER THAN INVENTED ────────────────────────────────────────
+        // Four attempts at this failed because every one of them reasoned about a number nobody had
+        // ever read. A door is BlockShapeModelEntity, so GetBounds returns a unit cube — and always
+        // will: the game only lifts custom bounds from a collider on the model's ROOT
+        // (BlockShapeModelEntity.PoolCreateOnceToAllCallBack uses GetComponent, not
+        // GetComponentInChildren), and a door's collider is on the animated child. So the leaf's
+        // position was assumed to be the middle of the voxel, and it is not.
         //
-        // A SHUT DOOR IS THE CASE THIS EXISTS FOR. Its leaf lives in a Unity prefab, so GetBounds
-        // hands back a default cube and the block layer cannot see the real thing — which is fine
-        // for a route passing through (a shut door DOES fill its doorway) and useless for a
-        // listener standing in the doorway, because a cube is on both sides of you at once.
+        // It can be measured. The spawned prefab is reachable through ChunkCache.GetBlockEntity at
+        // the PARENT position, and its child colliders' bounds are the leaf's real volume IN ITS
+        // CURRENT POSE. That is the game's own idiom — AnimatorDrawbridgeState reads exactly these
+        // bounds to test for obstructions.
         //
-        // So synthesise what a leaf is: a thin slab across the middle of the voxel, perpendicular
-        // to the way the door opens. That axis is read off the world rather than off the block —
-        // a door sits in a doorway, so the two neighbours you walk BETWEEN are open and the two
-        // that hold the frame are not. Cheapest axis wins. Asked of the world because rotation
-        // encodings for model entities differ across the supported game versions, and this
-        // project has twice been caught asking a block a question it answers with a default.
-        internal static Bounds[] EarLeafBounds(Block b, BlockValue bv, World world, int x, int y, int z,
-                                               out int leafAxis)
+        // Measuring rather than modelling buys three things at once:
+        //   * the real position, including the doors whose prefabs are deliberately offset
+        //     (houseSlidingDoorWhite 0,0,0.525; commercialGlassDoor 0,0,-0.525; bathroomStallDoor
+        //     0.5,0,-0.5) which no centre assumption could ever have covered;
+        //   * the real AXIS, instead of guessing it from which neighbours look emptiest — a guess
+        //     that ties at zero for a free-standing frame, for an unloaded chunk, and for the upper
+        //     course of a door, and then breaks the tie by array index;
+        //   * the SWING for free. The bounds move with the animation, so a half-open door reports a
+        //     half-swung leaf without any openness ramp being consulted at all.
+        //
+        // Returns null when the prefab is not reachable — chunk not resident, pooled object not yet
+        // handed out. The caller falls back to the rotation-derived plane below.
+        internal static Bounds[] MeasuredLeafBounds(World world, Vector3i cell, Vector3i parent)
         {
-            leafAxis = -1;
-            if (b == null || !IsSwingingLeaf(b, bv.type)) return null;
-            if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return null;  // open
-            // THE SIDE YOU ARE ON DECIDES, NOT THE ANIMATION. This used to switch itself off the
-            // moment a door started moving, on the reasoning that a swinging leaf is no longer
-            // across the middle. That was wrong twice over.
-            //
-            // It threw away the DIRECTION. With no leaf to place, the cell falls back to blocking
-            // uniformly, so a speaker on YOUR side of a door you had just opened went from audible
-            // to muffled — which is the "running through a door that is still opening occludes"
-            // report. And the swing trace says the leaf was never the problem: openness reads
-            // 1.000 on every sampled frame of an opening swing, so there is nothing to switch off.
-            // What is left is a window at the very start, before the animator's clip begins, where
-            // the door is registered shut. Keeping the split is what makes that window harmless:
-            // shut or not, a door never blocks what is already on your side of it.
-            //
-            // Chris's framing, which is the right one: being able to run through a door before it
-            // has finished opening does not make sense either, so the flip belongs at the doorway
-            // rather than at the animation. Sound beyond the door still fades in gradually as it
-            // swings, because the material behind the split is still scaled by openness. Gradual
-            // where it should be gradual, instant where it should be instant.
-            float bestSum = float.MaxValue; int bestAxis = -1;
-            for (int axis = 0; axis < 3; axis++)
+            BlockEntityData bed = world.ChunkCache != null ? world.ChunkCache.GetBlockEntity(parent) : null;
+            if (bed == null || !bed.bHasTransform || bed.transform == null) return null;
+            Collider[] cols;
+            try { cols = bed.transform.GetComponentsInChildren<Collider>(true); }
+            catch { return null; }
+            if (cols == null || cols.Length == 0) return null;
+
+            // includeInactive, and `enabled` is deliberately ignored: the game DISABLES a shut
+            // door's colliders when a player is standing in the doorway (AnimatorDoorState's
+            // obstacle check), which is how you can stand exactly where the leaf is. We want the
+            // geometry, not whether it is currently pushing anybody.
+            bool any = false; Bounds acc = new Bounds();
+            for (int i = 0; i < cols.Length; i++)
             {
-                int dx = axis == 0 ? 1 : 0, dy = axis == 1 ? 1 : 0, dz = axis == 2 ? 1 : 0;
-                float sum = NeighbourLoss(world, x - dx, y - dy, z - dz)
-                          + NeighbourLoss(world, x + dx, y + dy, z + dz);
-                if (sum < bestSum) { bestSum = sum; bestAxis = axis; }
+                if (cols[i] == null) continue;
+                Bounds wb = cols[i].bounds;                 // world, in RENDER space
+                if (wb.size.sqrMagnitude <= 1e-6f) continue;
+                if (!any) { acc = wb; any = true; } else acc.Encapsulate(wb);
             }
-            if (bestAxis < 0) return null;
-            leafAxis = bestAxis;
-            // A SHEET, NOT A SLAB. At 0.45..0.55 there is a tenth of a block in which you are on
-            // BOTH sides of the leaf at once, and walking through it wobbles. A sheet gives a
-            // clean flip at the moment you cross, and behaves the same running through as running
-            // back. The thousandth of a block of thickness is only so the split has something to
-            // land on when you stand exactly on the plane.
+            if (!any) return null;
+
+            // Render space -> world blocks (floating origin), then -> this CELL's local 0..1.
+            Vector3 mn = acc.min + Origin.position - new Vector3(cell.x, cell.y, cell.z);
+            Vector3 mx = acc.max + Origin.position - new Vector3(cell.x, cell.y, cell.z);
+            for (int k = 0; k < 3; k++)
+            {
+                if (mx[k] < 0f || mn[k] > 1f) return null;  // the leaf has swung clear of this cell
+                mn[k] = Mathf.Clamp01(mn[k]); mx[k] = Mathf.Clamp01(mx[k]);
+                if (mx[k] - mn[k] < 0.001f)                 // keep a sliver the rasteriser can hit
+                { float c = Mathf.Clamp(0.5f * (mn[k] + mx[k]), 0.0005f, 0.9995f); mn[k] = c - 0.0005f; mx[k] = c + 0.0005f; }
+            }
+            return new[] { new Bounds((mn + mx) * 0.5f, mx - mn) };
+        }
+
+        // THE FALLBACK, when the prefab cannot be reached. The axis comes from the block's ROTATION,
+        // which the game's own door placement sets from the jambs: both +/-X neighbours solid means
+        // you traverse along Z (rotation 0 or 2), both +/-Z solid means along X (1 or 3). So the
+        // traversal axis is simply (rotation & 1) == 0 ? Z : X.
+        //
+        // READ FROM THE PARENT, NEVER THE CHILD. On a multiblock child the game stores the parent
+        // offset in bits that OVERLAP the rotation field, so a 2-tall door's upper block reports
+        // rotation 31 in 3.x (and 8 in A21) instead of 0..3. That is silent — rotationsToQuats is
+        // padded to 32 with identity — and the upper block is exactly where a standing player's
+        // head is, so it is the value this code would have got every single time.
+        internal static Bounds[] RotationLeafBounds(Block b, BlockValue parentBv, out int leafAxis)
+        {
+            leafAxis = (parentBv.rotation & 1) == 0 ? 2 : 0;      // 0=X, 2=Z
             Vector3 mn = Vector3.zero, mx = Vector3.one;
-            mn[bestAxis] = 0.4995f; mx[bestAxis] = 0.5005f;
+            mn[leafAxis] = 0.4995f; mx[leafAxis] = 0.5005f;
             return new[] { new Bounds((mn + mx) * 0.5f, mx - mn) };
         }
 
@@ -886,6 +908,13 @@ namespace CMM
         // but blocks.xml has said Place="Door" for all 78 of them (plus everything that Extends one) since
         // A20, and BlockPlacementDoor/BlockPlacementDrawBridge exist in every supported assembly.
         private static readonly Dictionary<int, bool> _swingCache = new Dictionary<int, bool>();
+        // Public face of IsSwingingLeaf, for the reader. NOT gated on IsMovementBlocked: that flips
+        // at the LATCH (the hook is a postfix on TEFeatureDoor.SetOpen), so gating on it switched
+        // the leaf off for the whole of every opening swing — the cell then fell back to blocking
+        // uniformly, which is "running through a door that is still opening occludes". Where the
+        // leaf actually is during the swing is now measured, so there is nothing to gate.
+        internal static bool IsSwingingLeafDebug(Block b, BlockValue bv) => IsSwingingLeaf(b, bv.type);
+
         private static bool IsSwingingLeaf(Block b, int type)
         {
             if (_swingCache.TryGetValue(type, out bool s)) return s;

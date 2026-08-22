@@ -512,41 +512,59 @@ namespace CMM
 
             float t = 1f;
             float[] cov = EmitterAcoustics.FullCover;
-            string why = "AIR (nothing in your cell)";
-            float bodySide = -1f;
+            string why = "AIR";
             if (StepXZ == 1 && StepY == 1)          // one block per cell: the cell IS the block
             {
                 BlockValue bv = world.GetBlock(cx, cy, cz);
-                if (!bv.isair)
+                // NOT gated on isair. An air BlockValue over water is 0.2 loss, and skipping it
+                // here dropped the first cell of water on every route for a submerged listener.
+                t = Transmission(world, cx, cy, cz, out float[] _);
+                if (t < 1f)
                 {
-                    t = Transmission(world, cx, cy, cz, out float[] _);
-                    if (t < 1f)
+                    Block b = bv.Block;
+                    var here = new Vector3i(cx, cy, cz);
+                    // THE LISTENER POINT: horizontal from the BODY, vertical from the EAR.
+                    //
+                    // Horizontally the body is what a player means by which side they are on, and
+                    // it is stable — the camera is offset from the pivot it rotates about, so
+                    // standing still and turning could flip a decision made on centimetres.
+                    // Vertically the body is the FEET (position + eye height IS the camera), so
+                    // using it for Y put the listener 1.6 blocks below its own cell, which clamped
+                    // to 0 and reported every horizontal leaf as being entirely above the listener.
+                    Vector3 body = player.position;
+                    float sx = Mathf.Clamp01(body.x - cx), sz = Mathf.Clamp01(body.z - cz);
+                    float[] fr = { sx, fy, sz };
+
+                    Bounds[] leaf = null; int leafAxis = -1; string how = null;
+                    if (b != null && EmitterAcoustics.IsSwingingLeafDebug(b, bv))
                     {
-                        Block b = bv.Block;
-                        Bounds[] leaf = EmitterAcoustics.EarLeafBounds(b, bv, world, cx, cy, cz,
-                                                                       out int leafAxis);
-                        if (leaf != null)
+                        Vector3i par = bv.ischild && b.multiBlockPos != null
+                                     ? b.multiBlockPos.GetParentPos(here, bv) : here;
+                        leaf = EmitterAcoustics.MeasuredLeafBounds(world, here, par);
+                        how = "measured";
+                        if (leaf == null)
                         {
-                            // The split plane on the leaf's own axis comes from the BODY. Anywhere
-                            // clear of the leaf this agrees with the camera; within a few
-                            // centimetres of it, which is exactly where a player stands in a
-                            // doorway, only the body is stable enough to decide.
-                            Vector3 body = player.position;
-                            float[] fr = { fx, fy, fz };
-                            int cell = leafAxis == 0 ? cx : leafAxis == 1 ? cy : cz;
-                            float bw = leafAxis == 0 ? body.x : leafAxis == 1 ? body.y : body.z;
-                            fr[leafAxis] = Mathf.Clamp01(bw - cell);
-                            bodySide = fr[leafAxis];
-                            cov = EmitterAcoustics.CoverSplitAtBounds(leaf, fr[0], fr[1], fr[2]);
+                            // Fallback: the axis off the PARENT's rotation. Never the child's — a
+                            // multiblock child stores its parent offset in bits that overlap the
+                            // rotation field, so the upper block of a door reads 31, and the upper
+                            // block is exactly where a standing player's head is.
+                            BlockValue pbv = par.Equals(here) ? bv : world.GetBlock(par.x, par.y, par.z);
+                            leaf = EmitterAcoustics.RotationLeafBounds(b, pbv, out leafAxis);
+                            how = "rotation rot=" + pbv.rotation;
                         }
-                        else cov = EmitterAcoustics.CoverSplitAt(b, bv, fx, fy, fz);
+                    }
+
+                    if (leaf != null) cov = EmitterAcoustics.CoverSplitAtBounds(leaf, fr[0], fr[1], fr[2]);
+                    else              cov = EmitterAcoustics.CoverSplitAt(b, bv, fr[0], fr[1], fr[2]);
+
+                    if (CMMConfig.DebugLogging)
                         why = (b != null ? b.GetBlockName() : "?") + (bv.ischild ? " CHILD" : "")
                             + "  t=" + t.ToString("0.000")
                             + (leaf != null
-                               ? "  LEAF on " + (leafAxis == 0 ? "X" : leafAxis == 1 ? "Y" : "Z")
-                                 + " split at " + bodySide.ToString("0.00") + " (body)"
-                               : "  NO LEAF");
-                    }
+                               ? "  LEAF " + how
+                                 + (leafAxis >= 0 ? " axis " + (leafAxis == 0 ? "X" : leafAxis == 1 ? "Y" : "Z") : "")
+                                 + "  split " + sx.ToString("0.00") + "," + fy.ToString("0.00") + "," + sz.ToString("0.00")
+                               : "  no leaf");
                 }
             }
 
@@ -559,12 +577,11 @@ namespace CMM
             NativeField.cmm_fld_set_ear_cell(_f, cx, cy, cz,
                                              Face(nX, 0f), Face(nY, 0f), Face(nZ, 0f),
                                              Face(pX, 0f), Face(pY, 0f), Face(pZ, 0f));
-            EarCellWhy = "cell " + cx + "," + cy + "," + cz
-                       + "  at " + fx.ToString("0.00") + "," + fy.ToString("0.00") + "," + fz.ToString("0.00")
-                       + "  " + why
-                       + "\n     published  -X " + Db(Face(nX, 0f)) + "  -Y " + Db(Face(nY, 0f))
-                       + "  -Z " + Db(Face(nZ, 0f)) + "   +X " + Db(Face(pX, 0f))
-                       + "  +Y " + Db(Face(pY, 0f)) + "  +Z " + Db(Face(pZ, 0f)) + "   (dB)";
+            if (CMMConfig.DebugLogging)
+                EarCellWhy = "cell " + cx + "," + cy + "," + cz + "  " + why
+                           + "\n     published  -X " + Db(Face(nX, 0f)) + "  -Y " + Db(Face(nY, 0f))
+                           + "  -Z " + Db(Face(nZ, 0f)) + "   +X " + Db(Face(pX, 0f))
+                           + "  +Y " + Db(Face(pY, 0f)) + "  +Z " + Db(Face(pZ, 0f)) + "   (dB)";
         }
 
         private static string Db(float t)
