@@ -456,6 +456,9 @@ namespace CMM
             cover = EmitterAcoustics.FullCover;
             float loss = EmitterAcoustics.DebugCellLoss(bv, world, x, y, z);
             if (loss <= 0.0001f) return 1f;
+            // A door passing under the reader teaches us where its opening is, once, while it can
+            // still be measured. Nothing else gets a chance for a door the listener never touches.
+            EmitterAcoustics.LearnAperture(world, new Vector3i(x, y, z), bv);
             // Only asked for once there is material to place: air is most of the world and this
             // saves it a dictionary lookup per block read, on the path that costs eleven seconds
             // to sweep a window.
@@ -535,23 +538,24 @@ namespace CMM
                     float sx = Mathf.Clamp01(body.x - cx), sz = Mathf.Clamp01(body.z - cz);
                     float[] fr = { sx, fy, sz };
 
-                    Bounds[] leaf = null; int leafAxis = -1; string how = null;
+                    Bounds[] leaf = null; string how = null;
                     if (b != null && EmitterAcoustics.IsSwingingLeafDebug(b, bv))
                     {
+                        // Always the PARENT. A multiblock child stores its parent offset in bits
+                        // that overlap the rotation field, so the upper block of a door reads 31 —
+                        // and the upper block is exactly where a standing player's head is.
                         Vector3i par = bv.ischild && b.multiBlockPos != null
                                      ? b.multiBlockPos.GetParentPos(here, bv) : here;
-                        leaf = EmitterAcoustics.MeasuredLeafBounds(world, here, par);
-                        how = "measured";
-                        if (leaf == null)
-                        {
-                            // Fallback: the axis off the PARENT's rotation. Never the child's — a
-                            // multiblock child stores its parent offset in bits that overlap the
-                            // rotation field, so the upper block of a door reads 31, and the upper
-                            // block is exactly where a standing player's head is.
-                            BlockValue pbv = par.Equals(here) ? bv : world.GetBlock(par.x, par.y, par.z);
-                            leaf = EmitterAcoustics.RotationLeafBounds(b, pbv, out leafAxis);
-                            how = "rotation rot=" + pbv.rotation;
-                        }
+                        // IsMovementBlocked is `!isOpen` — a logical predicate that flips at the
+                        // LATCH, which makes it useless during a swing and exactly right at rest.
+                        // At rest is the only time it is asked: it decides whether this pose is the
+                        // shut one, i.e. the one worth remembering as the aperture.
+                        bool shut = false;
+                        try { shut = b.IsMovementBlocked(world, here, bv, BlockFace.None); }
+                        catch { /* modded door without the predicate ⇒ never remembered */ }
+                        leaf = EmitterAcoustics.LeafBoundsForCell(
+                                   world, here, par, bv.type,
+                                   EmitterAcoustics.IsDoorAnimating(par), shut, out how);
                     }
 
                     if (leaf != null) cov = EmitterAcoustics.CoverSplitAtBounds(leaf, fr[0], fr[1], fr[2]);
@@ -562,8 +566,9 @@ namespace CMM
                             + "  t=" + t.ToString("0.000")
                             + (leaf != null
                                ? "  LEAF " + how
-                                 + (leafAxis >= 0 ? " axis " + (leafAxis == 0 ? "X" : leafAxis == 1 ? "Y" : "Z") : "")
                                  + "  split " + sx.ToString("0.00") + "," + fy.ToString("0.00") + "," + sz.ToString("0.00")
+                               : how == "measured" ? "  leaf swung clear of this cell"
+                               : how != null ? "  no leaf (" + how + ")"
                                : "  no leaf");
                 }
             }

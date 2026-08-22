@@ -85,22 +85,28 @@ verification — emitters are excluded there anyway.
     a door, which should settle the report; the rest needs the leaf's facing from its rotation.
   - **Verify with** `cmm acoustics shape [x y z]` for the coverage numbers, then by ear.
 
-- [ ] **The door SWING.** The leaf is now measured off its prefab colliders, so its position and
-  axis are right and it moves with the animation. What is not settled is how the sound should
-  behave DURING the swing. Chris's rule stands: the door blocks by which side you are on, never by
-  what the animation is doing, and sound beyond it should fade in gradually as it opens while sound
-  on your own side is released immediately.
-  - The gradual part comes from `CellLoss`'s openness blend (`DoorAcoustic`), which with the shipped
-    gap defaults is 0 until the leaf is 15% open and 1 at 70%. Measured swing: `open` 0.000 at
-    t=0.054s, 0.295 at 0.114s, 0.977 at 0.212s of a 0.53 s clip. Closing slams early on purpose.
-  - Now the leaf is measured, the openness ramp may be redundant for the cell you are standing in —
-    the bounds already leave the voxel as it swings. Decide whether the two should both apply.
-  - `WorldEmitterDoorSwingFrac` is 1.0 (no remap). It did nothing at any value while the leaf was
-    switched off during the swing; retest it now that it is not.
-
+- [x] **The door SWING — the aperture model.** Done 2026-08-22. A door's leaf cannot be read while
+  it moves (`AnimatorDoorState` blanks its colliders for `0 <= nt < 0.99`, every door every swing —
+  measured: `LEAF measured` at rest, `LEAF rotation` at nt=0.295 with the leaf still fully spanning
+  the cell). So the door stopped being a leaf and became an APERTURE: its plane is measured once
+  while readable and remembered, and the openness ramp supplies how much of it is blocked. Fixed
+  geometry, moving number — what Wwise, FMOD and Project Acoustics all do.
+  - `RotationLeafBounds` is DELETED, and that was the bug. Its synthesised slab at 0.5, against a
+    body at 0.480, put the door on the OTHER SIDE of the listener: one frame after the latch, player
+    standing still, a far-side speaker went 14.9 dB occluded -> 0.0 dB. Both halves of the complaint,
+    one mechanism. A door with no remembered plane now gets NO plane — the isotropic lump is blunt
+    but symmetric, and a guessed plane is confidently wrong in the one direction you are listening.
+  - Three capture points, all main-thread: the reader passing a shut door (once per door, ever),
+    the first tick of an opening swing (before the clip starts, so the colliders are still on), and
+    standing in one at rest. The middle one is what covers a door somebody else opened.
+  - Accepted only when the leaf is THIN (min extent < 0.25, mid > 0.5). That gate also gives a hatch
+    its horizontal aperture by measurement, and rejects a prefab whose collider union ate the frame.
+  - STILL OPEN: `Span` is the largest multiblock dimension, so an ordinary door's gap is its HEIGHT.
+    Measured live: a 1x2x1 door reads acoustically fully open at nt=0.406, the garage door at 0.767.
+    Fixing it rescales every door's ramp, so it belongs with the re-tuning pass, not before it.
 - [ ] **Field defects found by the 2026-08-22 audit and NOT fixed.** Ranked as the audit ranked them.
   These are real; the door work only fixed the three that shared its symptom.
-  - **[MED-HIGH] The ear-cell override races the geometry reader.** `cmm_fld_solve` save/modifies/
+  - **[FIXED 2026-08-22] The ear-cell override races the geometry reader.** `cmm_fld_solve` save/modifies/
     restores the shared `m6` slot for the ear's cell (`cmm_field.c` ~458 and ~782). Any
     `cmm_fld_set_cell` write landing inside a flood is overwritten by the restore *while staying
     marked clean*, so the read is thrown away and not redone until the next dirty. Worst exactly
@@ -108,7 +114,7 @@ verification — emitters are excluded there anyway.
     installed essentially the whole window, and the ear's own cell is re-read every frame. Fix by
     not mutating `m6` — the leaving cell's pointer is hoisted once per settled cell, so a single
     `i == earIdx` test there covers it (nothing re-enters the seed cell profitably).
-  - **[MED] `cmm_fld_set_ear_cell` publishes coordinates BEFORE the numbers**, and the guard tests
+  - **[FIXED 2026-08-22] `cmm_fld_set_ear_cell` publishes coordinates BEFORE the numbers**, and the guard tests
     only the coordinates. A reader can see the new cell with the old six values. Write `earOvr`
     first and `earHas` last.
   - **[MED] `_ear` is a `Vector3` read across threads with no barrier.** A torn read seeds from a

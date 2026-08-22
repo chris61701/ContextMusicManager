@@ -818,19 +818,24 @@ namespace CMM
         //   * the real AXIS, instead of guessing it from which neighbours look emptiest — a guess
         //     that ties at zero for a free-standing frame, for an unloaded chunk, and for the upper
         //     course of a door, and then breaks the tie by array index;
-        //   * the SWING for free. The bounds move with the animation, so a half-open door reports a
-        //     half-swung leaf without any openness ramp being consulted at all.
+        // WHAT IT DOES NOT BUY IS THE SWING. That was the claim here and it is false, measured in
+        // game 2026-08-22 on a garage door with the player standing still: `LEAF measured` at rest,
+        // `LEAF rotation` at nt=0.295 with the leaf still risen only 0.89 m of 3 m and therefore
+        // still fully spanning the cell. AnimatorDoorState.OnStateUpdate calls EnableColliders(off)
+        // for the whole span collideOffPercent..collideOnPercent, which default to 0 and 0.99 —
+        // every door, every swing, obstruction or not. There is nothing to read while it moves.
         //
-        // Returns null when the prefab is not reachable — chunk not resident, pooled object not yet
-        // handed out. The caller falls back to the rotation-derived plane below.
-        internal static Bounds[] MeasuredLeafBounds(World world, Vector3i cell, Vector3i parent)
+        // Returns false when the prefab is not reachable (chunk not resident, pooled object not yet
+        // handed out) or its colliders have been blanked. Bounds are in WORLD BLOCKS, not cell
+        // local, so one measurement can be remembered and re-projected into any cell.
+        internal static bool MeasureLeafWorld(BlockEntityData bed, out Vector3 wmin, out Vector3 wmax)
         {
-            BlockEntityData bed = world.ChunkCache != null ? world.ChunkCache.GetBlockEntity(parent) : null;
-            if (bed == null || !bed.bHasTransform || bed.transform == null) return null;
+            wmin = Vector3.zero; wmax = Vector3.zero;
+            if (bed == null || !bed.bHasTransform || bed.transform == null) return false;
             Collider[] cols;
             try { cols = bed.transform.GetComponentsInChildren<Collider>(true); }
-            catch { return null; }
-            if (cols == null || cols.Length == 0) return null;
+            catch { return false; }
+            if (cols == null || cols.Length == 0) return false;
 
             // includeInactive, and `enabled` is deliberately ignored: the game DISABLES a shut
             // door's colliders when a player is standing in the doorway (AnimatorDoorState's
@@ -844,14 +849,24 @@ namespace CMM
                 if (wb.size.sqrMagnitude <= 1e-6f) continue;
                 if (!any) { acc = wb; any = true; } else acc.Encapsulate(wb);
             }
-            if (!any) return null;
+            if (!any) return false;
+            wmin = acc.min + Origin.position;               // render space -> world blocks
+            wmax = acc.max + Origin.position;
+            return true;
+        }
 
-            // Render space -> world blocks (floating origin), then -> this CELL's local 0..1.
-            Vector3 mn = acc.min + Origin.position - new Vector3(cell.x, cell.y, cell.z);
-            Vector3 mx = acc.max + Origin.position - new Vector3(cell.x, cell.y, cell.z);
+        private static bool MeasureLeafWorld(World world, Vector3i parent, out Vector3 wmin, out Vector3 wmax)
+            => MeasureLeafWorld(world.ChunkCache != null ? world.ChunkCache.GetBlockEntity(parent) : null,
+                                out wmin, out wmax);
+
+        // A world-block AABB projected into one CELL's local 0..1, or null if it does not reach it.
+        private static Bounds[] ClipToCell(Vector3 wmin, Vector3 wmax, Vector3i cell)
+        {
+            Vector3 mn = wmin - new Vector3(cell.x, cell.y, cell.z);
+            Vector3 mx = wmax - new Vector3(cell.x, cell.y, cell.z);
             for (int k = 0; k < 3; k++)
             {
-                if (mx[k] < 0f || mn[k] > 1f) return null;  // the leaf has swung clear of this cell
+                if (mx[k] < 0f || mn[k] > 1f) return null;  // does not reach this cell
                 mn[k] = Mathf.Clamp01(mn[k]); mx[k] = Mathf.Clamp01(mx[k]);
                 if (mx[k] - mn[k] < 0.001f)                 // keep a sliver the rasteriser can hit
                 { float c = Mathf.Clamp(0.5f * (mn[k] + mx[k]), 0.0005f, 0.9995f); mn[k] = c - 0.0005f; mx[k] = c + 0.0005f; }
@@ -859,28 +874,118 @@ namespace CMM
             return new[] { new Bounds((mn + mx) * 0.5f, mx - mn) };
         }
 
-        // THE FALLBACK, when the prefab cannot be reached. The axis comes from the block's ROTATION,
-        // which the game's own door placement sets from the jambs: both +/-X neighbours solid means
-        // you traverse along Z (rotation 0 or 2), both +/-Z solid means along X (1 or 3). So the
-        // traversal axis is simply (rotation & 1) == 0 ? Z : X.
+        // ── THE APERTURE: FIXED GEOMETRY, MOVING NUMBER ─────────────────────────────────────────
+        // A door's leaf cannot be read while it swings, so stop trying to. What a door contributes
+        // acoustically is an OPENING — fixed position, fixed orientation — and a scalar saying how
+        // much of it is currently blocked. The leaf's measured pose supplies the first, once, while
+        // it can still be read; the openness ramp already supplied the second all along.
         //
-        // READ FROM THE PARENT, NEVER THE CHILD. On a multiblock child the game stores the parent
-        // offset in bits that OVERLAP the rotation field, so a 2-tall door's upper block reports
-        // rotation 31 in 3.x (and 8 in A21) instead of 0..3. That is silent — rotationsToQuats is
-        // padded to 32 with identity — and the upper block is exactly where a standing player's
-        // head is, so it is the value this code would have got every single time.
-        internal static Bounds[] RotationLeafBounds(Block b, BlockValue parentBv, out int leafAxis)
+        // This is what every shipped system does (Wwise portals, FMOD polygons, Project Acoustics'
+        // per-portal open-area fraction). None of them voxelise the plate.
+        //
+        // THE FALLBACK THIS REPLACES WAS NOT A SAFETY NET, IT WAS A COIN FLIP. RotationLeafBounds
+        // synthesised a slab across the middle of the voxel from the parent's rotation. Measured in
+        // game on woodenGarageDoor3x3White, player stationary, one frame apart:
+        //
+        //     shut      LEAF measured    published  -Z 20.2   +Z  .      speaker 14.9 dB occluded
+        //     nt=0.295  LEAF rotation    published  -Z  .     +Z 14.2    speaker  0.0 dB, WIDE OPEN
+        //
+        // The real leaf sits at z < 0.48 in its voxel (the prefab offsets are real: commercialGlass
+        // Door 0,0,-0.525; houseSlidingDoorWhite 0,0,0.525; bathroomStallDoor 0.5,0,-0.5). The
+        // assumed plane at 0.5, against a body at 0.480, landed on the OTHER SIDE of the listener,
+        // so the door jumped from behind you to in front of you and released a far-side speaker by
+        // 15 dB — and by symmetry, wrongly charged whatever was behind. That is both halves of
+        // "running through a door that is still opening dips" in one mechanism.
+        //
+        // So a door with no remembered plane gets NO plane. Falling through to the isotropic lump
+        // is blunt, but it is the same in every direction; a guessed plane is confidently wrong in
+        // one, and one of the two rooms is always the one you are listening to.
+        private struct LeafPlane { public int Type; public Vector3 Min, Max; }
+        private static readonly Dictionary<Vector3i, LeafPlane> _leafPlanes = new Dictionary<Vector3i, LeafPlane>();
+
+        // A LEAF IS THIN. That one gate does a surprising amount of work: it gives a hatch its
+        // horizontal aperture by measurement rather than by a name list (a hatch is thin on Y, and
+        // deriving the axis from rotation could only ever produce a vertical plane — a shut hatch
+        // that does not block a floor), it keeps the deliberate prefab offsets, and it rejects a
+        // prefab whose collider union swallowed the frame rather than recording the frame as a door.
+        private static bool IsThinLeaf(Vector3 wmin, Vector3 wmax)
         {
-            leafAxis = (parentBv.rotation & 1) == 0 ? 2 : 0;      // 0=X, 2=Z
-            Vector3 mn = Vector3.zero, mx = Vector3.one;
-            mn[leafAxis] = 0.4995f; mx[leafAxis] = 0.5005f;
-            return new[] { new Bounds((mn + mx) * 0.5f, mx - mn) };
+            Vector3 e = wmax - wmin;
+            float big = -1f, mid = -1f, small = float.MaxValue;
+            for (int k = 0; k < 3; k++)
+            {
+                float v = e[k];
+                if (v > big) { mid = big; big = v; } else if (v > mid) mid = v;
+                if (v < small) small = v;
+            }
+            return small < 0.25f && mid > 0.5f;
         }
 
-        private static float NeighbourLoss(World world, int x, int y, int z)
+        // Record the aperture. Callers must only offer a SHUT, AT-REST leaf — that is the one pose
+        // that says where the doorway is. An open leaf is just as thin, and remembering it would
+        // pin the aperture to wherever the leaf was parked.
+        internal static void RememberLeaf(BlockEntityData bed, Vector3i parent, int type)
         {
-            BlockValue nb = world.GetBlock(x, y, z);
-            return nb.isair ? 0f : CellLoss(nb, world, x, y, z);
+            if (!MeasureLeafWorld(bed, out Vector3 wmin, out Vector3 wmax)) return;
+            if (!IsThinLeaf(wmin, wmax)) return;
+            // Bounded: doors are per-world and this only ever holds ones the listener has met, but
+            // a long session across many POIs should not accumulate for ever. Dropping the lot is
+            // fine — each one is re-learned the next time its door is stood in or opened.
+            if (_leafPlanes.Count > 1024) _leafPlanes.Clear();
+            _leafPlanes[parent] = new LeafPlane { Type = type, Min = wmin, Max = wmax };
+        }
+
+        // The reader's one entry point for "where is this door's material, inside this cell".
+        internal static Bounds[] LeafBoundsForCell(World world, Vector3i cell, Vector3i parent, int type,
+                                                  bool animating, bool shut, out string how)
+        {
+            how = null;
+            LeafPlane held; bool haveHeld = _leafPlanes.TryGetValue(parent, out held) && held.Type == type;
+
+            // MID-SWING THE APERTURE IS THE ANSWER, even on the doors whose colliders survive.
+            // Where the opening is does not move; only how much of it is blocked does, and that is
+            // the ramp. Reading the leaf here would price the same swing twice — once as geometry
+            // leaving the voxel, once as the scalar shrinking.
+            if (animating && haveHeld) { how = "held"; return ClipToCell(held.Min, held.Max, cell); }
+
+            BlockEntityData bed = world.ChunkCache != null ? world.ChunkCache.GetBlockEntity(parent) : null;
+            if (MeasureLeafWorld(bed, out Vector3 wmin, out Vector3 wmax))
+            {
+                if (!animating && shut) RememberLeaf(bed, parent, type);
+                how = "measured";
+                return ClipToCell(wmin, wmax, cell);
+            }
+            if (haveHeld) { how = "held"; return ClipToCell(held.Min, held.Max, cell); }
+            return null;
+        }
+
+        // Is this door mid-swing? Main thread only, same discipline as every other _doors read.
+        internal static bool IsDoorAnimating(Vector3i parent) => _doors.ContainsKey(parent);
+
+        // OPPORTUNISTIC CAPTURE, FROM THE CELL READER. The other two capture points are "you are
+        // standing in it" and "it has just begun to open", and neither fires for the door you have
+        // never touched — which is exactly "run through a door somebody else already opened", the
+        // case that started this. The reader walks every cell in the window anyway, so let it
+        // learn on the way past: a door beside you within a rolling near-refresh, everything else
+        // within a full sweep.
+        //
+        // Once per door for the process. The prefab walk allocates a Collider[], so the guards run
+        // cheapest-first — a type dictionary probe, then the have-we-already probe — and after the
+        // first success there is nothing new to find. Main thread only (Transmission is reached
+        // from FrameStep and PublishEarCell, both of which read the world).
+        internal static void LearnAperture(World world, Vector3i cell, BlockValue bv)
+        {
+            Block b = bv.Block;
+            if (b == null || !IsSwingingLeaf(b, bv.type)) return;
+            Vector3i parent = bv.ischild && b.multiBlockPos != null
+                            ? b.multiBlockPos.GetParentPos(cell, bv) : cell;
+            if (_leafPlanes.TryGetValue(parent, out LeafPlane have) && have.Type == bv.type) return;
+            if (_doors.ContainsKey(parent)) return;         // mid-swing: not a pose worth keeping
+            bool shut;
+            try { shut = b.IsMovementBlocked(world, cell, bv, BlockFace.None); } catch { return; }
+            if (!shut) return;                              // only a shut leaf defines the doorway
+            RememberLeaf(world.ChunkCache != null ? world.ChunkCache.GetBlockEntity(parent) : null,
+                         parent, bv.type);
         }
 
         private static Bounds[] ShapeBounds(Block b, BlockValue bv)
@@ -1271,6 +1376,17 @@ namespace CMM
 
             if (!da.Started)
             {
+                // CAPTURE THE APERTURE WHILE THERE IS STILL SOMETHING TO MEASURE. No clip of this
+                // swing has begun yet, so the leaf is at its PRE-TOGGLE pose and OnStateUpdate has
+                // not yet blanked its colliders. Opening ⇒ that pose is shut, which is the one pose
+                // that says where the doorway is; closing ⇒ it is parked open and worth nothing, so
+                // only ask on the way out. Once the clip starts there is nothing readable for the
+                // rest of the animation, which is precisely the window the sound has to be right in.
+                //
+                // This is also the ONLY capture that fires for a door opened from a distance. The
+                // listener's own cell learns its plane by standing in it, which is no use at all
+                // when the complaint is running through one that somebody already opened.
+                if (da.Opening) RememberLeaf(bed, parent, da.Type);
                 if (minNt >= 0.95f)   // no clip has begun (stale end-of-previous) → hold at start, keep waiting
                 {
                     da.Openness = da.Opening ? 0f : 1f;

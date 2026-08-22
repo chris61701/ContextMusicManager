@@ -376,10 +376,17 @@ void cmm_fld_set_ear_cell(cmm_fld *f, int cx, int cy, int cz,
                           float tnx, float tny, float tnz,
                           float tpx, float tpy, float tpz) {
     if (!f) return;
-    f->earCx = cx; f->earCy = cy; f->earCz = cz;
-    f->earHas = in_win(f, cx, cy, cz);
+    /* PUBLISH THE FLAG LAST. The solver's guard tests earHas AND the three coordinates, so
+     * writing them before the numbers let a concurrent flood see the new cell carrying the
+     * PREVIOUS cell's six values -- a door's leaf on the wrong side of the listener for one
+     * flood. Take the override out of service, fill it, then arm it. Store-store ordering on
+     * the target is what makes this hold; there is no barrier, and the cost of losing the race
+     * is one flood using the old-but-consistent override, which is the pre-existing behaviour. */
+    f->earHas = 0;
     f->earOvr[CM_NX] = t_q(tnx); f->earOvr[CM_NY] = t_q(tny); f->earOvr[CM_NZ] = t_q(tnz);
     f->earOvr[CM_PX] = t_q(tpx); f->earOvr[CM_PY] = t_q(tpy); f->earOvr[CM_PZ] = t_q(tpz);
+    f->earCx = cx; f->earCy = cy; f->earCz = cz;
+    f->earHas = in_win(f, cx, cy, cz);
 }
 
 void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
@@ -453,14 +460,29 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     int scx = b2c(bx, f->stepX), scy = b2c(by, f->stepY), scz = b2c(bz, f->stepZ);
     if (!in_win(f, scx, scy, scz)) { f->reached = 0; return 0; }
 
-    /* SWAP IN THE EAR'S OWN CELL. Only if the caller set it for THIS cell -- the ear moves
-     * between floods and a stale override would put a door's leaf on the wrong side of you. */
-    short earSave[6]; short *earSlot = NULL;
+    /* THE EAR'S OWN CELL IS SELECTED, NEVER SWAPPED IN.
+     *
+     * This used to save / overwrite / restore the shared m6 slot for the duration of the solve.
+     * The geometry reader runs concurrently: any cmm_fld_set_cell landing inside a flood was
+     * undone by the restore WHILE THE CELL STAYED MARKED CLEAN, so a completed read was silently
+     * discarded and not redone until something dirtied it again. Worst exactly during a door --
+     * the field re-floods every 20 ms for 1.5 s and the ear's own cell is re-read every frame, so
+     * the override is installed essentially the whole time. That is the one window whose
+     * behaviour the door work is trying to measure.
+     *
+     * Nothing needs writing. Only the LEAVING cell's six halves are ever read, and that pointer
+     * is hoisted once per settled cell, so one index test at each hoist covers it -- no cost in
+     * the inner 26-neighbour loop. The cell the ear stands in is never profitably re-entered
+     * (it carries the maximum trilinear seed weight, so its coupling penalty is zero), so the
+     * ENTERED half never needs the override.
+     *
+     * One deliberate behaviour change: sh_solid() reads m6 directly for the diagonal shoulder
+     * term and therefore now sees the STORED cell rather than the override. That is the more
+     * defensible answer -- a shoulder asks what the cell is made of, not where your head is. */
+    long long earIdx = -1;
     if (f->earHas && f->earCx == scx && f->earCy == scy && f->earCz == scz
-        && f->have[widx(f, scx, scy, scz)]) {
-        earSlot = f->m6 + widx(f, scx, scy, scz) * 6;
-        for (int e = 0; e < 6; e++) { earSave[e] = earSlot[e]; earSlot[e] = f->earOvr[e]; }
-    }
+        && f->have[widx(f, scx, scy, scz)])
+        earIdx = widx(f, scx, scy, scz);
 
     /* SEED THE EIGHT CELLS AROUND THE LISTENER, NOT THE ONE IT STANDS IN.
      *
@@ -570,7 +592,8 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
                  * own half, which is what makes a half block or a shut door block from the
                  * cell you are standing in. */
                 int mx2 = cx - scx, my2 = cy - scy, mz2 = cz - scz;
-                const short *mo = f->m6 + widx(f, scx, scy, scz) * 6;   /* the cell left  */
+                /* The cell left is the ear's own cell by definition, so it takes the override. */
+                const short *mo = earIdx >= 0 ? f->earOvr : f->m6 + widx(f, scx, scy, scz) * 6;
                 const short *mn = f->m6 + i * 6;                        /* the cell entered */
                 if (mx2 > 0)      smat += mo[CM_PX] + mn[CM_NX];
                 else if (mx2 < 0) smat += mo[CM_NX] + mn[CM_PX];
@@ -660,8 +683,10 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
             int rx = sx - ex; if (rx < 0) rx += NX;
             int ry = sy - ey; if (ry < 0) ry += NY;
             int rz = sz - ez; if (rz < 0) rz += NZ;
-            /* The six halves of the cell we are leaving, hoisted out of the 26-neighbour loop. */
-            const short *mo = M6 + i * 6;
+            /* The six halves of the cell we are leaving, hoisted out of the 26-neighbour loop.
+             * The ear's own cell reads its override here instead of the stored geometry -- one
+             * compare per settled cell, none in the inner loop. See the note at the seed. */
+            const short *mo = i == earIdx ? f->earOvr : M6 + i * 6;
 
             for (int dy = -1; dy <= 1; dy++) {
                 int ry2 = ry + dy; if (ry2 < 0 || ry2 >= NY) continue;
@@ -779,7 +804,6 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
      * for all of them; only the thin slab that just scrolled in carries its previous occupant's
      * value, and that slab is at the far edge of the window, past anything audible. Stale at the
      * rim for one flood interval beats silent everywhere. */
-    if (earSlot) for (int e = 0; e < 6; e++) earSlot[e] = earSave[e];   /* put the cell back */
     if (f->gen != gen0) return -1;
     /* Publish: the field just solved becomes current, the previous one stays available for the
      * caller's crossfade, and the oldest buffer is recycled for the next flood. */
