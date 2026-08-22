@@ -130,12 +130,38 @@ static float halfT(int cx, int cy, int cz, int axis, int positive) {
     return other ? sqrtf(T) : T;                  /* split so the two halves compose back to T */
 }
 
+/* HAND-AUTHORED HALVES, for geometry `solid` cannot express.
+ *
+ * The block grid is all-or-nothing per voxel, so it cannot state "the material is in the bottom
+ * eighth of this cell" -- which is exactly what a half block, a floor plate and a sliver ceiling
+ * are, and exactly the case the game gets wrong. In the game those six numbers come from the
+ * block's own bounds; here they are written down, so the FLOOD's handling of an asymmetric cell
+ * is graded without waiting on the reader that produces them.
+ *
+ * `axis` picks which pair is overridden, and the other two axes keep whatever `solid` says. */
+static struct { int onAxis, at, axis; float neg, pos; } ovr[8];
+static int ovrN = 0;
+static void ovr_clear(void) { ovrN = 0; }
+/* Every cell whose `onAxis` coordinate is `at` gets its `axis` pair replaced. A rule rather than
+ * a cell list, because these scenes override whole PLANES -- a wall or a ceiling -- and a list
+ * long enough for one is a list long enough to get silently truncated. */
+static void ovr_plane(int onAxis, int at, int axis, float neg, float pos) {
+    if (ovrN < 8) { ovr[ovrN].onAxis = onAxis; ovr[ovrN].at = at; ovr[ovrN].axis = axis;
+                    ovr[ovrN].neg = neg; ovr[ovrN].pos = pos; ovrN++; }
+}
+
 static void fill_all(cmm_fld *f) {
     int cx, cy, cz, guard = 0;
-    while (cmm_fld_next_pending(f, &cx, &cy, &cz) && guard++ < 400000)
-        cmm_fld_set_cell(f, cx, cy, cz,
-                         halfT(cx,cy,cz,0,0), halfT(cx,cy,cz,1,0), halfT(cx,cy,cz,2,0),
-                         halfT(cx,cy,cz,0,1), halfT(cx,cy,cz,1,1), halfT(cx,cy,cz,2,1));
+    while (cmm_fld_next_pending(f, &cx, &cy, &cz) && guard++ < 400000) {
+        float h[6] = { halfT(cx,cy,cz,0,0), halfT(cx,cy,cz,1,0), halfT(cx,cy,cz,2,0),
+                       halfT(cx,cy,cz,0,1), halfT(cx,cy,cz,1,1), halfT(cx,cy,cz,2,1) };
+        int cc[3] = { cx, cy, cz };
+        for (int k = 0; k < ovrN; k++)
+            if (cc[ovr[k].onAxis] == ovr[k].at) {
+                h[ovr[k].axis] = ovr[k].neg; h[ovr[k].axis + 3] = ovr[k].pos;
+            }
+        cmm_fld_set_cell(f, cx, cy, cz, h[0], h[1], h[2], h[3], h[4], h[5]);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -525,6 +551,89 @@ int main(int argc, char** argv) {
         }
         ckf("walling a speaker in seals it, corners or not", fabsf(got[1] - got[0]) < 6.0f,
             "corners open %.1f vs filled %.1f dB — was 0.1 vs 58.6", got[0], got[1]);
+    }
+
+    /* ── MATERIAL YOU ARE STANDING IN MUST BLOCK ────────────────────────────────────────
+     * The report, in the player's words: "if I'm standing in the position of a half block and
+     * sound is on the other side, it sounds like sound is going through the wall. Same with a
+     * closed door if I'm on the closed side in its cell."
+     *
+     * The cell holding the ear is a flood SEED, so it starts at zero cost and the flood spreads
+     * outward from it. Under the old three-face model, leaving that cell toward +X/+Y/+Z charged
+     * the NEIGHBOUR's face -- air -- so material standing in your own cell was skipped entirely on
+     * the way out. With halves the first step out crosses the cell's own half, and the material
+     * is charged wherever it sits.
+     *
+     * The property is not "a half wall blocks". It is that it blocks THE SAME whether you are
+     * standing in its cell or in the next one along, because that difference is the entire
+     * complaint. So each case is measured twice and it is the gap between them that decides.
+     *
+     * Both walls here are HALF-THICKNESS: material in one half of the cell only, air in the
+     * other. That is what the block grid cannot say and what the game reads from block bounds. */
+    {
+        /* A half-thickness wall filling the -X half of the cells at x=32. The ear stands at
+         * x=32.7 -- inside that cell, on the open side of the material -- and then at x=33.5,
+         * a whole cell clear of it. The source is on the far side either way. */
+        float got[2];
+        for (int inCell = 0; inCell <= 1; inCell++) {
+            memset(solid, 0, sizeof solid);
+            for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+            ovr_clear();
+            ovr_plane(0, 32, 0, 0.0f, 1.0f);        /* x=32: solid -X half, open +X half */
+            cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+            cmm_fld_recentre(g, 32, 4, 32);
+            fill_all(g);
+            cmm_fld_solve(g, inCell ? 32.7f : 33.5f, 2.5f, 32.5f);
+            got[inCell] = cmm_fld_sample_db(g, 26.5f, 2.5f, 32.5f);
+            cmm_fld_destroy(g);
+        }
+        ovr_clear();
+        ckf("a half wall blocks from the next cell", got[0] > 40.0f, "%.1f dB", got[0]);
+        ckf("...and blocks the same from INSIDE its cell", got[1] > 40.0f,
+            "%.1f dB standing in it vs %.1f dB beside it", got[1], got[0]);
+    }
+    {
+        /* A SLIVER CEILING: material in the +Y half of the cells at y=4, air below it. The ear
+         * stands at y=4.2 -- inside that cell, under the sliver -- and then at y=3.5, the cell
+         * below. The source is overhead. Vertical is the case the old model got wrong by a whole
+         * voxel: a ceiling plate was stamped on the cell's BOTTOM face, so it was charged going
+         * down through nothing and free going up through the plate. */
+        float got[2];
+        for (int inCell = 0; inCell <= 1; inCell++) {
+            memset(solid, 0, sizeof solid);
+            for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+            ovr_clear();
+            ovr_plane(1, 4, 1, 1.0f, 0.0f);         /* y=4: open -Y half, solid +Y half */
+            cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+            cmm_fld_recentre(g, 32, 4, 32);
+            fill_all(g);
+            cmm_fld_solve(g, 32.5f, inCell ? 4.2f : 3.5f, 32.5f);
+            got[inCell] = cmm_fld_sample_db(g, 32.5f, 9.5f, 32.5f);
+            cmm_fld_destroy(g);
+        }
+        ovr_clear();
+        ckf("a sliver ceiling blocks from the cell below", got[0] > 40.0f, "%.1f dB", got[0]);
+        ckf("...and blocks the same from INSIDE its cell", got[1] > 40.0f,
+            "%.1f dB standing in it vs %.1f dB below it", got[1], got[0]);
+    }
+    {
+        /* ...AND IT ONLY BLOCKS THE WAY THE MATERIAL FACES. The same sliver ceiling must not
+         * occlude a source BELOW the ear: there is nothing between them. Getting this wrong is
+         * how the old model turned a floor into a lid -- "sound travelling OVER a floor must not
+         * be attenuated BY the floor" -- and half-voxels have to keep that property, not just
+         * fix the direction they were failing. */
+        memset(solid, 0, sizeof solid);
+        for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+        ovr_clear();
+        ovr_plane(1, 4, 1, 1.0f, 0.0f);
+        cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+        cmm_fld_recentre(g, 32, 4, 32);
+        fill_all(g);
+        cmm_fld_solve(g, 32.5f, 4.2f, 32.5f);
+        float down = cmm_fld_sample_db(g, 38.5f, 2.5f, 32.5f);
+        cmm_fld_destroy(g);
+        ovr_clear();
+        ckf("a sliver ceiling does not block downward", down < 2.0f, "%.2f dB (want ~0)", down);
     }
 
     /* ── and it never vanishes: unreachable reads as silent, not as absent ───────────── */
