@@ -1327,6 +1327,13 @@
     step: v => v.toFixed(2), vol: v => v.toFixed(2), spacing: v => v.toFixed(1)
   };
 
+  // Looked up HERE, not down with the rest of the export code. Binding a slider calls sync()
+  // once to seed it, sync() calls updateExport(), and updateExport() reads this — so if the
+  // declaration sits below the BINDINGS loop, the first slider throws on `const` in its temporal
+  // dead zone and the IIFE dies with it. Everything after that point silently never runs: the
+  // export panel, the buttons, the file drop, the keyboard. Which is what it did.
+  const exportEl = document.getElementById("export");
+
   const bind = (key, id, outId) => {
     const el = document.getElementById(id), out = document.getElementById(outId);
     const sync = () => {
@@ -1366,7 +1373,6 @@
   document.getElementById("btnReset").addEventListener("click", () => applyValues(DEFAULTS));
 
   // ── Export ──────────────────────────────────────────────────────────────────
-  const exportEl = document.getElementById("export");
   function updateExport() {
     const n = (v, d) => Number(v).toFixed(d);
     exportEl.textContent =
