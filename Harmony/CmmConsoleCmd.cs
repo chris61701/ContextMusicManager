@@ -363,6 +363,62 @@ namespace CMM
                 return sb.ToString();
             }
 
+            // ── cmm acoustics shape ───────────────────────────────────────────────────────
+            // WHERE the model thinks a block's material sits inside its voxel: the fraction of
+            // each face covered by the shape's geometry, in the voxel's negative half of each
+            // axis, its positive half, and either.
+            //
+            // This exists because the one thing that cannot be settled offline is ROTATION. The
+            // numbers come from Block.shape.GetBounds(bv), which is documented as rotation-aware
+            // and 0..1 local — but the same trap has been walked into twice already (asking the
+            // shape CLASS and getting a default instead of the variant's truth), and a coverage
+            // read against the wrong axis would place a half wall's material on the wrong side
+            // and occlude from exactly the wrong direction. So: stand next to one, turn it, and
+            // read the numbers. Looks at the block you are aiming at, else the one you stand in.
+            if (arg == "shape")
+            {
+                var ps = GameManager.Instance?.World?.GetPrimaryPlayer();
+                var ws = GameManager.Instance?.World;
+                if (ps == null || ws == null) return "no player";
+                // Coordinates, or the block under your feet. NOT a look-at raycast: HitInfo's
+                // shape differs across the supported game versions and this command exists to
+                // check a suspicion, not to earn a cross-version compatibility problem. Take the
+                // coordinates from `cmm acoustics column`, which already prints them.
+                Vector3i at;
+                if (p.Count >= 5 && int.TryParse(p[2], out int sxq)
+                                 && int.TryParse(p[3], out int syq)
+                                 && int.TryParse(p[4], out int szq))
+                    at = new Vector3i(sxq, syq, szq);
+                else
+                    at = new Vector3i(Mathf.FloorToInt(ps.position.x),
+                                      Mathf.FloorToInt(ps.position.y) - 1,
+                                      Mathf.FloorToInt(ps.position.z));
+                BlockValue bvs = ws.GetBlock(at.x, at.y, at.z);
+                if (bvs.isair)
+                    return "AIR at " + at + " — stand on the block, or `cmm acoustics shape <x> <y> <z>`";
+                var bs = bvs.Block;
+                float[] cv = EmitterAcoustics.DebugCellCover(bvs);
+                float ls = EmitterAcoustics.DebugCellLoss(bvs, ws, at.x, at.y, at.z);
+                var sbs = new System.Text.StringBuilder();
+                sbs.Append(at.ToString()).Append("  ").Append(bs != null ? bs.GetBlockName() : "?")
+                   .Append("  rot ").Append(bvs.rotation)
+                   .Append("  shape ").Append(bs?.shape != null ? bs.shape.GetType().Name : "-")
+                   .Append(bs?.shape != null && bs.shape.IsSolidCube ? " CUBE" : " partial")
+                   .Append("\n  material loss ").Append(ls.ToString("0.000"))
+                   .Append(ReferenceEquals(cv, EmitterAcoustics.FullCover)
+                           ? "   cover FULL VOXEL (no honest bounds, or a true cube)" : "");
+                sbs.Append("\n            -half   +half    either");
+                string[] ax = { "X", "Y", "Z" };
+                for (int k = 0; k < 3; k++)
+                    sbs.Append("\n     ").Append(ax[k]).Append("   ")
+                       .Append(cv[k].ToString("0.00").PadLeft(7))
+                       .Append(cv[k + 3].ToString("0.00").PadLeft(8))
+                       .Append(cv[k + 6].ToString("0.00").PadLeft(9));
+                sbs.Append("\n  read it as: travelling along X, this much of the way is blocked in")
+                   .Append("\n  the -X half of the voxel, the +X half, and anywhere in it.");
+                return sbs.ToString();
+            }
+
             // cmm acoustics ray — what the FIELD charges along the straight line to the nearest
             // speaker, cell by cell, next to the geometry it read. `column` answers the same
             // question for the other model and at block resolution; this one is about the field.
@@ -427,7 +483,7 @@ namespace CMM
                  + "\n  scene:     " + AcousticBridge.LastStatus
                  + "\n  saturated: " + AcousticBridge.SaturatedPoints + " point(s) clamped at last publish"
                  + "\n  model:     " + EmitterAudioLayer.PinName
-                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column|ray [speaker]"
+                 + "\n  usage:     cmm acoustics on|off|rebuild|here|column|ray [speaker]|shape [x y z]"
                  + "\n             cmm acoustics wall <n> | verb <n>|off | model auto|native|legacy";
 #else
             return "native acoustics: not built into this game version";

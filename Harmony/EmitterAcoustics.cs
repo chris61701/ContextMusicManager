@@ -548,52 +548,24 @@ namespace CMM
                 return b.IsCollideBullets ? 0.15f : 0f;
             }
 
-            // DECORATIVE TRIM / MOLDING / ARCH: an opaque PARTIAL (non-cube) shape you can still walk through is
-            // oriented against the frame — it fills a voxel in our grid but leaves the opening clear, so sound
-            // passes like you do. Only a partial that actually BLOCKS movement (rotated INTO the path, a half-
-            // wall) keeps its solid share below. Per-instance + orientation-aware: the SAME trim block reads
-            // near-open flush to the wall but solid when turned into the doorway — which is why smashing the
-            // decor "let more sound through" (we were charging it as half a wall). Full cubes never reach here.
-            // ...BUT A FLOOR IS NOT TRIM, AND MOVEMENT IS THE WRONG QUESTION FOR ONE.
-            // "Does it block the player" is a good proxy for a wall and a useless one for a floor:
-            // you never walk THROUGH a floor, you stand ON it, so every partial-shape floor plate in
-            // the game answered "no" and took the 90% discount. Measured on the captures, floor
-            // voxels that separate two storeys and are acoustically OPEN:
+            // TRIM, FLOOR PLATES AND OPEN-CENTRE FRAMES USED TO BE GUESSED AT HERE.
             //
-            //     store    176 of 721   (24.4%)   -- 21.5% more open than shut
-            //     bunker  2762 of 3217  (85.9%)   -- 36.0% more open than shut
+            // Three branches stood in this spot, each a proxy for geometry this function could not
+            // see: partial-shape-you-can-walk-through ⇒ ×0.1 (trim), with an exception forcing
+            // floor plates back to solid because "does it block the player" is a useless question
+            // about a floor; and shape-with-a-clear-centre ⇒ ×0.05 (frames). They existed because a
+            // cell carried ONE number, so WHERE a shape sat inside its voxel had nowhere to live
+            // and had to be smuggled into HOW MUCH it blocked.
             //
-            // Concrete at 0.9 discounted to 0.09 reads as 91% open, so a bunker floor barely existed.
-            // That is "it's bleeding through the floor", and standing under the speaker's room the
-            // game measured 3.4 dB of occlusion where the same geometry offline gives 11-13.
+            // The field now reads that directly — CoverOf() below returns how much of each face a
+            // shape covers, per axis and per half — so the same trim plate comes out near-open when
+            // you travel along the wall it is stuck to and solid when you cross it, from its actual
+            // bounds instead of from a movement test. A floor plate needs no exception: it covers
+            // its whole horizontal cross-section and a tenth of its vertical ones, which is what a
+            // floor IS. Keeping the multipliers as well would price the same geometry twice.
             //
-            // A partial with air both above and below is separating two spaces -- it is structure,
-            // whatever it does to movement. Trim sits flush against something; a floor has room on
-            // both sides. Two extra block reads on a branch that only partial shapes reach.
-            //
-            // The trade this makes, stated so it is not a surprise later: a partial shape genuinely
-            // suspended in mid-air -- a hanging sign, a pipe run -- now falls through to solid and is
-            // over-charged. That is rarer in a POI than floor plates are, and the alternative was a
-            // 90% discount on every floor in the game. A grate or catwalk floor is unaffected: it has
-            // a genuinely open centre and is caught by the branch below, which is the correct answer
-            // for one -- you can see and hear straight through a grate.
-            if (b.shape != null && !b.shape.IsSolidCube &&
-                !b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)
-                && !(world.GetBlock(x, y + 1, z).isair && world.GetBlock(x, y - 1, z).isair))
-                return MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null) * 0.1f;
-
-            // OPEN-CENTRE FRAMES: deco frame/arch/trim pieces are solid at the FACES (they mate with the
-            // blocks around them) with a pass-through hole in the middle — block-level movement reads
-            // "blocked" (the rim's collision), but the player and the sound go through the hole. Ask the
-            // shape's own collision boxes: if the centre is clear along ALL THREE axes, it's a true
-            // frame ⇒ acoustically ~air (the rim casts a sliver of shadow). The three-axis test is what
-            // keeps this away from look-alikes: a wall plate blocks its face axis, a floor slab blocks
-            // the vertical, a centre pillar blocks everything — they all keep their partial loss below.
-            // Model-entity shapes (doors/hatches/furniture) are excluded — a closed door is a thin slab
-            // whose cell-centre is clear, and its opening is the damage/swing logic above.
-            if (b.shape != null && !b.shape.IsSolidCube && !(b.shape is BlockShapeModelEntity) &&
-                HasOpenCenter(b, bv))
-                return MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null) * 0.05f;
+            // What arrives below is therefore the block's MATERIAL, full strength, and the shape is
+            // priced separately by the reader.
 
             // A battle-damaged door/hatch/gate at rest: sound passes through the holes its CURRENT
             // damage-state mesh actually shows (the game swaps meshes at per-block health thresholds).
@@ -654,61 +626,90 @@ namespace CMM
             return s;
         }
 
-        // Does this shape's collision leave the cell's centre clear along every axis? Cached per
-        // (type, rotation) — GetBounds is rotation-aware and shapes are immutable at runtime.
-        private static readonly Dictionary<int, bool> _openCenterCache = new Dictionary<int, bool>();
-        private static bool HasOpenCenter(Block b, BlockValue bv)
+        // ── WHERE THE MATERIAL SITS INSIDE THE VOXEL ────────────────────────────────────────────
+        // Nine numbers per block variant: how much of the cross-section perpendicular to each axis
+        // is covered by the shape's geometry, measured in the voxel's NEGATIVE half of that axis,
+        // in its POSITIVE half, and in either (which is what a route passing straight through
+        // crosses). Indices [0..2] = -X -Y -Z, [3..5] = +X +Y +Z, [6..8] = either.
+        //
+        // WHAT THIS IS FOR. The field charges a move for the half it leaves through plus the half
+        // it enters through, so this is what lets a half block block from the side it is actually
+        // on and a sliver CEILING block upward while staying open downward. Before it, a cell held
+        // one number and the model knew a block was there but not where — which is why standing in
+        // a half block's cell, or on the closed side of a door in its cell, occluded nothing.
+        //
+        // THICKNESS IS DELIBERATELY ABSENT. A sliver plate and a full block of the same material
+        // block the same; what varies is how much of the OPENING is covered and from which side.
+        // That is also what retired the ×0.5 / ×0.2 / ×0.1 / ×0.05 shape discounts — they were all
+        // standing in for this, badly.
+        //
+        // Rasterised on an 8×8 grid rather than solved as a union of rectangles: shapes have a
+        // handful of boxes, 1/64 of a face is finer than anything downstream can use, and the
+        // answer is cached per (type, rotation) for the life of the process, because GetBounds
+        // is rotation-aware and shapes are immutable at runtime. This replaced IsFullCube and
+        // HasOpenCenter, which asked narrower questions of the same bounds and are now gone.
+        private const int CoverGrid = 8;
+        internal static readonly float[] FullCover = { 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f };
+        private static readonly Dictionary<int, float[]> _coverCache = new Dictionary<int, float[]>();
+
+        internal static float[] CoverOf(Block b, BlockValue bv)
         {
+            // ANYTHING WITHOUT HONEST BOUNDS FILLS ITS VOXEL, which is the answer that changes
+            // nothing. Model entities are the important case: a door leaf, a closet, a fridge and
+            // a bookcase keep their real geometry in a Unity PREFAB, and GetBounds falls straight
+            // through to BlockShape's default cube unless the block sets isCustomBounds, which
+            // almost none do. Asking would return "full" from a DEFAULT rather than from evidence,
+            // and it is better to say so here than to look like a measurement. Doors therefore
+            // stay full-voxel, which is also what keeps the shut-door calibration where it is.
+            if (b == null || b.shape == null || b.shape is BlockShapeModelEntity) return FullCover;
+            if (b.shape.IsSolidCube) return FullCover;
             int key = (bv.type << 6) | (bv.rotation & 63);
-            if (_openCenterCache.TryGetValue(key, out bool open)) return open;
-            Bounds[] arr = null;
-            try { arr = b.shape.GetBounds(bv); } catch { /* modded shape misbehaving ⇒ treat as closed */ }
-            open = arr != null && arr.Length > 0 &&
-                   CenterColumnClear(arr, 0) && CenterColumnClear(arr, 1) && CenterColumnClear(arr, 2);
-            _openCenterCache[key] = open;
-            return open;
-        }
-        private static bool CenterColumnClear(Bounds[] arr, int axis)
-        {
-            // A thin rod through the cell centre along `axis` (shape bounds are local 0..1 space).
-            Vector3 mn = new Vector3(0.4f, 0.4f, 0.4f), mx = new Vector3(0.6f, 0.6f, 0.6f);
-            mn[axis] = 0.02f; mx[axis] = 0.98f;
-            Bounds col = new Bounds((mn + mx) * 0.5f, mx - mn);
-            for (int i = 0; i < arr.Length; i++)
-                if (arr[i].Intersects(col)) return false;
-            return true;
+            if (_coverCache.TryGetValue(key, out float[] hit)) return hit;
+            float[] cov = ComputeCover(b, bv);
+            _coverCache[key] = cov;
+            return cov;
         }
 
-        // Transmission loss of an opaque solid (a wall, or a fully-shut door): its material, halved for a
-        // partial (non-cube) shape. Factored out so the door-openness blend and the plain-solid path agree.
-        // Does this block's VARIANT actually fill its voxel? b.shape.IsSolidCube answers for the shape
-        // CLASS, and every shapes.xml block shares the generic BlockShapeNew class -- so it returns
-        // false for woodShapes:cube, a block literally named "cube". The variant's real geometry is in
-        // GetBounds(bv), which HasOpenCenter already reads for the same reason.
-        //
-        // This is the identical trap the lightOpacity comment below describes ("BlockShapeNew never
-        // receives the shapes.xml value"), one line further on: ask the CLASS and you get the default,
-        // ask the BLOCK and you get the truth.
-        private static readonly Dictionary<int, bool> _fullCubeCache = new Dictionary<int, bool>();
-        private static bool IsFullCube(Block b, BlockValue bv)
+        private static float[] ComputeCover(Block b, BlockValue bv)
         {
-            if (b.shape == null) return true;
-            if (b.shape.IsSolidCube) return true;
-            int key = (bv.type << 6) | (bv.rotation & 63);
-            if (_fullCubeCache.TryGetValue(key, out bool full)) return full;
             Bounds[] arr = null;
-            try { arr = b.shape.GetBounds(bv); } catch { /* modded shape misbehaving ⇒ treat as partial */ }
-            full = false;
-            if (arr != null)
-                for (int i = 0; i < arr.Length; i++)
-                {
-                    Vector3 mn = arr[i].min, mx = arr[i].max;
-                    const float E = 0.02f;
-                    if (mn.x <= E && mn.y <= E && mn.z <= E
-                        && mx.x >= 1f - E && mx.y >= 1f - E && mx.z >= 1f - E) { full = true; break; }
-                }
-            _fullCubeCache[key] = full;
-            return full;
+            try { arr = b.shape.GetBounds(bv); } catch { /* modded shape misbehaving ⇒ treat as full */ }
+            if (arr == null || arr.Length == 0) return FullCover;
+            var cov = new float[9];
+            bool full = true;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int u = (axis + 1) % 3, v = (axis + 2) % 3;
+                int cn = 0, cp = 0, ca = 0;
+                for (int iu = 0; iu < CoverGrid; iu++)
+                    for (int iv = 0; iv < CoverGrid; iv++)
+                    {
+                        float fu = (iu + 0.5f) / CoverGrid, fv = (iv + 0.5f) / CoverGrid;
+                        bool hitN = false, hitP = false;
+                        for (int i = 0; i < arr.Length; i++)
+                        {
+                            Vector3 mn = arr[i].min, mx = arr[i].max;
+                            if (fu < mn[u] || fu > mx[u] || fv < mn[v] || fv > mx[v]) continue;
+                            // Which half (or both) this box reaches into along the axis of travel.
+                            if (mn[axis] < 0.5f) hitN = true;
+                            if (mx[axis] > 0.5f) hitP = true;
+                        }
+                        if (hitN) cn++;
+                        if (hitP) cp++;
+                        if (hitN || hitP) ca++;
+                    }
+                const float inv = 1f / (CoverGrid * CoverGrid);
+                cov[axis] = cn * inv; cov[axis + 3] = cp * inv; cov[axis + 6] = ca * inv;
+                if (cov[axis] < 0.999f || cov[axis + 3] < 0.999f) full = false;
+            }
+            return full ? FullCover : cov;   // share the common answer, so callers can compare by reference
+        }
+
+        // The reader's entry point: what a cell is made of, and where inside the voxel it sits.
+        internal static float[] DebugCellCover(BlockValue bv)
+        {
+            if (bv.isair) return FullCover;
+            return CoverOf(bv.Block, bv);
         }
 
         // Does this block's geometry SWING OUT of its voxel when it opens? Doors, hatches, garage doors
@@ -751,45 +752,19 @@ namespace CMM
             // Walls and floors built from shapes.xml were therefore half-transparent everywhere, which
             // is the bleeding through both -- and it applies to the SHIPPED model too, since this is
             // the shared block reader.
-            // ...AND A MODEL ENTITY'S BOUNDS ARE NOT ITS GEOMETRY, so it can never earn this discount.
-            // BlockShapeModelEntity.GetBounds falls straight through to BlockShape's default boundsArr
-            // unless the block sets isCustomBounds, which almost none do -- the real shape of a closet, a
-            // fridge, a bookcase or a door leaf lives in a Unity PREFAB the block layer cannot see. So
-            // IsFullCube answers "partial" for all of them from a DEFAULT rather than from evidence, and
-            // every door and every stick of furniture in the game was charged half its material.
+            // NO PARTIAL DISCOUNT. This used to halve a partial shape's material, or take it to a
+            // fifth when the artists' lightOpacity marker said the shape passes light — 526 of the
+            // 2263 shapes. That marker lumps plates, poles, frames and holed cubes together, and
+            // they are not acoustically alike: a plate crossed face-on is a wall, a pole is
+            // nothing, and a holed cube is whatever its hole is. One multiplier could not say
+            // which, so it was wrong for two of the three whichever value it took.
             //
-            // How far off that is, measured against this project's own spec: synth.js builds the scenario
-            // scenes that define what a shut wood door should sound like and writes that door as wood 0.5 --
-            // full material. In game the same door was 0.25. The acceptance gate could not see the gap
-            // because the dumps bake CellLoss (see [[acoustics-parity-blind-spot]]), so the spec passed
-            // 9/9 while the game ran every door at half strength.
-            //
-            // Charging furniture its full material is safe precisely because the disc exists: the Fresnel
-            // integral already prices PARTIAL obstruction geometrically, patch by patch, so a path that
-            // clips the corner of a chair pays for the fraction it clips. A blanket ×0.5 was doing that
-            // job badly and twice. Light-passing model entities (bar gates, chain-link, fence doors --
-            // lightOpacity 0) are genuinely open frames and keep their discount.
-            if (b.shape != null && !IsFullCube(b, bv)
-                && !(b.shape is BlockShapeModelEntity && b.lightOpacity != 0))
-            {
-                // Partial shapes split by the artists' LightOpacity marker (shapes.xml, 0|255):
-                // 0 = marked as passing light — plates/trim, poles, frames, holed cubes, "destroyed"
-                // wall pieces (526 of 2263 shapes) — thin or holed geometry that blocks movement but
-                // mostly passes sound. Opaque partials (solid halves, wedges, ramps — unset ⇒ 255)
-                // keep the half-wall rate.
-                // READ THE BLOCK's resolved lightOpacity, NOT shape.LightOpacity: BlockShapeNew never
-                // receives the shapes.xml value (only billboard/grass/water shape CLASSES hardcode 0);
-                // the shape XML's property is merged into the variant BLOCK's properties and lands on
-                // Block.lightOpacity at Init (decompile: ShapesFromXml.LoadProperties(props, shapeElem)
-                // → Block.Init reads PropLightOpacity). Reading the shape field made this discount DEAD
-                // for every shapes.xml partial — a woodShapes:plateHalf trim plate flat on a wall was
-                // charged half a wood wall PER CELL (8.75 virtual blocks at WallDistance 35), which is
-                // why decorative trim audibly blocked sound (user report 2026-07-08).
-                // Model entities (doors/hatches) are excluded regardless of their block XML: a thin
-                // door leaf SEALS its opening — its acoustics are the damage/swing logic, never the
-                // light marker.
-                m *= (b.lightOpacity == 0 && !(b.shape is BlockShapeModelEntity)) ? 0.2f : 0.5f;
-            }
+            // Thickness does not enter into it — the shipped rule is that a sliver plate and a full
+            // block of the same material block the same — and the rest is WHERE the shape sits,
+            // which CoverOf() answers per axis and per half from the block's own bounds. So the
+            // material is charged at full strength here and the geometry is priced once, by the
+            // reader, from evidence rather than from a marker.
+
             return m;
         }
 

@@ -355,28 +355,62 @@ namespace CMM
                 for (int a = 0; a < ea; a++)
                     for (int b = 0; b < eb; b++)
                     {
-                        float tn = 1f, tp = 1f;
+                        float tn = 1f, tp = 1f, ta = 1f;
                         for (int d = 0; d < step; d++)
                         {
                             int x, y, z;
                             if (axis == 0)      { x = bx + d; y = by + a; z = bz + b; }
                             else if (axis == 1) { x = bx + a; y = by + d; z = bz + b; }
                             else                { x = bx + a; y = by + b; z = bz + d; }
-                            float t = Transmission(world, x, y, z);
-                            if (d <= nHi && t < tn) tn = t;    // most blocking thing in this half
-                            if (d >= pLo && t < tp) tp = t;
+                            float t = Transmission(world, x, y, z, out float[] cov);
+                            if (t >= 1f) continue;                      // air: nothing to place
+                            if (step == 1)
+                            {
+                                // THE CELL IS THIS BLOCK, so the block's own half-voxels ARE the
+                                // cell's halves. This is the line the whole change is for: a half
+                                // block's material lands in the half it actually occupies, and a
+                                // sliver ceiling's lands in the top one.
+                                float mn = 1f - cov[axis]     * (1f - t);
+                                float mp = 1f - cov[axis + 3] * (1f - t);
+                                float ma = 1f - cov[axis + 6] * (1f - t);
+                                if (mn < tn) tn = mn;
+                                if (mp < tp) tp = mp;
+                                if (ma < ta) ta = ma;
+                            }
+                            else
+                            {
+                                // Cells bigger than a block: a half is whole sub-blocks, and where
+                                // a block sits inside its OWN voxel is finer than the grid carries.
+                                float ma = 1f - cov[axis + 6] * (1f - t);
+                                if (d <= nHi && ma < tn) tn = ma;
+                                if (d >= pLo && ma < tp) tp = ma;
+                                if (ma < ta) ta = ma;
+                            }
                         }
-                        sumNeg += tn; sumPos += tp;
-                        sumAny += tn < tp ? tn : tp;           // the cell's own, both halves
+                        // MOST BLOCKING WINS ALONG THE COLUMN, rather than the product of what is
+                        // in it. Thickness does not accumulate INSIDE a cell — a sliver plate and
+                        // a full block of the same material block the same. Two separate CELLS in
+                        // a row still charge twice, so a thicker wall still occludes more; that is
+                        // between cells, where it belongs.
+                        sumNeg += tn; sumPos += tp; sumAny += ta;
                         cols++;
                     }
+
                 if (cols == 0) { o[axis] = 1f; o[axis + 3] = 1f; continue; }
-                float meanNeg = sumNeg / cols, meanPos = sumPos / cols;
-                float T = Face(sumAny / cols, 0f);
-                bool hasNeg = meanNeg < 0.9999f, hasPos = meanPos < 0.9999f;
-                float split = (hasNeg && hasPos) ? Mathf.Sqrt(T) : T;
-                o[axis]     = hasNeg ? split : 1f;
-                o[axis + 3] = hasPos ? split : 1f;
+                float T = Face(sumAny / cols, 0f);          // what a straight pass-through costs
+                // SPLIT IT ACROSS THE HALVES IN PROPORTION TO WHAT EACH HOLDS. The two halves are
+                // summed by the flood, so they have to multiply back to T or every wall in the
+                // world doubles — and T^f · T^(1-f) is T for any f, which is what makes that hold
+                // by construction rather than by care.
+                float wn = 1f - sumNeg / cols, wp = 1f - sumPos / cols;
+                float tot = wn + wp;
+                if (tot <= 1e-5f) { o[axis] = 1f; o[axis + 3] = 1f; continue; }
+                float fn = wn / tot;
+                if (fn >= 0.999f)      { o[axis] = T;  o[axis + 3] = 1f; }   // all in the -half
+                else if (fn <= 0.001f) { o[axis] = 1f; o[axis + 3] = T;  }   // all in the +half
+                else if (fn > 0.48f && fn < 0.52f)                           // even: a full block
+                { float r = Mathf.Sqrt(T); o[axis] = r; o[axis + 3] = r; }
+                else { o[axis] = Mathf.Pow(T, fn); o[axis + 3] = Mathf.Pow(T, 1f - fn); }
             }
         }
 
@@ -415,11 +449,16 @@ namespace CMM
         // DOORS (4-9 dB), so a wood wall came out at 6 dB against the 20 dB the model people
         // actually like. Two models agreeing on a constant is worth nothing if the constant is
         // measuring different things.
-        private static float Transmission(World world, int x, int y, int z)
+        private static float Transmission(World world, int x, int y, int z, out float[] cover)
         {
             BlockValue bv = world.GetBlock(x, y, z);
+            cover = EmitterAcoustics.FullCover;
             float loss = EmitterAcoustics.DebugCellLoss(bv, world, x, y, z);
             if (loss <= 0.0001f) return 1f;
+            // Only asked for once there is material to place: air is most of the world and this
+            // saves it a dictionary lookup per block read, on the path that costs eleven seconds
+            // to sweep a window.
+            cover = EmitterAcoustics.DebugCellCover(bv);
             float db = (float)(CMMConfig.WorldEmitterFieldWallDb
                              * Math.Pow(loss, CMMConfig.WorldEmitterFieldWallPow));
             if (db <= 0f) return 1f;
