@@ -772,6 +772,22 @@ namespace CMM
         {
             if (b == null || !IsSwingingLeaf(b, bv.type)) return null;
             if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return null;  // open
+            // A LEAF THAT HAS STARTED MOVING IS NOT ACROSS THE MIDDLE ANY MORE. It swings OUT of
+            // the voxel, so the moment it is off the latch there is nothing standing between the
+            // two sides of the doorway and no plane to place. Without this, running through a door
+            // while it is still opening occludes for the width of the swing: the leaf is modelled
+            // at 0.45..0.55 and you pass straight through that band, so for a few frames it is on
+            // both sides of you at once. `IsMovementBlocked` does not catch it because the game
+            // keeps the collider up for most of the animation.
+            //
+            // Damage counts too: a leaf with a hole punched in it is no longer a plane either.
+            Vector3i dp = new Vector3i(x, y, z);
+            if (_doors.Count > 0 && _doorTypes.Contains(bv.type))
+            {
+                Vector3i par = bv.ischild ? b.multiBlockPos.GetParentPos(dp, bv) : dp;
+                if (_doors.TryGetValue(par, out DoorAnim dan) && dan.Openness > 0.02f) return null;
+            }
+            if (DamageOpenness(b, bv, world, x, y, z) > 0.02f) return null;
             float bestSum = float.MaxValue; int bestAxis = -1;
             for (int axis = 0; axis < 3; axis++)
             {
