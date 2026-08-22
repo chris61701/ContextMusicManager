@@ -1,0 +1,1433 @@
+<meta charset="utf-8" />
+<title>CMM Dial Lab — tuning a station in by ear</title>
+
+<!--
+  ─────────────────────────────────────────────────────────────────────────────
+  CMM DIAL LAB
+  ─────────────────────────────────────────────────────────────────────────────
+  A bench receiver for settling the FM-dial feel BEFORE any of it is written in
+  C. The two knobs in the occlusion field cost days each when they were argued
+  from logs instead of heard; this exists so the dial's numbers get settled the
+  only way a listening judgement can be — by ear, on the same speakers, seconds
+  apart, with your own music in the stations.
+
+  It is deliberately a full standalone document with no <html>/<body> wrapper:
+  browsers insert those, so the same single file opens from file:// out of the
+  repo AND publishes as an artifact. No network, no build step, no dependencies.
+
+  THE SIGNAL CHAIN IS THE REAL ONE, in the real order. Panel groups follow it.
+
+     station audio ─┐
+                    ├─▶ capture ─▶ [ + noise ] ─▶ de-emphasis ─▶ high-cut ─▶ soft mute ─▶ out
+     violet noise ──┘
+
+  Three details that a naive implementation gets wrong, all from how receivers
+  actually behave:
+
+  1. NOISE IS MIXED BEFORE THE FILTERS. A receiver de-emphasises after the
+     demodulator, so the filter that dulls a weak station also dulls its hiss.
+     Mix the noise after the filter and a weak station sounds like bright hiss
+     over clean music, which is not what a radio sounds like — it sounds like
+     muffled music under filtered hiss.
+
+  2. THE NOISE IS VIOLET, NOT WHITE. FM demodulator noise power rises with the
+     square of frequency, which is the whole reason FM needs pre-emphasis. That
+     is why between-station hiss is bright. Differencing successive white
+     samples gives exactly +6 dB/octave, so the buffer is generated that way
+     rather than filtered into shape.
+
+  3. CAPTURE, NOT CROSSFADE. FM capture ratio is about 3–4 dB: once one station
+     is that much stronger it suppresses the other entirely. Sweeping between
+     two stations gives you one, then noise, then the other — never a polite
+     blend of both. Within about a decibel they fight, and a real receiver
+     flutters between them.
+
+  Stereo blend is separate from level: a stereo signal needs roughly 20 dB more
+  signal than mono for the same noise floor, so a station goes mono well before
+  it goes quiet.
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+
+<style>
+  /* ── Tokens ────────────────────────────────────────────────────────────────
+     The workbench responds to the viewer's theme. The dial glass does NOT: an
+     illuminated dial is a dark object in any room, so it carries its own fixed
+     palette and reads as the same instrument on either ground. */
+  :root {
+    --bench:        #E7E3DA;
+    --bench-raised: #F3F0E9;
+    --bench-sunk:   #DAD5C9;
+    --rule:         #C6C0B2;
+    --ink:          #23262B;
+    --ink-soft:     #5C6068;
+    --ink-faint:    #8A8D94;
+    --lamp:         #B87513;
+    --lamp-soft:    #E9A13B;
+    --good:         #4E7A3C;
+    --weak:         #A8452C;
+    --focus:        #1D5FA8;
+
+    /* Fixed: the dial glass, both themes. */
+    --glass:        #14181F;
+    --glass-deep:   #0D1116;
+    --glass-edge:   #2B333F;
+    --glass-ink:    #E8E4DA;
+    --glass-faint:  #6C7686;
+    --glass-lamp:   #E9A13B;
+    --glass-good:   #7FB069;
+    --glass-weak:   #C4553B;
+
+    --scale: "SFMono-Regular", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+    --panel-face: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --prose: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bench:        #16191E;
+      --bench-raised: #1E232A;
+      --bench-sunk:   #101317;
+      --rule:         #333A44;
+      --ink:          #E4E1D9;
+      --ink-soft:     #A2A7B0;
+      --ink-faint:    #6E747E;
+      --lamp:         #E9A13B;
+      --lamp-soft:    #C9832A;
+      --good:         #7FB069;
+      --weak:         #C4553B;
+      --focus:        #6BA8E8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bench:        #16191E;
+    --bench-raised: #1E232A;
+    --bench-sunk:   #101317;
+    --rule:         #333A44;
+    --ink:          #E4E1D9;
+    --ink-soft:     #A2A7B0;
+    --ink-faint:    #6E747E;
+    --lamp:         #E9A13B;
+    --lamp-soft:    #C9832A;
+    --good:         #7FB069;
+    --weak:         #C4553B;
+    --focus:        #6BA8E8;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bench);
+    color: var(--ink);
+    font-family: var(--panel-face);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 28px 20px 72px;
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+
+  /* ── Masthead ───────────────────────────────────────────────────────────── */
+  .masthead { display: flex; flex-direction: column; gap: 6px; }
+  .masthead h1 {
+    margin: 0;
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .masthead p {
+    margin: 0;
+    font-family: var(--prose);
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 66ch;
+  }
+
+  /* ── The dial glass ─────────────────────────────────────────────────────── */
+  .set {
+    background: linear-gradient(180deg, var(--glass) 0%, var(--glass-deep) 100%);
+    border: 1px solid var(--glass-edge);
+    border-radius: 4px;
+    padding: 0;
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 6px 22px rgba(0,0,0,0.18);
+  }
+
+  .readouts {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    border-bottom: 1px solid var(--glass-edge);
+    flex-wrap: wrap;
+  }
+  .readout {
+    padding: 12px 18px;
+    border-right: 1px solid var(--glass-edge);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 118px;
+  }
+  .readout:last-child { border-right: none; }
+  .readout .lbl {
+    font-size: 9.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--glass-faint);
+  }
+  .readout .val {
+    font-family: var(--scale);
+    font-size: 19px;
+    font-variant-numeric: tabular-nums;
+    color: var(--glass-ink);
+    line-height: 1.15;
+  }
+  .readout .val.lit { color: var(--glass-lamp); }
+
+  .lamps { display: flex; gap: 7px; align-items: center; padding-top: 3px; }
+  .lamp {
+    font-size: 9.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--glass-faint);
+    border: 1px solid var(--glass-edge);
+    border-radius: 2px;
+    padding: 2px 6px;
+    transition: color .18s, border-color .18s, background .18s;
+  }
+  .lamp.on {
+    color: var(--glass-lamp);
+    border-color: color-mix(in srgb, var(--glass-lamp) 45%, transparent);
+    background: color-mix(in srgb, var(--glass-lamp) 12%, transparent);
+  }
+
+  /* Signal strength: a real tuner's meter, not a progress bar. */
+  .meter { display: flex; gap: 2px; align-items: flex-end; height: 22px; padding-top: 4px; }
+  .meter i {
+    display: block;
+    width: 4px;
+    background: var(--glass-edge);
+    border-radius: 1px;
+    transition: background .1s;
+  }
+
+  .band {
+    position: relative;
+    height: 132px;
+    cursor: ew-resize;
+    touch-action: none;
+    user-select: none;
+  }
+  .band canvas { display: block; width: 100%; height: 100%; }
+  .band:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+  .transport {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 12px 18px;
+    border-top: 1px solid var(--glass-edge);
+    flex-wrap: wrap;
+  }
+  .transport .hint {
+    font-size: 12px;
+    color: var(--glass-faint);
+    margin-left: auto;
+    font-family: var(--prose);
+  }
+
+  button {
+    font: inherit;
+    font-size: 13px;
+    padding: 7px 14px;
+    border-radius: 3px;
+    border: 1px solid var(--glass-edge);
+    background: transparent;
+    color: var(--glass-ink);
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  button:hover { background: rgba(255,255,255,0.05); }
+  button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button.primary {
+    background: var(--glass-lamp);
+    border-color: var(--glass-lamp);
+    color: #1A1206;
+    font-weight: 600;
+  }
+  button.primary:hover { background: #F0AE4E; }
+  button[disabled] { opacity: .4; cursor: not-allowed; }
+
+  /* ── Workbench ──────────────────────────────────────────────────────────── */
+  .bench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 22px; }
+  @media (max-width: 900px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+
+  .card {
+    background: var(--bench-raised);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 16px 18px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .card > h2 {
+    margin: 0;
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 600;
+  }
+  .card .note {
+    margin: 0;
+    font-family: var(--prose);
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+
+  /* Stations */
+  .stations { display: flex; flex-direction: column; gap: 7px; }
+  .st {
+    display: grid;
+    grid-template-columns: 12px minmax(0, 1fr) 74px 26px;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 9px;
+    background: var(--bench-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+  }
+  .st .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
+  .st .nm {
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .st .sub { font-size: 11px; color: var(--ink-faint); }
+  .st input[type="number"] {
+    font-family: var(--scale);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    width: 100%;
+    padding: 4px 5px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    background: var(--bench-raised);
+    color: var(--ink);
+  }
+  .st .rm {
+    border: none;
+    background: none;
+    color: var(--ink-faint);
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 4px;
+    cursor: pointer;
+  }
+  .st .rm:hover { color: var(--weak); }
+
+  .drop {
+    border: 1px dashed var(--rule);
+    border-radius: 3px;
+    padding: 18px 14px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--ink-soft);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--lamp); background: color-mix(in srgb, var(--lamp) 7%, transparent); }
+  .drop b { color: var(--ink); font-weight: 600; }
+  .drop small { display: block; margin-top: 5px; color: var(--ink-faint); font-size: 11.5px; }
+
+  /* Parameter groups: ordered as the signal chain, because that IS the order */
+  .grp { display: flex; flex-direction: column; gap: 9px; }
+  .grp > h3 {
+    margin: 0;
+    font-size: 10.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink);
+    font-weight: 600;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .grp > h3 em {
+    font-family: var(--prose);
+    font-style: italic;
+    font-size: 12px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink-faint);
+    font-weight: 400;
+  }
+  .grp + .grp { border-top: 1px solid var(--rule); padding-top: 14px; }
+
+  .row { display: grid; grid-template-columns: 128px minmax(0, 1fr) 62px; align-items: center; gap: 10px; }
+  .row label { font-size: 12.5px; color: var(--ink-soft); }
+  .row output {
+    font-family: var(--scale);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    color: var(--ink);
+  }
+  input[type="range"] {
+    width: 100%;
+    accent-color: var(--lamp);
+    height: 18px;
+  }
+  input[type="range"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .presets { display: flex; gap: 7px; flex-wrap: wrap; }
+  .presets button {
+    border-color: var(--rule);
+    color: var(--ink);
+    font-size: 12px;
+    padding: 5px 11px;
+  }
+  .presets button:hover { background: var(--bench-sunk); }
+
+  /* Export */
+  pre {
+    margin: 0;
+    background: var(--bench-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 13px 14px;
+    overflow-x: auto;
+    font-family: var(--scale);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--ink);
+    tab-size: 2;
+  }
+
+  .fine {
+    font-family: var(--prose);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 72ch;
+  }
+  .fine strong { color: var(--ink); font-weight: 600; }
+  .fine code {
+    font-family: var(--scale);
+    font-size: 12px;
+    background: var(--bench-sunk);
+    padding: 1px 4px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <div class="masthead">
+    <h1>Dial Lab — tuning a station in by ear</h1>
+    <p>
+      A bench receiver for settling how CMM's radio should sweep between stations, using your
+      own music. Nothing is uploaded; the files are decoded in this page and never leave it.
+      Drag the dial, or use the same keys the game uses. When it sounds right, copy the numbers
+      out at the bottom.
+    </p>
+  </div>
+
+  <div class="set">
+    <div class="readouts">
+      <div class="readout">
+        <span class="lbl">Dial</span>
+        <span class="val lit" id="rFreq">98.00</span>
+      </div>
+      <div class="readout">
+        <span class="lbl">Tuned to</span>
+        <span class="val" id="rStation" style="font-size:14px; font-family:var(--panel-face)">—</span>
+        <div class="lamps">
+          <span class="lamp" id="lampStereo">Stereo</span>
+          <span class="lamp" id="lampLock">Lock</span>
+        </div>
+      </div>
+      <div class="readout">
+        <span class="lbl">Signal</span>
+        <div class="meter" id="rMeter"></div>
+      </div>
+      <div class="readout">
+        <span class="lbl">High-cut</span>
+        <span class="val" id="rHicut">15.0k</span>
+      </div>
+      <div class="readout">
+        <span class="lbl">Hiss</span>
+        <span class="val" id="rNoise">0 dB</span>
+      </div>
+    </div>
+
+    <div class="band" id="band" tabindex="0" role="slider"
+         aria-label="Tuning dial" aria-valuemin="88" aria-valuemax="108" aria-valuenow="98">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="transport">
+      <button class="primary" id="btnPower">Switch on</button>
+      <button id="btnPrev" disabled>&larr; Seek down</button>
+      <button id="btnNext" disabled>Seek up &rarr;</button>
+      <span class="hint">Drag the dial &middot; arrows nudge &middot; hold to sweep &middot; Page Up / Page Down seek</span>
+    </div>
+  </div>
+
+  <div class="bench">
+
+    <div class="card">
+      <h2>Stations</h2>
+      <p class="note">
+        Each file becomes a station, spread across the band. Use real tracks from the folders you
+        actually listen to — the whole point is judging this on your own music, not on a test tone.
+      </p>
+      <div class="stations" id="stationList"></div>
+      <div class="drop" id="drop">
+        <b>Drop audio files here</b>, or click to choose
+        <small>Trimmed to the clip length below to keep memory sane. Nothing leaves this page.</small>
+      </div>
+      <input type="file" id="file" accept="audio/*" multiple hidden />
+      <div class="row">
+        <label for="pClip">Clip length</label>
+        <input type="range" id="pClip" min="10" max="120" step="5" value="45" />
+        <output id="oClip">45 s</output>
+      </div>
+      <div class="row">
+        <label for="pSpacing">Station spacing</label>
+        <input type="range" id="pSpacing" min="0.3" max="6" step="0.1" value="2.4" />
+        <output id="oSpacing">2.4</output>
+      </div>
+      <div class="presets">
+        <button id="btnDemo">Load demo stations</button>
+        <button id="btnRespace">Re-space evenly</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Receiver — in signal order</h2>
+
+      <div class="grp">
+        <h3>Selectivity <em>how wide a station sits on the band</em></h3>
+        <div class="row">
+          <label for="pBw">Bandwidth</label>
+          <input type="range" id="pBw" min="0.1" max="3" step="0.05" value="0.85" />
+          <output id="oBw">0.85</output>
+        </div>
+        <div class="row">
+          <label for="pOrder">Skirt steepness</label>
+          <input type="range" id="pOrder" min="1" max="8" step="0.25" value="2.5" />
+          <output id="oOrder">2.5</output>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>Capture <em>3–4 dB in a real receiver</em></h3>
+        <div class="row">
+          <label for="pCap">Capture ratio</label>
+          <input type="range" id="pCap" min="0.5" max="20" step="0.5" value="3.5" />
+          <output id="oCap">3.5 dB</output>
+        </div>
+        <div class="row">
+          <label for="pFlut">Flutter window</label>
+          <input type="range" id="pFlut" min="0" max="3" step="0.1" value="0.8" />
+          <output id="oFlut">0.8 dB</output>
+        </div>
+        <div class="row">
+          <label for="pFlutRate">Flutter rate</label>
+          <input type="range" id="pFlutRate" min="1" max="30" step="0.5" value="11" />
+          <output id="oFlutRate">11 Hz</output>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>Noise <em>violet, and mixed before the filters</em></h3>
+        <div class="row">
+          <label for="pNoise">Hiss level</label>
+          <input type="range" id="pNoise" min="0" max="1" step="0.01" value="0.34" />
+          <output id="oNoise">0.34</output>
+        </div>
+        <div class="row">
+          <label for="pNoiseCurve">Hiss onset</label>
+          <input type="range" id="pNoiseCurve" min="0.3" max="4" step="0.1" value="1.5" />
+          <output id="oNoiseCurve">1.5</output>
+        </div>
+        <div class="row">
+          <label for="pTilt">Brightness</label>
+          <input type="range" id="pTilt" min="0" max="1" step="0.01" value="1" />
+          <output id="oTilt">1.00</output>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>De-emphasis &amp; high-cut <em>a weak station goes dull first</em></h3>
+        <div class="row">
+          <label for="pDeem">De-emphasis</label>
+          <input type="range" id="pDeem" min="1200" max="20000" step="100" value="3183" />
+          <output id="oDeem">3183</output>
+        </div>
+        <div class="row">
+          <label for="pHcMin">High-cut, no signal</label>
+          <input type="range" id="pHcMin" min="400" max="8000" step="50" value="1400" />
+          <output id="oHcMin">1400</output>
+        </div>
+        <div class="row">
+          <label for="pHcMax">High-cut, full signal</label>
+          <input type="range" id="pHcMax" min="3000" max="20000" step="250" value="15000" />
+          <output id="oHcMax">15000</output>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>Blend <em>stereo needs ~20 dB more signal than mono</em></h3>
+        <div class="row">
+          <label for="pStFull">Full stereo above</label>
+          <input type="range" id="pStFull" min="0.1" max="1" step="0.01" value="0.72" />
+          <output id="oStFull">0.72</output>
+        </div>
+        <div class="row">
+          <label for="pStNone">Full mono below</label>
+          <input type="range" id="pStNone" min="0" max="0.9" step="0.01" value="0.24" />
+          <output id="oStNone">0.24</output>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>Soft mute <em>the last thing to go</em></h3>
+        <div class="row">
+          <label for="pMuteKnee">Starts below</label>
+          <input type="range" id="pMuteKnee" min="0" max="0.8" step="0.01" value="0.18" />
+          <output id="oMuteKnee">0.18</output>
+        </div>
+        <div class="row">
+          <label for="pMuteFloor">Floor</label>
+          <input type="range" id="pMuteFloor" min="-60" max="0" step="1" value="-24" />
+          <output id="oMuteFloor">-24 dB</output>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>Dial feel <em>how the keys move it</em></h3>
+        <div class="row">
+          <label for="pStep">Nudge per press</label>
+          <input type="range" id="pStep" min="0.02" max="1" step="0.02" value="0.16" />
+          <output id="oStep">0.16</output>
+        </div>
+        <div class="row">
+          <label for="pSweep">Hold sweep rate</label>
+          <input type="range" id="pSweep" min="0.5" max="20" step="0.5" value="5" />
+          <output id="oSweep">5.0/s</output>
+        </div>
+        <div class="row">
+          <label for="pGlide">Seek glide</label>
+          <input type="range" id="pGlide" min="0" max="3" step="0.05" value="0.75" />
+          <output id="oGlide">0.75 s</output>
+        </div>
+        <div class="row">
+          <label for="pVol">Volume</label>
+          <input type="range" id="pVol" min="0" max="1" step="0.01" value="0.7" />
+          <output id="oVol">0.70</output>
+        </div>
+      </div>
+
+      <div class="presets">
+        <button data-preset="realistic">Realistic receiver</button>
+        <button data-preset="cinematic">Cinematic sweep</button>
+        <button data-preset="cheap">Cheap pocket radio</button>
+        <button data-preset="tight">Tight, barely any hiss</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Settled values</h2>
+    <p class="note">
+      Paste into <code>Config/radio.xml</code>. These names are what the C side will read, so what
+      you settle here is what ships.
+    </p>
+    <pre id="export"></pre>
+    <div class="presets">
+      <button id="btnCopy">Copy</button>
+      <button id="btnReset">Back to defaults</button>
+    </div>
+  </div>
+
+  <p class="fine">
+    <strong>What to listen for.</strong> Sweep slowly across a station and back. A real receiver
+    gives you hiss, then the music arriving <em>dull and mono</em> under that hiss, then treble and
+    stereo opening up as you centre it — and the reverse on the way out. If the music arrives
+    already bright and stereo and merely quiet, the high-cut and blend are doing nothing and it
+    will sound like a volume fade, not a tuning. Between two close stations you should get one,
+    a burst of noise, then the other, never a polite blend of both — that is
+    <strong>capture</strong>, and at 3–4 dB it is a much harder edge than most people expect.
+  </p>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ── Band geometry ───────────────────────────────────────────────────────────
+  const F_LO = 88.0, F_HI = 108.0;
+
+  // ── Parameters. Every slider writes into this; export reads out of it. ──────
+  const P = {
+    bw: 0.85, order: 2.5,
+    cap: 3.5, flut: 0.8, flutRate: 11,
+    noise: 0.34, noiseCurve: 1.5, tilt: 1,
+    deem: 3183, hcMin: 1400, hcMax: 15000,
+    stFull: 0.72, stNone: 0.24,
+    muteKnee: 0.18, muteFloor: -24,
+    step: 0.16, sweep: 5, glide: 0.75, vol: 0.7,
+    clip: 45, spacing: 2.4
+  };
+  const DEFAULTS = Object.assign({}, P);
+
+  const PRESETS = {
+    realistic: { bw:0.85, order:2.5, cap:3.5, flut:0.8, flutRate:11, noise:0.34, noiseCurve:1.5,
+                 tilt:1, deem:3183, hcMin:1400, hcMax:15000, stFull:0.72, stNone:0.24,
+                 muteKnee:0.18, muteFloor:-24 },
+    // Wider, slower, more forgiving — reads as "tuning in" in a soundtrack rather
+    // than reproducing a receiver. Longer glide so the sweep is a moment, not a flick.
+    cinematic: { bw:1.9, order:1.6, cap:7, flut:0.4, flutRate:7, noise:0.26, noiseCurve:2.2,
+                 tilt:0.75, deem:4200, hcMin:2200, hcMax:16000, stFull:0.55, stNone:0.15,
+                 muteKnee:0.10, muteFloor:-18, glide:1.4, sweep:3 },
+    // Narrow, bright, noisy, mono almost throughout.
+    cheap:     { bw:0.5, order:4, cap:2.5, flut:1.6, flutRate:18, noise:0.55, noiseCurve:1.1,
+                 tilt:1, deem:2122, hcMin:900, hcMax:7000, stFull:0.95, stNone:0.6,
+                 muteKnee:0.26, muteFloor:-30 },
+    tight:     { bw:0.55, order:6, cap:3, flut:0.3, flutRate:9, noise:0.12, noiseCurve:3,
+                 tilt:0.9, deem:3183, hcMin:3000, hcMax:18000, stFull:0.45, stNone:0.12,
+                 muteKnee:0.30, muteFloor:-40 }
+  };
+
+  // ── Audio ───────────────────────────────────────────────────────────────────
+  let ctx = null, running = false;
+  let master = null, demodBus = null, deemNode = null, hicutNode = null, muteNode = null;
+  let noiseSrc = null, noiseGain = null, noiseWhiteGain = null, noiseVioletGain = null;
+  const stations = [];       // { name, freq, buffer, nodes..., colour }
+
+  const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+  const dbToGain = db => Math.pow(10, db / 20);
+
+  function ensureContext() {
+    if (ctx) return ctx;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    master = ctx.createGain();
+    master.gain.value = P.vol;
+    master.connect(ctx.destination);
+
+    // Chain, in receiver order: [stations + noise] -> de-emphasis -> high-cut -> soft mute
+    muteNode = ctx.createGain();
+    muteNode.gain.value = 1;
+    muteNode.connect(master);
+
+    hicutNode = ctx.createBiquadFilter();
+    hicutNode.type = "lowpass";
+    hicutNode.frequency.value = P.hcMax;
+    hicutNode.Q.value = 0.707;
+    hicutNode.connect(muteNode);
+
+    // De-emphasis is a first-order shelf in a real set; a gentle one-pole lowpass is
+    // the honest equivalent here and keeps the interaction with high-cut simple.
+    deemNode = ctx.createBiquadFilter();
+    deemNode.type = "lowpass";
+    deemNode.frequency.value = P.deem;
+    deemNode.Q.value = 0.5;
+    deemNode.connect(hicutNode);
+
+    demodBus = ctx.createGain();
+    demodBus.gain.value = 1;
+    demodBus.connect(deemNode);
+
+    buildNoise();
+    return ctx;
+  }
+
+  // Violet noise: white differenced sample-to-sample gives exactly +6 dB/octave,
+  // which is the spectrum an FM demodulator actually produces. Both buffers are
+  // generated so the brightness control crossfades between them.
+  function buildNoise() {
+    const n = Math.floor(ctx.sampleRate * 2);
+    const white = ctx.createBuffer(1, n, ctx.sampleRate);
+    const violet = ctx.createBuffer(1, n, ctx.sampleRate);
+    const w = white.getChannelData(0), v = violet.getChannelData(0);
+    let prev = 0;
+    for (let i = 0; i < n; i++) {
+      const s = Math.random() * 2 - 1;
+      w[i] = s * 0.5;
+      v[i] = (s - prev) * 0.28;   // differencing roughly doubles peak, so trim
+      prev = s;
+    }
+
+    noiseGain = ctx.createGain();
+    noiseGain.gain.value = 0;
+    noiseGain.connect(demodBus);
+
+    noiseWhiteGain = ctx.createGain();
+    noiseVioletGain = ctx.createGain();
+    noiseWhiteGain.gain.value = 1 - P.tilt;
+    noiseVioletGain.gain.value = P.tilt;
+    noiseWhiteGain.connect(noiseGain);
+    noiseVioletGain.connect(noiseGain);
+
+    const sw = ctx.createBufferSource(); sw.buffer = white;  sw.loop = true;
+    const sv = ctx.createBufferSource(); sv.buffer = violet; sv.loop = true;
+    sw.connect(noiseWhiteGain); sv.connect(noiseVioletGain);
+    sw.start(); sv.start();
+    noiseSrc = [sw, sv];
+  }
+
+  // A station's chain. Stereo width is done in mid/side so the blend to mono is a
+  // real collapse of the difference signal, the way a stereo decoder does it.
+  function wireStation(st) {
+    const src = ctx.createBufferSource();
+    src.buffer = st.buffer;
+    src.loop = true;
+
+    const splitter = ctx.createChannelSplitter(2);
+    const merger = ctx.createChannelMerger(2);
+
+    const midL = ctx.createGain(), midR = ctx.createGain();
+    const sideL = ctx.createGain(), sideR = ctx.createGain();
+    midL.gain.value = 0.5; midR.gain.value = 0.5;
+    sideL.gain.value = 0.5; sideR.gain.value = -0.5;
+
+    const mid = ctx.createGain(), side = ctx.createGain();
+    mid.gain.value = 1; side.gain.value = 1;       // side.gain = stereo width
+
+    const outLpos = ctx.createGain(), outLneg = ctx.createGain();
+    const outRpos = ctx.createGain(), outRneg = ctx.createGain();
+    outLpos.gain.value = 1; outLneg.gain.value = 1;
+    outRpos.gain.value = 1; outRneg.gain.value = -1;
+
+    src.connect(splitter);
+    splitter.connect(midL, 0); splitter.connect(midR, 1);
+    splitter.connect(sideL, 0); splitter.connect(sideR, 1);
+    midL.connect(mid); midR.connect(mid);
+    sideL.connect(side); sideR.connect(side);
+
+    // L = mid + side, R = mid - side
+    mid.connect(outLpos); side.connect(outLneg);
+    mid.connect(outRpos); side.connect(outRneg);
+    outLpos.connect(merger, 0, 0); outLneg.connect(merger, 0, 0);
+    outRpos.connect(merger, 0, 1); outRneg.connect(merger, 0, 1);
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    merger.connect(gain);
+    gain.connect(demodBus);
+
+    src.start();
+    st.src = src; st.gain = gain; st.side = side;
+  }
+
+  // ── The model. One frame's worth of receiver, in plain arithmetic. ──────────
+  let dial = 98.0, dialTarget = null, dialGlideT0 = 0, dialGlideFrom = 0;
+  let flutterPhase = 0;
+
+  function stationResponse(st, f) {
+    // Generalised Gaussian: order 1 is a soft bell, higher orders give the flat top
+    // and steep skirts of a real IF filter.
+    const x = Math.abs(f - st.freq) / Math.max(0.01, P.bw);
+    return Math.exp(-Math.LN2 * Math.pow(x, 2 * P.order));
+  }
+
+  function computeModel(f, dt) {
+    const raw = stations.map(st => stationResponse(st, f));
+    let best = 0, bestI = -1, second = 0;
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] > best) { second = best; best = raw[i]; bestI = i; }
+      else if (raw[i] > second) second = raw[i];
+    }
+
+    // Capture: everything within `cap` dB of the strongest survives, scaled by how
+    // far down it is; past that it is gone. Not a crossfade — a suppression.
+    const share = raw.map(r => {
+      if (r <= 1e-6 || best <= 1e-6) return 0;
+      const downDb = 20 * Math.log10(best / r);
+      const t = clamp(1 - downDb / Math.max(0.1, P.cap), 0, 1);
+      return t * t;      // squared: the last decibel of the capture window bites hardest
+    });
+
+    // Flutter: when the top two are within the flutter window they fight, and the
+    // receiver wobbles between them. Real sets do this; it is the sound of the
+    // exact midpoint between two transmitters.
+    let flutter = 0;
+    if (best > 1e-4 && second > 1e-4) {
+      const gapDb = 20 * Math.log10(best / second);
+      flutter = clamp(1 - gapDb / Math.max(0.05, P.flut), 0, 1);
+    }
+    if (flutter > 0) {
+      flutterPhase += dt * P.flutRate * Math.PI * 2;
+      const wob = 0.5 + 0.5 * Math.sin(flutterPhase) * (0.6 + 0.4 * Math.sin(flutterPhase * 2.7));
+      for (let i = 0; i < share.length; i++) {
+        if (i === bestI) share[i] *= 1 - flutter * (1 - wob);
+        else share[i] *= 1 - flutter * wob;
+      }
+    }
+
+    const S = best;                                    // overall signal quality, 0..1
+    const noise = Math.pow(1 - S, Math.max(0.05, P.noiseCurve)) * P.noise;
+    const width = clamp((S - P.stNone) / Math.max(0.01, P.stFull - P.stNone), 0, 1);
+    const hicut = P.hcMin + (P.hcMax - P.hcMin) * Math.pow(S, 0.6);
+    const mute = S >= P.muteKnee ? 1
+               : dbToGain(P.muteFloor * (1 - S / Math.max(0.01, P.muteKnee)));
+
+    return { raw, share, S, bestI, noise, width, hicut, mute, flutter };
+  }
+
+  // ── Frame loop ──────────────────────────────────────────────────────────────
+  let lastT = 0;
+  const held = { down: false, up: false };
+  let heldSince = 0;
+
+  function frame(t) {
+    const now = t / 1000;
+    const dt = lastT ? Math.min(0.1, now - lastT) : 0.016;
+    lastT = now;
+
+    // Dial motion: a glide toward a sought station, or a held sweep.
+    if (dialTarget !== null) {
+      const d = P.glide <= 0 ? 1 : clamp((now - dialGlideT0) / P.glide, 0, 1);
+      const e = d * d * (3 - 2 * d);
+      dial = dialGlideFrom + (dialTarget - dialGlideFrom) * e;
+      if (d >= 1) dialTarget = null;
+    } else if (held.down || held.up) {
+      const heldFor = now - heldSince;
+      if (heldFor > 0.28) {
+        const accel = clamp((heldFor - 0.28) / 1.2, 0, 1);
+        const rate = P.sweep * (0.35 + 0.65 * accel);
+        dial += (held.up ? 1 : -1) * rate * dt;
+      }
+    }
+    dial = clamp(dial, F_LO, F_HI);
+
+    const m = computeModel(dial, dt);
+
+    if (running && ctx) {
+      const T = ctx.currentTime, tau = 0.012;
+      for (let i = 0; i < stations.length; i++) {
+        const st = stations[i];
+        if (!st.gain) continue;
+        st.gain.gain.setTargetAtTime(m.share[i], T, tau);
+        st.side.gain.setTargetAtTime(m.width, T, 0.05);
+      }
+      if (noiseGain) noiseGain.gain.setTargetAtTime(m.noise, T, tau);
+      if (hicutNode) hicutNode.frequency.setTargetAtTime(m.hicut, T, 0.03);
+      if (deemNode) deemNode.frequency.setTargetAtTime(P.deem, T, 0.05);
+      if (muteNode) muteNode.gain.setTargetAtTime(m.mute, T, 0.03);
+      if (master) master.gain.setTargetAtTime(P.vol, T, 0.03);
+      if (noiseWhiteGain) {
+        noiseWhiteGain.gain.setTargetAtTime(1 - P.tilt, T, 0.05);
+        noiseVioletGain.gain.setTargetAtTime(P.tilt, T, 0.05);
+      }
+    }
+
+    draw(m);
+    readouts(m);
+    requestAnimationFrame(frame);
+  }
+
+  // ── Dial rendering ──────────────────────────────────────────────────────────
+  const band = document.getElementById("band");
+  const canvas = document.getElementById("canvas");
+  const g = canvas.getContext("2d");
+
+  function sizeCanvas() {
+    const r = band.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(r.width * dpr));
+    canvas.height = Math.max(1, Math.round(r.height * dpr));
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", sizeCanvas);
+
+  const xOf = (f, w) => ((f - F_LO) / (F_HI - F_LO)) * w;
+
+  function draw(m) {
+    const r = band.getBoundingClientRect();
+    const w = r.width, h = r.height;
+    if (!w || !h) return;
+    g.clearRect(0, 0, w, h);
+
+    const cs = getComputedStyle(document.documentElement);
+    const ink = cs.getPropertyValue("--glass-ink").trim() || "#E8E4DA";
+    const faint = cs.getPropertyValue("--glass-faint").trim() || "#6C7686";
+    const lamp = cs.getPropertyValue("--glass-lamp").trim() || "#E9A13B";
+    const good = cs.getPropertyValue("--glass-good").trim() || "#7FB069";
+
+    // Response curves: what the receiver can hear at every point on the band.
+    const baseY = h - 34;
+    for (let i = 0; i < stations.length; i++) {
+      const st = stations[i];
+      g.beginPath();
+      for (let px = 0; px <= w; px += 2) {
+        const f = F_LO + (px / w) * (F_HI - F_LO);
+        const v = stationResponse(st, f);
+        const y = baseY - v * (baseY - 26);
+        if (px === 0) g.moveTo(px, y); else g.lineTo(px, y);
+      }
+      g.strokeStyle = st.colour;
+      g.globalAlpha = 0.42;
+      g.lineWidth = 1.25;
+      g.stroke();
+
+      g.lineTo(w, baseY); g.lineTo(0, baseY); g.closePath();
+      g.globalAlpha = 0.10;
+      g.fillStyle = st.colour;
+      g.fill();
+      g.globalAlpha = 1;
+    }
+
+    // Scale: whole MHz ticked, every other one numbered.
+    g.strokeStyle = faint; g.fillStyle = faint;
+    g.lineWidth = 1;
+    g.font = '11px ' + (cs.getPropertyValue("--scale").trim() || "monospace");
+    g.textAlign = "center";
+    for (let f = Math.ceil(F_LO); f <= F_HI; f++) {
+      const x = Math.round(xOf(f, w)) + 0.5;
+      const major = f % 2 === 0;
+      g.globalAlpha = major ? 0.75 : 0.4;
+      g.beginPath();
+      g.moveTo(x, baseY);
+      g.lineTo(x, baseY + (major ? 9 : 5));
+      g.stroke();
+      if (major) g.fillText(String(f), x, baseY + 22);
+    }
+    g.globalAlpha = 1;
+
+    // Station marks + names.
+    for (const st of stations) {
+      const x = xOf(st.freq, w);
+      g.fillStyle = st.colour;
+      g.beginPath();
+      g.arc(x, baseY, 3, 0, Math.PI * 2);
+      g.fill();
+      g.save();
+      g.globalAlpha = 0.85;
+      g.textAlign = "center";
+      g.font = '10px ' + (cs.getPropertyValue("--panel-face").trim() || "sans-serif");
+      g.fillText(st.name.length > 18 ? st.name.slice(0, 17) + "…" : st.name, x, 18);
+      g.restore();
+    }
+
+    // Needle.
+    const nx = Math.round(xOf(dial, w)) + 0.5;
+    g.strokeStyle = lamp;
+    g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(nx, 6); g.lineTo(nx, baseY + 11); g.stroke();
+    g.fillStyle = lamp;
+    g.beginPath();
+    g.moveTo(nx - 5, 0); g.lineTo(nx + 5, 0); g.lineTo(nx, 8);
+    g.closePath(); g.fill();
+
+    // Lock glow when a station is genuinely captured.
+    if (m && m.S > 0.55) {
+      g.globalAlpha = (m.S - 0.55) / 0.45 * 0.5;
+      g.fillStyle = good;
+      g.fillRect(nx - 22, 0, 44, baseY + 11);
+      g.globalAlpha = 1;
+    }
+  }
+
+  // ── Readouts ────────────────────────────────────────────────────────────────
+  const rFreq = document.getElementById("rFreq");
+  const rStation = document.getElementById("rStation");
+  const rHicut = document.getElementById("rHicut");
+  const rNoise = document.getElementById("rNoise");
+  const rMeter = document.getElementById("rMeter");
+  const lampStereo = document.getElementById("lampStereo");
+  const lampLock = document.getElementById("lampLock");
+
+  const METER_BARS = 12;
+  for (let i = 0; i < METER_BARS; i++) {
+    const b = document.createElement("i");
+    b.style.height = (6 + i * 1.4) + "px";
+    rMeter.appendChild(b);
+  }
+
+  function readouts(m) {
+    rFreq.textContent = dial.toFixed(2);
+    band.setAttribute("aria-valuenow", dial.toFixed(2));
+    band.setAttribute("aria-valuetext", dial.toFixed(2) + " megahertz");
+
+    const st = m.bestI >= 0 && m.S > 0.02 ? stations[m.bestI] : null;
+    rStation.textContent = st ? st.name : "—";
+    rStation.style.color = st ? "" : "var(--glass-faint)";
+
+    rHicut.textContent = m.hicut >= 1000 ? (m.hicut / 1000).toFixed(1) + "k" : Math.round(m.hicut);
+    rNoise.textContent = m.noise <= 0.0005 ? "—" : (20 * Math.log10(m.noise)).toFixed(0) + " dB";
+
+    const cs = getComputedStyle(document.documentElement);
+    const good = cs.getPropertyValue("--glass-good").trim();
+    const weak = cs.getPropertyValue("--glass-weak").trim();
+    const edge = cs.getPropertyValue("--glass-edge").trim();
+    const lit = Math.round(m.S * METER_BARS);
+    for (let i = 0; i < METER_BARS; i++) {
+      rMeter.children[i].style.background =
+        i < lit ? (i < METER_BARS * 0.35 ? weak : good) : edge;
+    }
+
+    lampStereo.classList.toggle("on", m.width > 0.5);
+    lampLock.classList.toggle("on", m.S > 0.55 && m.flutter < 0.4);
+  }
+
+  // ── Dial interaction ────────────────────────────────────────────────────────
+  let dragging = false;
+  function freqFromEvent(e) {
+    const r = band.getBoundingClientRect();
+    const x = clamp(e.clientX - r.left, 0, r.width);
+    return F_LO + (x / r.width) * (F_HI - F_LO);
+  }
+  band.addEventListener("pointerdown", e => {
+    dragging = true; dialTarget = null;
+    band.setPointerCapture(e.pointerId);
+    dial = freqFromEvent(e);
+    band.focus();
+  });
+  band.addEventListener("pointermove", e => { if (dragging) { dialTarget = null; dial = freqFromEvent(e); } });
+  band.addEventListener("pointerup", e => { dragging = false; band.releasePointerCapture(e.pointerId); });
+  band.addEventListener("pointercancel", () => { dragging = false; });
+
+  function seek(dir) {
+    if (!stations.length) return;
+    const sorted = stations.slice().sort((a, b) => a.freq - b.freq);
+    let target = null;
+    if (dir > 0) { for (const s of sorted) if (s.freq > dial + 0.02) { target = s.freq; break; } }
+    else { for (let i = sorted.length - 1; i >= 0; i--) if (sorted[i].freq < dial - 0.02) { target = sorted[i].freq; break; } }
+    if (target === null) target = dir > 0 ? sorted[0].freq : sorted[sorted.length - 1].freq;
+    dialGlideFrom = dial;
+    dialGlideT0 = performance.now() / 1000;
+    dialTarget = target;
+  }
+
+  band.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+      if (!held.up) { held.up = true; heldSince = performance.now() / 1000; dialTarget = null; dial += P.step; }
+      e.preventDefault();
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+      if (!held.down) { held.down = true; heldSince = performance.now() / 1000; dialTarget = null; dial -= P.step; }
+      e.preventDefault();
+    } else if (e.key === "PageUp") { seek(1); e.preventDefault(); }
+    else if (e.key === "PageDown") { seek(-1); e.preventDefault(); }
+  });
+  band.addEventListener("keyup", e => {
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") held.up = false;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") held.down = false;
+  });
+  band.addEventListener("blur", () => { held.up = held.down = false; });
+
+  document.getElementById("btnNext").addEventListener("click", () => seek(1));
+  document.getElementById("btnPrev").addEventListener("click", () => seek(-1));
+
+  // ── Stations ────────────────────────────────────────────────────────────────
+  const COLOURS = ["#E9A13B", "#7FB069", "#6BA8E8", "#C4553B", "#B07FD0", "#4EC0B4",
+                   "#D4A05C", "#9AB84A", "#E07A9C", "#5A9FD4"];
+  const stationList = document.getElementById("stationList");
+
+  function respace() {
+    const n = stations.length;
+    if (!n) return;
+    const span = Math.min((F_HI - F_LO) - 2, P.spacing * (n - 1));
+    const mid = (F_LO + F_HI) / 2;
+    const start = n === 1 ? mid : mid - span / 2;
+    stations.forEach((st, i) => {
+      st.freq = n === 1 ? mid : start + (span / (n - 1)) * i;
+    });
+    renderStations();
+  }
+
+  function renderStations() {
+    stationList.innerHTML = "";
+    stations.forEach((st, i) => {
+      const row = document.createElement("div");
+      row.className = "st";
+
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = st.colour;
+
+      const name = document.createElement("div");
+      const nm = document.createElement("div");
+      nm.className = "nm"; nm.textContent = st.name;
+      const sub = document.createElement("div");
+      sub.className = "sub";
+      sub.textContent = st.buffer
+        ? st.buffer.duration.toFixed(0) + "s · " + (st.buffer.numberOfChannels > 1 ? "stereo" : "mono")
+        : "loading…";
+      name.appendChild(nm); name.appendChild(sub);
+
+      const freq = document.createElement("input");
+      freq.type = "number"; freq.step = "0.05";
+      freq.min = String(F_LO); freq.max = String(F_HI);
+      freq.value = st.freq.toFixed(2);
+      freq.setAttribute("aria-label", st.name + " frequency");
+      freq.addEventListener("input", () => {
+        const v = parseFloat(freq.value);
+        if (!isNaN(v)) st.freq = clamp(v, F_LO, F_HI);
+      });
+
+      const rm = document.createElement("button");
+      rm.className = "rm"; rm.textContent = "×";
+      rm.setAttribute("aria-label", "Remove " + st.name);
+      rm.addEventListener("click", () => {
+        try { if (st.src) st.src.stop(); } catch (_) {}
+        stations.splice(i, 1);
+        renderStations();
+      });
+
+      row.appendChild(dot); row.appendChild(name); row.appendChild(freq); row.appendChild(rm);
+      stationList.appendChild(row);
+    });
+  }
+
+  function addStation(name, buffer) {
+    const st = { name, buffer, freq: 98, colour: COLOURS[stations.length % COLOURS.length] };
+    stations.push(st);
+    if (running) wireStation(st);
+    respace();
+  }
+
+  // Trim on decode: a full album track is ~100 MB as float samples, and a dial test
+  // needs seconds, not minutes.
+  function trim(buffer, seconds) {
+    const want = Math.min(buffer.length, Math.floor(seconds * buffer.sampleRate));
+    if (want >= buffer.length) return buffer;
+    const out = ctx.createBuffer(buffer.numberOfChannels, want, buffer.sampleRate);
+    for (let c = 0; c < buffer.numberOfChannels; c++) {
+      out.getChannelData(c).set(buffer.getChannelData(c).subarray(0, want));
+    }
+    return out;
+  }
+
+  async function loadFiles(files) {
+    ensureContext();
+    for (const f of files) {
+      if (!f.type.startsWith("audio/") && !/\.(mp3|ogg|wav|flac|m4a|aac|opus|webm)$/i.test(f.name)) continue;
+      try {
+        const buf = await f.arrayBuffer();
+        const decoded = await ctx.decodeAudioData(buf);
+        addStation(f.name.replace(/\.[^.]+$/, ""), trim(decoded, P.clip));
+      } catch (err) {
+        const row = document.createElement("div");
+        row.className = "st";
+        row.innerHTML = '<span class="dot" style="background:var(--weak)"></span>';
+        const d = document.createElement("div");
+        d.innerHTML = '<div class="nm">' + f.name + '</div>' +
+                      '<div class="sub">could not be decoded — try mp3, ogg or wav</div>';
+        row.appendChild(d);
+        stationList.appendChild(row);
+      }
+    }
+  }
+
+  const fileInput = document.getElementById("file");
+  const drop = document.getElementById("drop");
+  drop.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => { loadFiles(Array.from(fileInput.files)); fileInput.value = ""; });
+  ["dragenter", "dragover"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => {
+    if (e.dataTransfer && e.dataTransfer.files) loadFiles(Array.from(e.dataTransfer.files));
+  });
+
+  // Demo stations: enough musical character to judge a sweep before you load anything.
+  // Each is a different key, tempo and timbre so you can tell instantly which one the
+  // receiver has captured.
+  function demoBuffer(spec) {
+    const sr = ctx.sampleRate, len = Math.floor(sr * 8);
+    const buf = ctx.createBuffer(2, len, sr);
+    const L = buf.getChannelData(0), R = buf.getChannelData(1);
+    const beat = 60 / spec.bpm;
+    for (let i = 0; i < len; i++) {
+      const t = i / sr;
+      let sL = 0, sR = 0;
+      spec.notes.forEach((semi, k) => {
+        const f = spec.root * Math.pow(2, semi / 12);
+        const env = 0.5 + 0.5 * Math.sin(2 * Math.PI * (t / (beat * 4) + k * 0.13));
+        const detune = 1 + (k % 2 ? 0.0015 : -0.0015);
+        let v = Math.sin(2 * Math.PI * f * t);
+        if (spec.timbre === "reed") v = Math.tanh(v * 2.2) * 0.7;
+        if (spec.timbre === "bell") v = v * Math.exp(-((t % (beat * 2)) * 2.4));
+        sL += v * env * 0.16;
+        sR += Math.sin(2 * Math.PI * f * detune * t) * env * 0.16;
+      });
+      const pulse = Math.exp(-((t % beat) * 14)) * 0.22;
+      sL += Math.sin(2 * Math.PI * spec.root * 0.5 * t) * pulse;
+      sR += Math.sin(2 * Math.PI * spec.root * 0.5 * t) * pulse;
+      L[i] = clamp(sL, -1, 1);
+      R[i] = clamp(sR, -1, 1);
+    }
+    return buf;
+  }
+
+  document.getElementById("btnDemo").addEventListener("click", () => {
+    ensureContext();
+    const specs = [
+      { name: "Low Country (warm pads)", root: 110, bpm: 84,  notes: [0, 7, 12, 16], timbre: "reed" },
+      { name: "Night Shift (bell tones)", root: 146.83, bpm: 96, notes: [0, 3, 10, 15], timbre: "bell" },
+      { name: "Interstate (bright)",      root: 196, bpm: 120, notes: [0, 4, 7, 11], timbre: "saw" },
+      { name: "Dust Bowl (sparse)",       root: 87.31, bpm: 68, notes: [0, 5, 12], timbre: "reed" }
+    ];
+    for (const s of specs) addStation(s.name, demoBuffer(s));
+  });
+
+  document.getElementById("btnRespace").addEventListener("click", respace);
+
+  // ── Power ───────────────────────────────────────────────────────────────────
+  const btnPower = document.getElementById("btnPower");
+  btnPower.addEventListener("click", async () => {
+    ensureContext();
+    if (!running) {
+      await ctx.resume();
+      for (const st of stations) if (!st.src) wireStation(st);
+      running = true;
+      btnPower.textContent = "Switch off";
+      document.getElementById("btnNext").disabled = false;
+      document.getElementById("btnPrev").disabled = false;
+      band.focus();
+    } else {
+      running = false;
+      if (master) master.gain.setTargetAtTime(0, ctx.currentTime, 0.02);
+      await ctx.suspend();
+      btnPower.textContent = "Switch on";
+    }
+  });
+
+  // ── Controls ────────────────────────────────────────────────────────────────
+  const FMT = {
+    cap: v => v.toFixed(1) + " dB", flut: v => v.toFixed(1) + " dB",
+    flutRate: v => v.toFixed(0) + " Hz", muteFloor: v => v.toFixed(0) + " dB",
+    clip: v => v.toFixed(0) + " s", sweep: v => v.toFixed(1) + "/s",
+    glide: v => v.toFixed(2) + " s",
+    deem: v => v.toFixed(0), hcMin: v => v.toFixed(0), hcMax: v => v.toFixed(0),
+    bw: v => v.toFixed(2), order: v => v.toFixed(2), noise: v => v.toFixed(2),
+    noiseCurve: v => v.toFixed(1), tilt: v => v.toFixed(2),
+    stFull: v => v.toFixed(2), stNone: v => v.toFixed(2), muteKnee: v => v.toFixed(2),
+    step: v => v.toFixed(2), vol: v => v.toFixed(2), spacing: v => v.toFixed(1)
+  };
+
+  const bind = (key, id, outId) => {
+    const el = document.getElementById(id), out = document.getElementById(outId);
+    const sync = () => {
+      P[key] = parseFloat(el.value);
+      out.textContent = (FMT[key] || (v => String(v)))(P[key]);
+      if (key === "spacing") respace();
+      updateExport();
+    };
+    el.addEventListener("input", sync);
+    el._sync = sync;
+    sync();
+  };
+
+  const BINDINGS = [
+    ["bw","pBw","oBw"], ["order","pOrder","oOrder"],
+    ["cap","pCap","oCap"], ["flut","pFlut","oFlut"], ["flutRate","pFlutRate","oFlutRate"],
+    ["noise","pNoise","oNoise"], ["noiseCurve","pNoiseCurve","oNoiseCurve"], ["tilt","pTilt","oTilt"],
+    ["deem","pDeem","oDeem"], ["hcMin","pHcMin","oHcMin"], ["hcMax","pHcMax","oHcMax"],
+    ["stFull","pStFull","oStFull"], ["stNone","pStNone","oStNone"],
+    ["muteKnee","pMuteKnee","oMuteKnee"], ["muteFloor","pMuteFloor","oMuteFloor"],
+    ["step","pStep","oStep"], ["sweep","pSweep","oSweep"], ["glide","pGlide","oGlide"],
+    ["vol","pVol","oVol"], ["clip","pClip","oClip"], ["spacing","pSpacing","oSpacing"]
+  ];
+  BINDINGS.forEach(b => bind(b[0], b[1], b[2]));
+
+  function applyValues(vals) {
+    Object.assign(P, vals);
+    BINDINGS.forEach(([key, id]) => {
+      const el = document.getElementById(id);
+      el.value = String(P[key]);
+      el._sync();
+    });
+  }
+
+  document.querySelectorAll("[data-preset]").forEach(b =>
+    b.addEventListener("click", () => applyValues(PRESETS[b.dataset.preset])));
+  document.getElementById("btnReset").addEventListener("click", () => applyValues(DEFAULTS));
+
+  // ── Export ──────────────────────────────────────────────────────────────────
+  const exportEl = document.getElementById("export");
+  function updateExport() {
+    const n = (v, d) => Number(v).toFixed(d);
+    exportEl.textContent =
+`<!-- Dial sweep. Settled by ear in tools/CmmDialLab. -->
+<RadioDialEnabled>true</RadioDialEnabled>
+
+<!-- Selectivity: how wide a station sits on the dial, and how steep its edges. -->
+<RadioDialBandwidth>${n(P.bw, 2)}</RadioDialBandwidth>
+<RadioDialSkirt>${n(P.order, 2)}</RadioDialSkirt>
+
+<!-- Capture: dB by which one station must beat another to silence it. Real
+     receivers are 3-4. Higher blends the two; lower makes the edge harder. -->
+<RadioDialCaptureDb>${n(P.cap, 1)}</RadioDialCaptureDb>
+<RadioDialFlutterDb>${n(P.flut, 1)}</RadioDialFlutterDb>
+<RadioDialFlutterHz>${n(P.flutRate, 1)}</RadioDialFlutterHz>
+
+<!-- Hiss. Violet (rising 6 dB/octave) is what a demodulator really produces;
+     Brightness 0 is plain white noise. Mixed BEFORE the filters below. -->
+<RadioDialNoiseLevel>${n(P.noise, 2)}</RadioDialNoiseLevel>
+<RadioDialNoiseOnset>${n(P.noiseCurve, 1)}</RadioDialNoiseOnset>
+<RadioDialNoiseBrightness>${n(P.tilt, 2)}</RadioDialNoiseBrightness>
+
+<!-- Tone. A weak station goes dull before it goes quiet. -->
+<RadioDialDeemphasisHz>${n(P.deem, 0)}</RadioDialDeemphasisHz>
+<RadioDialHighCutMinHz>${n(P.hcMin, 0)}</RadioDialHighCutMinHz>
+<RadioDialHighCutMaxHz>${n(P.hcMax, 0)}</RadioDialHighCutMaxHz>
+
+<!-- Stereo blend. Stereo needs ~20 dB more signal than mono, so a station
+     collapses to mono well before it fades. -->
+<RadioDialStereoFullAbove>${n(P.stFull, 2)}</RadioDialStereoFullAbove>
+<RadioDialMonoBelow>${n(P.stNone, 2)}</RadioDialMonoBelow>
+
+<!-- Soft mute: the last stage, so a dead spot is quiet rather than loud hiss. -->
+<RadioDialSoftMuteBelow>${n(P.muteKnee, 2)}</RadioDialSoftMuteBelow>
+<RadioDialSoftMuteFloorDb>${n(P.muteFloor, 0)}</RadioDialSoftMuteFloorDb>
+
+<!-- Dial feel. Spacing is how far apart stations are placed on the band. -->
+<RadioDialStationSpacing>${n(P.spacing, 2)}</RadioDialStationSpacing>
+<RadioDialNudge>${n(P.step, 2)}</RadioDialNudge>
+<RadioDialSweepRate>${n(P.sweep, 1)}</RadioDialSweepRate>
+<RadioDialSeekGlide>${n(P.glide, 2)}</RadioDialSeekGlide>`;
+  }
+
+  document.getElementById("btnCopy").addEventListener("click", async () => {
+    const btn = document.getElementById("btnCopy");
+    try {
+      await navigator.clipboard.writeText(exportEl.textContent);
+      btn.textContent = "Copied";
+    } catch (_) {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(exportEl);
+      sel.removeAllRanges(); sel.addRange(range);
+      btn.textContent = "Selected — press Ctrl+C";
+    }
+    setTimeout(() => { btn.textContent = "Copy"; }, 1800);
+  });
+
+  // ── Go ──────────────────────────────────────────────────────────────────────
+  sizeCanvas();
+  updateExport();
+  requestAnimationFrame(frame);
+})();
+</script>
