@@ -358,7 +358,16 @@ namespace CMM
                       .Append("  open ").Append(open.ToString("0.00"))
                       .Append(bv.isair || b == null ? "" :
                               "  shape " + (b.shape != null ? b.shape.GetType().Name : "-")
-                              + (b.shape != null && b.shape.IsSolidCube ? " CUBE" : " partial"));
+                              + (b.shape != null && b.shape.IsSolidCube ? " CUBE" : " partial")
+                              // WHERE THE LOSS CAME FROM, because "loss 0.700" on a pot plant is a
+                              // number with no author until you can see which bucket it fell in.
+                              // mat = the SurfaceCategory MaterialLoss switches on; opa = the block's
+                              // resolved lightOpacity, which is the only extent signal a model entity
+                              // has (its real geometry is in a prefab); mv = does it stop the player.
+                              + "  mat " + (b.blockMaterial != null
+                                            ? (b.blockMaterial.SurfaceCategory ?? "-") : "-")
+                              + "  opa " + b.lightOpacity
+                              + (b.IsMovementBlocked(w, v, bv, BlockFace.None) ? "  MOVEBLOCK" : "  walkthru"));
                 }
                 return sb.ToString();
             }
