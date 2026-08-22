@@ -135,7 +135,11 @@ namespace CMM
         //   the two share a station catalog but are different things: one is a speaker across the
         //   room, the other is in your head, and a level that suits one rarely suits the other.
         //   0.5 keeps the level the Radio context's trim used to give the emitters.
-        public static float  WorldEmitterVolume  = 0.5f;
+        // 1.0, up from 0.5. The old value was settled by ear while occlusion was LEAKING --
+        // a route could pass diagonally between two blocks meeting at a corner and pay nothing,
+        // so walls were under-charged anywhere there was geometry. Closing that made the same
+        // speakers correctly quieter, which means 0.5 is no longer the level it was chosen to be.
+        public static float  WorldEmitterVolume  = 1f;
         // Fade (seconds) when the station starts (a speaker comes in range) / stops (all leave range).
         public static float  WorldEmitterFade    = 1.0f;
         // Placement ("birth") ramp for a speaker that APPEARS while its station is already
