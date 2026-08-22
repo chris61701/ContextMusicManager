@@ -104,6 +104,37 @@ verification — emitters are excluded there anyway.
   - STILL OPEN: `Span` is the largest multiblock dimension, so an ordinary door's gap is its HEIGHT.
     Measured live: a 1x2x1 door reads acoustically fully open at nt=0.406, the garage door at 0.767.
     Fixing it rescales every door's ramp, so it belongs with the re-tuning pass, not before it.
+- [ ] **DOOR FINE-TUNING — deferred 2026-08-22, after the aperture work was confirmed working.**
+  The doors are RIGHT now (which side, and that they block at all). What is left is how they FEEL,
+  and all of it wants ears rather than a debugger. Do it in one sitting, with the levels pass.
+  - **`Span` is the largest multiblock dimension, so every door's gap is overstated.** For an
+    ordinary 1x2x1 door that dimension is its HEIGHT, not the 1 m opening, so it reads acoustically
+    fully open at **nt=0.406** — 40% into a 0.53 s animation. Measured live 2026-08-22, alongside
+    the garage door at nt=0.767 and `doorWoodLargeGate` at ~14%. A drawbridge (5,6,7) uses its
+    7-block DECK and is fully open after **10%**. The honest span is the dimension the aperture
+    actually opens along, which the remembered leaf now knows — thin axis aside, a swinging door
+    opens across its width and a roll-up across its height. Fixing it rescales every door's ramp,
+    which is why it belongs here and not before.
+  - **A shut door contributes almost nothing; the DETOUR does the work.** Measured with a shut iron
+    door between listener and speaker: `wall 1.0, detour 31.6` — 1 dB of the 32 came from the door,
+    the rest from the flood routing ~36 blocks around the building. Defensible as diffraction, but
+    it means `WorldEmitterFieldDetourDb` is currently the door knob, and turning the door knob does
+    almost nothing. Decide which one should be carrying it before tuning either.
+  - **`WorldEmitterDoorMaxLoss` (0.60 = 26.8 dB) was chosen by arithmetic, not by ear.** It is the
+    ceiling that stops a metal door reading as a metal wall. Sanity-check a shut steel door against
+    a shut wood door (20.2 dB) and a concrete wall (52 dB) and move it. `cmm field doormax <n>`.
+  - **Re-toggle resets openness to the endpoint.** `RefreshDoorAnim` overwrites with
+    `Opening ? 0f : 1f`, so closing a door that is 60% open sets it to fully OPEN for a tick.
+    Spamming the key gives full-volume flashes on every close press. Cheap fix, audible symptom.
+  - **A door anywhere unlocks the global slew for 1.5 s**, for every speaker including the one at
+    your elbow. Should be per-door-per-speaker, or at least range-gated.
+  - **`WorldEmitterDoorSwingFrac` is 1.0 and has never done anything measurable.** It did nothing
+    while the leaf was switched off during the swing; that is no longer true. Either it earns its
+    place in this pass or it goes.
+  - Everything else door-shaped that is NOT about feel — powered doors never hooked, MP remote
+    doors bypassing the hook, chainlink gates reading as vault walls, `manholeHatch` — is written
+    up in `docs/plan-door-aperture.md` under "separate real bugs". Those are correctness, not
+    tuning; do not fold them into this sitting.
 - [ ] **Field defects found by the 2026-08-22 audit and NOT fixed.** Ranked as the audit ranked them.
   These are real; the door work only fixed the three that shared its symptom.
   - **[FIXED 2026-08-22] The ear-cell override races the geometry reader.** `cmm_fld_solve` save/modifies/
