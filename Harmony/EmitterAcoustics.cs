@@ -757,7 +757,13 @@ namespace CMM
         internal static float[] CoverSplitAt(Block b, BlockValue bv, float fx, float fy, float fz)
         {
             Bounds[] arr = ShapeBounds(b, bv);
-            return arr == null ? FullCover : CoverSplitAtBounds(arr, fx, fy, fz);
+            // NOTHING TO SPLIT IS NOT THE SAME AS A FULL VOXEL. Falling back to FullCover here was
+            // a hole exactly the size of the ear's own cell: a pot plant reads coverage 0 from its
+            // opacity everywhere in the world, and then read a solid voxel the moment you stood in
+            // it. Measured at the plant, one build apart: 0.0 dB of wall four blocks away, 34.0 dB
+            // standing in its cell. Ask the ordinary path instead — it has an answer for shapes
+            // with no bounds, and the split cannot improve on it.
+            return arr == null ? CoverOf(b, bv) : CoverSplitAtBounds(arr, fx, fy, fz);
         }
 
         internal static float[] CoverSplitAtBounds(Bounds[] arr, float fx, float fy, float fz)
