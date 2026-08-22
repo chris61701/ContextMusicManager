@@ -93,6 +93,14 @@ namespace CMM
         // nothing about the store they live in, so it cannot tell when they have. With
         // no flags set — the overwhelmingly common case — the answer depends on exactly
         // three things, all checked by reference or counter.
+        //
+        // KEYING ON ARRAY IDENTITY IS ONLY SAFE BECAUSE ContextCache.directorySnapshot is
+        // always REPLACED, never edited in place — every writer (the crawler's partial
+        // publishes, the watch diff, the presence scan, the missing-file prune, the
+        // config reload) assigns a freshly built array, which is also what makes the
+        // snapshot lock-free for the reader threads. If anything ever starts mutating one
+        // in place, this cache goes stale silently and the bag starts handing out tracks
+        // that are no longer in the folder.
         private string[] _cachePool, _cacheOut;
         private string   _cacheAvoid;
         private int      _version;          // bumped whenever what has played changes

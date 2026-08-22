@@ -15,7 +15,7 @@ using CMM;
 // ─────────────────────────────────────────────────────────────────────────────
 internal static class Program
 {
-    static int _checks, _failed;
+    internal static int _checks, _failed;
 
     static int Main()
     {
@@ -58,6 +58,9 @@ internal static class Program
         Section("Allocation");
         FreshCycleReturnsThePoolItself();
         CacheDoesNotGoStale();
+
+        EdgeCases.Run();
+        LiveFiles.Run();
 
         Section("What it actually changes");
         HowSoonDoesATrackComeBack();
@@ -520,7 +523,7 @@ internal static class Program
 
     // A fixed-seed rng so a failure is reproducible. Each call site derives its own
     // stream from an integer, which also keeps the trials independent.
-    static TrackRng Rng(int seed)
+    internal static TrackRng Rng(int seed)
     {
         uint s = (uint)(seed * 2654435761u) | 1u;
         return () =>
@@ -530,10 +533,10 @@ internal static class Program
         };
     }
 
-    static string[] Pool(int n) =>
+    internal static string[] Pool(int n) =>
         Enumerable.Range(0, n).Select(i => $"track_{i:D4}.ogg").ToArray();
 
-    static List<string> Play(TrackRotation rot, string[] pool, int memory, int picks,
+    internal static List<string> Play(TrackRotation rot, string[] pool, int memory, int picks,
                              TrackFlag ban = null, TrackFlag fav = null, float favWeight = 3f,
                              int seedOffset = 0)
     {
@@ -552,13 +555,13 @@ internal static class Program
         return played;
     }
 
-    static void Section(string title)
+    internal static void Section(string title)
     {
         Console.WriteLine();
         Console.WriteLine("── " + title + " " + new string('─', Math.Max(0, 70 - title.Length)));
     }
 
-    static void Check(string what, bool ok, string detail = null)
+    internal static void Check(string what, bool ok, string detail = null)
     {
         _checks++;
         if (!ok) _failed++;

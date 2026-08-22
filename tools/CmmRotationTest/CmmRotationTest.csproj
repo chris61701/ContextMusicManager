@@ -14,7 +14,15 @@
        bag" is a property of CommitToHistory's replay detection, not of the
        rotation on its own, and it can only be tested through the real thing.
 
-       Shims.cs supplies the two UnityEngine stand-ins DataStructures.cs names.
+       LiveFiles.cs links the SCAN code as well (SourceScan / MusicRoots /
+       PlaylistSource / AudioDecoder) and builds a real tree on disk, so the
+       questions that are actually about the filesystem — a track moved while it
+       is playing, a recursive folder still being crawled, a playlist edited
+       under a running pass — are answered against real IO rather than a
+       simulation of it.
+
+       Shims.cs supplies Log / CMMConfig.D and the UnityEngine stand-ins the
+       linked files name.
   ─────────────────────────────────────────────────────────────────────────── -->
 
   <PropertyGroup>
@@ -30,9 +38,25 @@
 
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="EdgeCases.cs" />
+    <Compile Include="LiveFiles.cs" />
     <Compile Include="Shims.cs" />
     <Compile Include="..\..\Harmony\TrackRotation.cs"  Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\MusicRoots.cs"     Link="linked\MusicRoots.cs" />
+    <Compile Include="..\..\Harmony\SourceScan.cs"     Link="linked\SourceScan.cs" />
+    <Compile Include="..\..\Harmony\PlaylistSource.cs" Link="linked\PlaylistSource.cs" />
+    <Compile Include="..\..\Harmony\AudioDecoder.cs"   Link="linked\AudioDecoder.cs" />
+    <Compile Include="..\..\Harmony\NativeAudio.cs"    Link="linked\NativeAudio.cs" />
+  </ItemGroup>
+
+  <!-- Never decoded here (IsSupported is pure managed), but present so a stray
+       DllImport resolves rather than throwing. -->
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll"
+             Condition="Exists('..\..\CMM_Decoder\dist\CMM_Decoder.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>
