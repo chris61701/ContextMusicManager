@@ -85,6 +85,50 @@ verification — emitters are excluded there anyway.
     a door, which should settle the report; the rest needs the leaf's facing from its rotation.
   - **Verify with** `cmm acoustics shape [x y z]` for the coverage numbers, then by ear.
 
+- [ ] **The door SWING.** The leaf is now measured off its prefab colliders, so its position and
+  axis are right and it moves with the animation. What is not settled is how the sound should
+  behave DURING the swing. Chris's rule stands: the door blocks by which side you are on, never by
+  what the animation is doing, and sound beyond it should fade in gradually as it opens while sound
+  on your own side is released immediately.
+  - The gradual part comes from `CellLoss`'s openness blend (`DoorAcoustic`), which with the shipped
+    gap defaults is 0 until the leaf is 15% open and 1 at 70%. Measured swing: `open` 0.000 at
+    t=0.054s, 0.295 at 0.114s, 0.977 at 0.212s of a 0.53 s clip. Closing slams early on purpose.
+  - Now the leaf is measured, the openness ramp may be redundant for the cell you are standing in —
+    the bounds already leave the voxel as it swings. Decide whether the two should both apply.
+  - `WorldEmitterDoorSwingFrac` is 1.0 (no remap). It did nothing at any value while the leaf was
+    switched off during the swing; retest it now that it is not.
+
+- [ ] **Field defects found by the 2026-08-22 audit and NOT fixed.** Ranked as the audit ranked them.
+  These are real; the door work only fixed the three that shared its symptom.
+  - **[MED-HIGH] The ear-cell override races the geometry reader.** `cmm_fld_solve` save/modifies/
+    restores the shared `m6` slot for the ear's cell (`cmm_field.c` ~458 and ~782). Any
+    `cmm_fld_set_cell` write landing inside a flood is overwritten by the restore *while staying
+    marked clean*, so the read is thrown away and not redone until the next dirty. Worst exactly
+    during a door: `DoorMovingOrJustMoved` floods every 20 ms tick for 1.5 s, so the override is
+    installed essentially the whole window, and the ear's own cell is re-read every frame. Fix by
+    not mutating `m6` — the leaving cell's pointer is hoisted once per settled cell, so a single
+    `i == earIdx` test there covers it (nothing re-enters the seed cell profitably).
+  - **[MED] `cmm_fld_set_ear_cell` publishes coordinates BEFORE the numbers**, and the guard tests
+    only the coordinates. A reader can see the new cell with the old six values. Write `earOvr`
+    first and `earHas` last.
+  - **[MED] `_ear` is a `Vector3` read across threads with no barrier.** A torn read seeds from a
+    position that never existed and silently drops the override for that flood — while `EarCellWhy`
+    still prints it as published. Rare (<<1%), but it means the diagnostic line is not proof the
+    override was applied. Neither is it when `have` is 0 for that cell.
+  - **[MED] The seed's material charge omits the diagonal shoulder term**, though its comment claims
+    it is "identical for a diagonal, which is what stops a seed slipping through the seam where two
+    walls meet". A diagonal seed can start on the far side of a sealed corner for free — the same
+    20 dB failure the shoulder rule exists to fix. Either add it or correct the comment.
+  - **[LOW-MED] `free_space_db` mirrors the seeding arithmetic but not the seed SET** — it
+    normalises over all eight cells and never checks `in_win`/`have`, where the flood skips unread
+    seeds and normalises over the survivors. During warm-up and after every recentre this inflates
+    `excess`.
+  - **[LOW] The fallback seed can expand from uninitialised memory** — no `have` check before
+    seeding the containing cell, and `m6` is malloc'd, never zeroed. One flood, on a fresh window or
+    a teleport.
+  - **[LOW] Cell coords used as block coords** in `PublishEarCell` — correct only because
+    `StepXZ == StepY == 1`, and the body-fraction line has no guard of its own.
+
 - [ ] **Port the occlusion output shaping into the field.** THE LAST THING the audio engine
   needs. The per-door gap tuning (`WorldEmitterDoorGapOverrides`, hand-tuned per door type
   2026-07-08) was calibrated through `EmitterAcoustics.ShapeOcclusion`, and the field replaced
