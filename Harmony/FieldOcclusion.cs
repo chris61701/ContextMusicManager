@@ -224,6 +224,7 @@ namespace CMM
 
             _ear = EmitterAudioLayer.ListenerWorldPos(player);
             _earValid = true;
+            PublishEarCell(world);
 
             // RECENTRE ON A DRIFT, NOT ON EVERY STEP. A recentre changes what every index means,
             // so a flood in progress when one lands is thrown away — and with one-block-tall cells
@@ -464,6 +465,57 @@ namespace CMM
             if (db <= 0f) return 1f;
             if (db > 120f) db = 120f;
             return Mathf.Pow(10f, -db / 10f);
+        }
+
+        // ── THE CELL THE EAR IS IN, SPLIT AT THE EAR ───────────────────────────────────────────
+        // Main thread, because it reads the world; the flood itself touches no game API and that
+        // is what keeps it safe off the frame loop, so this cannot live there.
+        //
+        // Every other cell splits its material at the halfway plane — it has no way of knowing
+        // where you are standing. The one holding your head does, and the difference is the whole
+        // of "walking into a doorway occludes a speaker in my own room": a door leaf sits ACROSS
+        // the middle of its voxel, so both halves hold it and leaving the cell crosses one of them
+        // whichever way you go. Measured in the doorway of a POI, every one of the six reading
+        // 10.1 dB, taking a 1.7 dB room to 12.6 dB purely by standing there.
+        //
+        // Split at the ear and the material is wholly behind you or wholly ahead. Which also makes
+        // the ORIGINAL complaint stronger, not just this one: standing on the closed side of a
+        // door you now get the whole leaf where the halfway split gave you half of it.
+        private static void PublishEarCell(World world)
+        {
+            int cx = Mathf.FloorToInt(_ear.x / StepXZ), cy = Mathf.FloorToInt(_ear.y / StepY),
+                cz = Mathf.FloorToInt(_ear.z / StepXZ);
+            // Fractional position inside the cell — the plane to split about.
+            float fx = _ear.x / StepXZ - cx, fy = _ear.y / StepY - cy, fz = _ear.z / StepXZ - cz;
+
+            float t = 1f;
+            float[] cov = EmitterAcoustics.FullCover;
+            if (StepXZ == 1 && StepY == 1)          // one block per cell: the cell IS the block
+            {
+                BlockValue bv = world.GetBlock(cx, cy, cz);
+                if (!bv.isair)
+                {
+                    t = Transmission(world, cx, cy, cz, out float[] _);
+                    if (t < 1f)
+                    {
+                        Block b = bv.Block;
+                        Bounds[] leaf = EmitterAcoustics.EarLeafBounds(b, bv, world, cx, cy, cz);
+                        cov = leaf != null
+                            ? EmitterAcoustics.CoverSplitAtBounds(leaf, fx, fy, fz)
+                            : EmitterAcoustics.CoverSplitAt(b, bv, fx, fy, fz);
+                    }
+                }
+            }
+
+            // NO COMPOSE RULE HERE. Elsewhere the two halves must multiply back to the cell's
+            // material, because a route passing THROUGH crosses both. A route seeded in this cell
+            // starts between them and crosses one, so each half carries what is actually on that
+            // side of you — full strength, not a share.
+            float nX = 1f - cov[0] * (1f - t), nY = 1f - cov[1] * (1f - t), nZ = 1f - cov[2] * (1f - t);
+            float pX = 1f - cov[3] * (1f - t), pY = 1f - cov[4] * (1f - t), pZ = 1f - cov[5] * (1f - t);
+            NativeField.cmm_fld_set_ear_cell(_f, cx, cy, cz,
+                                             Face(nX, 0f), Face(nY, 0f), Face(nZ, 0f),
+                                             Face(pX, 0f), Face(pY, 0f), Face(pZ, 0f));
         }
 
         // ── Scheduler thread: the flood ─────────────────────────────────────────────────────────

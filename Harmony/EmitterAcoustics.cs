@@ -705,6 +705,101 @@ namespace CMM
             return full ? FullCover : cov;   // share the common answer, so callers can compare by reference
         }
 
+        // ── THE SAME QUESTION, ASKED ABOUT WHERE YOU ARE STANDING ───────────────────────────────
+        // Coverage split at an arbitrary plane instead of at the voxel's middle, for the one cell
+        // that knows where the listener is: the one holding the ear.
+        //
+        // Every other cell has to split at 0.5, and for a door that is exactly wrong — a leaf sits
+        // ACROSS the middle, so both halves hold it and leaving the cell crosses one of them
+        // whichever way you go. Measured in game: 10.1 dB in every direction, a 1.7 dB room
+        // becoming 12.6 dB just by standing in the doorway. Split at the ear and the leaf is
+        // wholly behind you or wholly in front, which is what it physically is.
+        //
+        // Uncached on purpose — the split plane moves with the player, and it is one cell per
+        // flood, about 200 point tests.
+        internal static float[] CoverSplitAt(Block b, BlockValue bv, float fx, float fy, float fz)
+        {
+            Bounds[] arr = ShapeBounds(b, bv);
+            return arr == null ? FullCover : CoverSplitAtBounds(arr, fx, fy, fz);
+        }
+
+        internal static float[] CoverSplitAtBounds(Bounds[] arr, float fx, float fy, float fz)
+        {
+            if (arr == null || arr.Length == 0) return FullCover;
+            var cov = new float[9];
+            float[] at = { fx, fy, fz };
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int u = (axis + 1) % 3, v = (axis + 2) % 3;
+                float split = at[axis] < 0.001f ? 0.001f : (at[axis] > 0.999f ? 0.999f : at[axis]);
+                int cn = 0, cp = 0, ca = 0;
+                for (int iu = 0; iu < CoverGrid; iu++)
+                    for (int iv = 0; iv < CoverGrid; iv++)
+                    {
+                        float fu = (iu + 0.5f) / CoverGrid, fv2 = (iv + 0.5f) / CoverGrid;
+                        bool hitN = false, hitP = false;
+                        for (int i = 0; i < arr.Length; i++)
+                        {
+                            Vector3 mn = arr[i].min, mx = arr[i].max;
+                            if (fu < mn[u] || fu > mx[u] || fv2 < mn[v] || fv2 > mx[v]) continue;
+                            if (mn[axis] < split) hitN = true;
+                            if (mx[axis] > split) hitP = true;
+                        }
+                        if (hitN) cn++;
+                        if (hitP) cp++;
+                        if (hitN || hitP) ca++;
+                    }
+                const float inv = 1f / (CoverGrid * CoverGrid);
+                cov[axis] = cn * inv; cov[axis + 3] = cp * inv; cov[axis + 6] = ca * inv;
+            }
+            return cov;
+        }
+
+        // WHERE A BLOCK'S GEOMETRY ACTUALLY IS, or null for "it fills its voxel".
+        //
+        // A SHUT DOOR IS THE CASE THIS EXISTS FOR. Its leaf lives in a Unity prefab, so GetBounds
+        // hands back a default cube and the block layer cannot see the real thing — which is fine
+        // for a route passing through (a shut door DOES fill its doorway) and useless for a
+        // listener standing in the doorway, because a cube is on both sides of you at once.
+        //
+        // So synthesise what a leaf is: a thin slab across the middle of the voxel, perpendicular
+        // to the way the door opens. That axis is read off the world rather than off the block —
+        // a door sits in a doorway, so the two neighbours you walk BETWEEN are open and the two
+        // that hold the frame are not. Cheapest axis wins. Asked of the world because rotation
+        // encodings for model entities differ across the supported game versions, and this
+        // project has twice been caught asking a block a question it answers with a default.
+        internal static Bounds[] EarLeafBounds(Block b, BlockValue bv, World world, int x, int y, int z)
+        {
+            if (b == null || !IsSwingingLeaf(b, bv.type)) return null;
+            if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return null;  // open
+            float bestSum = float.MaxValue; int bestAxis = -1;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int dx = axis == 0 ? 1 : 0, dy = axis == 1 ? 1 : 0, dz = axis == 2 ? 1 : 0;
+                float sum = NeighbourLoss(world, x - dx, y - dy, z - dz)
+                          + NeighbourLoss(world, x + dx, y + dy, z + dz);
+                if (sum < bestSum) { bestSum = sum; bestAxis = axis; }
+            }
+            if (bestAxis < 0) return null;
+            Vector3 mn = Vector3.zero, mx = Vector3.one;
+            mn[bestAxis] = 0.45f; mx[bestAxis] = 0.55f;      // the leaf, across the middle
+            return new[] { new Bounds((mn + mx) * 0.5f, mx - mn) };
+        }
+
+        private static float NeighbourLoss(World world, int x, int y, int z)
+        {
+            BlockValue nb = world.GetBlock(x, y, z);
+            return nb.isair ? 0f : CellLoss(nb, world, x, y, z);
+        }
+
+        private static Bounds[] ShapeBounds(Block b, BlockValue bv)
+        {
+            if (b == null || b.shape == null || b.shape is BlockShapeModelEntity) return null;
+            if (b.shape.IsSolidCube) return null;
+            try { Bounds[] a = b.shape.GetBounds(bv); return (a != null && a.Length > 0) ? a : null; }
+            catch { return null; }
+        }
+
         // The reader's entry point: what a cell is made of, and where inside the voxel it sits.
         internal static float[] DebugCellCover(BlockValue bv)
         {

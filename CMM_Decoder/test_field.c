@@ -636,6 +636,47 @@ int main(int argc, char** argv) {
         ckf("a sliver ceiling does not block downward", down < 2.0f, "%.2f dB (want ~0)", down);
     }
 
+    /* ── THE CELL YOU ARE STANDING IN KNOWS WHERE YOU ARE ─────────────────────────
+     * Reported after the six-half change landed: "if I'm in the same room as the emitter, walking
+     * into the block or closed door occludes". Measured in the doorway of a POI, every one of the
+     * six halves of the ear's own cell reading 10.1 dB, taking a 1.7 dB room to 12.6 dB purely by
+     * standing there.
+     *
+     * A door leaf sits ACROSS the middle of its voxel, so the halfway split puts material in BOTH
+     * halves and leaving the cell crosses one of them whichever way you go. Every other cell has
+     * to split at halfway -- it cannot know where you are standing. The one holding your head
+     * can, and cmm_fld_set_ear_cell is that: the same six numbers measured from the ear.
+     *
+     * Both directions are checked, because either alone is passed by a broken model: charging
+     * nothing passes the first, charging everything passes the second. */
+    {
+        float sameSide[2], farSide[2];
+        for (int split = 0; split <= 1; split++) {
+            memset(solid, 0, sizeof solid);
+            for (int x = 0; x < W; x++) for (int z = 0; z < W; z++) solid[x][0][z] = 1;
+            ovr_clear();
+            ovr_plane(0, 32, 0, 0.0f, 0.0f);        /* a leaf across the middle: BOTH X halves */
+            cmm_fld *g = cmm_fld_create(W/SX, H/SY, W/SZ, SX, SY, SZ);
+            cmm_fld_recentre(g, 32, 4, 32);
+            fill_all(g);
+            /* The ear stands at x=32.7 -- inside the leaf's cell, on its +X side. Split there and
+             * the whole leaf is behind you: nothing between you and +X, all of it toward -X. */
+            if (split) cmm_fld_set_ear_cell(g, 32, 2, 32, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+            cmm_fld_solve(g, 32.7f, 2.5f, 32.5f);
+            sameSide[split] = cmm_fld_sample_db(g, 36.5f, 2.5f, 32.5f);   /* your side of the leaf */
+            farSide[split]  = cmm_fld_sample_db(g, 26.5f, 2.5f, 32.5f);   /* through the leaf */
+            cmm_fld_destroy(g);
+        }
+        ovr_clear();
+        ckf("standing in a leaf, YOUR side of it is open", sameSide[1] < 2.0f,
+            "%.2f dB with the ear split, %.1f dB with the halfway one — in game 1.7 vs 12.6",
+            sameSide[1], sameSide[0]);
+        ckf("...and the far side is still blocked", farSide[1] > 40.0f,
+            "%.1f dB through the leaf", farSide[1]);
+        ckf("...and the halfway split is what got it wrong", sameSide[0] > 5.0f,
+            "%.1f dB toward a speaker on your own side of the leaf", sameSide[0]);
+    }
+
     /* ── and it never vanishes: unreachable reads as silent, not as absent ───────────── */
     memset(solid, 1, sizeof solid);                       /* seal the listener in solid rock */
     for (int y = 1; y <= 2; y++) solid[32][y][32] = 0;

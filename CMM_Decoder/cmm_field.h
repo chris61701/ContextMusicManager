@@ -45,7 +45,7 @@ extern "C" {
 #endif
 
 /* Bumped on any breaking change; the managed side checks it on load. */
-#define CMM_FLD_ABI 4
+#define CMM_FLD_ABI 5
 CMM_FLD_API int cmm_fld_abi(void);
 
 typedef struct cmm_fld cmm_fld;
@@ -103,6 +103,26 @@ CMM_FLD_API int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz);
 CMM_FLD_API void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
                                   float tnx, float tny, float tnz,
                                   float tpx, float tpy, float tpz);
+
+/* THE CELL THE EAR IS IN, SPLIT AT THE EAR RATHER THAN AT ITS MIDDLE.
+ *
+ * Every other cell splits its material at the halfway plane, which is the only thing it can do:
+ * a cell does not know where you are standing. The cell you ARE standing in does, and the
+ * difference is the whole of "walking into a doorway occludes a speaker in my own room".
+ *
+ * A door leaf sits across the MIDDLE of its voxel, so both halves hold material and leaving the
+ * cell crosses one of them whichever way you go -- measured in game at 10.1 dB in every
+ * direction, turning a 1.7 dB room into a 12.6 dB one just by standing in the doorway. Splitting
+ * at the ear instead puts the leaf entirely on one side of you: behind you it costs nothing, in
+ * front of you it costs the whole leaf rather than half.
+ *
+ * Six transmissions as usual, but measured from the ear's own position, and they do NOT have to
+ * compose back to the cell's material -- that rule is about routes passing THROUGH a cell, and a
+ * route seeded here starts inside it. Applied for one solve and then put back; the stored
+ * geometry is untouched. Pass cx/cy/cz outside the window, or never call it, to disable. */
+CMM_FLD_API void cmm_fld_set_ear_cell(cmm_fld *f, int cx, int cy, int cz,
+                                      float tnx, float tny, float tnz,
+                                      float tpx, float tpy, float tpz);
 
 /* Mark the cells covering a block region as needing geometry again (a door swung, a wall broke,
  * a chunk arrived). Cheap: it only queues a re-read, it never touches the field. */

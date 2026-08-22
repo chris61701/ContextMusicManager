@@ -101,6 +101,11 @@ struct cmm_fld {
      * The honest bottom line: about 22% more than the three-face model, for twice the numbers and
      * the three defects it fixes. The flood runs on the scheduler thread, not Unity's. */
     short *m6;                   /* [cell*6 + CM_*]: -X -Y -Z +X +Y +Z, quarter-dB */
+
+    /* The ear's own cell, split at the EAR instead of at the cell's middle. Swapped into m6 for
+     * the duration of one solve and put back after, so the stored geometry stays the reader's. */
+    short earOvr[6];
+    int   earCx, earCy, earCz, earHas;
     /* NEVER READ vs NEEDS RE-READING. These are not the same thing and conflating them cost a
      * 15 dB drop-out every time a door moved.
      *
@@ -367,6 +372,16 @@ void cmm_fld_set_cell(cmm_fld *f, int cx, int cy, int cz,
     if (wasNeed && f->pending > 0) f->pending--;
 }
 
+void cmm_fld_set_ear_cell(cmm_fld *f, int cx, int cy, int cz,
+                          float tnx, float tny, float tnz,
+                          float tpx, float tpy, float tpz) {
+    if (!f) return;
+    f->earCx = cx; f->earCy = cy; f->earCz = cz;
+    f->earHas = in_win(f, cx, cy, cz);
+    f->earOvr[CM_NX] = t_q(tnx); f->earOvr[CM_NY] = t_q(tny); f->earOvr[CM_NZ] = t_q(tnz);
+    f->earOvr[CM_PX] = t_q(tpx); f->earOvr[CM_PY] = t_q(tpy); f->earOvr[CM_PZ] = t_q(tpz);
+}
+
 void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
     if (!f) return;
     if (radiusBlocks < 0) radiusBlocks = 0;
@@ -437,6 +452,15 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
     int bx = (int)floorf(lx), by = (int)floorf(ly), bz = (int)floorf(lz);
     int scx = b2c(bx, f->stepX), scy = b2c(by, f->stepY), scz = b2c(bz, f->stepZ);
     if (!in_win(f, scx, scy, scz)) { f->reached = 0; return 0; }
+
+    /* SWAP IN THE EAR'S OWN CELL. Only if the caller set it for THIS cell -- the ear moves
+     * between floods and a stale override would put a door's leaf on the wrong side of you. */
+    short earSave[6]; short *earSlot = NULL;
+    if (f->earHas && f->earCx == scx && f->earCy == scy && f->earCz == scz
+        && f->have[widx(f, scx, scy, scz)]) {
+        earSlot = f->m6 + widx(f, scx, scy, scz) * 6;
+        for (int e = 0; e < 6; e++) { earSave[e] = earSlot[e]; earSlot[e] = f->earOvr[e]; }
+    }
 
     /* SEED THE EIGHT CELLS AROUND THE LISTENER, NOT THE ONE IT STANDS IN.
      *
@@ -755,6 +779,7 @@ int cmm_fld_solve(cmm_fld *f, float lx, float ly, float lz) {
      * for all of them; only the thin slab that just scrolled in carries its previous occupant's
      * value, and that slab is at the far edge of the window, past anything audible. Stale at the
      * rim for one flood interval beats silent everywhere. */
+    if (earSlot) for (int e = 0; e < 6; e++) earSlot[e] = earSave[e];   /* put the cell back */
     if (f->gen != gen0) return -1;
     /* Publish: the field just solved becomes current, the previous one stays available for the
      * caller's crossfade, and the oldest buffer is recycled for the next flood. */

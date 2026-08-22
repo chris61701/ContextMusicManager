@@ -14,7 +14,7 @@ namespace CMM
         private const string Dll = "CMM_Decoder";
 
         // Checked on first use so a stale DLL fails with a number rather than inside the flood.
-        internal const int ExpectedAbi = 4;
+        internal const int ExpectedAbi = 5;
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_fld_abi();
@@ -39,6 +39,13 @@ namespace CMM
         internal static extern void cmm_fld_set_cell(IntPtr f, int cx, int cy, int cz,
                                                      float tnx, float tny, float tnz,
                                                      float tpx, float tpy, float tpz);
+
+        // The cell the ear is in, split at the EAR rather than at the cell's middle — the only
+        // cell that can know where you are standing. See cmm_field.h.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_fld_set_ear_cell(IntPtr f, int cx, int cy, int cz,
+                                                         float tnx, float tny, float tnz,
+                                                         float tpx, float tpy, float tpz);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_fld_dirty(IntPtr f, int bx, int by, int bz, int radiusBlocks);
