@@ -42,6 +42,7 @@
     <Compile Include="LiveFiles.cs" />
     <Compile Include="LiveChurn.cs" />
     <Compile Include="Frequency.cs" />
+    <Compile Include="FavouriteReach.cs" />
     <Compile Include="Shims.cs" />
     <Compile Include="..\..\Harmony\TrackRotation.cs"  Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />

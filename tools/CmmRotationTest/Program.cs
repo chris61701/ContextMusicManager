@@ -63,6 +63,7 @@ internal static class Program
 
         EdgeCases.Run();
         Frequency.Run();
+        FavouriteReach.Run();
         LiveFiles.Run();
         LiveChurn.Run();
 
