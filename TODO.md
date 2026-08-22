@@ -166,11 +166,22 @@ verification — emitters are excluded there anyway.
 
 - [x] **Track cooldown / anti-repeat over the whole pool** *(requested 2026-08-20, same source)*.
   **Built 2026-08-21**, `Harmony/TrackRotation.cs`, offline harness `tools/CmmRotationTest`
-  (51 checks), in-game test pending. The bag, as asked: `TrackNoRepeatMemory` defaults to -1
-  = the whole folder, 0 = the old behaviour exactly, N = a recency window. Every "has to get
-  right" below is covered — favourites get `FavouriteWeight` turns per pass instead of being
-  flattened to one, bans skip without stalling a pass, added music is eligible at once, and
-  the pass is per context and session-only (deliberately not persisted). `cmm rotation`.
+  (231 checks incl. a real-filesystem section), **in-game test still pending**. The bag, as
+  asked: `TrackNoRepeatMemory` defaults to -1 = the whole folder, 0 = the old behaviour
+  exactly, N = a recency window. Every "has to get right" below is covered — bans skip
+  without stalling a pass, added music is eligible at once, and the pass is per context and
+  session-only (deliberately not persisted). `cmm rotation`.
+  - **`FavouriteWeight` was reworked in the same pass.** A strict bag would have flattened a
+    favourite to one play per pass like everything else, so it gets `FavouriteWeight` TURNS
+    per pass — and the weight is now SCALED to folder size (50-track reference, never scales
+    down), because as a raw multiplier it meant "every 45 min" at 40 tracks and "every 19 h"
+    at 1000. Measured constant at 5.7% of airtime from 50 tracks to 5000. Both the draw
+    weight and the allowance scale; scaling the allowance alone does nothing.
+  - Selection allocates NOTHING — `Select` walks the pool twice rather than building a
+    candidate array, which past ~10,600 tracks was a large-object-heap allocation per pick.
+  - **Radio does not use any of this** — see the code note in `RadioStationCatalog`: each
+    station is a fixed name-seeded permutation, so it already has the guarantee, and bans
+    and favourites never reach it.
   - **The load-bearing decision: commit at PLAY, not at pick.** Three of the six
     `PickNextFile` callers are speculative (the staged pin, the pre-staged advance, the
     missing-file replacement walk) and their picks are routinely discarded — a bag consumed
