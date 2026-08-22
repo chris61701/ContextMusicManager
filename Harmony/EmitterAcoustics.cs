@@ -493,7 +493,7 @@ namespace CMM
                     if (frac > 0.001f && frac < 0.999f) swing = Mathf.Clamp01(swing / frac);
                     else if (frac <= 0.001f) swing = da.Openness > 0.5f ? 1f : 0f;
                     float open = Mathf.Max(swing, dmgO);
-                    float shutLoss = (dmgO <= 0f && IsSealDoor(b, bv.type)) ? AirtightLoss : SolidLoss(b, bv);
+                    float shutLoss = DoorShutLoss(b, bv, dmgO);
                     return shutLoss * (1f - open);   // open ⇒ 0 (air), shut ⇒ full, mid ⇒ proportional
                 }
             }
@@ -525,8 +525,7 @@ namespace CMM
                 if (IsSwingingLeaf(b, bv.type)
                     && !b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return 0f;
                 float mdmg = DamageOpenness(b, bv, world, x, y, z);
-                if (mdmg <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
-                return SolidLoss(b, bv) * (1f - mdmg);
+                return DoorShutLoss(b, bv, mdmg) * (1f - mdmg);
             }
 
             if (b.IsSeeThrough(world, new Vector3i(x, y, z), bv))
@@ -590,10 +589,25 @@ namespace CMM
                 // through to here. Same test, applied where it was missing.
                 if (!b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return 0f;
                 float dmgOpen = DamageOpenness(b, bv, world, x, y, z);
-                if (dmgOpen <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
-                return SolidLoss(b, bv) * (1f - dmgOpen);
+                return DoorShutLoss(b, bv, dmgOpen) * (1f - dmgOpen);
             }
             return SolidLoss(b, bv);
+        }
+
+        // WHAT A SHUT DOOR IS MADE OF. The three branches that price one -- mid-swing, model-entity
+        // and at-rest -- all asked SolidLoss and all exempted the seal class, so they now share this.
+        //
+        // Two of them are reached by things that are NOT doors (the model-entity branch prices every
+        // closet and bookcase in the game), so the cap is gated on IsSwingingLeaf. A metal WALL must
+        // stay at 1.0; it is only a metal DOOR that is being told it is not one. See
+        // WorldEmitterDoorMaxLoss for the measurement that prompted it.
+        private static float DoorShutLoss(Block b, BlockValue bv, float damageOpenness)
+        {
+            if (damageOpenness <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
+            float loss = SolidLoss(b, bv);
+            if (!IsSwingingLeaf(b, bv.type)) return loss;        // furniture: not a door, no cap
+            float cap = CMMConfig.WorldEmitterDoorMaxLoss;
+            return (cap > 0f && loss > cap) ? cap : loss;
         }
 
         // ── Seal-class doors (airtight when shut+undamaged; config name-prefix list) ─────────────────

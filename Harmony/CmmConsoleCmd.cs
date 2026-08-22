@@ -208,7 +208,8 @@ namespace CMM
                      + ".\n  If a dip survives OFF, the cause is not occlusion.";
             }
 
-            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew" || a == "aperture" || a == "swing") && p.Count > 2
+            if ((a == "detour" || a == "wall" || a == "pow" || a == "slew" || a == "aperture"
+                 || a == "swing" || a == "doormax") && p.Count > 2
                 && float.TryParse(p[2], System.Globalization.NumberStyles.Float,
                                   System.Globalization.CultureInfo.InvariantCulture, out float v))
             {
@@ -218,13 +219,16 @@ namespace CMM
                 else if (a == "pow") { was = CMMConfig.WorldEmitterFieldWallPow.ToString("0.00"); CMMConfig.WorldEmitterFieldWallPow = v; }
                 else if (a == "slew") { was = CMMConfig.WorldEmitterFieldSlewDb.ToString("0.0"); CMMConfig.WorldEmitterFieldSlewDb = v; }
                 else if (a == "aperture") { was = CMMConfig.WorldEmitterFieldAperturePow.ToString("0.00"); CMMConfig.WorldEmitterFieldAperturePow = v; }
+                else if (a == "doormax") { was = CMMConfig.WorldEmitterDoorMaxLoss.ToString("0.00"); CMMConfig.WorldEmitterDoorMaxLoss = v; }
                 else { was = CMMConfig.WorldEmitterDoorSwingFrac.ToString("0.00"); CMMConfig.WorldEmitterDoorSwingFrac = v; }
                 // wall/pow change what each BLOCK is worth, so the stored geometry is now wrong and
                 // has to be read again; detour is used by the flood alone and lands by itself.
-                if (a == "wall" || a == "pow" || a == "aperture") FieldOcclusion.RereadAll();
+                // doormax is the same kind of thing — it changes what a shut door is made of.
+                bool reread = a == "wall" || a == "pow" || a == "aperture" || a == "doormax";
+                if (reread) FieldOcclusion.RereadAll();
                 return "field " + a + ": " + was + " -> " + v.ToString("0.00")
-                     + (a == "wall" || a == "pow" || a == "aperture" ? "  (re-reading the world, a second or two)"
-                                                  : "  (next flood, ~0.3 s)")
+                     + (reread ? "  (re-reading the world, a second or two)"
+                               : "  (next flood, ~0.3 s)")
                      + "\n  " + FieldOcclusion.Status();
             }
             return "field occlusion knobs — dial these by ear while the music plays:"
@@ -244,7 +248,9 @@ namespace CMM
                  + "      master bypass — off = clear line for every speaker (the bisect)"
                  + "\n  swing  " + CMMConfig.WorldEmitterDoorSwingFrac.ToString("0.00")
                  + "   how much of a door's swing the sound waits for. 0 = snap at the latch, 1 = the whole animation."
-                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew|aperture|swing <n>"
+                 + "\n  dmax   " + CMMConfig.WorldEmitterDoorMaxLoss.ToString("0.00")
+                 + "   ceiling on what a SHUT door is made of, so a metal door is not a metal wall. 0 = no cap; vault doors exempt."
+                 + "\n  usage: cmm field occl on|off   |   cmm field detour|wall|pow|slew|aperture|swing|doormax <n>"
                  + "\n         cmm acoustics ray";
 #else
             return "field occlusion: not built into this game version";

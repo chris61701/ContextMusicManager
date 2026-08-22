@@ -472,6 +472,24 @@ namespace CMM
         // fade bottoms out at "muffled", never "dead". Damage breaks the seal: any visible damage state
         // drops the door back to ordinary material acoustics. Hot-reloads.
         public static string WorldEmitterDoorSealTypes = "vaultDoor,vaultHatch";
+
+        // A DOOR IS NOT A WALL, AND A METAL DOOR IS NOT A METAL WALL. MaterialLoss reads a block's
+        // SurfaceCategory, and Mmetal answers 1.0 -- the model's maximum, identical to a steel wall.
+        // A shut sheet-metal roll-up garage door therefore blocked as hard as anything in the game:
+        // measured 2026-08-22 on rollUpDoor3x3White, wall 59.5 dB, and after shaping 158.9 dB of
+        // excess against a speaker 3.1 blocks away. That is silence, and it is a 3x3 hole in a wall.
+        //
+        // Real doors leak -- gaps at the jamb, at the threshold, around the panels. Project Acoustics
+        // clamps its occlusion for the same reason and says so: "forming a perfect acoustical seal is
+        // difficult and common doors have a degree of leakage". This is that clamp in this model's
+        // units. Applies ONLY to things that open (Place=Door/DrawBridge), so metal WALLS are
+        // untouched, and seal-class doors take AirtightLoss before the cap is consulted -- a vault
+        // door is the one thing in the game that genuinely does seal.
+        //
+        // 0.60 is 26.8 dB at the shipped wall curve: clearly the heaviest door in the game against a
+        // wood door's 20.2, and clearly not a wall's 52. Wood doors are 0.5 and so are unaffected.
+        // 0 disables the cap.
+        public static float  WorldEmitterDoorMaxLoss  = 0.6f;
         // ReverbRangeMult (≥1): the reverb's audible reach as a multiple of the dry Range. The reflections
         // carry FARTHER than the direct sound, so a brief step past the dry range in a connected cave doesn't
         // drop the tail (it fades continuously past the dry edge instead of cutting at it). Safe in the open:

@@ -729,6 +729,7 @@ If a door seals too late, raise WorldEmitterDoorGapClosed instead - globally, or
 one door type via WorldEmitterDoorGapOverrides. 0 here ignores the animation entirely and
 snaps at the latch, which is the only thing this is still good for."),
             F("WorldEmitterDoorSwingFrac",           "CMMConfig.WorldEmitterDoorSwingFrac",         1f),
+            F("WorldEmitterDoorMaxLoss",             "CMMConfig.WorldEmitterDoorMaxLoss",           0.6f),
 
             Gap(),
             B("WorldEmitterNativeAcoustics",         "CMMConfig.WorldEmitterNativeAcoustics",       false),
