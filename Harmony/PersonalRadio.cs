@@ -62,6 +62,47 @@ namespace CMM
         // one seamless noise per dial, never stacked bursts. Spontaneous joins (world entry, EOF
         // advance, stinger rejoin, unpause resync) never arm it.
         private static bool  _staticWanted;
+
+        // ── THE RECEIVER (spec: docs/plan-radio-tuning.md) ──────────────────────────────────────
+        // One signal value, 0..1, mirrored on both sides of the boundary: the native voice ramps
+        // it per sample (gain + treble + width), and this side tracks the SAME linear ramp so it
+        // can answer "where is it right now" when the player interrupts. Both move at the same
+        // rate from the same instant, so the two agree to within a tick without anything being
+        // read back across the boundary.
+        //
+        // Interrupting is the whole reason this is a rate rather than a duration. Press again half
+        // way through a tune-in and the leave starts from a half — not from full, which would swell
+        // upward before falling, and not over a fixed 260 ms, which would drag.
+        private static float _sigFrom = 1f, _sigTo = 1f, _sigRate, _sigT0;
+        private static float _searchUntil;    // realtime the minimum static floor expires
+        private static float _searchGiveUp;   // realtime the backstop abandons a wedged load
+        private static bool  _arriving;       // the new voice exists and is being brought up
+
+        private static float Signal
+        {
+            get
+            {
+                if (_sigRate <= 0f) return _sigTo;
+                float d = (Time.realtimeSinceStartup - _sigT0) * _sigRate;
+                return _sigTo > _sigFrom ? Mathf.Min(_sigTo, _sigFrom + d)
+                                         : Mathf.Max(_sigTo, _sigFrom - d);
+            }
+        }
+
+        private static float LeaveRate  => 1000f / Mathf.Max(20f, CMMConfig.RadioTuneLeaveMs);
+        private static float ArriveRate => 1000f / Mathf.Max(20f, CMMConfig.RadioTuneArriveMs);
+
+        // Aim the signal, and tell the voice to do the same. Starts from wherever the ramp has
+        // actually reached, never from the last target.
+        private static void AimSignal(long voiceId, float to, float ratePerSec)
+        {
+            _sigFrom = Signal; _sigTo = to; _sigRate = ratePerSec;
+            _sigT0 = Time.realtimeSinceStartup;
+            if (voiceId != 0)
+                CmmMixer.Instance?.SetVoiceReceiver(voiceId, to, ratePerSec,
+                                                    CMMConfig.RadioTuneDullness,
+                                                    CMMConfig.RadioTuneMononess);
+        }
         private static float _nextStaticAt;
 
         // ── Async start state ───────────────────────────────────────────────────────────────────
@@ -158,9 +199,14 @@ namespace CMM
         // Positions: Off, then the catalog's stations in sorted order; both keys wrap through Off.
         // A tuned name that's currently off air still holds its alphabetical slot, so stepping
         // away from a dead station lands where you'd expect.
+        // Which way the dial was last turned. A station that fails to open seeks ON in the same
+        // direction rather than reversing into the one the player was trying to leave.
+        private static int _lastStepDir = 1;
+
         internal static void Step(int dir)
         {
             if (!ContextMusicManager.inGame) return;
+            if (dir != 0) _lastStepDir = dir > 0 ? 1 : -1;
             EntityPlayerLocal player = GameManager.Instance?.World?.GetPrimaryPlayer();
             if (player == null) return;
 
@@ -202,6 +248,15 @@ namespace CMM
             _offAir = false;
             _staticWanted = false;
             StopStatic();
+            // OFF IS NOT A STATION, SO IT GETS NO TUNING. Chris's call: rolling onto Off goes
+            // silent at once — no leave ramp, no static, nothing to search for. The plain fade
+            // below is short enough to read as immediate and long enough not to click.
+            //
+            // Reset the receiver so the next station starts from nothing. That is also what gives
+            // "rolling off Off onto a station" its no-leave-phase behaviour for free: the leave
+            // is computed from the current signal, and the current signal is zero.
+            _sigFrom = _sigTo = 0f; _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
+            _arriving = false; _searchUntil = 0f; _searchGiveUp = 0f;
             Save();
             RefreshOverlayCaches();
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
@@ -469,9 +524,24 @@ namespace CMM
             // seek on a worker — see StartFromClock). A keypress never blocks the frame, rapid
             // dialing just re-aims the single in-flight start (FadeVoiceOut bumped _startGen),
             // and the old station can never keep playing under the new dial position.
-            FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
-            _nextStartFade = CMMConfig.ManualSkipFadeDuration;   // keypress-fast
-            _nextTick = 0f;                                      // dispatch next frame, not in ≤250 ms
+            // ── LEAVE ───────────────────────────────────────────────────────────────────────
+            // The receiver takes the signal down, which dulls and narrows the old station on its
+            // way out rather than just turning it down. The gain fade runs alongside over the
+            // SAME time so the voice actually retires — computed from where the signal is now, so
+            // interrupting a half-finished arrival fades from half and takes half as long.
+            float leaveSec = Mathf.Max(0.02f, Signal / LeaveRate);
+            AimSignal(_voiceId, 0f, LeaveRate);
+            FadeVoiceOut(leaveSec);
+            _nextStartFade = 0.01f;      // the receiver does the arriving; don't fade twice
+            _nextTick = 0f;              // dispatch next frame, not in ≤250 ms
+
+            // ── SEARCH ──────────────────────────────────────────────────────────────────────
+            // A floor on the static, restarted by every PRESS (so hammering the key gives one
+            // continuous search that settles a beat after you stop) but NOT by the auto-advance
+            // that skips a dead station — three dead folders in a row must not cost three floors.
+            _searchUntil = Time.realtimeSinceStartup + CMMConfig.RadioTuneMinStaticMs / 1000f;
+            _searchGiveUp = Time.realtimeSinceStartup + CMMConfig.RadioTuneGiveUpMs / 1000f;
+            _arriving = false;
             // A CLICK ON EVERY DIAL MOVE, and the right KIND of click. Powering the radio on is a
             // toggle going over centre; turning the knob one station is a detent dropping into a
             // groove. They are different objects and they get different sounds. It fires BEFORE
@@ -646,6 +716,30 @@ namespace CMM
                 Sfx(CmmMixer.SfxTuningStatic);
             }
 
+            // ── ARRIVE ──────────────────────────────────────────────────────────────────────
+            // The station is open and holding silent; the minimum has now expired. Bring it up —
+            // dull and mono under the static first, opening out as the signal rises — and let the
+            // static release against it rather than switching off underneath it.
+            if (_staticWanted && !_arriving && _voiceId != 0
+                && Time.realtimeSinceStartup >= _searchUntil)
+            {
+                _arriving = true;
+                AimSignal(_voiceId, 1f, ArriveRate);
+                _staticWanted = false;
+                StopStatic();
+            }
+            // The backstop. Only reached when a station neither opened nor errored — a wedged
+            // file rather than a missing one, which the failure path already handles by seeking
+            // on. Rather than sit in static for ever, move along in the direction of travel.
+            else if (_staticWanted && _voiceId == 0 && _searchGiveUp > 0f
+                     && Time.realtimeSinceStartup >= _searchGiveUp)
+            {
+                Log.Warning($"[CMM] Radio: '{_tunedName}' did not open in " +
+                            $"{CMMConfig.RadioTuneGiveUpMs:0} ms — seeking on.");
+                _searchGiveUp = 0f;
+                Step(_lastStepDir >= 0 ? 1 : -1);
+            }
+
             // Idle but on (world entry with a persisted on-state, a gain-wait retry, or it just
             // came back on air): join the broadcast. The carry re-arms a gated EOF advance.
             if (st.Ready) StartFromClock(st, AdvanceOverride: _advanceCarry);
@@ -783,8 +877,17 @@ namespace CMM
                 return;
             }
             _voiceId = id; _track = file; _gainApplied = gain;
-            _staticWanted = false;  // the dialed station is voicing — the tuning static ends
-            StopStatic();
+            // ── THE STATION IS OPEN, BUT NOT NECESSARILY AUDIBLE YET ────────────────────────
+            // Hold it at signal 0 — decoding, in step with the broadcast clock, and silent. The
+            // static keeps rolling until the minimum floor expires, and the tick starts the
+            // arrival then. This is what makes "it was already loaded" and "it took a second"
+            // sound the same: the floor is spent either way, and the station is genuinely there
+            // the whole time rather than being started late.
+            CmmMixer.Instance?.SetVoiceReceiver(id, 0f, 0f,
+                                                CMMConfig.RadioTuneDullness,
+                                                CMMConfig.RadioTuneMononess);
+            _sigFrom = _sigTo = 0f; _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
+            _arriving = false;
             _advanceCarry = null;   // consumed — the next idle start is a plain join
             ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if unmeasured
             Log.Out($"[CMM] Radio: '{station}' playing {Path.GetFileName(file)} @ {off:0}s " +

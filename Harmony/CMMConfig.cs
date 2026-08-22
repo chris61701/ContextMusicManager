@@ -177,6 +177,26 @@ namespace CMM
         // is 2122). The error was LowHz 350, which threw away everything below it — so what came
         // out was a midrange "shhh" with no body: neither the roar nor the hiss, which is why it
         // read as synthetic. Drop the low cut and the same code produces the real thing.
+        // ── Tuning between stations (spec: docs/plan-radio-tuning.md) ─────────────────────────
+        // Changing station runs LEAVE -> SEARCH -> ARRIVE. One signal value, 0..1, drives the
+        // station's gain, how much treble it keeps and how wide it is, and — inverted — the
+        // static. Welded to one number on purpose: a station that merely gets quieter sounds like
+        // a volume fade, and four curves tuned separately end up disagreeing.
+        //
+        // MinStaticMs is a FLOOR, not a duration. A slow file extends it; a file that was ready
+        // instantly still pays it, because tuning has to sound like tuning even when the next
+        // station happens to be loaded. Leave/Arrive are quoted at full scale and applied as a
+        // RATE, so interrupting a half-finished tune-in fades from half and takes half as long —
+        // a fixed duration drags on an early interrupt and snaps on a late one.
+        public static float  RadioTuneMinStaticMs = 900f;
+        public static float  RadioTuneLeaveMs     = 260f;
+        public static float  RadioTuneArriveMs    = 420f;
+        public static float  RadioTuneDullness    = 0.85f;   // 0 = no treble loss on the way in/out
+        public static float  RadioTuneMononess    = 1f;      // 0 = stays stereo the whole way
+        // Backstop only, so a wedged open/seek cannot strand the player in static for ever. A
+        // merely SLOW station is waited for; abandoning one that is still working is worse.
+        public static float  RadioTuneGiveUpMs    = 10000f;
+
         public static float  RadioStaticVolume  = -1f;
         public static float  RadioStaticLowHz   = 50f;     // was 350 — the body of the roar lives here.
                                                            // 50 is the C's own floor (sfx_capture_static_tone

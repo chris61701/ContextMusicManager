@@ -153,6 +153,21 @@ typedef struct mix_voice {
     int    emitPtFlags[MAX_EMIT_PTS]; /* emitter (v34): per-point render flags (bit0 = ham class) */
     int    emitPtCount;         /* number of active positions in emitPts */
     float  emitMinDist, emitMaxDist;  /* emitter: full volume within min; silent beyond max */
+
+    /* ── THE RECEIVER (v46): one number, four destinations ───────────────────────────────────
+     * `recvSig` is signal strength, 0..1, and it drives the station's gain, how much treble it
+     * keeps, and how wide it is. The tuning static's level is the same number inverted, applied
+     * on the managed side. Tying them together is the point: a station that merely gets quieter
+     * sounds like a volume fade, and four separately-tuned curves can disagree with each other.
+     *
+     * Ramped like the other gains, and by RATE rather than duration -- interrupting a tune-in
+     * half way must fade from half, taking half as long, or an early interrupt drags and a late
+     * one snaps. Off by default (`recvOn` 0), so every voice that is not a radio is untouched
+     * and pays one predictable branch. */
+    int    recvOn;                                  /* 0 = ordinary voice, no receiver stage */
+    float  recvSig, recvSigTarget, recvSigStep;     /* 0..1 signal, ramped per frame */
+    float  recvDull, recvMono;                      /* how much dulling / collapsing to apply */
+    float  recvLp[2];                               /* the dulling one-pole's state, per channel */
 } mix_voice;
 
 /* ── Mixer singleton state (the managed CmmMixer was a singleton too) ──────*/
@@ -517,6 +532,43 @@ static int render_voice_add(mix_voice* v, int n) {
         }
         int o = f * g_busChannels;
         float g = v->gain * v->trackGain;
+        /* ── THE RECEIVER STAGE ────────────────────────────────────────────────────────────
+         * A station leaving or arriving does not just change level: it loses its treble and its
+         * stereo first, which is what makes it read as tuning rather than as a fade. Emitters
+         * are excluded -- they are a placed speaker heard across a room, not something being
+         * tuned, and their own coloration already lives in cmm_out. */
+        if (v->recvOn && !emit) {
+            if (v->recvSigStep != 0.0f) {
+                v->recvSig += v->recvSigStep;
+                if ((v->recvSigStep > 0.0f && v->recvSig >= v->recvSigTarget) ||
+                    (v->recvSigStep < 0.0f && v->recvSig <= v->recvSigTarget))
+                { v->recvSig = v->recvSigTarget; v->recvSigStep = 0.0f; }
+            }
+            float s = v->recvSig < 0.0f ? 0.0f : (v->recvSig > 1.0f ? 1.0f : v->recvSig);
+            float l = g_voiceStereo[o], r = g_voiceStereo[o + 1];
+            if (v->recvDull > 0.001f) {
+                /* Treble opens as the signal comes up. A ONE-POLE, deliberately: every filter in
+                 * this codebase is one, and a bench that settles a corner against anything
+                 * steeper hands over numbers that do not survive the port. Coefficient is
+                 * recomputed per frame, which is a cheap expf we can afford on one voice --
+                 * interpolating it per block would zipper on a fast interrupt. */
+                float fc = 300.0f + (16000.0f - 300.0f) * powf(s, 1.0f + 2.0f * v->recvDull);
+                float ny = (float)g_busRate * 0.45f;
+                if (fc > ny) fc = ny;
+                float k = 1.0f - expf(-6.2831853f * fc / (float)g_busRate);
+                v->recvLp[0] += k * (l - v->recvLp[0]); l = v->recvLp[0];
+                v->recvLp[1] += k * (r - v->recvLp[1]); r = v->recvLp[1];
+            }
+            if (v->recvMono > 0.001f) {
+                /* Stereo needs about 20 dB more signal than mono in a real receiver, so it goes
+                 * long before the station does. Mid/side, so a mono source is untouched. */
+                float w = 1.0f - v->recvMono * (1.0f - s);
+                float m = 0.5f * (l + r), sd = 0.5f * (l - r) * w;
+                l = m + sd; r = m - sd;
+            }
+            g_voiceStereo[o] = l; g_voiceStereo[o + 1] = r;
+            g *= s;
+        }
         if (emit) {
             /* Dry mono into this voice's SLOT lane (accumulated: two voices sharing a slot during
              * a track-advance crossfade sum; different stations land in different lanes). */
@@ -1811,6 +1863,42 @@ CMM_API void cmm_mix_set_master(float vol) { g_masterVol = vol; }
  * pushes the game's music slider × the Radio context's own volume, so the radio scales only to the
  * slider (and its context level), not VolumeModifier or the current music context's volume. */
 CMM_API void cmm_mix_set_emitter_master(float vol) { g_emMasterVol = vol < 0.0f ? 0.0f : vol; }
+
+/* v46 — arm or update a voice's RECEIVER stage: signal strength 0..1 driving gain, treble and
+ * stereo width together, so a station leaves and arrives the way a radio does instead of just
+ * changing level. See the mix_voice fields for why the three are welded to one number.
+ *
+ * `ratePerSec` is a RATE, not a duration: 1.0 means a full 0->1 move takes one second, and a move
+ * from 0.5 takes half of it. That is what makes interrupting a half-finished tune-in sound right;
+ * a fixed duration drags on an early interrupt and snaps on a late one. Pass <= 0 to jump.
+ *
+ * Idempotent, so managed can push it every tick without re-arming anything. Returns 0 if the voice
+ * has already retired, which is the normal race when a station is abandoned mid-load. */
+CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePerSec,
+                                       float dullness, float mononess) {
+    int i, found = 0;
+    float s = signal < 0.0f ? 0.0f : (signal > 1.0f ? 1.0f : signal);
+    mix_lock(&g_lock);
+    for (i = 0; i < g_voiceCount; i++) {
+        mix_voice* v = g_voices[i];
+        if (v->id != id) continue;
+        if (!v->recvOn) {                 /* first arm: start where we were told, not at zero */
+            v->recvOn = 1; v->recvSig = s;
+            v->recvLp[0] = v->recvLp[1] = 0.0f;
+        }
+        v->recvDull = dullness < 0.0f ? 0.0f : (dullness > 1.0f ? 1.0f : dullness);
+        v->recvMono = mononess < 0.0f ? 0.0f : (mononess > 1.0f ? 1.0f : mononess);
+        v->recvSigTarget = s;
+        if (ratePerSec <= 0.0f) { v->recvSig = s; v->recvSigStep = 0.0f; }
+        else {
+            float per = ratePerSec / (float)g_busRate;          /* units of signal per frame */
+            v->recvSigStep = (s > v->recvSig) ? per : (s < v->recvSig ? -per : 0.0f);
+        }
+        found = 1; break;
+    }
+    mix_unlock(&g_lock);
+    return found;
+}
 
 /* Update a live voice's per-track gain in place (loudness settle / trim key). */
 CMM_API int cmm_mix_set_voice_gain(long long id, float trackGain, float rampSeconds) {

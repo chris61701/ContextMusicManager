@@ -451,6 +451,12 @@ mid-hash — so dial between stations while editing and hear each change immedia
                   lower = dull rumble.
   StaticCrackle : 0..1 sputter depth. 0 = smooth ""shhh""; 1 = full pops-and-sputter radio
                   crackle (random dropouts a few ms to ~30 ms long)."),
+            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              900f),
+            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  260f),
+            F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 420f),
+            F("RadioTuneDullness",                   "CMMConfig.RadioTuneDullness",                 0.85f),
+            F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f),
+            F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f),
             F("RadioStaticVolume",                   "CMMConfig.RadioStaticVolume",                 -1f),
             F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  50f),
             F("RadioStaticHighHz",                   "CMMConfig.RadioStaticHighHz",                 2100f),
