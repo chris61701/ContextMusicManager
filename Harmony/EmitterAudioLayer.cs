@@ -88,6 +88,9 @@ namespace CMM
         private struct PublishedExtra { public float Value; public float At; }
         private static readonly Dictionary<Vector3i, PublishedExtra> _publishedExtra = new Dictionary<Vector3i, PublishedExtra>();
         private static float _doorEventAt = -999f;   // last door toggle (see NotifyAcousticChange)
+        // The _doorEventAt value ReportDoorLatency has already printed. Separate from the timestamp
+        // itself so the diagnostic cannot expire the door exemption -- see ReportDoorLatency.
+        private static float _doorLatencyLoggedFor = -999f;
         // A door moved just now, or is still moving. The field's slew stands aside for this: a
         // door is a discrete act the player performed and watched, and the sound belongs with the
         // latch rather than a second and a half later.
@@ -127,8 +130,23 @@ namespace CMM
         internal static void ReportDoorLatency()
         {
             if (_doorEventAt < 0f) return;
+            // ONCE PER DOOR, WITHOUT TOUCHING _doorEventAt.
+            //
+            // This used to clear _doorEventAt to get the once-per-door behaviour, which meant a
+            // DIAGNOSTIC was silently switching off the door exemption -- and only on the field
+            // path, because FieldOcclusion.SchedulerTick is this method's only caller. Two things
+            // read _doorEventAt: DoorMovingOrJustMoved (the field's dB slew exemption, 1.5 s) and
+            // doorWindow (the publish rise-limiter exemption, 1 s). Both exist so a door SNAPS
+            // instead of being eased in like ordinary model noise. Clearing the timestamp 33-79 ms
+            // after the latch collapsed both to AnyDoorAnimating, so the field spent the rest of
+            // the swing rate-limited while legacy and native -- which never call this -- kept
+            // their full windows. That is a door that slams on one model and oozes on the other.
+            //
+            // Keyed on the event timestamp instead: a new toggle stamps a new _doorEventAt, so the
+            // line still prints once per door and the exemption survives its own measurement.
+            if (_doorLatencyLoggedFor == _doorEventAt) return;
+            _doorLatencyLoggedFor = _doorEventAt;
             float ms = (CmmClock.Now - _doorEventAt) * 1000f;
-            _doorEventAt = -999f;                       // once per door, not once per flood
             if (ms >= 0f && ms < 5000f)
                 Log.Out($"[CMM] door -> occlusion: {ms:0} ms (latch to published field, "
                       + $"frame {Time.unscaledDeltaTime * 1000f:0} ms)");
