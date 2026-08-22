@@ -175,6 +175,21 @@ All notable changes to Context Music Manager are documented here.
   - `cmm rotation` shows how far each context is through its pass and how many tracks are
     still to come; `cmm rotation reset` starts them over.
 
+- **`FavouriteWeight` now means the same thing whatever the size of your library.** It used
+  to be a plain multiplier, which quietly made it useless in exactly the libraries it
+  matters most in: measured, one favourite at the default weight of 3 came round every
+  ~45 minutes in a 40-track folder and every ~19 hours in a 1000-track one. Same setting,
+  same intent, completely different result. It is now scaled to the size of the folder, so
+  3 is roughly once an hour of play whether the folder holds fifty tracks or five thousand,
+  and a favourite takes about the same share of the music at every size.
+  - **Nothing changes for folders of 50 tracks or fewer** — it never scales down, so no
+    existing setup can lose emphasis it already had. Only larger folders are affected, and
+    only by giving the favourite more turns.
+  - Raise the number for more, lower it toward 1 for less; 1 is still no preference at all.
+  - Applies to `Random` as well as `RandomNoRepeat`, so the two agree.
+  - If you already have a `settings.xml`, the explanatory comment next to this setting will
+    still be the old one — existing files are never rewritten, only added to.
+
 - **CMM writes its own config files instead of shipping them.** `settings.xml`, `radio.xml`
   and `contexts.xml` are no longer in the download; they are created on first run with the
   documented defaults, exactly as before. The point is what happens on the NEXT update:

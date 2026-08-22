@@ -620,10 +620,14 @@ namespace CMM
         // it only takes audible effect when LoudnessNormalizationEnabled is true.
         public static float UserTrimStep = 0.1f;
         // How much more often a favourited track is picked in the random track orders
-        // (weight multiplier; 1 = no preference). Sequential order ignores favourites.
-        // Under RandomNoRepeat it is also the number of turns a favourite gets per pass
-        // through the library — see TrackRotation, which would otherwise flatten a
-        // favourite to one play per cycle like everything else.
+        // (1 = no preference). Sequential order ignores favourites.
+        //
+        // SCALED TO THE FOLDER, not a raw multiplier — see TrackRotation.ScaledWeight.
+        // A plain multiplier meant this setting did something completely different
+        // depending on library size (measured: weight 3 gave a favourite a turn every
+        // ~45 minutes in a 40-track folder and every ~19 hours in a 1000-track one).
+        // Calibrated so weight 3 is roughly once an hour of play at any size, and it
+        // never scales DOWN, so small folders behave exactly as they always did.
         public static float FavouriteWeight = 3f;
 
         // How many recently played tracks a context refuses to repeat, under the

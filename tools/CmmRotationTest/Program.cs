@@ -43,6 +43,7 @@ internal static class Program
         OnlyThePlayingTrackIsUnbanned();
         FavouritesGetMoreTurnsPerPass();
         FavouriteWeightBelowOneIsOneTurn();
+        WeightScalesWithTheFolder();
 
         Section("Picking is not playing");
         SpeculativePicksDoNotDrainTheBag();
@@ -291,6 +292,47 @@ internal static class Program
         Check("FavouriteWeight 0 clamps to one turn", TrackRotation.Allowance(0f) == 1);
         Check("FavouriteWeight 1 is one turn", TrackRotation.Allowance(1f) == 1);
         Check("FavouriteWeight 2.6 rounds to 3", TrackRotation.Allowance(2.6f) == 3);
+    }
+
+    // The weight is scaled to the folder so it means the same share of the music at any
+    // library size. The rule that makes this safe to ship is that it NEVER scales down:
+    // no existing small-folder setup can lose favourite emphasis it already had.
+    static void WeightScalesWithTheFolder()
+    {
+        const int Ref = TrackRotation.WeightReferencePool;
+        Check($"below the {Ref}-track reference the raw weight stands, unchanged",
+              TrackRotation.ScaledWeight(3f, 10) == 3f && TrackRotation.ScaledWeight(3f, 49) == 3f,
+              TrackRotation.ScaledWeight(3f, 10).ToString());
+        Check("at the reference size it is exactly the raw weight",
+              TrackRotation.ScaledWeight(3f, Ref) == 3f, TrackRotation.ScaledWeight(3f, Ref).ToString());
+        Check("above it, it scales with the folder",
+              TrackRotation.ScaledWeight(3f, 500) == 30f && TrackRotation.ScaledWeight(3f, 5000) == 300f,
+              TrackRotation.ScaledWeight(3f, 500).ToString());
+        Check("it never scales DOWN, whatever the size",
+              Enumerable.Range(1, 400).All(n => TrackRotation.ScaledWeight(3f, n) >= 3f));
+        Check("weight 1 (no preference) is never scaled into a preference",
+              TrackRotation.ScaledWeight(1f, 100000) == 1f, TrackRotation.ScaledWeight(1f, 100000).ToString());
+        Check("weight below 1 is left alone too",
+              TrackRotation.ScaledWeight(0.5f, 100000) == 0.5f);
+
+        // And it has to reach the pool through Select, not just exist as a helper: in a
+        // 500-track folder a weight-3 favourite should take ~30 turns per pass, not 3.
+        string[] pool = Pool(500);
+        string favourite = pool[0];
+        var rot = new TrackRotation();
+        string last = null;
+        int plays = 0;
+        TrackRng rng = Rng(31337);
+        for (int i = 0; i < 530; i++)   // one pass = 499 ordinary + ~30 favourite
+        {
+            string p = rot.Select(pool, TrackRotation.WholePool, last, null,
+                                  x => x == favourite, 3f, rng);
+            rot.Commit(p, TrackRotation.WholePool);
+            if (p == favourite) plays++;
+            last = p;
+        }
+        Check("a weight-3 favourite in a 500-track folder gets ~30 turns in a pass, not 3",
+              plays >= 25 && plays <= 31, plays + " turns");
     }
 
     // ── Picking is not playing ───────────────────────────────────────────────

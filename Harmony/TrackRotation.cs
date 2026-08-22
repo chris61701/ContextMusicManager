@@ -208,8 +208,9 @@ namespace CMM
             // refill on every play would just spin the cycle counter.
             if (pool.Length == 1) return (banned != null && banned(pool[0])) ? null : pool[0];
 
-            int allowance = Allowance(favouriteWeight);
-            float w = favouriteWeight < 1f ? 1f : favouriteWeight;
+            float w = ScaledWeight(favouriteWeight, pool.Length);
+            int allowance = Allowance(w);
+            if (w < 1f) w = 1f;
 
             double total;
             int keep, playable;
@@ -301,11 +302,40 @@ namespace CMM
             return last;
         }
 
-        // A favourite's turns per pass. FavouriteWeight is a float because it is a weight
-        // in the single roll below; as an allowance it has to be a whole number of plays,
-        // so 3.0 means "three turns per pass through the library".
-        internal static int Allowance(float favouriteWeight)
-            => favouriteWeight < 1f ? 1 : (int)(favouriteWeight + 0.5f);
+        // ── FavouriteWeight scales with the folder ────────────────────────────
+        // A raw multiplier means completely different things at different library sizes,
+        // which made the setting almost useless in exactly the libraries it matters most
+        // in. MEASURED, one favourite at weight 3: in a 40-track folder it came round
+        // every ~13 tracks (about 45 minutes of play); in a 1000-track folder every ~333
+        // (about 19 hours), because 3x of one-in-a-thousand is still one-in-a-thousand.
+        // Same setting, same intent, wildly different result.
+        //
+        // So the weight is calibrated against a REFERENCE folder size and scaled from
+        // there, which makes it mean the same share of the music everywhere: at weight 3
+        // a favourite comes round roughly once an hour of play whether the folder holds
+        // fifty tracks or fifty thousand.
+        //
+        // It never scales DOWN. Below the reference size the raw weight stands, so no
+        // existing small-folder setup changes at all — this can only ever give a
+        // favourite more turns than it had, never fewer.
+        internal const int WeightReferencePool = 50;
+
+        internal static float ScaledWeight(float favouriteWeight, int poolSize)
+        {
+            if (favouriteWeight <= 1f || poolSize <= WeightReferencePool) return favouriteWeight;
+            float scaled = favouriteWeight * poolSize / WeightReferencePool;
+            return scaled < favouriteWeight ? favouriteWeight : scaled;
+        }
+
+        // A favourite's turns per pass. The weight is a float because it is also the
+        // weight in the draw; as an allowance it has to be a whole number of plays.
+        //
+        // BOTH have to use the scaled value. The allowance alone would do nothing: a
+        // favourite drawn at weight 3 out of a thousand is picked 0.3% of the time, so it
+        // would never reach a 60-turn allowance before the pass ended. The draw rate is
+        // what it actually gets; the allowance is what stops it exceeding that.
+        internal static int Allowance(float scaledWeight)
+            => scaledWeight < 1f ? 1 : (int)(scaledWeight + 0.5f);
 
         // ── The weighted roll ─────────────────────────────────────────────────
         // Uniform over the candidates, except that banned tracks are excluded and each
@@ -319,7 +349,10 @@ namespace CMM
             if (banned == null && favourite == null)
                 return candidates[Index(rng, candidates.Length)];
 
-            float w = favouriteWeight < 1f ? 1f : favouriteWeight;
+            // Same folder-size scaling as the bag, so plain Random and RandomNoRepeat give
+            // a favourite the same share of the music rather than differing by library size.
+            float w = ScaledWeight(favouriteWeight, candidates.Length);
+            if (w < 1f) w = 1f;
             int eligible = 0, favs = 0;
             for (int i = 0; i < candidates.Length; i++)
             {

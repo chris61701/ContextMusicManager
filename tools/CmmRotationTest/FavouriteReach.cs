@@ -88,22 +88,51 @@ internal static class FavouriteReach
         Console.WriteLine($"                         mean     {r.MeanGap,6:F0} tracks = {Hours(r.MeanGap)}");
         Console.WriteLine($"                         longest  {r.MaxGap,6:F0} tracks = {Hours(r.MaxGap)}");
 
-        Program.Check("the favourite really does get FavouriteWeight turns per pass",
-                      Math.Abs(perPass - 3.0) < 0.15, perPass.ToString("F2"));
-        Program.Check("which is 3x an ordinary track's share of the airtime",
-                      Math.Abs((double)r.Plays / Picks * Size / 3.0 - 1.0) < 0.1,
-                      (100.0 * r.Plays / Picks).ToString("F2") + "%");
+        int expectedTurns = TrackRotation.Allowance(TrackRotation.ScaledWeight(3f, Size));
+        Program.Check($"a weight-3 favourite in {Size} tracks gets its scaled {expectedTurns} turns per pass",
+                      Math.Abs(perPass - expectedTurns) < expectedTurns * 0.1,
+                      perPass.ToString("F1") + " vs " + expectedTurns);
 
-        // What would you have to set the weight to?
+        // THE POINT OF THE SCALING: the same setting, across library sizes.
         Console.WriteLine();
-        Console.WriteLine($"   The same favourite at other FavouriteWeight settings:");
+        Console.WriteLine($"   ONE favourite at the default FavouriteWeight 3, across folder sizes.");
+        Console.WriteLine($"   'unscaled' is what a raw multiplier gave — the same number meaning");
+        Console.WriteLine($"   something completely different depending on how much music you have:");
         Console.WriteLine();
-        Console.WriteLine($"     {"weight",6} | {"plays/pass",10} | {"% of plays",10} | {"median gap",12} | {"longest gap",12}");
+        Console.WriteLine($"     {"folder",7} | {"turns/pass",10} | {"% of plays",10} | {"median gap",11} | {"longest gap",11} | {"unscaled median",15}");
+        Console.WriteLine("     " + new string('-', 82));
+        var shares = new List<double>();
+        foreach (int size in new[] { 10, 25, 50, 100, 250, 1000, 5000 })
+        {
+            int picks = Math.Max(20000, size * 25);
+            Result x = Play(size, 1, 3f, TrackRotation.WholePool, picks, 4711);
+            // What the old raw multiplier would have given: allowance fixed at 3.
+            double unscaledGap = (size - 1 + 3.0) / 3.0;
+            int turns = (int)Math.Round((double)x.Plays / x.Passes);
+            double share = 100.0 * x.Plays / picks;
+            if (size >= TrackRotation.WeightReferencePool) shares.Add(share);
+            Console.WriteLine($"     {size,7:N0} | {turns,10} | {share,9:F2}% | "
+                            + $"{Hours(x.MedianGap),11} | {Hours(x.MaxGap),11} | {Hours(unscaledGap),15}");
+        }
+
+        // THE WHOLE POINT, asserted: the setting has to mean the same thing at every size
+        // at or above the reference. Below it the raw weight stands, which is why those
+        // rows are excluded — a 10-track folder cannot give one track only 5.7% of the
+        // airtime without giving it less than one turn per pass.
+        Program.Check("from the reference size upward, one setting = one constant share of the music",
+                      shares.Max() - shares.Min() < 0.3,
+                      $"{shares.Min():F2}%..{shares.Max():F2}% across 50..5000 tracks");
+
+        // What would you have to set the weight to, now that it scales?
+        Console.WriteLine();
+        Console.WriteLine($"   And the weight dial itself, in a {Size}-track folder:");
+        Console.WriteLine();
+        Console.WriteLine($"     {"weight",6} | {"turns/pass",10} | {"% of plays",10} | {"median gap",12} | {"longest gap",12}");
         Console.WriteLine("     " + new string('-', 62));
-        foreach (float w in new[] { 1f, 3f, 10f, 30f, 100f, 300f })
+        foreach (float w in new[] { 1f, 2f, 3f, 6f, 12f, 25f })
         {
             Result x = Play(Size, 1, w, TrackRotation.WholePool, Picks, 4711);
-            Console.WriteLine($"     {w,6:F0} | {(double)x.Plays / x.Passes,10:F1} | "
+            Console.WriteLine($"     {w,6:F0} | {(double)x.Plays / x.Passes,10:F0} | "
                             + $"{100.0 * x.Plays / Picks,9:F2}% | {Hours(x.MedianGap),12} | {Hours(x.MaxGap),12}");
         }
 
@@ -122,11 +151,16 @@ internal static class FavouriteReach
                             + $"{Hours(x.MedianGap),12} | {Hours(x.MaxGap),12}");
         }
 
-        // The worst case is structural and worth naming: the favourite can spend all its
-        // turns early in one pass and late in the next, so the longest gap approaches two
-        // passes even though the average is one third of a pass.
-        Program.Check("the longest gap can approach two passes — that is inherent to a bag",
-                      r.MaxGap > Size, r.MaxGap.ToString("F0"));
+        // The tail is structural and worth naming rather than hiding. A favourite's turns
+        // are drawn at random, so it can spend them early in one pass and late in the next
+        // and go quiet in between — the median gap is half an hour, the worst is a day.
+        // Evening that out would mean SCHEDULING the turns across the pass instead of
+        // sampling them, which is a different design; this just pins the shape so a
+        // regression that made the tail worse would show up.
+        Program.Check("the median gap is far shorter than the worst gap — the tail is skewed",
+                      r.MaxGap > r.MedianGap * 5, $"median {r.MedianGap:F0}, max {r.MaxGap:F0}");
+        Program.Check("but the worst gap is still well inside a single pass",
+                      r.MaxGap < Size, r.MaxGap.ToString("F0"));
         Console.WriteLine();
     }
 }

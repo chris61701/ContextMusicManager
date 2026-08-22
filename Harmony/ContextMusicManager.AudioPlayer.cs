@@ -979,7 +979,6 @@ namespace CMM
         private static readonly TrackRng  UnityRng       = () => UnityEngine.Random.Range(0f, 1f);
         private static TrackFlag BannedFlag    => LoudnessStore.BannedCount    > 0 ? _bannedFlag    : null;
         private static TrackFlag FavouriteFlag => LoudnessStore.FavouriteCount > 0 ? _favouriteFlag : null;
-        private static int FavouriteAllowance() => TrackRotation.Allowance(CMMConfig.FavouriteWeight);
 
         // ── cmm rotation ──────────────────────────────────────────────────────
         // Anti-repeat is invisible by construction: it changes WHICH track is picked,
@@ -1013,9 +1012,9 @@ namespace CMM
                   .Append(memory).Append(" others have played.");
 
             TrackFlag ban = BannedFlag, fav = FavouriteFlag;
-            int allowance = FavouriteAllowance();
-            if (fav != null && allowance > 1)
-                sb.Append("  favourites get ").Append(allowance).Append(" turns per pass.");
+            if (fav != null && CMMConfig.FavouriteWeight > 1f)
+                sb.Append("  favourites get ").Append(CMMConfig.FavouriteWeight.ToString("0.#"))
+                  .Append("x the airtime, scaled to each folder's size (turns per pass shown below).");
 
             string filter = string.IsNullOrEmpty(arg) ? null : arg;
             int shown = 0;
@@ -1028,12 +1027,18 @@ namespace CMM
                 // explicit per-context query still shows them.
                 if (filter == null && kv.Value.rotation.Plays == 0 && kv.Value.rotation.Cycle == 1) continue;
 
+                // The favourite allowance depends on how big THIS folder is, so it is
+                // computed per context rather than once for the report.
+                int allowance = TrackRotation.Allowance(
+                    TrackRotation.ScaledWeight(CMMConfig.FavouriteWeight, pool.Length));
                 TrackRotation r = kv.Value.rotation;
                 sb.Append(CMMSettingsWriter.NL).Append("  ").Append(kv.Key.PadRight(22))
                   .Append(" pass ").Append(r.Cycle)
                   .Append("   ").Append(r.RemainingIn(pool, memory, ban, fav, allowance))
                   .Append(" of ").Append(pool.Length).Append(" still to come")
                   .Append("   (").Append(r.Plays).Append(" played this pass)");
+                if (fav != null && allowance > 1)
+                    sb.Append("   favourites ").Append(allowance).Append("x");
                 shown++;
             }
             if (shown == 0)

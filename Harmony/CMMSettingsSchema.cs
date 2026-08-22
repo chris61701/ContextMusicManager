@@ -310,8 +310,15 @@ whose folder is removed goes silent (""off air"") and resumes when it returns.")
             B("NowPlayingEnabled",                   "CMMConfig.NowPlayingEnabled",                 false),
             Cmt(@"Per-press change to the current track's volume trim (linear factor)."),
             F("UserTrimStep",                        "CMMConfig.UserTrimStep",                      0.1f),
-            Cmt(@"How much more often a favourited track is picked (weight multiplier;
-1 = no preference)."),
+            Cmt(@"How much more often a favourited track is picked. 1 = no preference.
+
+Scaled to the size of the folder, so it means the same thing whatever the size of
+your library: at 3 a favourite comes round roughly once an hour of play, in a
+50-track folder and in a 5000-track one alike. Without that scaling the same number
+meant ""every 45 minutes"" in a small folder and ""every 19 hours"" in a big one,
+which made the favourite key close to useless in exactly the libraries it matters
+most in. Folders smaller than 50 tracks are unaffected — it never scales down.
+Raise it for more, lower it toward 1 for less. Sequential order ignores favourites."),
             F("FavouriteWeight",                     "CMMConfig.FavouriteWeight",                   3f),
             Cmt(@"Crossfade for the MANUAL next/prev/ban skips, in seconds — a keypress switches
 this fast regardless of the context's fadeintime. Automatic advances and
