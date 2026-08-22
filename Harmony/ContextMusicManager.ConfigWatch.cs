@@ -83,6 +83,11 @@ namespace CMM
             if (settingsChanged)
             {
                 CMMConfig.D("[CMM] settings changed — reloading.");
+                // MusicPath repoints EVERY relative context at once, and the contexts-changed
+                // branch below cannot see it: that one compares each context's `source`, which
+                // is a path relative to the root and is identical before and after. So capture
+                // the root here.
+                string oldPrimary = MusicRoots.Primary;
                 CMMConfigLoader.LoadSettings(ModPath);
                 // Re-read Sounds/ too: a swapped click file is heard without a restart, same
                 // contract as every other tunable in there.
@@ -97,6 +102,16 @@ namespace CMM
                 MusicRootsDiscovery.Discover(ModPath);
                 InvalidateAllPresence();
                 RadioStationCatalog.ForceRebuild();   // re-marshal cfg into Lua on the next scan tick
+
+                // A new MusicPath means every context is reading a different folder, so every
+                // anti-repeat pass is about tracks that are no longer in any pool. Eligibility
+                // sorts itself out (none of the remembered paths exist under the new root), but
+                // the pass counters would carry over and read as nonsense in `cmm rotation`.
+                if (!string.Equals(oldPrimary, MusicRoots.Primary, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (ContextCache c in cacheMap.Values) { c.rotation.Reset(); c.rotation.Cycle = 1; }
+                    CMMConfig.D("[CMM] MusicPath changed — anti-repeat passes restarted.");
+                }
             }
 
             if (contextsChanged)
@@ -148,6 +163,13 @@ namespace CMM
                         movedCache.lastPlayedFile = null;      // old source's track no longer belongs here
                         movedCache.resumePosition = 0f;
                         movedCache.lastLeftTime = -1f;
+                        // The anti-repeat pass was over the OLD folder. Nothing in it can be in
+                        // the new one, so eligibility is already right either way — but the pass
+                        // NUMBER would keep counting across two unrelated folders, and in window
+                        // mode the dead entries would sit in the window taking up slots that
+                        // should belong to the new folder's tracks.
+                        movedCache.rotation.Reset();
+                        movedCache.rotation.Cycle = 1;
                     }
                     // Covers a flip in EITHER direction (folder→playlist, playlist→folder,
                     // or a change of playlist file / folder); MakeScanItem branches on the

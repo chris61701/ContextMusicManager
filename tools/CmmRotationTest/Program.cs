@@ -52,6 +52,8 @@ internal static class Program
         Section("A library that changes underneath it");
         TracksAddedMidCycleGetATurn();
         TracksRemovedMidCycleDoNotStallIt();
+        GrowingPoolDuringARecursiveCrawl();
+        MovedTrackCountsAsNew();
 
         Section("Allocation");
         FreshCycleReturnsThePoolItself();
@@ -358,6 +360,64 @@ internal static class Program
         Check("music removed mid-pass does not stall the pass", after.Count == 60);
         Check("the pass completes and rolls over", rot.Cycle >= 2, "cycle " + rot.Cycle);
         Check("nothing that was deleted is ever picked", after.All(shrunk.Contains));
+    }
+
+    static void GrowingPoolDuringARecursiveCrawl()
+    {
+        // A subfolders="true" context on a huge tree is published INCREMENTALLY: the
+        // crawler swaps in a bigger snapshot every so often, for minutes, while music is
+        // already playing from the partial one. The pass must span that — a track that
+        // only appears at publish 4 still has to get its turn in the pass that started
+        // at publish 1, and nothing played from an earlier partial may come round again.
+        int[] stages = { 500, 2000, 6000, 10000 };
+        var rot = new TrackRotation();
+        var played = new List<string>();
+        string last = null;
+        int pick = 0;
+        foreach (int size in stages)
+        {
+            // Each publish is a NEW array holding a superset — exactly what the crawler does.
+            string[] pool = Pool(size);
+            for (int i = 0; i < 200; i++)
+            {
+                string p = rot.Select(pool, TrackRotation.WholePool, last, null, null, 3f, Rng(++pick));
+                rot.Commit(p, TrackRotation.WholePool);
+                played.Add(p); last = p;
+            }
+        }
+        Check("800 picks across four incremental publishes: not one repeat",
+              played.Distinct().Count() == played.Count,
+              played.Count - played.Distinct().Count() + " repeats");
+        Check("the pass survives the pool quadrupling under it", rot.Cycle == 1, "cycle " + rot.Cycle);
+        Check("tracks that only appeared in a later publish do get picked",
+              played.Any(p => Array.IndexOf(Pool(500), p) < 0));
+    }
+
+    static void MovedTrackCountsAsNew()
+    {
+        // The rotation is keyed on the file's PATH. The loudness store is keyed on content
+        // hash and so survives a move; this deliberately does not. A track moved to a new
+        // path is a track the pass has not seen, so it becomes eligible again — which is
+        // the same answer the pass gives for any newly-appeared file, and the only one
+        // that does not require hashing every candidate on the pick path.
+        string[] before = Pool(20);
+        var rot = new TrackRotation();
+        rot.Commit(before[3], TrackRotation.WholePool);
+
+        string[] after = (string[])before.Clone();
+        after[3] = "renamed_" + before[3];
+        string[] elig = rot.Eligible(after, TrackRotation.WholePool, null, null, null, 1);
+        Check("a track moved mid-pass is eligible again under its new name",
+              elig.Contains(after[3]) && elig.Length == after.Length);
+
+        // And the entry left behind for the old path is inert: it is not in the pool, so
+        // it cannot be picked and — the part that matters — it cannot stop the pass ending.
+        // 21 picks, not 20: the 20th empties the bag, the 21st is what refills it.
+        List<string> rest = Play(rot, after, TrackRotation.WholePool, 21, seedOffset: 11);
+        Check("the stale entry does not stall the pass", rot.Cycle == 2, "cycle " + rot.Cycle);
+        Check("...and never resurfaces as a pick", !rest.Contains(before[3]));
+        Check("all 20 live tracks still got their turn before the refill",
+              rest.Take(20).Distinct().Count() == 20, rest.Take(20).Distinct().Count().ToString());
     }
 
     // ── Allocation ───────────────────────────────────────────────────────────
