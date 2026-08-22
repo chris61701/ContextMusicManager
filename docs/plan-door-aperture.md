@@ -83,7 +83,48 @@ Note the aperture model gives this for free — `cos theta` coverage through `Fa
 fraction. Also from that paper, worth stealing: clamp maximum occlusion to ~30 dB, because real
 doors leak and a door that reaches silence reads as a mix bug. (Probably exempt `IsSealDoor`.)
 
-## THE ONE FACT THE WHOLE THING RESTS ON — test it before writing code
+## ANSWERED IN GAME 2026-08-22 12:08 — the measurement dies mid-swing, and the fallback is on the WRONG SIDE
+
+Run on `woodenGarageDoor3x3White`, player stationary throughout (ear identical to one decimal in
+all three reads), speaker 6.8 m away in the **−Z** direction.
+
+```
+shut       t=0.010  LEAF measured             split 0.38,0.68,0.48
+           published  -X 0.6  -Y 0.6  -Z 20.2   +X 0.6  +Y 0.6  +Z  .      excess 14.9 dB
+nt=0.295   t=0.038  LEAF rotation rot=2 axis Z  split 0.38,0.68,0.48
+           published  -X  .   -Y  .   -Z  .     +X  .   +Y  .   +Z 14.2    excess  0.0 dB
+nt=0.767   AIR (open=1.000)                                                excess  0.0 dB
+```
+
+**1. Mid-swing measurement FAILS.** `LEAF measured` at rest, `LEAF rotation` at nt=0.295. The leaf
+had risen 0.89 m of 3 m and was still fully spanning the cell, so "swung clear" is not the cause —
+this is `AnimatorDoorState` blanking the colliders for `0 <= nt < 0.99`, exactly as predicted.
+**The fallback design is the one to build.** Measure once while it is readable, remember the plane,
+keep the ramp as the scalar.
+
+**2. The shut measurement is excellent** — the full 20.2 dB on −Z, +Z free. Perfect sidedness, from
+the geometry, with no side test. That is the thing worth preserving, and it confirms the aperture
+model works when it has a plane to work with.
+
+**3. `RotationLeafBounds` PUT THE DOOR ON THE WRONG SIDE.** Measured says −Z; the fallback's slab at
+0.5 against a body at 0.480 says +Z. The real leaf sits at z < 0.48 in its voxel (prefab offset);
+the assumed plane at 0.5 is on the other side of the player from the real one. **This is the dip,
+and it is the whole of it**: the far-side speaker went from 14.9 dB occluded to *completely
+released* the instant the measurement dropped — 15 dB of erroneous un-occlusion, one frame after
+the latch, with the player standing still. The complaint arrives from the other direction too:
+whichever side is released, the other is wrongly charged.
+
+So the fallback is not a safety net, it is an active flip. Whatever replaces it must reuse the
+**measured** plane, never a synthesised one.
+
+**4. The ramp IS sampled at animation rate** — `DoorTrace` shows `open` moving every 30-60 ms
+(0.257, 0.750, 1.000...). Agent 1's uncertainty #4 is closed; the gradual fade has a live input.
+
+**5. `Span` confirmed live.** An ordinary door: `span=2m gap=0.81m thresh=0.70/0.15` reaches
+`open=1.000` at **nt=0.406** — 40% through its animation, because span is its *height* not its 1 m
+aperture. The garage door hits full at nt=0.767. Both are the 2x overstatement, measured.
+
+## The fact this rested on, and how it was tested
 
 `AnimatorDoorState.OnStateUpdate` (3.1 decompile, :119-129) calls `EnableColliders(false)` for the
 span `collideOffPercent <= nt < collideOnPercent`, whose defaults are **0 and 0.99**. Every door,
@@ -102,16 +143,24 @@ is ~6 s against a wood door's 0.53 s, so you can run a command during the swing 
 the design is live. If it falls back to `LEAF rotation`, the leaf has to come off the animated
 child's `Transform`/`Renderer.bounds` instead, and the fallback design below applies.
 
-## The one real disagreement, and the test above settles it
+## The one real disagreement — SETTLED by the test above
 
-- **If mid-swing bounds work:** measured coverage becomes the openness. One measure of "open", one
-  geometry, `DoorAcoustic` and `WorldEmitterDoorSwingFrac` retire. Elegant, and it collapses P2 by
-  construction rather than by tuning two curves to agree.
-- **If they do not:** measure the plane **once per door instance, while the leaf is thin** (the
-  first tick of a swing is valid — the hook is a postfix on `SetOpen`, so `open = 0.000` at
-  t=0.054 s), remember it, and keep the tuned `DoorAcoustic` ramp as the scalar. Fixed geometry,
-  moving number. Robust to the collider question by design, and it keeps a tuning surface that was
-  settled by ear.
+Mid-swing bounds do **not** work, so the elegant version (measured coverage *becomes* the openness,
+`DoorAcoustic` retires) is off the table. Build the fallback:
+
+**Measure the plane once per door instance, while the leaf is readable, remember it, and keep the
+tuned `DoorAcoustic` ramp as the scalar.** Fixed geometry, moving number.
+
+The measurement window is at rest, plus the first tick of a swing — the hook is a postfix on
+`SetOpen`, so `open = 0.000` at t=0.054 s, and the observed blackout starts at nt=0. Prefer the
+at-rest read: a door is shut and readable for the overwhelming majority of its life, and the
+recorded plane survives the swing that follows. A door never yet seen shut falls back to the ramp
+alone with **no** synthesised plane — given finding 3, no plane is strictly better than a guessed
+one.
+
+Accept a measurement only when the leaf is **thin** — smallest extent < ~0.25 block, other two
+> ~0.5 — which also gives hatches the right (vertical) aperture axis by measurement rather than by
+a name list, and rejects a prefab whose collider union swallowed the frame.
 
 Accept a measurement only when it is **thin** — smallest extent < ~0.25 block, other two > ~0.5.
 That one gate makes hatches come out right by measurement rather than by a name list (a hatch is

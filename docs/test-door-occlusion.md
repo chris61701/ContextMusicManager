@@ -46,7 +46,11 @@ PASS: `... LEAF measured  split a,b,c`, and in the `published` line **one** hori
 FAIL-A: `LEAF rotation rot=NN` — the prefab was unreachable, you are testing the fallback plane.
 FAIL-B: `no leaf`. FAIL-C: both halves of one axis carry a number — no sidedness at all.
 
-**4. THE ONE THAT DECIDES THE DESIGN — the ear cell MID-SWING.** Stand in the **garage door's**
+**4. THE ONE THAT DECIDED THE DESIGN — RUN 2026-08-22, RESULT: FAIL (mid-swing measurement dies).**
+Kept as a regression check; re-run it if the collider behaviour ever changes. See
+`plan-door-aperture.md` for the three findings it produced, including that the `RotationLeafBounds`
+fallback put the door on the *wrong side* and released a far-side speaker by 15 dB.
+The original step, verbatim: **the ear cell MID-SWING.** Stand in the **garage door's**
 cell (S6). Hit it. While it is still moving, run `cmm acoustics ray` twice.
 PASS: `LEAF measured` both times, and the `split` numbers **change** between the two reads.
 FAIL: `LEAF rotation` mid-swing when step 3 said `measured` at rest. That is Unity refusing to
