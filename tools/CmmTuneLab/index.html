@@ -62,6 +62,8 @@
     <button id="btnOnce">Once</button>
     <span id="phase" style="color:var(--dim)">idle</span>
     <span style="flex:1"></span>
+    <span id="status" style="font-size:11px;color:var(--faint)">press play to start audio</span>
+    <span style="width:12px"></span>
     <label style="color:var(--dim)">volume</label>
     <input type="range" id="vol" min="0" max="1" step="0.01" value="0.7" style="width:110px">
   </div>
@@ -292,22 +294,79 @@ const P = () => (live === "A" ? A : B);
 let ctx = null, node = null, srcNode = null, musicBuf = null, refBuf = null, refSrc = null;
 let started = false, looping = false;
 
+function setStatus(msg, bad) {
+  const s = document.getElementById("status");
+  s.textContent = msg;
+  s.style.color = bad ? "#d4715e" : "#6fd08c";
+}
+
+// TWO WAYS TO RUN THE SAME CODE, because opening this from a file:// path is the normal case and
+// AudioWorklet is not reliable there — the page has an opaque origin, and browsers differ on
+// whether addModule() will accept a blob: URL from one. When it refuses, fall back to a
+// ScriptProcessorNode driven by hand.
+//
+// The fallback runs the IDENTICAL processor class, not a rewrite of it: the worklet source is
+// eval'd here with a stub AudioWorkletProcessor, and its process() is called per block. There is
+// no second implementation to drift, which is the whole premise of this bench.
+function makeFallback() {
+  let Proc = null;
+  const prevAWP = globalThis.AudioWorkletProcessor, prevReg = globalThis.registerProcessor,
+        prevSR = globalThis.sampleRate;
+  globalThis.AudioWorkletProcessor = class {
+    constructor() { this.port = { postMessage() {}, onmessage: null }; }
+  };
+  globalThis.registerProcessor = (n, c) => { Proc = c; };
+  globalThis.sampleRate = ctx.sampleRate;
+  new Function(WORKLET)();
+  globalThis.AudioWorkletProcessor = prevAWP;
+  globalThis.registerProcessor = prevReg;
+  if (prevSR !== undefined) globalThis.sampleRate = prevSR;
+
+  const proc = new Proc();
+  const spn = ctx.createScriptProcessor(1024, 2, 2);
+  const inArr = [[null, null]], outArr = [[null, null]];
+  spn.onaudioprocess = e => {
+    inArr[0][0] = e.inputBuffer.getChannelData(0);
+    inArr[0][1] = e.inputBuffer.getChannelData(1);
+    outArr[0][0] = e.outputBuffer.getChannelData(0);
+    outArr[0][1] = e.outputBuffer.getChannelData(1);
+    proc.process(inArr, outArr);
+  };
+  // Same surface as an AudioWorkletNode, so nothing downstream knows the difference.
+  return {
+    _spn: spn,
+    port: { postMessage: m => proc.port.onmessage && proc.port.onmessage({ data: m }),
+            set onmessage(fn) { proc.port.postMessage = d => fn({ data: d }); } },
+    connect: d => spn.connect(d),
+  };
+}
+
 async function ensure() {
   if (ctx) return true;
-  ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const url = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
   try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) { setStatus("no Web Audio in this browser: " + e.message, true); return false; }
+
+  let how = "AudioWorklet";
+  try {
+    if (!ctx.audioWorklet) throw new Error("no audioWorklet on this AudioContext");
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
     await ctx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
     node = new AudioWorkletNode(ctx, "tune", { numberOfInputs: 1, outputChannelCount: [2] });
   } catch (e) {
-    alert("This browser would not load the audio worklet:\n" + e.message +
-          "\n\nTry Chrome or Edge. Firefox is fine too; Safari on file:// is not.");
-    return false;
+    try {
+      node = makeFallback();
+      how = "ScriptProcessor (the worklet was refused: " + e.message + ")";
+    } catch (e2) {
+      setStatus("could not start audio at all: " + e2.message, true);
+      return false;
+    }
   }
-  URL.revokeObjectURL(url);
   node.port.onmessage = e => { lastPhase = e.data; };
   node.connect(ctx.destination);
   push();
+  setStatus("audio running via " + how + " at " + ctx.sampleRate + " Hz", false);
   return true;
 }
 
@@ -494,22 +553,26 @@ function draw() {
       i ? g2.lineTo(i, yOf(v)) : g2.moveTo(i, yOf(v)); }
     g2.stroke();
   };
+  // LITERAL COLOURS. A canvas context cannot resolve `var(--sig)` — it is not CSS, it is a string
+  // the 2D context rejects, which leaves strokeStyle at whatever it was (black) on a near-black
+  // background. Both curves and the playhead drew invisibly and the scope looked stone dead.
   curve(ms => ms < p.outMs ? 1 - ms / p.outMs
              : ms < p.loadMs ? 0
-             : ms < p.loadMs + p.inMs ? (ms - p.loadMs) / p.inMs : 1, "var(--sig)");
+             : ms < p.loadMs + p.inMs ? (ms - p.loadMs) / p.inMs : 1, "#6fd08c");
   curve(ms => {
     if (ms >= p.loadMs + p.inMs) return 0;
     const atk = Math.min(1, ms / 10), rem = p.loadMs + p.inMs - ms;
     return Math.min(atk, rem < 90 ? rem / 90 : 1) * p.staticVol;
-  }, "var(--noise)");
+  }, "#d4715e");
 
   if (lastPhase && lastPhase.t && ctx) {
     const ms = lastPhase.t / ctx.sampleRate * 1000;
-    g2.strokeStyle = "var(--lamp)"; g2.lineWidth = 1;
+    g2.strokeStyle = "#ffb454"; g2.lineWidth = 1;
     g2.beginPath(); g2.moveTo(xOf(ms), 4); g2.lineTo(xOf(ms), h - 4); g2.stroke();
   }
-  g2.fillStyle = "#6d5f4c"; g2.font = "11px " + getComputedStyle(document.body).fontFamily;
-  g2.fillText("station", 8, 20); g2.fillStyle = "#d4715e"; g2.fillText("static", 62, 20);
+  g2.font = "11px ui-monospace, Menlo, Consolas, monospace";
+  g2.fillStyle = "#6fd08c"; g2.fillText("station", 8, 20);
+  g2.fillStyle = "#d4715e"; g2.fillText("static", 62, 20);
   document.getElementById("phase").textContent =
     looping ? "looping — " + Math.round(T) + " ms per pass" : "idle";
 }
