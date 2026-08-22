@@ -108,8 +108,31 @@ namespace CMM
         // one block (they track BLOCKS, not cells), so the ring that catches a door the hook
         // missed can run more than twice as often for less than half the budget it used to take.
         // Worst-case latency for a door is now this plus one flood interval.
+        //
+        // RADIUS 8, DOWN FROM 12, AND THE ARITHMETIC IS THE WHOLE REASON.
+        //
+        // cmm_fld_dirty expands by radius + step on every side, so a radius-12 ring at one-block
+        // cells dirties 27^3 = 19,683 cells. Every 0.4 s that is 49,200 cells/s. The read budget
+        // is 1.5 ms/frame, which this file's own note above puts at ~140k cells in ~3 s, i.e.
+        // ~46,500 cells/s. The safety net was asking for six percent more than everything the
+        // reader had.
+        //
+        // Six percent is enough to never converge. Measured in game: the field reached "read
+        // complete" on 9% of samples, and a shut door published its correct 49.7 dB on two ticks
+        // out of seventy before reverting to the stale door-open value — which is a door you
+        // cannot hear, because the slew limiter needs over a second to travel that far and the
+        // answer only stood for half of one.
+        //
+        // Radius 8 is 19^3 = 6,859 cells, 17,100/s, about a third of the budget. COVERAGE GOES UP,
+        // not down: the full-window sweep is gated on CellsPending <= 0 (see FrameStep), and an
+        // oversubscribed near ring meant that was never true, so the far sweep had never run at
+        // all. Leaving the reader slack is what lets the ten-second net exist.
+        //
+        // Doors are not relying on this in the first place — the latch hook invalidates them
+        // directly (EmitterDoorHook). This ring is only for changes nothing reported, and it was
+        // starving the targeted invalidations it exists to back up.
         private const float NearRefreshSec = 0.4f, FarRefreshSec = 10f;
-        private const int   NearRefreshBlocks = 12;
+        private const int   NearRefreshBlocks = 8;
         private static float _nearRefreshAt, _farRefreshAt;
         internal static int NearRefreshes, FarRefreshes;
 
