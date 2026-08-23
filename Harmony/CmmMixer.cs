@@ -172,7 +172,8 @@ namespace CMM
         // RATE, so a move from half way takes half as long. See cmm_mix.c.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_mix_set_voice_receiver(long id, float signal, float ratePerSec,
-                                                              float dullness, float mononess);
+                                                              float dullness, float mononess,
+                                                              float gainPow);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_mix_reclaim(long id, float fade);
@@ -535,9 +536,10 @@ namespace CMM
         // Aim a voice's receiver at `signal` (0 = gone, 1 = fully tuned). Idempotent, so it can be
         // pushed every tick. Returns false when the voice has already retired, which is the normal
         // race when a station is abandoned mid-load.
-        public bool SetVoiceReceiver(long id, float signal, float ratePerSec, float dullness, float mononess)
+        public bool SetVoiceReceiver(long id, float signal, float ratePerSec, float dullness,
+                                     float mononess, float gainPow)
         {
-            return NativeMix.cmm_mix_set_voice_receiver(id, signal, ratePerSec, dullness, mononess) != 0;
+            return NativeMix.cmm_mix_set_voice_receiver(id, signal, ratePerSec, dullness, mononess, gainPow) != 0;
         }
 
         // Ramp the CONSUMER-side output gain toward `target` over `seconds` (0 = immediate). Used

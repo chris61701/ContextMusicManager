@@ -101,7 +101,8 @@ namespace CMM
             if (voiceId != 0)
                 CmmMixer.Instance?.SetVoiceReceiver(voiceId, to, ratePerSec,
                                                     CMMConfig.RadioTuneDullness,
-                                                    CMMConfig.RadioTuneMononess);
+                                                    CMMConfig.RadioTuneMononess,
+                                                    CMMConfig.RadioTuneGainPow);
         }
         private static float _nextStaticAt;
 
@@ -454,7 +455,7 @@ namespace CMM
         // Fire one radio-UI one-shot (native synth; no asset files). Config-gated + hot-tunable;
         // the native side ensures the output device, so a power-on click can precede the radio
         // voice's own add, and it never touches the output gain (pause duck stays ducked).
-        private static void Sfx(int kind)
+        private static void Sfx(int kind, float scale = 1f)
         {
             if (!CMMConfig.RadioSfxEnabled) return;
             float vol = CMMConfig.RadioSfxVolume;
@@ -467,6 +468,7 @@ namespace CMM
                     // The static has its own level (-1 = inherit) and a live tone: pushing the
                     // tone on EVERY ping is what makes radio.xml edits audible mid-hash.
                     if (CMMConfig.RadioStaticVolume >= 0f) vol = CMMConfig.RadioStaticVolume;
+                    vol *= scale;   // the arrival fades the hash out from under the station
                     mixer.SetStaticTone(CMMConfig.RadioStaticLowHz,
                                         CMMConfig.RadioStaticHighHz,
                                         CMMConfig.RadioStaticCrackle);
@@ -693,9 +695,10 @@ namespace CMM
                 _arriving = true;
                 _searchGiveUp = 0f;          // landed: the backstop must not fire later
                 AimSignal(_voiceId, 1f, ArriveRate);
-                _staticWanted = false;
-                StopStatic();
                 CMMConfig.D($"[CMM] Radio: arriving — voice {_voiceId}, {CMMConfig.RadioTuneArriveMs:0} ms.");
+                // NOTE: _staticWanted stays TRUE. The hash is not switched off in front of the
+                // station; it fades out from under it, in the keepalive below. A station that
+                // starts after the noise stops is a crossfade — the thing this is meant not to be.
             }
             // RESCUE, and it is deliberately NOT part of the chain above. A voice sitting at zero
             // with nothing searching for it is a silent radio, which is a far worse failure than
@@ -725,7 +728,19 @@ namespace CMM
             if (_staticWanted && Time.realtimeSinceStartup >= _nextStaticAt)
             {
                 _nextStaticAt = Time.realtimeSinceStartup + TickInterval;
-                Sfx(CmmMixer.SfxTuningStatic);
+                // While searching, full level. While ARRIVING, fall against the signal so the
+                // music comes up THROUGH the noise rather than after it. Squared, because the
+                // station's own gain rises fast — a linear fall leaves the hash sitting on top
+                // of an already-loud station.
+                float sc = 1f;
+                if (_arriving) { sc = Mathf.Clamp01(1f - Signal); sc *= sc; }
+                Sfx(CmmMixer.SfxTuningStatic, sc);
+            }
+            // Released once the station is essentially in. The 90 ms native release finishes it.
+            if (_staticWanted && _arriving && Signal >= 0.92f)
+            {
+                _staticWanted = false;
+                StopStatic();
             }
 
             if (_voiceId != 0)
@@ -916,7 +931,8 @@ namespace CMM
             bool tuning = _staticWanted;
             CmmMixer.Instance?.SetVoiceReceiver(id, tuning ? 0f : 1f, 0f,
                                                 CMMConfig.RadioTuneDullness,
-                                                CMMConfig.RadioTuneMononess);
+                                                CMMConfig.RadioTuneMononess,
+                                                CMMConfig.RadioTuneGainPow);
             _sigFrom = _sigTo = tuning ? 0f : 1f;
             _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
             _arriving = !tuning;

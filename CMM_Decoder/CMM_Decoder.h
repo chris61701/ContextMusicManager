@@ -183,7 +183,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        with them). The ramp is per FRAME so channels share a gain (no stereo shift), emitter
  *        slots all ramp from one start value so the K slots stay locked, and both masters snap to
  *        target on device attach so a fresh device opens at level instead of fading in. */
-#define CMM_DECODER_ABI 43
+#define CMM_DECODER_ABI 44
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */

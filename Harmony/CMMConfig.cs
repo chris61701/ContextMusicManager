@@ -190,11 +190,18 @@ namespace CMM
         // a fixed duration drags on an early interrupt and snaps on a late one.
         public static float  RadioTuneMinStaticMs = 900f;
         public static float  RadioTuneLeaveMs     = 260f;
-        public static float  RadioTuneArriveMs    = 420f;
+        public static float  RadioTuneArriveMs    = 1100f;  // 420 was too quick to hear as opening up
         public static float  RadioTuneDullness    = 0.85f;   // 0 = no treble loss on the way in/out
         public static float  RadioTuneMononess    = 1f;      // 0 = stays stereo the whole way
         // Backstop only, so a wedged open/seek cannot strand the player in static for ever. A
         // merely SLOW station is waited for; abandoning one that is still working is worse.
+        // GAIN RISES FAST, TONE OPENS SLOWLY. gain = signal^this. A real receiver holds the
+        // programme at full level across almost the whole quieting range and moves the NOISE
+        // instead; a station tied linearly to signal just fades up, which is the single most
+        // recognisable fake and is what the first version of this sounded like. At 0.30, a tenth
+        // of the signal is already half the level, so the station is THERE and merely dull and
+        // buried, and it is the muffling and the hiss that resolve. 1.0 = the old plain fade.
+        public static float  RadioTuneGainPow     = 0.30f;
         public static float  RadioTuneGiveUpMs    = 10000f;
 
         public static float  RadioStaticVolume  = -1f;

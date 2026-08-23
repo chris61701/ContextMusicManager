@@ -167,6 +167,7 @@ typedef struct mix_voice {
     int    recvOn;                                  /* 0 = ordinary voice, no receiver stage */
     float  recvSig, recvSigTarget, recvSigStep;     /* 0..1 signal, ramped per frame */
     float  recvDull, recvMono;                      /* how much dulling / collapsing to apply */
+    float  recvGainPow;                             /* gain = signal^this; <1 rises fast then sits */
     float  recvLp[2];                               /* the dulling one-pole's state, per channel */
 } mix_voice;
 
@@ -588,7 +589,17 @@ static int render_voice_add(mix_voice* v, int n) {
                 l = m + sd; r = m - sd;
             }
             g_voiceStereo[o] = l; g_voiceStereo[o + 1] = r;
-            g *= s;
+            /* LEVEL IS NOT THE THING THAT MOVES. In a real receiver the programme sits at full
+             * level across the whole quieting range and only the NOISE changes; the station gets
+             * duller and narrower and buried, not quieter. Crossfading music up out of noise is
+             * the single most recognisable fake, and tying gain linearly to the signal is exactly
+             * that -- which is why the first version of this sounded like the plain fade it
+             * replaced.
+             *
+             * So gain rises FAST and then sits, while the filter and the width take their time:
+             * at pow 0.3 a tenth of the signal is already half the level. It still has to reach 0,
+             * because the search really is silent, but it spends almost none of its travel there. */
+            g *= (v->recvGainPow > 0.99f && v->recvGainPow < 1.01f) ? s : powf(s, v->recvGainPow);
         }
         if (emit) {
             /* Dry mono into this voice's SLOT lane (accumulated: two voices sharing a slot during
@@ -1743,6 +1754,7 @@ CMM_API void cmm_mix_play_sfx(int kind, float gain) {
             live->len  = live->pos + (int)((float)g_busRate * 0.40f);  /* hold ~0.4s past this ping */
             live->gain = gain;                                          /* follow a hot-reloaded volume */
             sfx_capture_static_tone(live);                              /* tone edits land mid-hash too */
+            live->gain = gain;   /* ...and so does LEVEL, so the hash can fade under an arrival */
             mix_unlock(&g_lock);
             return;
         }
@@ -1905,7 +1917,7 @@ CMM_API void cmm_mix_set_emitter_master(float vol) { g_emMasterVol = vol < 0.0f 
  * Idempotent, so managed can push it every tick without re-arming anything. Returns 0 if the voice
  * has already retired, which is the normal race when a station is abandoned mid-load. */
 CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePerSec,
-                                       float dullness, float mononess) {
+                                       float dullness, float mononess, float gainPow) {
     int i, found = 0;
     float s = signal < 0.0f ? 0.0f : (signal > 1.0f ? 1.0f : signal);
     mix_lock(&g_lock);
@@ -1923,6 +1935,7 @@ CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePer
         }
         v->recvDull = dullness < 0.0f ? 0.0f : (dullness > 1.0f ? 1.0f : dullness);
         v->recvMono = mononess < 0.0f ? 0.0f : (mononess > 1.0f ? 1.0f : mononess);
+        v->recvGainPow = gainPow < 0.05f ? 0.05f : (gainPow > 4.0f ? 4.0f : gainPow);
         v->recvSigTarget = s;
         if (ratePerSec <= 0.0f) { v->recvSig = s; v->recvSigStep = 0.0f; }
         else {
