@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 12;
+        internal const int CurrentSchema = 13;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -456,15 +456,16 @@ mid-hash — so dial between stations while editing and hear each change immedia
             // schema-9 values and therefore walked straight past them. See MatchesAnyFormerDefault.
             F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              100f,
               since: 6, changedIn: 12, was: new object[] { 900f, 4000f, 1500f }),
-            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  1200f,
-              since: 6, changedIn: 11, was: new object[] { 260f, 3400f }),
+            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  700f,
+              since: 6, changedIn: 13, was: new object[] { 260f, 3400f, 1200f }),
             F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 2800f,
               since: 6, changedIn: 11, was: new object[] { 1100f, 7000f }),
             F("RadioTuneDullness",                   "CMMConfig.RadioTuneDullness",                 0.85f, since: 6),
             F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f, since: 6),
             F("RadioTuneGainPow",                    "CMMConfig.RadioTuneGainPow",                  0.30f, since: 7),
             F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f, since: 6),
-            F("RadioRecvKnee",                       "CMMConfig.RadioRecvKnee",                     0.45f, since: 8),
+            F("RadioRecvKnee",                       "CMMConfig.RadioRecvKnee",                     0.65f,
+              since: 8, changedIn: 13, was: 0.45f),
             F("RadioRecvKneeWidth",                  "CMMConfig.RadioRecvKneeWidth",                0.22f, since: 8),
             F("RadioRecvNoise",                      "CMMConfig.RadioRecvNoise",                    0.55f, since: 8, changedIn: 9, was: 0.45f),
             F("RadioRecvClicks",                     "CMMConfig.RadioRecvClicks",                   0.18f, since: 8, changedIn: 9, was: 0.22f),

@@ -193,7 +193,11 @@ namespace CMM
         // listening demo and then shipping it as a gameplay timing without anyone checking it as
         // one. 5.5 s total is what settled: 1.2 out, 1.5 of static, 2.8 back in.
         public static float  RadioTuneMinStaticMs = 100f;
-        public static float  RadioTuneLeaveMs     = 1200f;
+        // 700, not 1200. The knee puts the whole audible break-up in the LAST part of the
+        // fade, so at 1200 ms the first 0.67 s of a dial press did nothing you could hear — the
+        // key felt dead. Nobody caught it tuning by ear, because in a listening demo you never
+        // press the key. Shortened here and the knee moved earlier; together, 0.25 s.
+        public static float  RadioTuneLeaveMs     = 700f;
         public static float  RadioTuneArriveMs    = 2800f;
         public static float  RadioTuneDullness    = 0.85f;   // 0 = no treble loss on the way in/out
         public static float  RadioTuneMononess    = 1f;      // 0 = stays stereo the whole way
@@ -218,7 +222,7 @@ namespace CMM
         // about EIGHT DECIBELS of carrier-to-noise, with flat plateaus either side, so the ramp
         // is bent into plateau → event → plateau. KneeWidth is how much of the ramp the event
         // gets: NARROW is correct, and widening it is the thing that will make it smooth again.
-        public static float  RadioRecvKnee        = 0.45f;   // where the break-up happens, 0..1
+        public static float  RadioRecvKnee        = 0.65f;   // where the break-up happens, 0..1 — HIGHER = sooner after the key
         public static float  RadioRecvKneeWidth   = 0.22f;   // how much of the ramp it occupies
         // How loud the hiss gets against the music. The old separate static topped out 5.9 dB
         // QUIETER than the music it was meant to bury, so it never buried anything.
