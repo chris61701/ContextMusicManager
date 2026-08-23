@@ -336,6 +336,9 @@ namespace CMM
             if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; _floodRoomOnly = false; }
             if (CmmClock.Now < _nextTick) return;
             _nextTick = CmmClock.Now + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
+            // Everything below is what WorldEmitterTickHz multiplies. Measured here and NOT via
+            // EmitPoll, which is the registry's own 4 Hz loop and is unaffected by the tick rate.
+            using (CMMPerf.Measure(CMMPerf.Phase.EmitTick)) {
 
             // ── 1 Hz path/stability summary ─────────────────────────────────────────────────────
             // path=  which occlusion path landed, in ticks over the last second (field = cached
@@ -568,6 +571,7 @@ namespace CMM
                 }
                 PushReverb(player);
             }
+            }   // EmitTick
         }
 
         // Queued frames and starvation count for each live emitter slot, compactly.

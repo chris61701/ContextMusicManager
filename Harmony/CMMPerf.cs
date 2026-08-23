@@ -49,13 +49,18 @@ namespace CMM
             EmitPoll,        // EmitterRegistry.Poll — the whole 4 Hz registry tick
             EmitProx,        // EmitterRegistry.ScanProximity — the placed-radio discovery box (2 Hz)
             EmitPoiScan,     // EmitterRegistry.ContinueScan — amortised POI walk (ScanBudgetMs-capped)
+            // The OCCLUSION DECISION, and the only phase WorldEmitterTickHz actually governs.
+            // EmitPoll is a DIFFERENT loop: EmitterRegistry keeps its own PollInterval (4 Hz,
+            // hardcoded), so raising the tick rate does not change it and its timings say nothing
+            // about what the tick rate costs. That distinction was got wrong once already.
+            EmitTick,        // EmitterAudioLayer.Tick, post-throttle — decide + publish point sets
             COUNT
         }
 
         static readonly string[] Names =
         {
             "ScanPoll", "ScanResolve", "ScanGate", "ScanMarshal", "ScanLuaCall",
-            "EmitPoll", "EmitProx", "EmitPoiScan"
+            "EmitPoll", "EmitProx", "EmitPoiScan", "EmitTick"
         };
 
         const int N = (int)Phase.COUNT;
