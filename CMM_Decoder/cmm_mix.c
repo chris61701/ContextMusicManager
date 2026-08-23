@@ -1378,6 +1378,17 @@ CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int max
  * realtime device callback — call it on the sim clock to let the producer keep
  * rendering (voices advance, fade, and retire → the native alloc/free churn cycles)
  * at compressed speed. Returns frames actually drained. */
+/* v49 -- the headless pump, but it gives you the audio. cmm_mix_pump_out throws the frames
+ * away, which is all a leak-hunt needs; rendering a station change to a file needs them back.
+ * dst holds frames * channels interleaved floats. Headless only. */
+CMM_API int cmm_mix_pump_capture(float* dst, int frames) {
+    int drained;
+    mix_lock(&g_lock);
+    drained = (g_out && g_headless) ? cmm_out_drain_into(g_out, dst, frames) : 0;
+    mix_unlock(&g_lock);
+    return drained;
+}
+
 CMM_API int cmm_mix_pump_out(int frames) {
     int drained;
     mix_lock(&g_lock);

@@ -211,8 +211,15 @@ typedef struct cmm_decoder cmm_decoder;
  *        generator (fixed band-pass, sample-and-hold sputter, no de-emphasis, no wander, no
  *        clicks). Three sounds for one event. Now radio voices contribute programme only into a
  *        radio sub-bus and one bus-level stage generates the noise, sums, and applies the shared
- *        hi-cut and width. It runs with no voices at all, which is what retires the hash. */
-#define CMM_DECODER_ABI 48
+ *        hi-cut and width. It runs with no voices at all, which is what retires the hash.
+ *
+ *   v49: cmm_out_drain_into / cmm_mix_pump_capture -- the headless pump hands the frames back
+ *        instead of discarding them. The headless path existed only for leak-hunting, so it had
+ *        no way to return audio; that meant every question about how the radio SOUNDS could only
+ *        be answered by starting the game and loading a world, several minutes a go, and judging
+ *        by ear. With this a station change renders to a WAV in seconds and can be diffed against
+ *        the reference render directly. */
+#define CMM_DECODER_ABI 49
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -462,6 +469,12 @@ CMM_API void cmm_out_close(cmm_out* o);
  * pace the caller pumps (compressed), with no audio hardware. Everything else behaves
  * identically to a real device. cmm_out_close skips device teardown for these. */
 CMM_API cmm_out* cmm_out_open_null(int sampleRate, int channels, int ringFrames, int* err);
+
+/* Drain a headless ring INTO a caller buffer (interleaved floats, frames * channels), applying
+ * the consumer gain ramp exactly as the realtime callback does. The offline radio simulator's
+ * only route to the mixer's real output. */
+CMM_API int cmm_out_drain_into(cmm_out* o, float* dst, int frames);
+CMM_API int cmm_mix_pump_capture(float* dst, int frames);
 
 /* Consume up to `frames` from a headless ring (services a pending flush first, like the
  * realtime callback), discarding them. Returns frames consumed. SPSC: one consumer only. */

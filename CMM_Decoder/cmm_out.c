@@ -971,6 +971,60 @@ CMM_API cmm_out* cmm_out_open_null(int sampleRate, int channels, int ringFrames,
  * call from ONE consumer thread only (the harness pump), exactly as the device
  * callback is the sole reader in the realtime path. No-op / 0 on a real (started)
  * device — that path has its own callback consumer. */
+/* Like cmm_out_drain, but COPIES the frames out instead of discarding them. This is what
+ * makes the headless path useful for anything other than leak-hunting: the offline harness
+ * gets the mixer's real output as samples, so a station change can be rendered to a WAV and
+ * compared against the reference render instead of against somebody's memory of it.
+ *
+ * `dst` receives interleaved float frames and must hold frames * channels floats. Applies the
+ * consumer output gain exactly as the realtime callback does, so a captured render and an
+ * audible one are the same signal. */
+CMM_API int cmm_out_drain_into(cmm_out* o, float* dst, int frames)
+{
+    int consumed = 0;
+    if (!o || !dst || frames <= 0) return 0;
+
+    if (o->flush) {
+        o->flush = 0;
+        ma_uint32 avail = ma_pcm_rb_available_read(&o->rb);
+        while (avail > 0) {
+            ma_uint32 n = avail; void* p = NULL;
+            if (ma_pcm_rb_acquire_read(&o->rb, &n, &p) != MA_SUCCESS || n == 0) break;
+            ma_pcm_rb_commit_read(&o->rb, n);
+            avail -= n;
+        }
+        if (o->flushSetGain) {
+            o->flushSetGain = 0;
+            o->gain = o->flushGain; o->gainTarget = o->flushGain; o->gainStep = 0.0f;
+        }
+    }
+
+    while (consumed < frames) {
+        ma_uint32 n = (ma_uint32)(frames - consumed);
+        void* readPtr = NULL;
+        if (ma_pcm_rb_acquire_read(&o->rb, &n, &readPtr) != MA_SUCCESS || n == 0) break;
+        memcpy(dst + (size_t)consumed * o->channels, readPtr,
+               (size_t)n * o->channels * sizeof(float));
+        ma_pcm_rb_commit_read(&o->rb, n);
+        consumed += (int)n;
+    }
+
+    /* The same per-frame gain ramp the realtime callback applies. */
+    {
+        int f, c;
+        for (f = 0; f < consumed; f++) {
+            if (o->gainStep != 0.0f) {
+                o->gain += o->gainStep;
+                if ((o->gainStep > 0.0f && o->gain >= o->gainTarget) ||
+                    (o->gainStep < 0.0f && o->gain <= o->gainTarget))
+                { o->gain = o->gainTarget; o->gainStep = 0.0f; }
+            }
+            for (c = 0; c < o->channels; c++) dst[(size_t)f * o->channels + c] *= o->gain;
+        }
+    }
+    return consumed;
+}
+
 CMM_API int cmm_out_drain(cmm_out* o, int frames)
 {
     if (!o || frames <= 0) return 0;

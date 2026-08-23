@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmRadioSim — render a station change offline, through the REAL mixer.
+
+       The problem this exists to solve: every question about how the radio
+       SOUNDS could previously only be answered by starting the game and
+       loading a world — several minutes a go — and judging by ear. Six
+       consecutive attempts at the station change were shipped that way and
+       four of them were wrong, twice badly. Worse, the failures were never in
+       the audio maths: they were in the seams — a config file silently
+       overriding the code, one function doing two jobs, a state machine
+       returning early. An offline model that reimplemented the DSP would have
+       reproduced exactly none of them.
+
+       So this drives the SHIPPING CMM_Decoder.dll: the real mixer, the real
+       receiver stage, the real voice lifecycle, the real decoders, running
+       headless with a null output device, drained through cmm_mix_pump_capture
+       into a WAV. What comes out is what the game plays.
+
+         dotnet run (from tools\CmmRadioSim) A.mp3 B.mp3 out.wav
+
+       Compare the result against the approved reference render from
+       tools\CmmTuneRender. Those two agreeing is the acceptance test the radio
+       has never had.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmRadioSim</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Native CMM_Decoder.dll is Windows x64. -->
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!-- The shipping native mixer — copied next to the exe so DllImport resolves. -->
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
