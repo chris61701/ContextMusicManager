@@ -182,8 +182,22 @@ typedef struct cmm_decoder cmm_decoder;
  *        Surfaced when CMM started honouring the Overall/Ambient sliders (both masters now move
  *        with them). The ramp is per FRAME so channels share a gain (no stereo shift), emitter
  *        slots all ramp from one start value so the K slots stay locked, and both masters snap to
- *        target on device attach so a fresh device opens at level instead of fading in. */
-#define CMM_DECODER_ABI 46
+ *        target on device attach so a fresh device opens at level instead of fading in.
+ *
+ *   v47: THE ARRIVAL. cmm_mix_set_receiver_arrival + cmm_mix_set_receiver_radio. Losing a station
+ *        was already right ("when it fades out, it's perfect"); coming back was wrong for four
+ *        rounds because NOTHING was happening to the music. Measured, the deepest treatment an
+ *        arriving station got was -3 dB at 3.75 kHz with its bass, dynamics and image intact --
+ *        the source file, fading up, with noise over it, which is what it sounded like. Now the
+ *        programme is band-limited HARD at both ends (400 Hz - 2.6 kHz at full depth, two poles
+ *        each, low cut BEFORE the saturator so the drive makes grit and not mud), driven, squashed
+ *        8:1 and made up, then released as it locks. Also: the hiss outlasts the tuning instead of
+ *        clearing while the station is still opening; the treble window is keyed to ramp position
+ *        rather than SNR (which saturates too early to be usable); and the stereo decoder LATCHES
+ *        late with hysteresis instead of gliding -- without the authentic decoder clunk, which was
+ *        a one-sample 0.34 DC step and measured as the single largest discontinuity in the whole
+ *        transition. */
+#define CMM_DECODER_ABI 47
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */

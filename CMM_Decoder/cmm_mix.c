@@ -173,6 +173,13 @@ typedef struct mix_voice {
     float  recvWCur, recvWTgt; int recvWHold;       /* the slow level wander (AGC breathing) */
     float  recvFA, recvFB;                          /* flutter: band-limited noise, not an LFO */
     float  recvLp[2];                               /* the dulling one-pole's state, per channel */
+    /* THE ARRIVAL's own machinery. Settled by ear against real tracks over twenty A/B rounds
+     * (tools/CmmTuneRender), 2026-08-23. The way in is not the way out: a departure is masked by
+     * the station it is leaving, an arrival is scrutinised, and the same processing that reads as
+     * correct going down reads as somebody turning a knob coming up. */
+    int    recvLocked; float recvLockW;             /* stereo pilot LATCH -- and NO decoder clunk */
+    float  recvMlp[4], recvMhp[4];                  /* the MUSIC path's OWN two-pole pairs */
+    float  recvCEnv;                                /* the broadcast squash's follower */
 } mix_voice;
 
 /* ── Mixer singleton state (the managed CmmMixer was a singleton too) ──────*/
@@ -189,6 +196,22 @@ static float g_recvHiFloor = 1800.0f, g_recvDeemK = 0.24f;
 static float g_recvFloorDb = 5.0f, g_recvMuteW = 5.0f, g_recvDrive = 0.15f;
 static float g_recvWander = 0.55f, g_recvFlutter = 0.30f;
 static float g_recvFlutK = 0.0018f, g_recvFlutSlowK = 0.00022f;   /* ~14 Hz / ~1.7 Hz at 48k */
+
+/* v47 -- THE ARRIVAL. Everything above describes a receiver losing a station, and it was right:
+ * "when it fades out, it's perfect". Coming back it was wrong for four consecutive rounds, and the
+ * reason turned out to be that NOTHING was happening to the music. Measured, the deepest treatment
+ * an arriving station ever received was -3 dB at 3.75 kHz with its bass, its dynamics and its
+ * stereo image completely intact -- i.e. the source file, fading up, with noise laid over it.
+ * Which is exactly what it sounded like.
+ *
+ * Two things were missing and both are here. The programme has to be MANGLED and then repaired
+ * (g_recvRadio*), and the hiss has to outlast the tuning (g_recvNoiseHold) instead of clearing
+ * while the station is still opening -- because a fade with nothing over it is just a fade. */
+static float g_recvNoiseHold = 1.0f, g_recvNoiseFloorR = 0.06f;
+static float g_recvWinA = 0.28f, g_recvWinB = 0.912f;   /* the treble window, as ramp positions */
+static float g_recvLockU = 0.52f, g_recvLockMs = 9.0f;  /* where stereo latches, and how fast */
+static float g_recvRadio = 1.0f, g_recvRadioMk = 9.0f;
+static float g_recvRadioHp = 400.0f, g_recvRadioLp = 2600.0f;
 
 static int       g_started;
 static volatile int g_running;
@@ -635,7 +658,23 @@ static int render_voice_add(mix_voice* v, int n) {
             float flut = 1.0f + g_recvFlutter * fmod;
             if (flut < 0.05f) flut = 0.05f;
 
-            float nAmp = powf(10.0f, -snr * 0.05f) * g_recvNoiseTrim * v->recvWCur * flut;
+            /* THE HISS MUST OUTLAST THE TUNING. Tied to the signal alone it was gone while the
+             * station was still opening up, leaving a stretch of clean-but-dull music fading in
+             * with nothing over it -- and a fade with nothing over it is just a fade. On the way
+             * IN the noise gets its own, later window, plus a residual bed that never quite goes:
+             * a set at full lock still has a noise floor, and hitting absolute zero is what says
+             * "sound effect ended" rather than "receiver". */
+            int rising = (v->recvSigStep > 0.0f);
+            float nLvl = powf(10.0f, -snr * 0.05f);
+            if (g_recvNoiseHold > 0.001f && rising) {
+                float na = 0.22f, nb = 0.55f + 0.42f * g_recvNoiseHold;
+                float nf = 1.0f - (u - na) / (nb - na);
+                if (nf < 0.0f) nf = 0.0f; else if (nf > 1.0f) nf = 1.0f;
+                nf = nf * nf * (3.0f - 2.0f * nf);
+                float held = g_recvNoiseFloorR + (1.0f - g_recvNoiseFloorR) * nf;
+                if (held > nLvl) nLvl = held;
+            }
+            float nAmp = nLvl * g_recvNoiseTrim * v->recvWCur * flut;
             if (nAmp > 1.6f) nAmp = 1.6f;
             v->recvRng = v->recvRng * 1664525u + 1013904223u;
             float wn = (float)(int)v->recvRng * (1.0f / 2147483648.0f);
@@ -678,6 +717,70 @@ static int render_voice_add(mix_voice* v, int n) {
 
             /* --- THE SUM. From here down there is one signal. ------------------------------ */
             float pl = l * progG, pr = r * progG;
+
+            /* ===== THE MUSIC ITSELF CHANGES SHAPE ==========================================
+             * Every earlier attempt added things ON TOP of a full-fidelity source, and a
+             * full-fidelity source with things on top of it is precisely what it sounded like:
+             * "I get no sense that we're tuning into anything." A weak station is not clean audio
+             * under noise -- it is MANGLED audio. Squeezed at both ends by a narrow IF and a small
+             * speaker, driven into distortion, and flattened by the station's own processing on
+             * top of the receiver's AGC. Broadcast has no micro-dynamics at all, and micro-dynamics
+             * are a large part of what "full fidelity" sounds like.
+             *
+             * Order is load-bearing. The low cut comes BEFORE the saturator: with bass still in it
+             * a soft clipper only makes mush; with the bass gone the same drive becomes midrange
+             * grit. That is the whole difference between "distorted" and "muddy", and it is why
+             * g_recvDrive at 0.15 had been inaudible -- it was working on a full-range signal.
+             *
+             * Two poles at each end, not one. A one-pole is a 6 dB/oct tilt, which is a tone
+             * control; two is an EDGE, which is a bandwidth. Every previous EQ round used one pole
+             * and was heard, correctly, as an EQ.
+             *
+             * ARRIVAL ONLY -- the departure was already right and must not move. */
+            if (g_recvRadio > 0.001f && rising) {
+                float ra = 1.0f - (u - g_recvWinA) / (g_recvWinB - g_recvWinA);
+                if (ra < 0.0f) ra = 0.0f; else if (ra > 1.0f) ra = 1.0f;
+                ra = ra * ra * (3.0f - 2.0f * ra) * g_recvRadio;
+
+                float fhp = 20.0f * powf(g_recvRadioHp / 20.0f, ra);
+                float kh = 1.0f - expf(-6.2831853f * fhp / (float)g_busRate);
+                v->recvMhp[0] = mix_undenorm(v->recvMhp[0] + kh * (pl - v->recvMhp[0]));
+                { float a = pl - v->recvMhp[0];
+                  v->recvMhp[2] = mix_undenorm(v->recvMhp[2] + kh * (a - v->recvMhp[2]));
+                  pl = a - v->recvMhp[2]; }
+                v->recvMhp[1] = mix_undenorm(v->recvMhp[1] + kh * (pr - v->recvMhp[1]));
+                { float b = pr - v->recvMhp[1];
+                  v->recvMhp[3] = mix_undenorm(v->recvMhp[3] + kh * (b - v->recvMhp[3]));
+                  pr = b - v->recvMhp[3]; }
+
+                { float dr = 1.0f + ra * 9.0f;              /* grit, not mud: the bass has gone */
+                  pl = tanhf(pl * dr) / dr; pr = tanhf(pr * dr) / dr; }
+
+                { float flp = 15000.0f * powf(g_recvRadioLp / 15000.0f, ra);
+                  float ny = (float)g_busRate * 0.45f; if (flp > ny) flp = ny;
+                  float kl = 1.0f - expf(-6.2831853f * flp / (float)g_busRate);
+                  v->recvMlp[0] = mix_undenorm(v->recvMlp[0] + kl * (pl - v->recvMlp[0]));
+                  v->recvMlp[2] = mix_undenorm(v->recvMlp[2] + kl * (v->recvMlp[0] - v->recvMlp[2]));
+                  pl = v->recvMlp[2];
+                  v->recvMlp[1] = mix_undenorm(v->recvMlp[1] + kl * (pr - v->recvMlp[1]));
+                  v->recvMlp[3] = mix_undenorm(v->recvMlp[3] + kl * (v->recvMlp[1] - v->recvMlp[3]));
+                  pr = v->recvMlp[3]; }
+
+                { float av = fabsf(pl) > fabsf(pr) ? fabsf(pl) : fabsf(pr);
+                  float ka = 1.0f - expf(-1.0f / (0.005f * (float)g_busRate));
+                  float kr = 1.0f - expf(-1.0f / (0.060f * (float)g_busRate));
+                  v->recvCEnv = mix_undenorm(v->recvCEnv + (av > v->recvCEnv ? ka : kr) * (av - v->recvCEnv));
+                  if (v->recvCEnv > 0.06f) {
+                      float gg = powf(0.06f / v->recvCEnv, 0.875f * ra);   /* 8:1 */
+                      pl *= gg; pr *= gg;
+                  } }
+
+                /* Makeup. Taking out everything below 400 Hz and above 2.6 kHz costs real level,
+                 * and a station that gets QUIETER as it arrives is the fade that four rounds were
+                 * spent killing. Put it back -- measured flat to within half a dB of lock. */
+                { float mk = powf(10.0f, g_recvRadioMk * ra * 0.05f); pl *= mk; pr *= mk; }
+            }
+
             if (g_recvDrive > 0.001f) {
                 /* Damage, not just dulling: a weak station in a real set is clipping and squashed,
                  * and clean music behind a blanket reads as a fader however dull you make it.
@@ -699,7 +802,13 @@ static int render_voice_add(mix_voice* v, int n) {
                  * against the 64 this knee sweeps, so using it literally made the treble a
                  * STEP rather than a sweep. Widened to span the knee, which is the same idea
                  * at this scale: treble is the last thing to come back. */
-                float t = (34.0f - snr) / 26.0f;
+                /* KEYED TO RAMP POSITION, NOT SNR. snr saturates near its maximum long before
+                 * the station is merely audible, so anything read off it necessarily fires early
+                 * and lands inside the knee -- which made the treble a STEP. The window spans the
+                 * ramp instead, and both directions share it: with the arrival 2.3x longer than
+                 * the departure the same span is a slower gesture coming back, which is what a
+                 * receiver recovering its treble over seconds actually is. */
+                float t = 1.0f - (u - g_recvWinA) / (g_recvWinB - g_recvWinA);
                 if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
                 t *= v->recvDull;
                 float fc = 15000.0f * powf(g_recvHiFloor / 15000.0f, t);
@@ -714,8 +823,23 @@ static int render_voice_add(mix_voice* v, int n) {
              * eight real tuners, 20.0 to 22.9 dB -- so it collapses long before the station does,
              * and it takes the noise's image down with it. */
             if (v->recvMono > 0.001f) {
-                float w = (snr - 14.0f) / 13.0f;
-                if (w < 0.0f) w = 0.0f; else if (w > 1.0f) w = 1.0f;
+                /* A DECODER LATCHES; IT DOES NOT GLIDE. And it latches on ramp POSITION -- keyed
+                 * to snr it fired while the station was still buried, so the station arrived
+                 * already in stereo, which is the one thing a real decoder never does. Stereo is
+                 * the LAST thing to come good, after the treble. Hysteresis because a lock is
+                 * harder to acquire than to keep.
+                 *
+                 * No clunk. A real decoder does thump as it engages, and that thump was in here
+                 * as a one-sample DC step of 0.34 -- measured at -14.6 dBFS, the largest
+                 * discontinuity anywhere in the transition, larger than any musical transient.
+                 * It is authentic and it is not wanted. */
+                float w;
+                if (v->recvLocked) {
+                    if (u < g_recvLockU - 0.14f) v->recvLocked = 0;
+                } else if (u > g_recvLockU) v->recvLocked = 1;
+                { float kSnap = 1.0f - expf(-1.0f / (0.001f * g_recvLockMs * (float)g_busRate));
+                  v->recvLockW = mix_undenorm(v->recvLockW + ((v->recvLocked ? 1.0f : 0.0f) - v->recvLockW) * kSnap);
+                  w = v->recvLockW; }
                 w = 1.0f - v->recvMono * (1.0f - w);
                 float m = 0.5f * (l + r), sd = 0.5f * (l - r) * w;
                 l = m + sd; r = m - sd;
@@ -2084,6 +2208,42 @@ CMM_API void cmm_mix_set_receiver_shape(float floorDb, float muteW, float drive,
     if (flutter >= 0.0f && flutter <= 2.0f)   g_recvFlutter = flutter;
     if (flutHz  > 0.5f  && flutHz  < 200.0f)
         g_recvFlutK = 1.0f - expf(-6.2831853f * flutHz / (float)g_busRate);
+}
+
+/* v47 -- THE ARRIVAL, part one: what the noise does on the way back in, where the treble window
+ * sits, and when the stereo decoder latches.
+ *
+ *   noiseHold   how far into the arrival the hiss lasts. Tied to signal alone it cleared while the
+ *               station was still opening, and clean music fading in under nothing is a fade.
+ *   noiseFloor  the residual bed that never fully goes. Absolute zero reads as "effect ended".
+ *   winA/winB   the treble window as positions on the 0..1 ramp, shared by both directions.
+ *   lockU       where on the ramp the stereo decoder latches. LATE -- after the treble.
+ *   lockMs      how fast the image opens once it does. Fast enough to be an event. */
+CMM_API void cmm_mix_set_receiver_arrival(float noiseHold, float noiseFloor, float winA,
+                                          float winB, float lockU, float lockMs) {
+    if (noiseHold  >= 0.0f && noiseHold  <= 4.0f)  g_recvNoiseHold   = noiseHold;
+    if (noiseFloor >= 0.0f && noiseFloor <= 1.0f)  g_recvNoiseFloorR = noiseFloor;
+    if (winA >= 0.0f && winB > winA + 0.02f && winB <= 1.0f) { g_recvWinA = winA; g_recvWinB = winB; }
+    if (lockU  > 0.02f && lockU  < 0.98f)          g_recvLockU  = lockU;
+    if (lockMs > 0.2f  && lockMs < 2000.0f)        g_recvLockMs = lockMs;
+}
+
+/* v47 -- THE ARRIVAL, part two: how badly the arriving station is mangled before it is repaired.
+ * This is the stage that was missing entirely, and its absence is why four rounds of tuning the
+ * noise could not fix "it still sounds like audio at its full fidelity fading in".
+ *
+ *   amount      master depth, 0 = untouched (the old behaviour), 1 = full.
+ *   makeupDb    level put back, because band-limiting costs real loudness and a station that gets
+ *               quieter as it arrives is a fade.
+ *   lowCutHz    where the low cut lands at full depth. This is the one nothing had ever touched,
+ *               and bass is most of what makes a source sound hi-fi.
+ *   highCutHz   where the high cut lands at full depth. Together they are a telephone. */
+CMM_API void cmm_mix_set_receiver_radio(float amount, float makeupDb,
+                                        float lowCutHz, float highCutHz) {
+    if (amount    >= 0.0f  && amount    <= 1.0f)     g_recvRadio   = amount;
+    if (makeupDb  >= -6.0f && makeupDb  <= 24.0f)    g_recvRadioMk = makeupDb;
+    if (lowCutHz  >= 20.0f && lowCutHz  <= 2000.0f)  g_recvRadioHp = lowCutHz;
+    if (highCutHz > 300.0f && highCutHz <= 15000.0f) g_recvRadioLp = highCutHz;
 }
 
 CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePerSec,

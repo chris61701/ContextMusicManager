@@ -368,6 +368,9 @@ FodyWeavers.xsd
 # The shipped CMM_Decoder.dll under dist/ IS tracked; everything else here is regenerable.
 /CMM_Decoder/build/
 /CMM_Decoder/*.exe
+
+# The offline tuning bench's binary; the source is committed, the build is not.
+/tools/CmmTuneRender/*.exe
 /CMM_Decoder/test_out.txt
 /CMM_Decoder/dist/*.a
 # Build scratch: staging dirs and stray config/ModInfo copies emitted by the

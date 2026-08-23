@@ -183,6 +183,20 @@ namespace CMM
                                                               float clickAmt, float clickMax,
                                                               float hiFloor, float deemHz);
 
+        // v47 — THE ARRIVAL. What the noise does on the way back in, where the treble window
+        // sits, when the decoder latches (`arrival`), and how badly the arriving station is
+        // mangled before it is repaired (`radio`). The latter is the stage that was missing
+        // entirely: four rounds of tuning the noise could not fix "it still sounds like audio at
+        // its full fidelity fading in", because nothing was touching the audio.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_receiver_arrival(float noiseHold, float noiseFloor,
+                                                                 float winA, float winB,
+                                                                 float lockU, float lockMs);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_receiver_radio(float amount, float makeupDb,
+                                                               float lowCutHz, float highCutHz);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_mix_set_voice_receiver(long id, float signal, float ratePerSec,
                                                               float dullness, float mononess,
@@ -560,6 +574,17 @@ namespace CMM
         {
             NativeMix.cmm_mix_set_receiver_tone(knee, kneeW, noiseTrim, clickAmt, clickMax,
                                                 hiFloor, deemHz);
+        }
+
+        public void SetReceiverArrival(float noiseHold, float noiseFloor, float winA, float winB,
+                                       float lockU, float lockMs)
+        {
+            NativeMix.cmm_mix_set_receiver_arrival(noiseHold, noiseFloor, winA, winB, lockU, lockMs);
+        }
+
+        public void SetReceiverRadio(float amount, float makeupDb, float lowCutHz, float highCutHz)
+        {
+            NativeMix.cmm_mix_set_receiver_radio(amount, makeupDb, lowCutHz, highCutHz);
         }
 
         public bool SetVoiceReceiver(long id, float signal, float ratePerSec, float dullness,

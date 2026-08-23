@@ -28,12 +28,25 @@ tunerender <inA.mp3> <startA> <out.wav> \
 
 Positional and long, deliberately — it is driven from a shell loop, not by hand.
 
-The **last approved settings** (V1, which reproduces "N3"):
+The **settled settings** — "F", approved 2026-08-23 and now the shipped defaults (ABI 47,
+schema 10):
 
 ```
-tunerender src.mp3 20 out.wav  0.55 0.18 180 2122 15  0.55 0.30 14 0  -5 0.15 5 \
-           dst.mp3 30  1.2 1.5 2.8  0  1.0 0.9 1.0 0.06  0.52 1.0 9 1800 0.28 0.912  0 0 0 0
+tunerender srcA.mp3 20 out.wav  0.55 0.18 180 2122 15  0.55 0.30 14 0  -5 0.15 5 \
+           srcB.mp3 30  1.2 1.5 2.8  0  1.0 0.9 1.0 0.06  0.52 0.0 9 1800 0.28 0.912 \
+           0 0 0 0  0 0  1.0 9 400 2600
 ```
+
+The three that carry the sound, in order of how much they matter:
+
+| arg | value | what it is |
+|---|---|---|
+| `radioAmt` (38) | **1.0** | how hard the arriving station is mangled. This is the whole thing. |
+| `floorDb` (13) | **−5** | how far the station sinks. Small is right; see the state doc. |
+| `lockClick` (27) | **0.0** | the decoder clunk. Authentic, measured as the largest discontinuity in the transition, and not wanted. |
+
+Note the two source files must be **different tracks**. With the same song both sides you cannot
+tell a handover from a dropout, and a round gets spent on it.
 
 ## Two rules, both learned the hard way
 

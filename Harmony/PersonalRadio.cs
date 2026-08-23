@@ -105,6 +105,16 @@ namespace CMM
                                                CMMConfig.RadioRecvNoise, CMMConfig.RadioRecvClicks,
                                                CMMConfig.RadioRecvClickRate, CMMConfig.RadioRecvHiFloorHz,
                                                CMMConfig.RadioRecvDeemphHz);
+            CmmMixer.Instance?.SetReceiverArrival(CMMConfig.RadioRecvNoiseHold,
+                                                  CMMConfig.RadioRecvNoiseFloor,
+                                                  CMMConfig.RadioRecvWindowA,
+                                                  CMMConfig.RadioRecvWindowB,
+                                                  CMMConfig.RadioRecvLockAt,
+                                                  CMMConfig.RadioRecvLockMs);
+            CmmMixer.Instance?.SetReceiverRadio(CMMConfig.RadioRecvMangle,
+                                                CMMConfig.RadioRecvMakeupDb,
+                                                CMMConfig.RadioRecvLowCutHz,
+                                                CMMConfig.RadioRecvHighCutHz);
             if (voiceId != 0)
                 CmmMixer.Instance?.SetVoiceReceiver(voiceId, to, ratePerSec,
                                                     CMMConfig.RadioTuneDullness,

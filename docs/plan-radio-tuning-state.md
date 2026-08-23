@@ -5,8 +5,37 @@ research is `plan-fm-dial-consult.md`. This is the *state*.
 
 ## What is deployed
 
-`8b80aeb` — ABI 46, schema 9. That is the **J1** settings, and it is NOT the latest thing Chris has
-heard. Everything after J1 was settled in the offline renderer and has not been ported.
+**SETTLED AND SHIPPED, 2026-08-23.** ABI 47, schema 10, built and deployed to all four game
+installs. Everything below is now the compiled default — the bench and the game agree for the
+first time since J1.
+
+In-game listening test still pending. What to check, in order: that a station change at real game
+volume still reads as tuning (the bench is 15 s of headphones, not a firefight); that the
+mangle-then-repair is not too aggressive on bass-heavy tracks; and that nothing pops at the lock
+instant (there is a theoretical −29 dB one-sample step there where the held noise floor stops
+applying — it measured below the music and never surfaced in the bench, but game speakers at
+volume are a different test).
+
+## The one that mattered
+
+*"It still sounds like audio at its full fidelity slowly fading in with things layered on top of
+it."* Four rounds were spent adding things — bright hiss, treble windows, noise holds — on top of a
+programme that measurement showed was **essentially untouched**: −3 dB at 3.75 kHz, full bass, full
+dynamics, full stereo. The answer was never additive. The music itself has to be wrecked and then
+repaired: band-limited to 400 Hz – 2.6 kHz with two poles at each end, driven, squashed 8:1, made
+up +9 dB, and released as the station locks. Verdict on that, first try, at full depth: *"Full is
+fine."*
+
+Three details that make it work rather than sound like an EQ:
+
+- **The low cut comes BEFORE the saturator.** With bass still in it a soft clipper makes mush;
+  with the bass gone the same drive becomes midrange grit. This is also why `drive` at 0.15 had
+  been inaudible for the entire project — it was working on a full-range signal.
+- **Two poles at each end, not one.** A one-pole is a 6 dB/oct tilt, i.e. a tone control. Two is
+  an edge, i.e. a bandwidth. Every previous EQ round used one pole and was correctly heard as EQ.
+- **The makeup gain is not optional.** Band-limiting costs real level, and a station that gets
+  quieter as it arrives is the fade that four rounds were spent killing. Measured flat to within
+  half a dB of the locked level.
 
 ## Settled by ear, and NOT to be relitigated
 
@@ -32,15 +61,19 @@ heard. Everything after J1 was settled in the offline renderer and has not been 
   +9.5 dB overshoot. That was *"the volume ramps way up before settling"*. Now `tanh(x·d)/d`, ×7.
 - **Noise at 2.5× full scale.** Clipping, and harsh.
 
-## Open, and where it stopped
+## Rejected in the final rounds
 
-Chris was sent **V1** and **V2** (`scratchpad/v20/`, and the scratchpad is temporary):
-
-- **V1** = N3 reproduced exactly, with every later change switched off.
-- **V2** = V1 with *only* the stereo lock moved later (0.85 of the ramp) and its clunk removed.
-
-The first question is whether **V1 actually sounds like N3 did**. If it does not, the revert is
-wrong and everything downstream of it is guesswork.
+- **Speeding up the treble sweep.** The bench's arrival ran its 2.6 octaves at 1.47 oct/s against
+  the approved departure's 3.43 and the shipped code's 9.15, which looked like a smoking gun. A
+  four-step ladder said otherwise: *"1-slowest-current is fine."* The rate was never the problem.
+- **Carrier-present bright hiss.** Physically real (demod noise is triangular, de-emphasis cancels
+  the +6 dB/oct exactly, so a carrier turns the dark roar into a bright sizzle) and the missing
+  masker above 6 kHz, where the dark bed holds only 1.8% of its power. Three of four agents made it
+  their top pick. Verdict: *"It sounds completely wrong. That's not the right direction."* Kept in
+  the bench behind `hfLvl` (arg 36, default 0) in case it earns a place later.
+- **The decoder clunk.** A one-sample 0.34 DC step into the mid channel at the stereo latch,
+  measured at −14.6 dBFS — the largest discontinuity anywhere in the transition, larger than any
+  musical transient in either track. Real decoders do it. Not wanted, and never ported.
 
 ## Things that were tried and made it worse
 

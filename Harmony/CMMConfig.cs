@@ -188,9 +188,13 @@ namespace CMM
         // station happens to be loaded. Leave/Arrive are quoted at full scale and applied as a
         // RATE, so interrupting a half-finished tune-in fades from half and takes half as long —
         // a fixed duration drags on an early interrupt and snaps on a late one.
-        public static float  RadioTuneMinStaticMs = 4000f;
-        public static float  RadioTuneLeaveMs     = 3400f;
-        public static float  RadioTuneArriveMs    = 7000f;
+        //
+        // 14 seconds end to end was the original, and it came from applying "double is fine" to a
+        // listening demo and then shipping it as a gameplay timing without anyone checking it as
+        // one. 5.5 s total is what settled: 1.2 out, 1.5 of static, 2.8 back in.
+        public static float  RadioTuneMinStaticMs = 1500f;
+        public static float  RadioTuneLeaveMs     = 1200f;
+        public static float  RadioTuneArriveMs    = 2800f;
         public static float  RadioTuneDullness    = 0.85f;   // 0 = no treble loss on the way in/out
         public static float  RadioTuneMononess    = 1f;      // 0 = stays stereo the whole way
         // Backstop only, so a wedged open/seek cannot strand the player in static for ever. A
@@ -255,6 +259,46 @@ namespace CMM
         public static float  RadioRecvWander      = 0.55f;
         public static float  RadioRecvFlutter     = 0.30f;
         public static float  RadioRecvFlutterHz   = 14f;
+
+        // ── THE ARRIVAL ────────────────────────────────────────────────────────────────────
+        // Losing a station was right from early on. Coming back was wrong for four consecutive
+        // rounds, and the reason turned out to be that NOTHING was happening to the music.
+        // Measured, the deepest treatment an arriving station ever got was −3 dB at 3.75 kHz with
+        // its bass, its dynamics and its stereo image completely intact — i.e. the source file,
+        // fading up, with noise laid over it. Which is exactly what it sounded like: "I get no
+        // sense that we're tuning into anything."
+        //
+        // Mangle is the fix and it is the load-bearing one. A weak station is not clean audio
+        // under noise, it is WRECKED audio: squeezed into LowCut..HighCut by a narrow IF and a
+        // small speaker, driven into distortion, and flattened by the station's own processing on
+        // top of the receiver's AGC. All of it then lets go as the station locks. 0 = the old
+        // behaviour (nothing happens to the music); 1 = full.
+        //
+        // LowCutHz is the one nothing had ever touched, and it matters twice over: bass is most
+        // of what makes a source sound hi-fi, AND cutting it first is what turns Drive into
+        // midrange grit instead of mud. MakeupDb puts back the level that band-limiting costs,
+        // because a station that gets quieter as it arrives is the fade this all exists to avoid.
+        public static float  RadioRecvMangle      = 1f;
+        public static float  RadioRecvMakeupDb    = 9f;
+        public static float  RadioRecvLowCutHz    = 400f;
+        public static float  RadioRecvHighCutHz   = 2600f;
+        // How far into the arrival the hiss lasts, and the residual bed that never fully goes.
+        // Tied to the signal alone the hiss cleared while the station was still opening, which
+        // left clean music fading in with nothing over it — and a fade with nothing over it is
+        // just a fade. Absolute zero reads as "sound effect ended" rather than "receiver".
+        public static float  RadioRecvNoiseHold   = 1f;
+        public static float  RadioRecvNoiseFloor  = 0.06f;
+        // The treble window, as positions on the 0..1 signal ramp, shared by both directions.
+        // Keyed to ramp position rather than SNR because SNR saturates near its maximum long
+        // before the station is merely audible, so anything read off it fires early and lands
+        // inside the knee — which made the treble a step rather than a recovery.
+        public static float  RadioRecvWindowA     = 0.28f;
+        public static float  RadioRecvWindowB     = 0.912f;
+        // Where the stereo decoder latches, and how fast the image opens once it does. A decoder
+        // LATCHES; it does not glide, and it is the LAST thing to come good — after the treble.
+        // Hysteresis of 0.14 is baked in: a lock is harder to acquire than to keep.
+        public static float  RadioRecvLockAt      = 0.52f;
+        public static float  RadioRecvLockMs      = 9f;
 
         public static float  RadioStaticVolume  = -1f;
         public static float  RadioStaticLowHz   = 50f;     // was 350 — the body of the roar lives here.

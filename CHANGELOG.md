@@ -44,6 +44,32 @@ All notable changes to Context Music Manager are documented here.
   `RadioStaticCrackle` (0 = smooth hiss, 1 = full sputter) and `RadioStaticVolume`; the
   clicks' `RadioClickOn*` / `RadioClickOff*` (tone cap Hz, snap = sharp tick vs soft thud,
   length, volume). Edits are audible mid-static / on the next dial. Native ABI 38.
+- **Changing station sounds like tuning a radio, not like a crossfade.** Pressing next/previous
+  now plays the whole event: the station you are leaving is buried under interstation noise,
+  the noise runs for as long as the next station needs to load, and then that station is
+  *acquired* rather than faded up. The difference is what happens to the music itself. An
+  arriving station comes in squeezed to roughly a telephone's bandwidth, distorted and
+  squashed flat with no dynamics left, and then opens out — bass first, then treble, and the
+  stereo image last of all, snapping in the way a real decoder locks. Nothing is
+  crossfaded: the programme holds its level throughout and the noise does the moving, which
+  is what a real receiver does and is the reason it no longer reads as two sounds passing
+  each other. The whole change takes about 5.5 seconds when the next station is ready
+  instantly, and stretches only as long as loading actually needs.
+  - Everything is live in `settings.xml`. The timing is `RadioTuneMinStaticMs` /
+    `RadioTuneLeaveMs` / `RadioTuneArriveMs` (1500 / 1200 / 2800 — these are much shorter
+    than before; the old values were three times too long). How wrecked the arriving station
+    gets is `RadioRecvMangle` (0 turns the whole thing off and restores the old plain
+    fade-in), with `RadioRecvLowCutHz` / `RadioRecvHighCutHz` setting the band it is squeezed
+    into and `RadioRecvMakeupDb` the level put back.
+  - The noise's own character is `RadioRecvNoise`, `RadioRecvClicks` / `RadioRecvClickRate`,
+    `RadioRecvWander` and `RadioRecvFlutter`; how far into the arrival it lasts is
+    `RadioRecvNoiseHold`, and `RadioRecvNoiseFloor` is the residual hiss a locked station
+    keeps. `RadioRecvWindowA` / `RadioRecvWindowB` are when the treble comes back, and
+    `RadioRecvLockAt` / `RadioRecvLockMs` are when and how fast the stereo image opens.
+  - Interrupting a half-finished change is handled: signal is ramped by rate rather than
+    duration, so dialling on from half way fades from half and takes half as long instead of
+    dragging or snapping. Native ABI 47.
+
 - **Ham radios sound like ham radios.** The `radioHam` block now has its own always-on
   "small communications speaker" voicing — narrowed band, a touch of soft-clip breakup, a
   whisper of static — while store shelf speakers keep playing clean. Under the hood every

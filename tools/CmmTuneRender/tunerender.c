@@ -34,6 +34,12 @@ int main(int argc, char** argv){
     float lim2   = argc > 33 ? atof(argv[33]) : 0.0f;   /* extra squash on a weak station */
     float nHiHz  = argc > 34 ? atof(argv[34]) : 0.0f;   /* static's own top cap; 0 = off */
     float musicEq= argc > 35 ? atof(argv[35]) : 0.0f;   /* 1 = band-limit the MUSIC only */
+    float hfLvl  = argc > 36 ? atof(argv[36]) : 0.0f;   /* CARRIER-PRESENT bright hiss level */
+    float hfSide = argc > 37 ? atof(argv[37]) : 0.0f;   /* 0 = dual mono, 1 = all in the sides */
+    float radioAmt=argc > 38 ? atof(argv[38]) : 0.0f;   /* MASTER: how radio-ised the music gets */
+    float radioMk = argc > 39 ? atof(argv[39]) : 7.0f;  /* makeup dB at full depth */
+    float radioHp = argc > 40 ? atof(argv[40]) : 400.0f;/* low cut at full depth */
+    float radioLp = argc > 41 ? atof(argv[41]) : 2600.0f;/* high cut at full depth */
     float trim = atof(argv[4]), clickAmt = atof(argv[5]), clickMax = atof(argv[6]);
     float deemHz = atof(argv[7]), secs = atof(argv[8]);
     float wander = atof(argv[9]), flutter = atof(argv[10]);
@@ -77,6 +83,12 @@ int main(int argc, char** argv){
     if (kwOv > 0.001f) kw = kwOv;
     float hiFloor = 1800.0f, dull = 0.85f, mono = 1.0f;
     float deemK = 1.0f - expf(-6.2831853f * deemHz / rate);
+    float nzHi = 0.0f, nzHi2 = 0.0f, hfNz = 0.0f;
+    /* the MUSIC path's own filter state. It used to share lp0/lp1 with the output stage,
+     * which meant the 'move the EQ onto the music' round filtered the mix twice and never
+     * touched the music at all. Its own state, so it does what it says. */
+    float mlp0=0, mlp1=0, mlp2=0, mlp3=0, mhp0=0, mhp1=0, mhp2=0, mhp3=0, cEnv=0;
+    float kHi = 1.0f - expf(-6.2831853f * 15000.0f / rate);   /* the 15 kHz MPX wall */
     float clickDecay = 0.9975f;
 
     FILE* f = fopen(out, "wb"); unsigned data = (unsigned)n * 2 * 2;
@@ -199,6 +211,27 @@ int main(int argc, char** argv){
         }
         float nz = nzs*nAmp*2.0f;
 
+        /* CARRIER-PRESENT HISS. The bed above is the NO-carrier case: demodulator noise is
+         * flat, de-emphasis eats it, and what is left is a dark roar. That roar puts 79% of
+         * its power below 2 kHz and 1.8% above 6 kHz, so it cannot cover a cymbal -- and the
+         * arriving station's top end therefore appears with nothing whatsoever over it, which
+         * is what 'too clean' is. With a carrier PRESENT the noise is triangular (+6 dB/oct),
+         * de-emphasis cancels that exactly, and the result is flat from 2.1 kHz to the 15 kHz
+         * wall: a bright, thin hiss. That is the component the hi-cut is actually fighting,
+         * and the reason a real set gets brighter AND hissier in the same instant. Shaped as a
+         * HUMP across the treble window -- zero at both ends, so it is non-monotonic and can
+         * never read as a filter opening. Arrival only: the search bed and the whole departure
+         * are untouched. */
+        hfNz = 0.0f;
+        if (hfLvl > 0.0001f && rising) {
+            float o = (u - tInA) / (tInB - tInA);
+            if (o < 0.0f) o = 0.0f; else if (o > 1.0f) o = 1.0f;
+            float hfAmp = hfLvl * 4.0f * o * (1.0f - o);
+            nzHi  += kHi*((wn - nz1) - nzHi);      /* HP at deemHz, reusing nz1: free */
+            nzHi2 += kHi*(nzHi - nzHi2);
+            hfNz = nzHi2 * hfAmp * 2.0f;
+        }
+
         if (clickAmt>0.001f && snr<14.0f){
             if(--clkNext<=0){
                 float r2 = clickMax*powf(10.0f,-(snr+4.0f)*0.1667f); if(r2<0.05f)r2=0.05f;
@@ -215,6 +248,67 @@ int main(int argc, char** argv){
         }
 
         float pl = ml*progG, pr = mr*progG;
+
+        /* ================= THE MUSIC ITSELF CHANGES SHAPE =================================
+         * Everything before this round added things ON TOP of a full-fidelity source, and a
+         * full-fidelity source with things on top of it is exactly what it sounds like. A weak
+         * station is not clean audio under noise -- it is MANGLED audio: squeezed at both ends
+         * by a narrow IF and a small speaker, driven into distortion, and flattened by the
+         * station's own processing riding on top of the receiver's AGC. None of that was
+         * happening; measured, the deepest treatment the arriving station ever got was -3 dB at
+         * 3.75 kHz with its bass and its dynamics completely intact.
+         *
+         * Order is load-bearing. The low cut comes BEFORE the saturator: with bass still in it a
+         * soft clipper just makes mush, and with the bass gone the same drive turns into midrange
+         * grit. That is the difference between 'distorted' and 'muddy'.
+         *
+         * Two poles at each end, not one. A one-pole is a 6 dB/oct tilt -- a tone control. Real
+         * band-limiting has an EDGE, and an edge is what reads as a bandwidth rather than as
+         * somebody's finger on an EQ.
+         *
+         * Arrival only, so the departure is bit-identical. */
+        if (radioAmt > 0.001f && rising) {
+            float ra = 1.0f - (u - tInA)/(tInB - tInA);
+            if (ra < 0.0f) ra = 0.0f; else if (ra > 1.0f) ra = 1.0f;
+            ra = ra*ra*(3.0f-2.0f*ra) * radioAmt;
+
+            /* --- low cut, 20 Hz -> radioHp, two poles --- */
+            float fhp = 20.0f * powf(radioHp/20.0f, ra);
+            float kh = 1.0f-expf(-6.2831853f*fhp/rate);
+            mhp0 += kh*(pl-mhp0); float ah = pl-mhp0;
+            mhp2 += kh*(ah-mhp2); pl = ah-mhp2;
+            mhp1 += kh*(pr-mhp1); float bh = pr-mhp1;
+            mhp3 += kh*(bh-mhp3); pr = bh-mhp3;
+
+            /* --- drive. Bass is gone, so this is grit rather than mud. --- */
+            float dr = 1.0f + ra*9.0f;
+            pl = tanhf(pl*dr)/dr; pr = tanhf(pr*dr)/dr;
+
+            /* --- high cut, 15 kHz -> radioLp, two poles --- */
+            float flp = 15000.0f * powf(radioLp/15000.0f, ra);
+            float kl = 1.0f-expf(-6.2831853f*flp/rate);
+            mlp0 += kl*(pl-mlp0); mlp2 += kl*(mlp0-mlp2); pl = mlp2;
+            mlp1 += kl*(pr-mlp1); mlp3 += kl*(mlp1-mlp3); pr = mlp3;
+
+            /* --- squash it flat. Every station is Optimod'd and every set has AGC; broadcast
+             *     has no micro-dynamics at all, and micro-dynamics are a large part of what
+             *     'full fidelity' sounds like. 8:1, 5 ms attack, 60 ms release. --- */
+            float av = fabsf(pl) > fabsf(pr) ? fabsf(pl) : fabsf(pr);
+            float ka = 1.0f-expf(-1.0f/(0.005f*rate)), kr = 1.0f-expf(-1.0f/(0.060f*rate));
+            cEnv += (av > cEnv ? ka : kr) * (av - cEnv);
+            float thr = 0.06f;
+            if (cEnv > thr) {
+                float g = powf(thr/cEnv, (1.0f - 1.0f/8.0f) * ra);
+                pl *= g; pr *= g;
+            }
+
+            /* --- makeup. Taking out everything below 400 Hz and above 2.6 kHz costs real
+             *     level, and a station that gets quieter as it arrives is the FADE we spent
+             *     four rounds killing. Put it back. --- */
+            float mk = powf(10.0f, radioMk*ra*0.05f);
+            pl *= mk; pr *= mk;
+        }
+
         if (drive > 0.001f) {
             /* Drive scales with how far gone the signal is, level-compensated so it dirties the
              * station rather than just making it louder. Clean music behind a blanket reads as a
@@ -257,7 +351,8 @@ int main(int argc, char** argv){
                 pl = tanhf(pl*d2)/d2; pr = tanhf(pr*d2)/d2;
             }
         }
-        float l = pl + nz, r = pr + nz*0.85f;
+        float l = pl + nz + hfNz*(1.0f + hfSide);
+        float r = pr + nz*0.85f + hfNz*(1.0f - hfSide);
         if (u < 0.9995f){
             float tt;
             if (stagger > 0.001f) {
