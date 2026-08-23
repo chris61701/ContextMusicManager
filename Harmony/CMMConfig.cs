@@ -811,6 +811,17 @@ namespace CMM
         // written at all — a mod manager's read-only overlay — CMMConfigLoader.PersistSetting
         // says so and the toggle still works for the session.
         public static bool CombatMusicMuted = false;
+        // TENSION-MUSIC MUTE, persisted the same way and driven by the SAME key. Tension is
+        // combat music that has not started yet — the stalking cue the game plays when it
+        // thinks a fight is coming — so silencing fights while it keeps running only moves the
+        // noise rather than removing it. Alt+Home therefore cycles both: off together, then
+        // combat alone, then back on.
+        //
+        // Kept as its own setting rather than folded into one three-valued one so each line
+        // still means exactly one thing, an existing CombatMusicMuted keeps working untouched,
+        // and hand-editing THIS alone silences only tension — a combination the key never
+        // lands on but which is perfectly coherent to want.
+        public static bool TensionMusicMuted = false;
         // Shows/hides the persistent Now Playing overlay (top-left track + context
         // readout). NowPlayingEnabled below picks the state at launch.
         public static KeyCode KeyNowPlaying       = KeyCode.Keypad7;

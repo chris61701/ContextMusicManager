@@ -91,6 +91,7 @@ namespace CMM
                 // keybind writes the file: a reload can only ever read back the value the
                 // toggle just stored, so the two cannot disagree.
                 ContextMusicManager.SetCombatMusicMuted(CMMConfig.CombatMusicMuted);
+                ContextMusicManager.SetTensionMusicMuted(CMMConfig.TensionMusicMuted);
 
                 // MusicPath may have just changed (settings hot-reload): the ban /
                 // favourite mirrors hold absolute paths derived from it, so re-derive.

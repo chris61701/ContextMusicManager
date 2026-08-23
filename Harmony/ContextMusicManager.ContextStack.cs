@@ -252,20 +252,46 @@ namespace CMM
         private static readonly HashSet<string> _combatContexts =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // TENSION: the same idea for the pre-fight cue. Its own flag and its own set, because
+        // the two are muted independently even though one key drives both — see CycleMusicMute.
+        private static bool _tensionMusicMuted;
+        private static readonly HashSet<string> _tensionContexts =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         internal static bool CombatMusicMuted => _combatMusicMuted;
+        internal static bool TensionMusicMuted => _tensionMusicMuted;
         internal static int CombatContextCount => _combatContexts.Count;
+        internal static int TensionContextCount => _tensionContexts.Count;
 
-        // Returns true when combat music is muted AFTER the toggle.
-        internal static bool ToggleCombatMusicMuted() => _combatMusicMuted = !_combatMusicMuted;
+        // THE MUTE KEY IS A THREE-STOP CYCLE, not a toggle:
+        //
+        //     both on  →  combat + tension off  →  combat off  →  both on
+        //
+        // Tension is combat music that has not started yet, so the FIRST stop is the loud one:
+        // someone reaching for this key in a fight wants the fight music gone, and leaving the
+        // stalking cue running underneath just moves the noise. The middle stop exists because
+        // tension alone is genuinely wanted by some — it is the mood without the drums.
+        //
+        // A hand-edited file can hold tension-muted-alone, which the cycle never produces. That
+        // is a legitimate setting, not a corrupt one, so it is not "repaired" on load; the next
+        // keypress simply lands on all-on, the one stop that is unambiguous from anywhere.
+        internal static void CycleMusicMute()
+        {
+            if (!_combatMusicMuted && !_tensionMusicMuted) { _combatMusicMuted = true;  _tensionMusicMuted = true;  }
+            else if (_combatMusicMuted && _tensionMusicMuted) { _combatMusicMuted = true;  _tensionMusicMuted = false; }
+            else                                              { _combatMusicMuted = false; _tensionMusicMuted = false; }
+        }
 
-        // Set it outright, from the loaded config. Separate from the toggle so a settings
-        // (re)load cannot flip the state by accident — a load says what the value IS, a
+        // Set them outright, from the loaded config. Separate from the cycle so a settings
+        // (re)load cannot advance the state by accident — a load says what the value IS, a
         // keypress says it changed, and conflating the two is how a hot-reload ends up
         // un-muting someone mid-fight.
         internal static void SetCombatMusicMuted(bool muted) => _combatMusicMuted = muted;
+        internal static void SetTensionMusicMuted(bool muted) => _tensionMusicMuted = muted;
 
         internal static bool IsUserDisabled(string contextName) =>
-            _combatMusicMuted && _combatContexts.Contains(contextName);
+            (_combatMusicMuted && _combatContexts.Contains(contextName))
+            || (_tensionMusicMuted && _tensionContexts.Contains(contextName));
 
         // (Re)derives _combatContexts from the loaded context table. Called wherever
         // RebuildVanillaLinkMap is (InitContexts + CMMConfigLoader.LoadContexts).
@@ -282,6 +308,22 @@ namespace CMM
                 if (ctx.Context.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0
                     || _combatMarked.Contains(ctx.Context))
                     _combatContexts.Add(ctx.Context);
+            }
+
+            // The tension set is rebuilt HERE rather than behind its own entry point, so no
+            // caller can refresh one set and leave the other stale. They are read by the same
+            // keypress and must always describe the same contexts table.
+            //
+            // Name convention only: there is exactly one shipped tension context, and unlike
+            // combat — where Low_Health_Panic is a fight sting whose name says otherwise and
+            // needed combat="true" — nothing in the table is tension music under another name.
+            // If that stops being true, mirror _combatMarked rather than widening the match.
+            _tensionContexts.Clear();
+            foreach (Contexts ctx in contexts.Values)
+            {
+                if (ctx.Context == null) continue;
+                if (ctx.Context.IndexOf("tension", StringComparison.OrdinalIgnoreCase) >= 0)
+                    _tensionContexts.Add(ctx.Context);
             }
         }
 
@@ -562,7 +604,7 @@ namespace CMM
         private static bool PanicHandoffSectionDisabled()
         {
             if (CMMConfig.DisabledVanillaSections.Count == 0 && !_combatMusicMuted
-                && !PersonalRadio.SuppressesMusic)
+                && !_tensionMusicMuted && !PersonalRadio.SuppressesMusic)
                 return false;
             World world = GameManager.Instance?.World;
             bool bloodMoon = world != null && world.IsWorldEvent(World.WorldEvent.BloodMoon);

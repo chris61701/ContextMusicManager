@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 17;
+        internal const int CurrentSchema = 18;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -264,18 +264,26 @@ Live controls for whatever music is playing (menu or in-game):
                        second line — with the readout hidden, the box pops
                        up briefly just for them. NowPlayingEnabled below
                        picks the state at launch.
-  Combat music       – a TOGGLE that mutes/unmutes ALL combat contexts at
-                       once (the Combat tiers, their biome variants, and
-                       Blood_Moon_Combat — any context whose name contains
-                       ""combat""). While muted, fights keep whatever music
-                       was already playing: the combat contexts resolve
-                       through their fallback chains as if empty, and the
-                       game's own Combat/Bloodmoon sections are held back
-                       too. SAVED: pressing it writes CombatMusicMuted
-                       below, so the choice survives a restart. Set that
-                       to true here and the game starts muted with no
-                       keypress at all. (A mod UPDATE replaces this file
-                       and resets it to the shipped default.)
+  Combat music       – a three-stop CYCLE, not an on/off toggle:
+                         1st press – combat AND tension music off
+                         2nd press – combat off, tension back on
+                         3rd press – both back on
+                       Combat covers the Combat tiers, their biome variants
+                       and Blood_Moon_Combat — any context whose name
+                       contains ""combat"", plus anything marked
+                       combat=""true"". Tension covers any context whose
+                       name contains ""tension"". Tension is the pre-fight
+                       stalking cue, which is why one key covers both:
+                       muting fights while it still plays just moves the
+                       noise. While muted those contexts resolve through
+                       their fallback chains as if empty and the game's own
+                       linked sections (Combat/Bloodmoon, Suspense) are held
+                       back too, so a fight keeps whatever was playing.
+                       SAVED: pressing it writes CombatMusicMuted and
+                       TensionMusicMuted below, so the choice survives a
+                       restart. Set those here and the game starts muted
+                       with no keypress at all. (A mod UPDATE replaces this
+                       file and resets them to the shipped defaults.)
 Keys use Unity KeyCode names (RightArrow, Delete, Home, F7, Keypad6, ...).
 By default all of these require Alt held so they don't collide with game or
 chat input, and none sit on letters — the game binds letters (D = strafe,
@@ -297,6 +305,12 @@ bindings."),
 it; edit it by hand for the same effect. true = fights keep whatever music was
 already playing, and the game's own Combat/Bloodmoon sections stay held back too."),
             B("CombatMusicMuted",                    "CMMConfig.CombatMusicMuted",                  false),
+            Cmt(@"Tension music muted at launch. Alt+Home drives this together with CombatMusicMuted:
+one press mutes combat AND tension, a second leaves only combat muted, a third
+restores both. Tension is the pre-fight stalking cue, so muting fights while it
+still plays only moves the noise — that is why one key covers the pair. Set this
+true on its own (the key never produces that combination) to silence ONLY tension."),
+            B("TensionMusicMuted",                   "CMMConfig.TensionMusicMuted",                 false, since: 18),
             E("KeyNowPlaying",                       "CMMConfig.KeyNowPlaying",                     @"Keypad7"),
             Cmt(@"Personal radio dial (in-game only, works on EVERY game version): the two keys step
 through Off → station → station → … → Off, wrapping both ways, so they give you
