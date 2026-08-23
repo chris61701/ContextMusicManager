@@ -121,8 +121,9 @@ struct cmm_out {
         /* Radio coloration filter state (per slot per CLASS — each station is an independent
          * stream, and its ham points are colored separately from its speaker points). The
          * coloration PARAMS are global (emCol* for speakers, emColHam* for hams); cutoffs too. */
-        float colLo[2];             /* one-pole low tracker (~250 Hz) — subtracted for the voicing HPF */
-        float colHi[2];             /* one-pole low-pass (~4.2 kHz) — the voicing's top cap */
+        float colLo[2], colLo2[2];  /* voicing HPF: TWO one-pole low trackers, subtracted (an EDGE) */
+        float colHi[2], colHi2[2];  /* voicing LPF: TWO one-poles in series — the top cap */
+        float colRzB[2], colRzL[2]; /* the CONE RESONANCE: state-variable band-pass (bp, lp) */
         unsigned int colRng;        /* LCG state for the static hiss (seeded per slot; shared by both
                                      * classes — they draw different samples, so no correlation) */
         /* Per-slot CARRY reverb send (v31): the managed side's seal-gated next-room level for THIS
@@ -164,7 +165,6 @@ struct cmm_out {
     volatile float emColHamDrive;
     volatile float emColHamStatic;
     volatile float emColHamVoice;
-    float emColLoCoef, emColHiCoef;  /* fixed cutoffs, computed from the device rate at open */
     /* v42: drive the emitter's TONE from occlusion rather than from virtual distance. Off by
      * default, so the shipped occlusion model's carefully tuned door behaviour is bit-identical;
      * the native acoustic model turns it on, because it publishes an occlusion whose worth in
@@ -555,6 +555,8 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             }
             sl->lpf[0] = sl->lpf[1] = 0.0f; sl->lpfCoef[0] = sl->lpfCoef[1] = 1.0f;
             sl->colLo[0] = sl->colLo[1] = 0.0f; sl->colHi[0] = sl->colHi[1] = 0.0f;
+            sl->colLo2[0] = sl->colLo2[1] = 0.0f; sl->colHi2[0] = sl->colHi2[1] = 0.0f;
+            sl->colRzB[0] = sl->colRzB[1] = 0.0f; sl->colRzL[0] = sl->colRzL[1] = 0.0f;
             sl->prevPtCount = 0;      /* point smooth state re-inits from the new station's targets */
             sl->revSendSm = 0.0f;
         }
@@ -688,6 +690,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
          * near-unity, peaks get crushed — grit without a volume jump. */
         float colDrive[2], colStatic[2], colVoice[2];
         float colPre[2], colMk[2], colNoiseAmp[2];
+        float colHpK[2], colLpK[2], colRzF[2], colRzQ[2], colRzAmt[2];
         int   colOn[2];
         colDrive[0] = o->emColDrive;    colStatic[0] = o->emColStatic;    colVoice[0] = o->emColVoice;
         colDrive[1] = o->emColHamDrive; colStatic[1] = o->emColHamStatic; colVoice[1] = o->emColHamVoice;
@@ -698,6 +701,41 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                 colPre[c] = 1.0f + colDrive[c] * 5.0f;
                 colMk[c] = 0.25f / tanhf(colPre[c] * 0.25f);
                 colNoiseAmp[c] = colStatic[c] * 0.08f;
+
+                /* ===== THE KNOB SWEEPS THE SPEAKER, IT DOES NOT BLEND INTO ONE ================
+                 * This used to be two FIXED one-poles (250 Hz / 4.2 kHz) mixed with the dry by
+                 * `voice`. Both halves of that were wrong, and the receiver had already learned
+                 * why (see cmm_mix.c, the arrival mangle):
+                 *
+                 *   - A one-pole is 6 dB/oct, which is a TILT — a tone control. Two is an EDGE,
+                 *     which is a bandwidth. At full strength the old pass took only ~9 dB off
+                 *     100 Hz, and the distance muffle was already doing more than that.
+                 *   - Blending keeps the dry signal. At 0.65 a THIRD of the full-range source
+                 *     came through untouched, bass and all, so the one thing that says "small
+                 *     speaker" — no low end — could never happen at any setting.
+                 *
+                 * So the knob moves the band edges themselves, 0 = wide open (bypassed below),
+                 * 1 = a 320 Hz–3 kHz communications speaker, and nothing dry survives.
+                 *
+                 * And the RESONANCE, which is the actual tell. A small driver in a small box
+                 * rings, and that honk is what the ear identifies as "little speaker"; take a
+                 * full-range signal and merely remove the ends and you get muffled music. It
+                 * rises in frequency with the knob because a smaller cone resonates higher. */
+                {
+                    float v   = colVoice[c];
+                    float sr  = (float)o->sampleRate;
+                    float fhp = 20.0f    * powf(16.0f,        v);   /*    20 Hz -> 320 Hz  */
+                    float flp = 18000.0f * powf(1.0f / 6.0f,  v);   /*  18 kHz -> 3 kHz    */
+                    float frz = 700.0f   * powf(1.6f,         v);   /*   700 Hz -> 1.1 kHz */
+                    float ny  = sr * 0.45f;
+                    if (flp > ny) flp = ny;
+                    if (frz > ny) frz = ny;
+                    colHpK[c] = 1.0f - expf(-6.2831853f * fhp / sr);
+                    colLpK[c] = 1.0f - expf(-6.2831853f * flp / sr);
+                    colRzF[c] = 2.0f * sinf(3.14159265f * frz / sr);
+                    colRzQ[c] = 0.55f;              /* 1/Q — a box resonance, not a whistle */
+                    colRzAmt[c] = v * 0.9f;         /* about +5 dB at the peak, wide open */
+                }
             }
         }
 
@@ -771,10 +809,25 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                                 /* Band-pass voicing: strip lows (~250 Hz) and highs (~4.2 kHz) — the
                                  * "small speaker" body — blended by `voice` (0 keeps full-range). */
                                 if (colVoice[c] > 0.0f) {
-                                    sl->colLo[c] += o->emColLoCoef * (x - sl->colLo[c]);
-                                    float bp = x - sl->colLo[c];                 /* highs + mids (lows removed) */
-                                    sl->colHi[c] += o->emColHiCoef * (bp - sl->colHi[c]); /* cap the top */
-                                    x += (sl->colHi[c] - x) * colVoice[c];
+                                    /* HIGH-PASS, two poles: track the lows twice and subtract. */
+                                    float kh = colHpK[c];
+                                    sl->colLo[c]  += kh * (x - sl->colLo[c]);
+                                    x -= sl->colLo[c];
+                                    sl->colLo2[c] += kh * (x - sl->colLo2[c]);
+                                    x -= sl->colLo2[c];
+                                    /* LOW-PASS, two poles in series. */
+                                    float kl = colLpK[c];
+                                    sl->colHi[c]  += kl * (x - sl->colHi[c]);
+                                    sl->colHi2[c] += kl * (sl->colHi[c] - sl->colHi2[c]);
+                                    x = sl->colHi2[c];
+                                    /* CONE RESONANCE: state-variable band-pass, added back. */
+                                    if (colRzAmt[c] > 0.0f) {
+                                        float fq = colRzF[c];
+                                        float hp = x - sl->colRzL[c] - colRzQ[c] * sl->colRzB[c];
+                                        sl->colRzB[c] += fq * hp;
+                                        sl->colRzL[c] += fq * sl->colRzB[c];
+                                        x += sl->colRzB[c] * colRzAmt[c];
+                                    }
                                 }
                                 /* Soft-clip drive (Padé tanh, exact ±1 at the ±3 clamp). */
                                 if (colDrive[c] > 0.001f) {
@@ -901,8 +954,6 @@ static cmm_out* cmm_out_alloc_ring(int sampleRate, int channels, int ringFrames,
     /* Coloration off (clean bypass) until config relays; fixed voicing cutoffs from the device rate. */
     o->emColDrive = 0.0f; o->emColStatic = 0.0f; o->emColVoice = 0.0f;
     o->emColHamDrive = 0.0f; o->emColHamStatic = 0.0f; o->emColHamVoice = 0.0f;
-    o->emColLoCoef = 1.0f - expf(-6.2831853f * 250.0f  / (float)sampleRate);
-    o->emColHiCoef = 1.0f - expf(-6.2831853f * 4200.0f / (float)sampleRate);
     o->emRevLocWet = 0.0f; o->emRevLocMix = 0.0f; o->emRevLocHold = 0.0f;    /* local bus idle until relayed */
     cmm_reverb_init(&o->reverb, sampleRate);
     cmm_reverb_init(&o->reverbLocal, sampleRate);

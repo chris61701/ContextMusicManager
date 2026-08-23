@@ -219,7 +219,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        be answered by starting the game and loading a world, several minutes a go, and judging
  *        by ear. With this a station change renders to a WAV in seconds and can be diffed against
  *        the reference render directly. */
-#define CMM_DECODER_ABI 49
+#define CMM_DECODER_ABI 50
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
