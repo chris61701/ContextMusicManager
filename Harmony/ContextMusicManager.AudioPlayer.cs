@@ -408,6 +408,34 @@ namespace CMM
             Contexts ctx = GetContext(contextName);
             if (ctx == null || !cacheMap.TryGetValue(contextName, out ContextCache cache)) return;
 
+            // ── THE RADIO OWNS THE MUSIC LAYER, AND THIS IS THE CHOKE POINT ────────────────
+            // The gate in StartContextCoroutine only covers starts that come through it. The two
+            // auto-advance paths (NativeTrackLoop's EOF break, and the marshalled fallback) and
+            // the loudness hold all call this method DIRECTLY, so with the radio on they could
+            // still put a context voice on the bus.
+            //
+            // That is not a cosmetic leak, it is a FEEDBACK LOOP, because both players infer the
+            // end of a track from the same signal: "my voice is no longer in the mixer".
+            // cmm_mix_add crossfades every other music voice out, so a context start retires the
+            // radio's voice; the radio reads that as EOF and rejoins the broadcast; ITS add
+            // retires the context voice; the context reads that as EOF and advances — ungated —
+            // and round it goes, once per fade, for as long as the radio is on.
+            //
+            // Observed 2026-08-23 on 2.6: a 5.4 s cycle that survived every station change —
+            // "track ended → next track" every five seconds with the station audibly restarting,
+            // and a track that had demonstrably not ended (log 12-58, Mazirene FM ping-ponging
+            // between two files while Pocket Full of Rain kept advancing underneath).
+            //
+            // Ignition is as small as dialling the radio off and straight back on: the resolver
+            // starts a context track in the gap (8 ms wide in that log) and it is self-feeding
+            // from there. PlayOnce stingers are the deliberate exception — they interrupt the
+            // radio, and PersonalRadio holds its rejoin until they finish.
+            if (PersonalRadio.SuppressesMusic && !ctx.PlayOnce)
+            {
+                ReleaseNativeVoiceForRadio(CrossFadeDuration);
+                return;
+            }
+
             // Remember the voice of the context we're leaving so a quick flip back can reclaim
             // its still-fading track (and so a stinger's ducked bed can be reclaimed after).
             if (_nativeActiveContext != null
