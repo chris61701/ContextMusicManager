@@ -238,12 +238,13 @@ namespace CMM
         public static float  RadioRecvKneeWidth   = 0.22f;   // how much of the ramp it occupies
         // How loud the hiss gets against the music. The old separate static topped out 5.9 dB
         // QUIETER than the music it was meant to bury, so it never buried anything.
-        // 0.31, and the number moved for a reason worth writing down. It was settled by ear at
-        // 0.55 against RAW source files in the offline renderer. The game plays LOUDNESS
-        // NORMALISED audio — pulled toward -18 LUFS — and this machine's library sits a median
-        // 5 dB above that before normalisation, so the same 0.55 against the normalised programme
-        // is 5 dB hot. Scaled to match: 0.55 x 10^(-5/20).
-        public static float  RadioRecvNoise       = 0.31f;
+        // 0.15, set by ear in game. The history is worth keeping: 0.55 was settled against RAW
+        // files in the offline renderer, and the game plays audio normalised toward -18 LUFS —
+        // about 5 dB below where those files sat — so 0.55 was always hot. It only sounded right
+        // while the per-track loudness gain was being applied to the noise as well and happening
+        // to cancel it. With that gone (a receiver's noise floor is fixed) the error showed, and
+        // the honest level turned out to be lower again than the arithmetic suggested.
+        public static float  RadioRecvNoise       = 0.15f;
         // Demodulator clicks: additive bipolar ticks that rise ABOVE the bed, isolated near the
         // threshold and merging into a rattle below it. The old "crackle" was a multiplier with a
         // ceiling of 1.0 — purely subtractive — so it could never produce one. 0 disables.
