@@ -21,21 +21,35 @@ design and swamps a 2 dB structural difference — turn it off before comparing 
 Everything that went wrong this cycle went wrong because a question about how it *sounds* could
 only be answered by loading a world. Six attempts shipped that way; four were wrong, two badly.
 
-## What is deployed vs what is committed
+## What is deployed
 
-**Deployed:** the build at `93e0fcd` (12:28). Native ABI 49, schema 16.
+**Everything, as of `56f5d98` (13:13).** Native ABI 49, schema 17, all four installs.
 
-**Committed but NOT deployed** — the game held the DLL and it was never re-run:
+An earlier draft of this file said `8a28005` / `c97d527` / `95cd6af` were committed but never
+deployed. That was wrong: the 12:28 build DID succeed and carried all three. What actually
+happened is that the running 3.1 session had the *pre*-12:28 DLL loaded in memory, so it kept
+reporting schema 16 while the file on disk was already schema 17 — and the 2.6 launch at 12:54
+was the first process to load the new code. **A running game is not evidence of what is on
+disk.** Check the DLL's timestamp and the config's schema stamp, not the session in front of you.
 
-| commit | what |
-|---|---|
-| `8a28005` | the ABI guard: bumped 46→49 **and** actually called (`NativeOpus.Verify()` from Init) |
-| `c97d527` | context music holds silently for its loudness measurement (schema 17) |
-| `95cd6af` | config files written with a UTF-8 BOM |
+The loudness hold changes *when* music starts and a fault there is silence — the worst failure
+this mod has. Still worth testing deliberately: enter a world with an unmeasured context, confirm
+music arrives within ~3 s and at the right level.
 
-**Deploy these first thing.** The loudness hold in particular changes *when* music starts, and a
-fault there is silence — the worst failure this mod has. Test it deliberately: enter a world with an
-unmeasured context, confirm music arrives within ~3 s and at the right level.
+## The two-player feedback loop (fixed 2026-08-23, `56f5d98`, unheard)
+
+The radio and the context player fought once per fade for as long as the radio was on — heard as
+"it keeps switching tracks". Both infer end-of-track from the same signal, *my voice is no longer
+in the mixer*, and `cmm_mix_add` crossfades every other music voice out. Each one's start was the
+thing that retired the other's voice, and each read that as EOF.
+
+`PersonalRadio.SuppressesMusic` was checked in `StartContextCoroutine`, but the two auto-advance
+paths and the loudness hold call `StartNativeContext` directly — three ways in, one guarded. The
+gate now sits in `StartNativeContext`, which all three funnel through.
+
+**The lesson is the shape, not the instance: a guard belongs at the choke point, not on the
+path you happened to be looking at.** Ignition here was an 8 ms window — the radio dialled off
+and straight back on.
 
 ## The settled numbers
 
