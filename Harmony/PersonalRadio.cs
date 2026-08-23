@@ -132,7 +132,7 @@ namespace CMM
             CmmMixer.Instance?.SetReceiverSignal(to, ratePerSec,
                                                  CMMConfig.RadioTuneDullness,
                                                  CMMConfig.RadioTuneMononess,
-                                                 _on, _gainApplied);
+                                                 _on, 1f);
             if (voiceId != 0) CmmMixer.Instance?.SetVoiceRadio(voiceId, true);
         }
         private static float _nextStaticAt;
@@ -640,12 +640,19 @@ namespace CMM
             // everything else — Death and Spawn take the bus outright, and a roar continuing
             // underneath one would be worse than silence. The SIGNAL is never re-pushed on this
             // timer: it is ramped natively and re-stating its target would snap it.
-            // Level = the current track's LOUDNESS gain, not 1. The programme carries that gain
-            // in with it, so the noise has to follow or the noise-to-programme ratio that
-            // RadioRecvNoise was tuned against moves with every track. It used to get this for
-            // free by riding the voice; at bus level it has to be told.
+            // A RECEIVER'S NOISE FLOOR IS FIXED. Level 1, deliberately — not the track's
+            // loudness gain, which is what this was and which was wrong.
+            //
+            // The reasoning that put the gain here was that the programme carries it, so the noise
+            // must follow to hold the ratio. That is true of a RAW programme and false of a
+            // normalised one, and CMM normalises: every track is pulled toward the same loudness,
+            // so the music comes out at the same level whatever its gain was, and scaling the
+            // noise by that gain moves ONLY the noise. A quiet song needing +12 dB of boost got
+            // +12 dB of static with it. Constant here means constant against a constant
+            // programme, which is the ratio that was actually settled by ear. RadioRecvNoise is
+            // the one knob that sets it.
             CmmMixer.Instance?.SetReceiverActive(
-                _on && !ContextMusicManager.PlayOnceStingerActive, _gainApplied);
+                _on && !ContextMusicManager.PlayOnceStingerActive, 1f);
 
             if (!_on) return;
 

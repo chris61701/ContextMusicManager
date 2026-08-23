@@ -184,7 +184,7 @@ namespace CmmRadioSim
                 {
                     _voiceA = Add(_a, _startA, fade: 0.01f, gain: GainA);
                     N.cmm_mix_set_voice_radio(_voiceA, 1);
-                    N.cmm_mix_set_receiver_signal(1f, 0f, Dullness, Mononess, 1, GainA);
+                    N.cmm_mix_set_receiver_signal(1f, 0f, Dullness, Mononess, 1, 1f);
                     Note(t, $"station A up, voice {_voiceA}");
                     _step = 1;
                 }
@@ -194,7 +194,7 @@ namespace CmmRadioSim
                 if (_step == 1 && t >= _pressAt)
                 {
                     double leaveSec = LeaveMs / 1000.0, searchSec = MinStaticMs / 1000.0;
-                    N.cmm_mix_set_receiver_signal(0f, 1000f / LeaveMs, Dullness, Mononess, 1, GainA);
+                    N.cmm_mix_set_receiver_signal(0f, 1000f / LeaveMs, Dullness, Mononess, 1, 1f);
                     _swapAt   = t + leaveSec + searchSec * 0.5;
                     _arriveAt = t + leaveSec + searchSec;
                     Note(t, $"PRESS — leave {leaveSec:0.00}s, swap +{_swapAt - t:0.00}s, arrive +{_arriveAt - t:0.00}s");
@@ -212,12 +212,12 @@ namespace CmmRadioSim
                 // 3: ARRIVE.
                 if (_step == 3 && t >= _arriveAt)
                 {
-                    N.cmm_mix_set_receiver_signal(1f, 1000f / ArriveMs, Dullness, Mononess, 1, GainB);
+                    N.cmm_mix_set_receiver_signal(1f, 1000f / ArriveMs, Dullness, Mononess, 1, 1f);
                     Note(t, $"ARRIVE — {ArriveMs / 1000f:0.00}s");
                     _step = 4;
                 }
                 // The 4 Hz re-arm the game pushes from the top of Tick.
-                N.cmm_mix_set_receiver_active(1, _step >= 3 ? GainB : GainA);
+                N.cmm_mix_set_receiver_active(1, 1f);   // a receiver's noise floor is FIXED
             }
 
             long Add(string path, double startSec, float fade, float gain)
