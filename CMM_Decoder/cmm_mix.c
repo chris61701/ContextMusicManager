@@ -611,11 +611,24 @@ static void receiver_advance(int n) {
 static void render_receiver_add(int n) {
     int f;
     if (!g_recvActive) {
-        /* Off air. Reset the parts that would otherwise resume mid-roar on the next power-on;
-         * leave the RNG alone so successive tunes do not repeat the same noise. */
+        /* Not armed. THE PROGRAMME STILL HAS TO COME OUT. Returning here instead of summing was
+         * the bug that made this "completely broken": radio voices contribute to g_radioBus and
+         * nothing else, so an unarmed receiver silently threw their audio away -- and the arm was
+         * being pushed from a spot in Tick() that sits below seven early returns, so during
+         * ordinary playback it barely ran. Anything that routes audio somewhere must sum it back
+         * unconditionally; gating a ROUTE on a state flag is how you lose audio, gating an EFFECT
+         * on one is fine.
+         *
+         * Reset the parts that would otherwise resume mid-roar on the next power-on; leave the
+         * RNG alone so successive tunes do not repeat the same noise. */
         g_recvLp[0] = g_recvLp[1] = 0.0f;
         g_recvNzLp = g_recvNzLp2 = g_recvClk = 0.0f;
         g_recvLocked = 0; g_recvLockW = 0.0f;
+        for (f = 0; f < n; f++) {
+            int o = f * g_busChannels;
+            g_bus[o]     += g_radioBus[o];
+            g_bus[o + 1] += g_radioBus[o + 1];
+        }
         return;
     }
     for (f = 0; f < n; f++) {
@@ -701,9 +714,14 @@ static void render_receiver_add(int n) {
             nz += g_recvClk;
         }
 
-        /* --- THE SUM. From here down there is one signal. --------------------------------- */
-        float l = g_radioBus[o] + nz;
-        float r = g_radioBus[o + 1] + nz * 0.85f;   /* FM noise is far worse in the side */
+        /* --- THE SUM. From here down there is one signal. ---------------------------------
+         * THE LEVEL SCALES THE NOISE ONLY. The programme arrived in g_radioBus already carrying
+         * its voice gain -- crossfade x loudness -- so multiplying the SUM by the same loudness
+         * figure applied it to the programme a second time: the station came out squared, a
+         * median 5 dB below where it belonged and moving with every track. The noise is the part
+         * with no voice to inherit from, so the noise is the part that has to be told. */
+        float l = g_radioBus[o] + nz * g_recvLevel;
+        float r = g_radioBus[o + 1] + nz * 0.85f * g_recvLevel;   /* noise is worse in the side */
 
         /* SHARED hi-cut, 15 kHz down to g_recvHiFloor, keyed to RAMP POSITION rather than SNR --
          * snr saturates near its maximum long before the station is merely audible, so anything
@@ -739,8 +757,8 @@ static void render_receiver_add(int n) {
         /* The receiver's own volume. The programme carried its voice gain in, but the NOISE has
          * no voice to inherit from -- and between stations there is no voice at all -- so the
          * radio's level (context volume x duck) is pushed in from managed and applied here. */
-        g_bus[o]     += l * g_recvLevel;
-        g_bus[o + 1] += r * g_recvLevel;
+        g_bus[o]     += l;
+        g_bus[o + 1] += r;
     }
 }
 

@@ -38,6 +38,9 @@ namespace CMM
     internal static class PersonalRadio
     {
         private const float TickInterval = 0.25f;
+        // The handover crossfade. Long enough not to click, short enough to finish well inside
+        // the static it hides under.
+        private const float SwapFade = 0.25f;
         private const float AdvanceFade = 0.2f;    // EOF → next track (near-seamless)
         private const float SilenceFade = 0.4f;    // off-air / world-exit fade to silent
 
@@ -74,7 +77,11 @@ namespace CMM
         // way through a tune-in and the leave starts from a half — not from full, which would swell
         // upward before falling, and not over a fixed 260 ms, which would drag.
         private static float _sigFrom = 1f, _sigTo = 1f, _sigRate, _sigT0;
-        private static float _searchUntil;    // realtime the minimum static floor expires
+        private static float _searchUntil;
+        // When the station being left hands over to the station being joined. Down in the middle
+        // of the static, where neither of them is audible — the same place the sound preview
+        // swaps its two source files.
+        private static float _swapAt;    // realtime the minimum static floor expires
         private static float _searchGiveUp;   // realtime the backstop abandons a wedged load
         private static bool  _arriving;       // the new voice exists and is being brought up
 
@@ -122,7 +129,7 @@ namespace CMM
             CmmMixer.Instance?.SetReceiverSignal(to, ratePerSec,
                                                  CMMConfig.RadioTuneDullness,
                                                  CMMConfig.RadioTuneMononess,
-                                                 _on, 1f);
+                                                 _on, _gainApplied);
             if (voiceId != 0) CmmMixer.Instance?.SetVoiceRadio(voiceId, true);
         }
         private static float _nextStaticAt;
@@ -281,7 +288,7 @@ namespace CMM
             // "rolling off Off onto a station" its no-leave-phase behaviour for free: the leave
             // is computed from the current signal, and the current signal is zero.
             _sigFrom = _sigTo = 0f; _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
-            _arriving = false; _searchUntil = 0f; _searchGiveUp = 0f;
+            _arriving = false; _searchUntil = 0f; _searchGiveUp = 0f; _swapAt = 0f;
             Save();
             RefreshOverlayCaches();
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
@@ -557,20 +564,29 @@ namespace CMM
             // interrupting a half-finished arrival fades from half and takes half as long.
             float leaveSec = Mathf.Max(0.02f, Signal / LeaveRate);
             AimSignal(_voiceId, 0f, LeaveRate);
-            // ONE AUDIBLE CURVE, NOT TWO. Native gain is `gain × trackGain × signal`, so running
-            // both ramps over the same span multiplies them into t² — the leave dives early and
-            // its last third is inaudible. The receiver is the curve we want to hear; trackGain
-            // only has to reach zero eventually, because the voice is orphaned here and otherwise
-            // retires at EOF. Give it twice the span so it stays out of the way.
-            FadeVoiceOut(leaveSec * 2f);
-            _nextStartFade = 0.01f;      // the receiver does the arriving; don't fade twice
+            // THE STATION BEING LEFT KEEPS PLAYING. It is not faded and it is not stopped — the
+            // receiver buries it, which is a different thing and the only one that sounds right.
+            // Cutting it was the single worst defect in the old behaviour: loading the next
+            // station was also what killed this one, so the moment the file opened (~150 ms in,
+            // long before the static is loud enough to hide anything) the old track vanished
+            // mid-note and the new one appeared in the clear. Click, silence, then static, then
+            // a tune-in on a station you could already hear.
+            //
+            // So: no FadeVoiceOut here. This voice plays on, sinking under the rising hiss, until
+            // the handover retires it at _swapAt.
+            _nextStartFade = SwapFade;   // a real crossfade, spent entirely underneath the static
             _nextTick = 0f;              // dispatch next frame, not in ≤250 ms
 
             // ── SEARCH ──────────────────────────────────────────────────────────────────────
             // A floor on the static, restarted by every PRESS (so hammering the key gives one
             // continuous search that settles a beat after you stop) but NOT by the auto-advance
             // that skips a dead station — three dead folders in a row must not cost three floors.
-            _searchUntil = Time.realtimeSinceStartup + CMMConfig.RadioTuneMinStaticMs / 1000f;
+            // ANCHORED AFTER THE LEAVE, NOT AT THE PRESS. Anchoring it at the press meant the
+            // 1.2 s fade-out ate most of the 1.5 s floor and left about a third of a second of
+            // actual static — a fifth of what was auditioned.
+            float searchSec = CMMConfig.RadioTuneMinStaticMs / 1000f;
+            _swapAt      = Time.realtimeSinceStartup + leaveSec + searchSec * 0.5f;
+            _searchUntil = Time.realtimeSinceStartup + leaveSec + searchSec;
             _searchGiveUp = Time.realtimeSinceStartup + CMMConfig.RadioTuneGiveUpMs / 1000f;
             _arriving = false;
             // A CLICK ON EVERY DIAL MOVE, and the right KIND of click. Powering the radio on is a
@@ -608,6 +624,24 @@ namespace CMM
 
             if (Time.realtimeSinceStartup < _nextTick) return;
             _nextTick = Time.realtimeSinceStartup + TickInterval;
+
+            // ARM THE RECEIVER HERE, ABOVE EVERY RETURN BELOW. There are seven of them between
+            // this point and the end of the method, and the first version of this push sat under
+            // all of them — so during ordinary playback it effectively never ran. This is the
+            // second time a receiver instruction has been put in dead code in this file; if you
+            // are adding another one, put it here.
+            //
+            // The receiver is not a voice, so it does not inherit the duck a stinger applies to
+            // everything else — Death and Spawn take the bus outright, and a roar continuing
+            // underneath one would be worse than silence. The SIGNAL is never re-pushed on this
+            // timer: it is ramped natively and re-stating its target would snap it.
+            // Level = the current track's LOUDNESS gain, not 1. The programme carries that gain
+            // in with it, so the noise has to follow or the noise-to-programme ratio that
+            // RadioRecvNoise was tuned against moves with every track. It used to get this for
+            // free by riding the voice; at bus level it has to be told.
+            CmmMixer.Instance?.SetReceiverActive(
+                _on && !ContextMusicManager.PlayOnceStingerActive, _gainApplied);
+
             if (!_on) return;
 
             EntityPlayerLocal player = ContextMusicManager.inGame
@@ -754,13 +788,6 @@ namespace CMM
             // same stereo width, so pinging the separate hash on top would put the two-objects
             // problem straight back. This keepalive is for the genuinely voice-less window only:
             // after the old station has gone and before the new one has opened.
-            // Re-arm every tick. The receiver is not a voice, so it does not inherit the duck a
-            // stinger applies to everything else — Death and Spawn take the bus outright, and a
-            // roar continuing underneath one would be worse than the silence. The SIGNAL is never
-            // re-pushed here: it is ramped natively and re-stating its target would snap it.
-            CmmMixer.Instance?.SetReceiverActive(
-                _on && !ContextMusicManager.PlayOnceStingerActive, 1f);
-
             // THE HASH IS GONE. There is one receiver and it is armed for as long as the radio
             // is on, so the voice-less window between stations is covered by the same noise as
             // everything either side of it. It used to be filled by a separate generator — fixed
@@ -808,7 +835,14 @@ namespace CMM
 
             // Idle but on (world entry with a persisted on-state, a gain-wait retry, or it just
             // came back on air): join the broadcast. The carry re-arms a gated EOF advance.
-            if (st.Ready) StartFromClock(st, AdvanceOverride: _advanceCarry);
+            //
+            // On a DIAL MOVE the start is held until _swapAt — the middle of the static. Adding a
+            // voice crossfades every other one out, so the add IS the handover; doing it early is
+            // what cut the outgoing station off in the clear. Held here, both stations are at
+            // zero signal and buried, and the crossfade is inaudible. A slow file pushes the
+            // handover later and simply extends the static, which is what a real one does.
+            if (st.Ready && (!_staticWanted || Time.realtimeSinceStartup >= _swapAt))
+                StartFromClock(st, AdvanceOverride: _advanceCarry);
         }
 
         // ── Voice ───────────────────────────────────────────────────────────────────────────────
