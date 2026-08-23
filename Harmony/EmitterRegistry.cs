@@ -293,11 +293,35 @@ namespace CMM
             }
             int px = Mathf.FloorToInt(pp.x), py = Mathf.FloorToInt(pp.y), pz = Mathf.FloorToInt(pp.z);
             int y0 = Mathf.Max(0, py - ProxRadiusY), y1 = Mathf.Min(256, py + ProxRadiusY + 1);
+            // THE CHUNK LOOKUP IS THE COST, so it is hoisted out of the voxel loop. World.GetBlock
+            // is `GetChunkFromWorldPos(x,y,z)` then `chunk.GetBlock(local)` -- one chunk resolve PER
+            // VOXEL. Measured 2026-08-23 at ~225 ns a read: 21,853 voxels came to 5 ms average and
+            // 11.7 ms worst, four times worse than the "~21k reads, a couple of ms" this file used
+            // to claim, and the reason a wider discovery box looked unaffordable.
+            //
+            // Chunks are 16 wide and z is the inner loop, so the chunk changes about three times per
+            // x row: ~120 resolves per sweep instead of 21,853. The block reads themselves stay.
+            //
+            // GetBlockNoDamage, NOT GetBlock -- IChunk.GetBlock EXISTS on A20/A21/2.6 and was
+            // REMOVED in 3.1, and we compile against 3.1 and ship ONE DLL to all four. NoDamage is
+            // on every version, and damage cannot change .isair or .type, which is all this reads.
+            IChunk chunk = null;
+            int curCX = int.MinValue, curCZ = int.MinValue;
             for (int x = px - ProxRadiusXZ; x <= px + ProxRadiusXZ; x++)
+            {
+                int cx = World.toChunkXZ(x), bx = World.toBlockXZ(x);
                 for (int z = pz - ProxRadiusXZ; z <= pz + ProxRadiusXZ; z++)
+                {
+                    int cz = World.toChunkXZ(z), bz = World.toBlockXZ(z);
+                    if (cx != curCX || cz != curCZ)
+                    {
+                        curCX = cx; curCZ = cz;
+                        chunk = world.GetChunkSync(cx, cz);
+                    }
+                    if (chunk == null) continue;   // unloaded -- GetBlock would have returned Air
                     for (int y = y0; y < y1; y++)
                     {
-                        BlockValue bv = world.GetBlock(x, y, z);   // null-safe → Air on unloaded
+                        BlockValue bv = chunk.GetBlockNoDamage(bx, World.toBlockY(y), bz);
                         if (bv.isair) continue;
                         if (_targetIds.TryGetValue(bv.type, out string name))
                         {
@@ -332,6 +356,8 @@ namespace CMM
                             _placedCache[pos] = name;   // discover (kept until destroyed / far)
                         }
                     }
+                }
+            }
         }
 
         // True when `p` lies inside a nearby, SCANNABLE POI's bounding box — that POI's scan/rescan
@@ -405,13 +431,25 @@ namespace CMM
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             int colH = _scanY1 - _scanY0, sinceCheck = 0;
+            // Same hoist as ScanProximity, and this loop gains MORE from it: it walks whole columns
+            // (up to 256 tall), so World.GetBlock was resolving the same chunk once per Y step.
+            // One resolve per column instead of colH of them. See ScanProximity for why NoDamage.
+            IChunk chunk = null;
+            int curCX = int.MinValue, curCZ = int.MinValue;
             while (_scanX < _scanX1)
             {
+                int cx = World.toChunkXZ(_scanX), bx = World.toBlockXZ(_scanX);
                 while (_scanZ < _scanZ1)
                 {
-                    for (int y = _scanY0; y < _scanY1; y++)
+                    int cz = World.toChunkXZ(_scanZ), bz = World.toBlockXZ(_scanZ);
+                    if (cx != curCX || cz != curCZ)
                     {
-                        BlockValue bv = world.GetBlock(_scanX, y, _scanZ);   // null-safe → Air on unloaded
+                        curCX = cx; curCZ = cz;
+                        chunk = world.GetChunkSync(cx, cz);
+                    }
+                    for (int y = _scanY0; chunk != null && y < _scanY1; y++)
+                    {
+                        BlockValue bv = chunk.GetBlockNoDamage(bx, World.toBlockY(y), bz);
                         if (bv.isair) continue;
                         if (_targetIds.TryGetValue(bv.type, out string name))
                             _scanHits.Add(new Emitter { Pos = new Vector3i(_scanX, y, _scanZ), Name = name,
