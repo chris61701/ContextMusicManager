@@ -57,3 +57,18 @@ changes and this does not, it becomes a faithful simulator of something that no 
 Two things the game has that this does not: the tick is quantised to 4 Hz (up to 250 ms of jitter
 on the swap and the arrival), and the output cushion can be far deeper. Neither changes the sound,
 but both change the timing you would measure against a log.
+
+## The UI
+
+`tools/CmmRadioLab` is a window over this: a slider per setting, **Render GAME** and **Render
+REFERENCE** side by side, and A/B playback. It shells out to this tool and to `CmmTuneRender`
+rather than linking either, because the native mixer is a process-wide singleton with its own
+producer thread — a wedged render should not take the window with it.
+
+Two things it does that are worth having:
+
+- **Load radio.xml prints every value that disagrees with the shipped default**, and the disagreeing
+  knobs turn red and stay red. That is the check whose absence sent the whole tuning effort to
+  numbers nobody approved.
+- **Save edits radio.xml in place**, keeping its comments, its schema stamp and every key the UI
+  does not own, with a `.bak` alongside. So a sound dialled in here ships as-is.
