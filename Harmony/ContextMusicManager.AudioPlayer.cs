@@ -380,8 +380,29 @@ namespace CMM
         // fadeOverride ≥ 0 replaces the fade the context/transition settings would give
         // (the manual-skip keybinds pass CMMConfig.ManualSkipFadeDuration so a keypress
         // switches quickly regardless of the context's fadeintime); -1 = no override.
+        // Wait (silently) for `file`'s loudness, then start it. See the call site for why.
+        private IEnumerator HoldForLoudness(string contextName, bool isSameContextSwitchingToNextTrack,
+                                            int transitionId, string file, float fadeOverride)
+        {
+            RequestPrewarm(file);
+            CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(file));
+            float until = Time.realtimeSinceStartup + CMMConfig.LoudnessStartHoldMs / 1000f;
+            while (Time.realtimeSinceStartup < until && !LoudnessStore.IsMeasured(file))
+            {
+                if (transitionId != _transitionId) yield break;   // superseded — drop it silently
+                yield return null;
+            }
+            if (transitionId != _transitionId) yield break;
+            if (!LoudnessStore.IsMeasured(file))
+                CMMConfig.D($"[CMM] loudness hold expired for {System.IO.Path.GetFileName(file)} — starting uncorrected.");
+            // Pinned + skipLoudnessHold: play THIS track, and do not hold a second time.
+            StartNativeContext(contextName, isSameContextSwitchingToNextTrack, transitionId, file,
+                               fadeOverride, skipLoudnessHold: true);
+        }
+
         internal void StartNativeContext(string contextName, bool isSameContextSwitchingToNextTrack,
-                                         int transitionId, string forcedFile, float fadeOverride = -1f)
+                                         int transitionId, string forcedFile, float fadeOverride = -1f,
+                                         bool skipLoudnessHold = false)
         {
             if (transitionId != _transitionId) return;
             Contexts ctx = GetContext(contextName);
@@ -468,7 +489,27 @@ namespace CMM
                 return;
             }
 
-            // ── Loudness gain (non-blocking; see method header) ──
+            // ── Loudness: NOTHING AUDIBLE UNTIL IT IS NORMALISED ──────────────────────────
+            // This used to start immediately at no correction and ease the real gain in when the
+            // measurement landed. On a quiet file needing the full +12 dB boost that is a large,
+            // audible climb a second into the track — "sometimes when music comes in, it's not
+            // normalised". Hold instead, silently, and start once it is known.
+            //
+            // Bounded by LoudnessStartHoldMs and re-entered with the file PINNED (forcedFile) so
+            // the retry plays the track that was chosen rather than rolling the selection again —
+            // and with skipLoudnessHold set, so an expired hold starts uncorrected instead of
+            // holding again for ever. transitionId is re-checked on the way back in, so a context
+            // change during the wait supersedes this start rather than racing it.
+            //
+            // The RADIO has done this since it was written (StartFromClock's gain wait); this is
+            // the same idea, and now the same knob.
+            if (CMMConfig.LoudnessNormalizationEnabled && !skipLoudnessHold
+                && !LoudnessStore.IsMeasured(file) && CMMConfig.LoudnessStartHoldMs > 0)
+            {
+                CMM_CoRoutines.StartCoroutine(HoldForLoudness(contextName, isSameContextSwitchingToNextTrack,
+                                                              transitionId, file, fadeOverride));
+                return;
+            }
             float trackGain = CMMConfig.LoudnessNormalizationEnabled ? LoudnessStore.GetTrackGain(file) : 1f;
             if (CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(file))
                 CMM_CoRoutines.StartCoroutine(EnsureLoudnessMeasured(file));

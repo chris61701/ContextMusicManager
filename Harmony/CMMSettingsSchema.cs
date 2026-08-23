@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 16;
+        internal const int CurrentSchema = 17;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -130,6 +130,7 @@ normalized track the first time it's switched to.
 (the context player and the world-emitter radio each keep this many ready). Higher = more tracks
 pre-normalized so nothing decodes on-demand while playing (smoother on huge / slow-storage
 libraries), at a little more background decoding. Default 3. Hot-reloads."),
+            I("LoudnessStartHoldMs",                 "CMMConfig.LoudnessStartHoldMs",               3000, since: 17),
             I("LoudnessMeasureAhead",                "CMMConfig.LoudnessMeasureAhead",              3),
 
             Gap(),

@@ -889,7 +889,7 @@ namespace CMM
                 if (!string.Equals(_gainWaitFile, file, StringComparison.OrdinalIgnoreCase))
                 {
                     _gainWaitFile = file;
-                    _gainWaitUntil = Time.realtimeSinceStartup + 6f;
+                    _gainWaitUntil = Time.realtimeSinceStartup + CMMConfig.LoudnessStartHoldMs / 1000f;
                 }
                 if (Time.realtimeSinceStartup < _gainWaitUntil)
                 {

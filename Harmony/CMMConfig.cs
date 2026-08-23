@@ -719,6 +719,18 @@ namespace CMM
         // slow-storage libraries), at the cost of a little more background decoding. 0 = measure only
         // the track about to play. Hot-reloadable.
         public static int LoudnessMeasureAhead = 3;
+        // How long a track may be HELD SILENT waiting for its loudness measurement before it is
+        // started anyway. Nothing should be audible until it is normalised: a track that starts
+        // at no correction and has its gain eased in a moment later is an audible jump, and on a
+        // quiet file needing +12 dB it is a big one.
+        //
+        // Bounded, because a file that cannot be measured at all (decode error, unreadable) must
+        // still play — silence forever is a far worse failure than one hot entrance. On expiry it
+        // starts uncorrected and settles as it always did.
+        //
+        // Only applies when LoudnessNormalizationEnabled: with normalisation off there is nothing
+        // to wait for and the hold is skipped entirely.
+        public static int LoudnessStartHoldMs = 3000;
 
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
