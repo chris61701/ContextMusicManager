@@ -177,6 +177,30 @@ every voice and the bus stage read the same value for the same frame.
 
 ---
 
+## TESTED IN GAME 2026-08-23 — three of these were NOT REAL
+
+Chris reproduced the list below rather than taking it on trust. Three did not happen, and the
+reason they were all predicted is one wrong assumption shared between them.
+
+**The pause menu keeps a player.** The whole theory rested on `Tick`'s `player == null` return
+firing when the game is paused, stranding `_staticWanted` / `_searchGiveUp` in a state nothing
+below that return can clear. It does not fire — the tick keeps running, the station lands, the
+timers are cleared normally.
+
+| predicted | reality |
+|---|---|
+| the radio dials itself after a menu trip | **does not happen.** *"A radio never fails to load, even if I go to the pause menu."* The give-up timer never gets the chance. |
+| static over the menu | **does not happen.** *"the station always resolves, even while paused."* |
+| a stinger mid-tune destroys the transition | **does not happen.** *"Triggering death during a station change keeps the static playing until your spawn and then it resolves the station."* The arm-edge signal snap is real in the code but nothing reaches it — the transition completes correctly. |
+| POI_Cleared kills the radio instead of ducking | **happens, and is preferred.** *"it's how I'd prefer it."* The `TEMP` marker is now a recorded decision. |
+| the ABI guard is stale and dead | **confirmed by inspection.** 46 against a native 49, and `Available` forwarded by seven wrappers and consumed by none. Fixed. |
+
+The lesson is about the method, not the code. Four agents reading the same file all reasoned
+from `player == null` firing on pause, because that is what the code *looks* like it does. None
+of them could run the game. **A code-path argument is a hypothesis, and the cheap ones should be
+tested before they are ranked as defects** — three of these were written up with severities and
+repro steps for something that never occurs.
+
 ## Everything still broken, ranked
 
 | # | what | where |

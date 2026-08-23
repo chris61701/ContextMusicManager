@@ -522,7 +522,13 @@ namespace CMM
             // <volume> setting, or the global VolumeModifier when that's unset (-1), matching how
             // CMMConfig.GetVolume resolves an effective volume. Restore that to re-enable ducking:
             //   CmmMixer.StingerDuckLevel * (ctx.VolumeOverride >= 0f ? ctx.VolumeOverride : CMMConfig.VolumeModifier)
-            float duckTo = poiCleared ? 0f /* TEMP: duck level 0 = bed silenced; restore to 35% of POI_Cleared volume (see note above) */ : -1f;
+            // NOT TEMP ANY MORE. 0 silences the bed outright rather than ducking it, because a
+            // 0 target is never marked as ducked and so never swells back. That was parked as a
+            // placeholder for a 35% duck; tested in game 2026-08-23 and the silence is preferred
+            // — a POI clear is a beat, and the radio cutting for it lands better than the radio
+            // continuing quietly underneath. The restore recipe is kept above in case that
+            // preference ever changes.
+            float duckTo = poiCleared ? 0f : -1f;
 
             // ── Hand the open + Play to the start worker (survives a main-thread freeze) ──
             EnsureNativeWorker();

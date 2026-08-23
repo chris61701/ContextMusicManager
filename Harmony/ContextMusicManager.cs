@@ -114,6 +114,7 @@ namespace CMM
             // DllImport("CMM_Decoder") only resolves once the module is already in-process.
             // Required for ALL formats (every codec decodes natively, no managed fallback).
             NativeOpus.Preload(modPath);
+            NativeOpus.Verify();   // logs the ABI, loudly on a mismatch — see NativeAudio.Verify
 #if CMM_LOUDNESS_SELFTEST
             R128SelfTest.Run();
 #endif
