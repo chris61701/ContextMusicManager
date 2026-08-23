@@ -98,6 +98,10 @@ namespace CMM
         {
             _sigFrom = Signal; _sigTo = to; _sigRate = ratePerSec;
             _sigT0 = Time.realtimeSinceStartup;
+            CmmMixer.Instance?.SetReceiverTone(CMMConfig.RadioRecvKnee, CMMConfig.RadioRecvKneeWidth,
+                                               CMMConfig.RadioRecvNoise, CMMConfig.RadioRecvClicks,
+                                               CMMConfig.RadioRecvClickRate, CMMConfig.RadioRecvHiFloorHz,
+                                               CMMConfig.RadioRecvDeemphHz);
             if (voiceId != 0)
                 CmmMixer.Instance?.SetVoiceReceiver(voiceId, to, ratePerSec,
                                                     CMMConfig.RadioTuneDullness,
@@ -725,19 +729,18 @@ namespace CMM
             // Keep the tuning hash alive while a dial move is still searching. Native KEEPALIVE:
             // each ping extends ONE seamless hash rather than layering bursts. It must be above
             // the return too, or it stops the instant the voice lands and never covers the floor.
-            if (_staticWanted && Time.realtimeSinceStartup >= _nextStaticAt)
+            // THE RECEIVER OWNS THE NOISE WHENEVER THERE IS A VOICE TO OWN IT. The station's
+            // hiss is generated inside its own signal path now, through the same filter and the
+            // same stereo width, so pinging the separate hash on top would put the two-objects
+            // problem straight back. This keepalive is for the genuinely voice-less window only:
+            // after the old station has gone and before the new one has opened.
+            if (_staticWanted && _voiceId == 0 && Time.realtimeSinceStartup >= _nextStaticAt)
             {
                 _nextStaticAt = Time.realtimeSinceStartup + TickInterval;
-                // While searching, full level. While ARRIVING, fall against the signal so the
-                // music comes up THROUGH the noise rather than after it. Squared, because the
-                // station's own gain rises fast — a linear fall leaves the hash sitting on top
-                // of an already-loud station.
-                float sc = 1f;
-                if (_arriving) { sc = Mathf.Clamp01(1f - Signal); sc *= sc; }
-                Sfx(CmmMixer.SfxTuningStatic, sc);
+                Sfx(CmmMixer.SfxTuningStatic);
             }
-            // Released once the station is essentially in. The 90 ms native release finishes it.
-            if (_staticWanted && _arriving && Signal >= 0.92f)
+            // The moment a voice exists, hand the noise over to it and let the hash release.
+            if (_staticWanted && _voiceId != 0)
             {
                 _staticWanted = false;
                 StopStatic();

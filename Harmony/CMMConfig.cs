@@ -204,6 +204,34 @@ namespace CMM
         public static float  RadioTuneGainPow     = 0.30f;
         public static float  RadioTuneGiveUpMs    = 10000f;
 
+        // ── THE RECEIVER'S CHARACTER ───────────────────────────────────────────────────────
+        // The hiss is generated INSIDE the station's own signal path now, summed with the music
+        // before the shared low-pass and the shared stereo width — so they are one signal rather
+        // than two sounds crossfading past each other. These shape what that one signal does.
+        //
+        // Knee/KneeWidth are the important pair. A linear ramp through a linear law is a fade,
+        // and no endpoint tuning changes that. Real FM does its entire audible break-up inside
+        // about EIGHT DECIBELS of carrier-to-noise, with flat plateaus either side, so the ramp
+        // is bent into plateau → event → plateau. KneeWidth is how much of the ramp the event
+        // gets: NARROW is correct, and widening it is the thing that will make it smooth again.
+        public static float  RadioRecvKnee        = 0.45f;   // where the break-up happens, 0..1
+        public static float  RadioRecvKneeWidth   = 0.22f;   // how much of the ramp it occupies
+        // How loud the hiss gets against the music. The old separate static topped out 5.9 dB
+        // QUIETER than the music it was meant to bury, so it never buried anything.
+        public static float  RadioRecvNoise       = 1.6f;
+        // Demodulator clicks: additive bipolar ticks that rise ABOVE the bed, isolated near the
+        // threshold and merging into a rattle below it. The old "crackle" was a multiplier with a
+        // ceiling of 1.0 — purely subtractive — so it could never produce one. 0 disables.
+        public static float  RadioRecvClicks      = 0.7f;
+        public static float  RadioRecvClickRate   = 900f;    // per second at the very bottom
+        // Where the SHARED hi-cut lands with no signal, and the noise's own de-emphasis corner
+        // (2122 = 75 µs US, 3183 = 50 µs EU). De-emphasis is the one stage that must NOT be
+        // shared: the transmitter pre-emphasises, so for the music it cancels and only the noise
+        // eats the curve. That is why between stations is a dark ROAR and a weak station is a
+        // bright hiss — the off-station sound being the darker of the two.
+        public static float  RadioRecvHiFloorHz   = 1800f;
+        public static float  RadioRecvDeemphHz    = 2122f;
+
         public static float  RadioStaticVolume  = -1f;
         public static float  RadioStaticLowHz   = 50f;     // was 350 — the body of the roar lives here.
                                                            // 50 is the C's own floor (sfx_capture_static_tone

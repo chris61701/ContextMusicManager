@@ -170,6 +170,13 @@ namespace CMM
         // v46 — the receiver: signal 0..1 driving gain, treble and stereo width together, so a
         // station leaves and arrives like a radio instead of just changing level. ratePerSec is a
         // RATE, so a move from half way takes half as long. See cmm_mix.c.
+        // v45 — the receiver's CHARACTER (per set, not per station): where the break-up happens,
+        // how wide it is, how loud the hiss gets, the clicks, and the shared hi-cut floor.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_receiver_tone(float knee, float kneeW, float noiseTrim,
+                                                              float clickAmt, float clickMax,
+                                                              float hiFloor, float deemHz);
+
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_mix_set_voice_receiver(long id, float signal, float ratePerSec,
                                                               float dullness, float mononess,
@@ -536,6 +543,13 @@ namespace CMM
         // Aim a voice's receiver at `signal` (0 = gone, 1 = fully tuned). Idempotent, so it can be
         // pushed every tick. Returns false when the voice has already retired, which is the normal
         // race when a station is abandoned mid-load.
+        public void SetReceiverTone(float knee, float kneeW, float noiseTrim, float clickAmt,
+                                    float clickMax, float hiFloor, float deemHz)
+        {
+            NativeMix.cmm_mix_set_receiver_tone(knee, kneeW, noiseTrim, clickAmt, clickMax,
+                                                hiFloor, deemHz);
+        }
+
         public bool SetVoiceReceiver(long id, float signal, float ratePerSec, float dullness,
                                      float mononess, float gainPow)
         {

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 7;
+        internal const int CurrentSchema = 8;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -459,6 +459,13 @@ mid-hash — so dial between stations while editing and hear each change immedia
             F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f, since: 6),
             F("RadioTuneGainPow",                    "CMMConfig.RadioTuneGainPow",                  0.30f, since: 7),
             F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f, since: 6),
+            F("RadioRecvKnee",                       "CMMConfig.RadioRecvKnee",                     0.45f, since: 8),
+            F("RadioRecvKneeWidth",                  "CMMConfig.RadioRecvKneeWidth",                0.22f, since: 8),
+            F("RadioRecvNoise",                      "CMMConfig.RadioRecvNoise",                    1.6f,  since: 8),
+            F("RadioRecvClicks",                     "CMMConfig.RadioRecvClicks",                   0.7f,  since: 8),
+            F("RadioRecvClickRate",                  "CMMConfig.RadioRecvClickRate",                900f,  since: 8),
+            F("RadioRecvHiFloorHz",                  "CMMConfig.RadioRecvHiFloorHz",                1800f, since: 8),
+            F("RadioRecvDeemphHz",                   "CMMConfig.RadioRecvDeemphHz",                 2122f, since: 8),
             F("RadioStaticVolume",                   "CMMConfig.RadioStaticVolume",                 -1f),
             F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  50f,
               since: 1, changedIn: 6, was: 350f),
