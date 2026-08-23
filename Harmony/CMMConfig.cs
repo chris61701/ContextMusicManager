@@ -188,9 +188,9 @@ namespace CMM
         // station happens to be loaded. Leave/Arrive are quoted at full scale and applied as a
         // RATE, so interrupting a half-finished tune-in fades from half and takes half as long —
         // a fixed duration drags on an early interrupt and snaps on a late one.
-        public static float  RadioTuneMinStaticMs = 900f;
-        public static float  RadioTuneLeaveMs     = 260f;
-        public static float  RadioTuneArriveMs    = 1100f;  // 420 was too quick to hear as opening up
+        public static float  RadioTuneMinStaticMs = 4000f;
+        public static float  RadioTuneLeaveMs     = 3400f;
+        public static float  RadioTuneArriveMs    = 7000f;
         public static float  RadioTuneDullness    = 0.85f;   // 0 = no treble loss on the way in/out
         public static float  RadioTuneMononess    = 1f;      // 0 = stays stereo the whole way
         // Backstop only, so a wedged open/seek cannot strand the player in static for ever. A
@@ -218,12 +218,12 @@ namespace CMM
         public static float  RadioRecvKneeWidth   = 0.22f;   // how much of the ramp it occupies
         // How loud the hiss gets against the music. The old separate static topped out 5.9 dB
         // QUIETER than the music it was meant to bury, so it never buried anything.
-        public static float  RadioRecvNoise       = 1.6f;
+        public static float  RadioRecvNoise       = 0.55f;
         // Demodulator clicks: additive bipolar ticks that rise ABOVE the bed, isolated near the
         // threshold and merging into a rattle below it. The old "crackle" was a multiplier with a
         // ceiling of 1.0 — purely subtractive — so it could never produce one. 0 disables.
-        public static float  RadioRecvClicks      = 0.7f;
-        public static float  RadioRecvClickRate   = 900f;    // per second at the very bottom
+        public static float  RadioRecvClicks      = 0.18f;
+        public static float  RadioRecvClickRate   = 180f;    // per second at the very bottom
         // Where the SHARED hi-cut lands with no signal, and the noise's own de-emphasis corner
         // (2122 = 75 µs US, 3183 = 50 µs EU). De-emphasis is the one stage that must NOT be
         // shared: the transmitter pre-emphasises, so for the music it cancels and only the noise
@@ -231,6 +231,30 @@ namespace CMM
         // bright hiss — the off-station sound being the darker of the two.
         public static float  RadioRecvHiFloorHz   = 1800f;
         public static float  RadioRecvDeemphHz    = 2122f;
+
+        // ── THE LEVEL LAW, and the one number that decided the whole thing ──────────────────
+        // FloorDb is how far the station is allowed to sink. SMALL IS RIGHT, and this took a
+        // long time to see: pulling it down 26 dB IS a fade, however much noise you layer over
+        // it, and every version that did so was described as "the music fades out and the static
+        // fades out, like they are two different things". A real receiver holds the programme at
+        // full level and lets the NOISE do all the moving — the station is buried and then
+        // revealed, never faded up. Five decibels is "barely moves", and that was the difference.
+        //
+        // MuteWidth is the SNR span it sinks over, wide enough that the station is dropping WHILE
+        // the noise rises rather than holding still and then stopping.
+        public static float  RadioRecvFloorDb     = 5f;
+        public static float  RadioRecvMuteWidth   = 5f;
+        // Damage, not just dulling. Clean music behind a blanket reads as a fader whatever you do
+        // to the treble; a station that is clipping and squashed reads as a receiver. Unity
+        // small-signal gain, so it dirties rather than boosting.
+        public static float  RadioRecvDrive       = 0.15f;
+        // The noise has to MOVE or it reads as a sound effect. Wander is a slow random drift (a
+        // real AGC breathing as the signal fades); Flutter is faster movement on top, built from
+        // BAND-LIMITED NOISE rather than an oscillator — two fixed sines gave the wobble a rate,
+        // and a rate is a metronome you can hear counting.
+        public static float  RadioRecvWander      = 0.55f;
+        public static float  RadioRecvFlutter     = 0.30f;
+        public static float  RadioRecvFlutterHz   = 14f;
 
         public static float  RadioStaticVolume  = -1f;
         public static float  RadioStaticLowHz   = 50f;     // was 350 — the body of the roar lives here.

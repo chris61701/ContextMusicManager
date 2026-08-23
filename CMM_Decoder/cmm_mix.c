@@ -168,17 +168,27 @@ typedef struct mix_voice {
     float  recvSig, recvSigTarget, recvSigStep;     /* 0..1 signal, ramped per frame */
     float  recvDull, recvMono;                      /* how much dulling / collapsing to apply */
     unsigned recvRng;                               /* the receiver's own noise generator */
-    float  recvNzLp;                                /* de-emphasis one-pole, NOISE ONLY */
+    float  recvNzLp, recvNzLp2;                     /* de-emphasis pair, NOISE ONLY */
     float  recvClk; int recvClkNext;                /* current click decay + frames to the next */
+    float  recvWCur, recvWTgt; int recvWHold;       /* the slow level wander (AGC breathing) */
+    float  recvFA, recvFB;                          /* flutter: band-limited noise, not an LFO */
     float  recvLp[2];                               /* the dulling one-pole's state, per channel */
 } mix_voice;
 
 /* ── Mixer singleton state (the managed CmmMixer was a singleton too) ──────*/
 static mix_mutex g_lock;
 /* Receiver character, shared by every radio voice -- they are all the same receiver. */
-static float g_recvKnee = 0.45f, g_recvKneeW = 0.22f, g_recvNoiseTrim = 1.6f;
-static float g_recvClickAmt = 0.7f, g_recvClickMax = 900.0f, g_recvClickDecay = 0.9975f;
+static float g_recvKnee = 0.45f, g_recvKneeW = 0.22f, g_recvNoiseTrim = 0.45f;
+static float g_recvClickAmt = 0.22f, g_recvClickMax = 220.0f, g_recvClickDecay = 0.9975f;
 static float g_recvHiFloor = 1800.0f, g_recvDeemK = 0.24f;
+/* Settled by ear against real tracks, 2026-08-23 (tools render: leave 3.4s, search 4s, arrive 7s).
+ * FloorDb is the one that mattered: pulling the station down 26 dB IS a fade, however much noise
+ * is laid over it. A real receiver holds the programme at full level and lets the NOISE do all the
+ * moving -- the station is buried and then revealed, never faded up. Five decibels is "barely
+ * moves", and it was the difference between "sounds like a crossfade" and "sounds like a radio". */
+static float g_recvFloorDb = 5.0f, g_recvMuteW = 5.0f, g_recvDrive = 0.15f;
+static float g_recvWander = 0.55f, g_recvFlutter = 0.30f;
+static float g_recvFlutK = 0.0018f, g_recvFlutSlowK = 0.00022f;   /* ~14 Hz / ~1.7 Hz at 48k */
 
 static int       g_started;
 static volatile int g_running;
@@ -595,17 +605,38 @@ static int render_voice_add(mix_voice* v, int n) {
              * level cannot reach audio level. The only thing that touches it is soft mute, and a
              * real chip's rule is 2 dB of cut per dB of SNR below 4, floored at 16 dB (Si47xx
              * AN332 defaults). Below that the noise has taken over anyway. */
-            float mute = 2.0f * (4.0f - snr);
-            if (mute < 0.0f) mute = 0.0f; else if (mute > 16.0f) mute = 16.0f;
+            float mute = (g_recvFloorDb / g_recvMuteW) * (14.0f - snr);
+            if (mute < 0.0f) mute = 0.0f; else if (mute > g_recvFloorDb) mute = g_recvFloorDb;
             float progG = mute > 0.0f ? powf(10.0f, -mute * 0.05f) : 1.0f;
-            /* It does still have to reach zero, because the search really is silent -- but only
-             * in the last sliver of travel, not across the whole of it. */
-            if (u < 0.02f) progG *= u * 50.0f;
 
             /* NOISE, DERIVED FROM the signal rather than automated alongside it. Its level is
              * simply minus the SNR, so the two can never disagree about where they are. */
-            float nAmp = powf(10.0f, -snr * 0.05f) * g_recvNoiseTrim;
-            if (nAmp > 2.5f) nAmp = 2.5f;
+            /* WANDER: a slow random walk on the noise level. A real receiver's AGC breathes as
+             * the signal fades in and out, and it is why interstation noise never sits still.
+             * FLUTTER on top, and it is BAND-LIMITED NOISE rather than an oscillator -- two fixed
+             * sines gave the wobble a rate, and a rate is a metronome you can hear counting. */
+            if (--v->recvWHold <= 0) {
+                v->recvRng = v->recvRng * 1664525u + 1013904223u;
+                float uw = (float)(v->recvRng >> 8) * (1.0f / 16777216.0f);
+                v->recvWTgt = 1.0f + g_recvWander * (uw * 2.0f - 1.0f);
+                if (v->recvWTgt < 0.05f) v->recvWTgt = 0.05f;
+                v->recvRng = v->recvRng * 1664525u + 1013904223u;
+                float uh = (float)(v->recvRng >> 8) * (1.0f / 16777216.0f);
+                v->recvWHold = (int)((float)g_busRate * (0.18f + 0.9f * uh));
+                if (v->recvWHold < 1) v->recvWHold = 1;
+            }
+            v->recvWCur += (v->recvWTgt - v->recvWCur) * 0.00012f;
+            v->recvRng = v->recvRng * 1664525u + 1013904223u;
+            float fw = (float)(int)v->recvRng * (1.0f / 2147483648.0f);
+            v->recvFA = mix_undenorm(v->recvFA + g_recvFlutK * (fw - v->recvFA));
+            v->recvFB = mix_undenorm(v->recvFB + g_recvFlutSlowK * (v->recvFA - v->recvFB));
+            float fmod = (v->recvFA - v->recvFB) * 46.0f;
+            if (fmod > 1.4f) fmod = 1.4f; else if (fmod < -1.4f) fmod = -1.4f;
+            float flut = 1.0f + g_recvFlutter * fmod;
+            if (flut < 0.05f) flut = 0.05f;
+
+            float nAmp = powf(10.0f, -snr * 0.05f) * g_recvNoiseTrim * v->recvWCur * flut;
+            if (nAmp > 1.6f) nAmp = 1.6f;
             v->recvRng = v->recvRng * 1664525u + 1013904223u;
             float wn = (float)(int)v->recvRng * (1.0f / 2147483648.0f);
             /* De-emphasis, noise only. This is what gives the between-stations sound its body:
@@ -614,7 +645,8 @@ static int render_voice_add(mix_voice* v, int n) {
              * off-station sound is the DARKER of the two, which is the opposite of most people's
              * intuition and a large part of why synthetic versions do not convince. */
             v->recvNzLp = mix_undenorm(v->recvNzLp + g_recvDeemK * (wn - v->recvNzLp));
-            float nz = v->recvNzLp * nAmp;
+            v->recvNzLp2 = mix_undenorm(v->recvNzLp2 + g_recvDeemK * (v->recvNzLp - v->recvNzLp2));
+            float nz = v->recvNzLp2 * nAmp * 2.0f;   /* x2: two poles cost about 6 dB of level */
 
             /* CLICKS. Below threshold the noise phasor overtakes the carrier, and every overtake
              * is a phase step the demodulator renders as an audible tick -- isolated at first,
@@ -638,15 +670,26 @@ static int render_voice_add(mix_voice* v, int n) {
                     v->recvRng = v->recvRng * 1664525u + 1013904223u;
                     float mag = 0.4f + 0.6f * ((float)(v->recvRng >> 8) * (1.0f / 16777216.0f));
                     v->recvClk = sgn * mag * g_recvClickAmt
-                               * (nAmp > 0.05f ? nAmp : 0.05f) * 3.0f;
+                               * (nAmp > 0.05f ? nAmp : 0.05f) * 1.0f;
                 }
                 v->recvClk *= g_recvClickDecay;
                 nz += v->recvClk;
             }
 
             /* --- THE SUM. From here down there is one signal. ------------------------------ */
-            l = l * progG + nz;
-            r = r * progG + nz * 0.85f;   /* not dead centre: FM noise is far worse in the side */
+            float pl = l * progG, pr = r * progG;
+            if (g_recvDrive > 0.001f) {
+                /* Damage, not just dulling: a weak station in a real set is clipping and squashed,
+                 * and clean music behind a blanket reads as a fader however dull you make it.
+                 * tanh(x*d)/d, so quiet parts pass at UNITY and only loud ones get squashed -- the
+                 * first version compensated with a hand-picked curve unrelated to the drive and
+                 * put the station through fourteen decibels hot, which is what "the volume ramps
+                 * way up before settling" was. */
+                float d = 1.0f + g_recvDrive * 7.0f * (1.0f - q);
+                pl = tanhf(pl * d) / d; pr = tanhf(pr * d) / d;
+            }
+            l = pl + nz;
+            r = pr + nz * 0.85f;          /* not dead centre: FM noise is far worse in the side */
 
             /* SHARED hi-cut, 15 kHz down to g_recvHiFloor across the same knee. Real receivers
              * slam this shut and reopen it slowly, and that asymmetry is much of why it never
@@ -2020,6 +2063,29 @@ CMM_API void cmm_mix_set_receiver_tone(float knee, float kneeW, float noiseTrim,
         g_recvDeemK = 1.0f - expf(-6.2831853f * deemHz / (float)g_busRate);
 }
 
+/* v46 -- the receiver's LEVEL LAW and its movement, settled by ear against real tracks.
+ *
+ *   floorDb  how far the station is allowed to sink, in dB. SMALL IS RIGHT. Pulling it down 26 dB
+ *            is a fade whatever is layered over it; a real receiver holds the programme at full
+ *            level and lets the noise do the moving, so the station is buried and then revealed.
+ *   muteW    the SNR span that sink happens over -- wide enough that the station is dropping
+ *            WHILE the noise rises, not holding still and then stopping.
+ *   drive    how hard a weak station is squashed. Unity small-signal gain, so it dirties rather
+ *            than boosting.
+ *   wander   slow random drift on the noise level -- AGC breathing.
+ *   flutter  faster movement on top, from BAND-LIMITED NOISE so it has no rate to lock onto.
+ *   flutHz   the top of that movement's speed range. */
+CMM_API void cmm_mix_set_receiver_shape(float floorDb, float muteW, float drive,
+                                        float wander, float flutter, float flutHz) {
+    if (floorDb >= 0.0f && floorDb < 60.0f)   g_recvFloorDb = floorDb;
+    if (muteW   > 0.5f  && muteW   < 60.0f)   g_recvMuteW   = muteW;
+    if (drive   >= 0.0f && drive   <= 2.0f)   g_recvDrive   = drive;
+    if (wander  >= 0.0f && wander  <= 2.0f)   g_recvWander  = wander;
+    if (flutter >= 0.0f && flutter <= 2.0f)   g_recvFlutter = flutter;
+    if (flutHz  > 0.5f  && flutHz  < 200.0f)
+        g_recvFlutK = 1.0f - expf(-6.2831853f * flutHz / (float)g_busRate);
+}
+
 CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePerSec,
                                        float dullness, float mononess, float gainPow) {
     int i, found = 0;
@@ -2036,7 +2102,9 @@ CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePer
         if (!v->recvOn) {
             v->recvOn = 1; v->recvSig = 1.0f;
             v->recvLp[0] = v->recvLp[1] = 0.0f;
-            v->recvNzLp = 0.0f; v->recvClk = 0.0f; v->recvClkNext = 1;
+            v->recvNzLp = v->recvNzLp2 = 0.0f; v->recvClk = 0.0f; v->recvClkNext = 1;
+            v->recvWCur = v->recvWTgt = 1.0f; v->recvWHold = 1;
+            v->recvFA = v->recvFB = 0.0f;
             v->recvRng = (unsigned)(id * 2654435761u) | 1u;
         }
         v->recvDull = dullness < 0.0f ? 0.0f : (dullness > 1.0f ? 1.0f : dullness);

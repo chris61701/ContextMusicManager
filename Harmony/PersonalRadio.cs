@@ -98,6 +98,9 @@ namespace CMM
         {
             _sigFrom = Signal; _sigTo = to; _sigRate = ratePerSec;
             _sigT0 = Time.realtimeSinceStartup;
+            CmmMixer.Instance?.SetReceiverShape(CMMConfig.RadioRecvFloorDb, CMMConfig.RadioRecvMuteWidth,
+                                                CMMConfig.RadioRecvDrive, CMMConfig.RadioRecvWander,
+                                                CMMConfig.RadioRecvFlutter, CMMConfig.RadioRecvFlutterHz);
             CmmMixer.Instance?.SetReceiverTone(CMMConfig.RadioRecvKnee, CMMConfig.RadioRecvKneeWidth,
                                                CMMConfig.RadioRecvNoise, CMMConfig.RadioRecvClicks,
                                                CMMConfig.RadioRecvClickRate, CMMConfig.RadioRecvHiFloorHz,

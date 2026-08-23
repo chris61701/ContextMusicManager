@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 8;
+        internal const int CurrentSchema = 9;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -451,21 +451,29 @@ mid-hash — so dial between stations while editing and hear each change immedia
                   lower = dull rumble.
   StaticCrackle : 0..1 sputter depth. 0 = smooth ""shhh""; 1 = full pops-and-sputter radio
                   crackle (random dropouts a few ms to ~30 ms long)."),
-            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              900f, since: 6),
-            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  260f, since: 6),
-            F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 1100f,
-              since: 6, changedIn: 7, was: 420f),
+            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              4000f,
+              since: 6, changedIn: 9, was: 900f),
+            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  3400f,
+              since: 6, changedIn: 9, was: 260f),
+            F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 7000f,
+              since: 6, changedIn: 9, was: 1100f),
             F("RadioTuneDullness",                   "CMMConfig.RadioTuneDullness",                 0.85f, since: 6),
             F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f, since: 6),
             F("RadioTuneGainPow",                    "CMMConfig.RadioTuneGainPow",                  0.30f, since: 7),
             F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f, since: 6),
             F("RadioRecvKnee",                       "CMMConfig.RadioRecvKnee",                     0.45f, since: 8),
             F("RadioRecvKneeWidth",                  "CMMConfig.RadioRecvKneeWidth",                0.22f, since: 8),
-            F("RadioRecvNoise",                      "CMMConfig.RadioRecvNoise",                    1.6f,  since: 8),
-            F("RadioRecvClicks",                     "CMMConfig.RadioRecvClicks",                   0.7f,  since: 8),
-            F("RadioRecvClickRate",                  "CMMConfig.RadioRecvClickRate",                900f,  since: 8),
+            F("RadioRecvNoise",                      "CMMConfig.RadioRecvNoise",                    0.55f, since: 8, changedIn: 9, was: 0.45f),
+            F("RadioRecvClicks",                     "CMMConfig.RadioRecvClicks",                   0.18f, since: 8, changedIn: 9, was: 0.22f),
+            F("RadioRecvClickRate",                  "CMMConfig.RadioRecvClickRate",                180f,  since: 8, changedIn: 9, was: 220f),
             F("RadioRecvHiFloorHz",                  "CMMConfig.RadioRecvHiFloorHz",                1800f, since: 8),
             F("RadioRecvDeemphHz",                   "CMMConfig.RadioRecvDeemphHz",                 2122f, since: 8),
+            F("RadioRecvFloorDb",                    "CMMConfig.RadioRecvFloorDb",                  5f,    since: 9),
+            F("RadioRecvMuteWidth",                  "CMMConfig.RadioRecvMuteWidth",                5f,    since: 9),
+            F("RadioRecvDrive",                      "CMMConfig.RadioRecvDrive",                    0.15f, since: 9),
+            F("RadioRecvWander",                     "CMMConfig.RadioRecvWander",                   0.55f, since: 9),
+            F("RadioRecvFlutter",                    "CMMConfig.RadioRecvFlutter",                  0.30f, since: 9),
+            F("RadioRecvFlutterHz",                  "CMMConfig.RadioRecvFlutterHz",                14f,   since: 9),
             F("RadioStaticVolume",                   "CMMConfig.RadioStaticVolume",                 -1f),
             F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  50f,
               since: 1, changedIn: 6, was: 350f),
