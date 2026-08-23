@@ -341,6 +341,26 @@ namespace CMM
         private static void CellNumbers(World world, int cx, int cy, int cz, float[] o)
         {
             int bx = cx * StepXZ, by = cy * StepY, bz = cz * StepXZ;
+            // ONE BLOCK PER CELL MEANS ONE READ PER CELL.
+            //
+            // StepXZ and StepY are both 1, so `step`, `ea` and `eb` are all 1 and every axis
+            // resolves to the SAME (bx,by,bz). This was calling Transmission -- GetBlock, CellLoss,
+            // aperture learning, cover -- three times on the identical block, and then throwing two
+            // of the answers away.
+            //
+            // That matters because this reader is the slowest thing in the mod. The sweep is
+            // documented in Transmission as costing eleven seconds a window, and the live log never
+            // gets past 29-53% read while the player is moving (2026-08-23, 139,425 cells, 101
+            // recentres) -- which is precisely "it takes a moment to settle on what I should be
+            // hearing". Two thirds of the work was redundant.
+            //
+            // Safe to collapse: Transmission is a pure function of the coordinate except for
+            // LearnAperture, which returns early once a leaf is known, so the 2nd and 3rd calls
+            // never did anything the 1st had not already done.
+            bool oneBlockCell = StepXZ == 1 && StepY == 1;
+            float tCell = 1f;
+            float[] covCell = null;
+            if (oneBlockCell) tCell = Transmission(world, bx, by, bz, out covCell);
             for (int axis = 0; axis < 3; axis++)
             {
                 int step = axis == 1 ? StepY : StepXZ;
@@ -363,7 +383,9 @@ namespace CMM
                             if (axis == 0)      { x = bx + d; y = by + a; z = bz + b; }
                             else if (axis == 1) { x = bx + a; y = by + d; z = bz + b; }
                             else                { x = bx + a; y = by + b; z = bz + d; }
-                            float t = Transmission(world, x, y, z, out float[] cov);
+                            float t; float[] cov;
+                            if (oneBlockCell) { t = tCell; cov = covCell; }
+                            else              { t = Transmission(world, x, y, z, out cov); }
                             if (t >= 1f) continue;                      // air: nothing to place
                             if (step == 1)
                             {
