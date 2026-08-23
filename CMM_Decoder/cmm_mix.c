@@ -164,22 +164,12 @@ typedef struct mix_voice {
      * half way must fade from half, taking half as long, or an early interrupt drags and a late
      * one snaps. Off by default (`recvOn` 0), so every voice that is not a radio is untouched
      * and pays one predictable branch. */
-    int    recvOn;                                  /* 0 = ordinary voice, no receiver stage */
-    float  recvSig, recvSigTarget, recvSigStep;     /* 0..1 signal, ramped per frame */
-    float  recvDull, recvMono;                      /* how much dulling / collapsing to apply */
-    unsigned recvRng;                               /* the receiver's own noise generator */
-    float  recvNzLp, recvNzLp2;                     /* de-emphasis pair, NOISE ONLY */
-    float  recvClk; int recvClkNext;                /* current click decay + frames to the next */
-    float  recvWCur, recvWTgt; int recvWHold;       /* the slow level wander (AGC breathing) */
-    float  recvFA, recvFB;                          /* flutter: band-limited noise, not an LFO */
-    float  recvLp[2];                               /* the dulling one-pole's state, per channel */
-    /* THE ARRIVAL's own machinery. Settled by ear against real tracks over twenty A/B rounds
-     * (tools/CmmTuneRender), 2026-08-23. The way in is not the way out: a departure is masked by
-     * the station it is leaving, an arrival is scrutinised, and the same processing that reads as
-     * correct going down reads as somebody turning a knob coming up. */
-    int    recvLocked; float recvLockW;             /* stereo pilot LATCH -- and NO decoder clunk */
-    float  recvMlp[4], recvMhp[4];                  /* the MUSIC path's OWN two-pole pairs */
-    float  recvCEnv;                                /* the broadcast squash's follower */
+    int    recvOn;                                  /* 1 = this voice's audio is RADIO PROGRAMME */
+    /* Everything else the receiver owns now lives at MIXER level, because there is one receiver
+     * and it does not belong to a station. See g_recv* below. All that survives here is the
+     * mangle's filter state, which genuinely IS per-voice: it acts on this voice's programme. */
+    float  recvMlp[4], recvMhp[4];                  /* the mangle's two-pole pairs, per channel */
+    float  recvCEnv;                                /* the mangle's squash follower */
 } mix_voice;
 
 /* ── Mixer singleton state (the managed CmmMixer was a singleton too) ──────*/
@@ -212,6 +202,42 @@ static float g_recvWinA = 0.28f, g_recvWinB = 0.912f;   /* the treble window, as
 static float g_recvLockU = 0.52f, g_recvLockMs = 9.0f;  /* where stereo latches, and how fast */
 static float g_recvRadio = 1.0f, g_recvRadioMk = 9.0f;
 static float g_recvRadioHp = 400.0f, g_recvRadioLp = 2600.0f;
+
+/* ══ v48: ONE RECEIVER, AT THE BUS ══════════════════════════════════════════════════════════
+ * The noise used to be generated per VOICE, which was right when a radio meant one voice and
+ * wrong the moment a dial press meant two. Changing station overlaps the station being left with
+ * the station being loaded, and the loading one HOLDS AT SIGNAL 0 -- which is maximum noise --
+ * while it waits out the search floor. Signal does not attenuate a voice (g = gain x trackGain;
+ * the receiver's own 5 dB level law owns that), so both voices emitted full-scale hiss at once,
+ * from independent generators with independent wander and flutter. Two uncorrelated roars summing
+ * is not a louder receiver, it is two receivers, and it was audibly both.
+ *
+ * A third noise existed as well: a separate synthesized hash pinged every 250 ms whenever no
+ * voice existed at all, on a completely different generator (fixed band-pass, sample-and-hold
+ * sputter, no de-emphasis, no wander, no clicks). Three sounds for one event.
+ *
+ * There is one receiver. It is not a property of a station -- stations are what it is tuned TO.
+ * So: radio voices contribute PROGRAMME ONLY into g_radioBus, and one bus-level stage generates
+ * the noise, sums, and applies the shared hi-cut and the shared width. It runs whether or not any
+ * voice exists, which is what retires the hash: the voiceless window between stations is now
+ * covered by the same static as everything either side of it.
+ *
+ * g_recvU is the per-frame signal, advanced ONCE per block before the voice loop so that every
+ * voice and the bus stage read the same number for the same frame. That also deletes the old
+ * per-voice "this voice under-produced, advance its ramp to match" compensation: there is one
+ * ramp now, and it does not care what the voices did. */
+static float* g_recvU;                          /* per-frame signal for this block */
+static volatile int   g_recvActive;             /* 0 = radio off: the stage is a no-op */
+static volatile float g_recvLevel = 1.0f;       /* the radio's own volume (context vol x duck) */
+static float g_recvSig, g_recvSigTarget, g_recvSigStep;
+static float g_recvDull = 0.85f, g_recvMono = 1.0f;
+static unsigned g_recvRng = 22222u;
+static float g_recvNzLp, g_recvNzLp2;
+static float g_recvClk; static int g_recvClkNext;
+static float g_recvWCur = 1.0f, g_recvWTgt = 1.0f; static int g_recvWHold;
+static float g_recvFA, g_recvFB;
+static float g_recvLp[2];
+static int   g_recvLocked; static float g_recvLockW;
 
 static int       g_started;
 static volatile int g_running;
@@ -456,6 +482,7 @@ static int g_wasEmpty;
 
 /* pinned scratch (producer thread only, so no lock needed for these) */
 static float* g_bus;
+static float* g_radioBus;   /* radio PROGRAMME only; the receiver stage sums it out */
 static float* g_voiceStereo;
 static float* g_convTmp;
 static float* g_emitterMono;   /* per-SLOT dry mono for the consumer-side spatializer:
@@ -560,6 +587,163 @@ static inline float mix_undenorm(float x)
     return (u & 0x7f800000u) == 0u ? 0.0f : x;
 }
 
+/* Advance the ONE receiver ramp across this block and publish it per frame, so every voice and
+ * the bus stage below read the same signal for the same frame. Called before the voice loop. */
+static void receiver_advance(int n) {
+    int f;
+    for (f = 0; f < n; f++) {
+        if (g_recvSigStep != 0.0f) {
+            g_recvSig += g_recvSigStep;
+            if ((g_recvSigStep > 0.0f && g_recvSig >= g_recvSigTarget) ||
+                (g_recvSigStep < 0.0f && g_recvSig <= g_recvSigTarget))
+            { g_recvSig = g_recvSigTarget; g_recvSigStep = 0.0f; }
+        }
+        g_recvU[f] = g_recvSig < 0.0f ? 0.0f : (g_recvSig > 1.0f ? 1.0f : g_recvSig);
+    }
+}
+
+/* THE RECEIVER. One of them. Runs whether or not a station voice exists -- which is the whole
+ * point, because the window between "the old station has gone" and "the new one has opened" is
+ * the longest and most exposed part of a dial press, and it used to be filled by a completely
+ * different noise generator. The programme arrives in g_radioBus already mangled and levelled;
+ * everything from here down is shared, because in a real set the hiss and the programme come out
+ * of the same detector and cannot have different bandwidths or different stereo images. */
+static void render_receiver_add(int n) {
+    int f;
+    if (!g_recvActive) {
+        /* Off air. Reset the parts that would otherwise resume mid-roar on the next power-on;
+         * leave the RNG alone so successive tunes do not repeat the same noise. */
+        g_recvLp[0] = g_recvLp[1] = 0.0f;
+        g_recvNzLp = g_recvNzLp2 = g_recvClk = 0.0f;
+        g_recvLocked = 0; g_recvLockW = 0.0f;
+        return;
+    }
+    for (f = 0; f < n; f++) {
+        int o = f * g_busChannels;
+        float u = g_recvU[f];
+        float q;
+        if      (u <= 0.0005f) q = 0.0f;
+        else if (u >= 0.9995f) q = 1.0f;
+        else q = 1.0f / (1.0f + expf(-(u - g_recvKnee) * (4.0f / g_recvKneeW)));
+        float snr = -4.0f + 64.0f * q;
+        int rising = (g_recvSigStep > 0.0f);
+
+        /* WANDER: a slow random walk on the noise level -- a real AGC breathing as the signal
+         * fades, and why interstation noise never sits still. FLUTTER on top, from BAND-LIMITED
+         * NOISE rather than an oscillator: two fixed sines gave the wobble a rate, and a rate is
+         * a metronome you can hear counting. */
+        if (--g_recvWHold <= 0) {
+            g_recvRng = g_recvRng * 1664525u + 1013904223u;
+            float uw = (float)(g_recvRng >> 8) * (1.0f / 16777216.0f);
+            g_recvWTgt = 1.0f + g_recvWander * (uw * 2.0f - 1.0f);
+            if (g_recvWTgt < 0.05f) g_recvWTgt = 0.05f;
+            g_recvRng = g_recvRng * 1664525u + 1013904223u;
+            float uh = (float)(g_recvRng >> 8) * (1.0f / 16777216.0f);
+            g_recvWHold = (int)((float)g_busRate * (0.18f + 0.9f * uh));
+            if (g_recvWHold < 1) g_recvWHold = 1;
+        }
+        g_recvWCur += (g_recvWTgt - g_recvWCur) * 0.00012f;
+        g_recvRng = g_recvRng * 1664525u + 1013904223u;
+        float fw = (float)(int)g_recvRng * (1.0f / 2147483648.0f);
+        g_recvFA = mix_undenorm(g_recvFA + g_recvFlutK * (fw - g_recvFA));
+        g_recvFB = mix_undenorm(g_recvFB + g_recvFlutSlowK * (g_recvFA - g_recvFB));
+        float fmod = (g_recvFA - g_recvFB) * 46.0f;
+        if (fmod > 1.4f) fmod = 1.4f; else if (fmod < -1.4f) fmod = -1.4f;
+        float flut = 1.0f + g_recvFlutter * fmod;
+        if (flut < 0.05f) flut = 0.05f;
+
+        /* THE HISS MUST OUTLAST THE TUNING. Tied to the signal alone it was gone while the
+         * station was still opening up, leaving clean music fading in with nothing over it --
+         * and a fade with nothing over it is just a fade. Plus a residual bed that never quite
+         * goes: hitting absolute zero says "sound effect ended", not "receiver". */
+        float nLvl = powf(10.0f, -snr * 0.05f);
+        if (g_recvNoiseHold > 0.001f && rising) {
+            float na = 0.22f, nb = 0.55f + 0.42f * g_recvNoiseHold;
+            float nf = 1.0f - (u - na) / (nb - na);
+            if (nf < 0.0f) nf = 0.0f; else if (nf > 1.0f) nf = 1.0f;
+            nf = nf * nf * (3.0f - 2.0f * nf);
+            float held = g_recvNoiseFloorR + (1.0f - g_recvNoiseFloorR) * nf;
+            if (held > nLvl) nLvl = held;
+        }
+        float nAmp = nLvl * g_recvNoiseTrim * g_recvWCur * flut;
+        if (nAmp > 1.6f) nAmp = 1.6f;
+
+        g_recvRng = g_recvRng * 1664525u + 1013904223u;
+        float wn = (float)(int)g_recvRng * (1.0f / 2147483648.0f);
+        /* De-emphasis, NOISE ONLY -- it is a matched pair, so for the programme it cancels and
+         * only the noise eats the curve. With no carrier the demodulator's noise is FLAT, so
+         * after this it is a dark, full ROAR; a weak carrier gives a bright thin hiss instead.
+         * The off-station sound being the DARKER of the two is the opposite of most people's
+         * intuition and much of why synthetic versions do not convince. */
+        g_recvNzLp = mix_undenorm(g_recvNzLp + g_recvDeemK * (wn - g_recvNzLp));
+        g_recvNzLp2 = mix_undenorm(g_recvNzLp2 + g_recvDeemK * (g_recvNzLp - g_recvNzLp2));
+        float nz = g_recvNzLp2 * nAmp * 2.0f;      /* x2: two poles cost about 6 dB */
+
+        /* CLICKS. Below threshold the noise phasor overtakes the carrier and every overtake is a
+         * phase step the demodulator renders as a tick -- isolated at first, merging into a
+         * rattle as the signal goes. EVENTS: additive and bipolar, rising ABOVE the bed. */
+        if (g_recvClickAmt > 0.001f && snr < 14.0f) {
+            if (--g_recvClkNext <= 0) {
+                float rate = g_recvClickMax * powf(10.0f, -(snr + 4.0f) * 0.1667f);
+                if (rate < 0.05f) rate = 0.05f;
+                g_recvRng = g_recvRng * 1664525u + 1013904223u;
+                float uu = (float)(g_recvRng >> 8) * (1.0f / 16777216.0f);
+                if (uu < 1e-4f) uu = 1e-4f;
+                g_recvClkNext = (int)(-logf(uu) * (float)g_busRate / rate);
+                if (g_recvClkNext < 1) g_recvClkNext = 1;
+                g_recvRng = g_recvRng * 1664525u + 1013904223u;
+                float sgn = ((g_recvRng >> 8) & 1u) ? 1.0f : -1.0f;
+                g_recvRng = g_recvRng * 1664525u + 1013904223u;
+                float mag = 0.4f + 0.6f * ((float)(g_recvRng >> 8) * (1.0f / 16777216.0f));
+                g_recvClk = sgn * mag * g_recvClickAmt * (nAmp > 0.05f ? nAmp : 0.05f);
+            }
+            g_recvClk *= g_recvClickDecay;
+            nz += g_recvClk;
+        }
+
+        /* --- THE SUM. From here down there is one signal. --------------------------------- */
+        float l = g_radioBus[o] + nz;
+        float r = g_radioBus[o + 1] + nz * 0.85f;   /* FM noise is far worse in the side */
+
+        /* SHARED hi-cut, 15 kHz down to g_recvHiFloor, keyed to RAMP POSITION rather than SNR --
+         * snr saturates near its maximum long before the station is merely audible, so anything
+         * read off it fires early and lands inside the knee, which made the treble a step. */
+        if (u < 0.9995f && g_recvDull > 0.001f) {
+            float t = 1.0f - (u - g_recvWinA) / (g_recvWinB - g_recvWinA);
+            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            t *= g_recvDull;
+            float fc = 15000.0f * powf(g_recvHiFloor / 15000.0f, t);
+            float ny = (float)g_busRate * 0.45f;
+            if (fc > ny) fc = ny;
+            float k = 1.0f - expf(-6.2831853f * fc / (float)g_busRate);
+            g_recvLp[0] = mix_undenorm(g_recvLp[0] + k * (l - g_recvLp[0])); l = g_recvLp[0];
+            g_recvLp[1] = mix_undenorm(g_recvLp[1] + k * (r - g_recvLp[1])); r = g_recvLp[1];
+        } else { g_recvLp[0] = l; g_recvLp[1] = r; }
+
+        /* A DECODER LATCHES; IT DOES NOT GLIDE, and it latches on ramp position -- keyed to snr
+         * it fired while the station was still buried, so the station arrived already in stereo,
+         * which is the one thing a real decoder never does. Stereo is the LAST thing to come
+         * good, after the treble. Hysteresis: a lock is harder to acquire than to keep. And no
+         * decoder clunk -- authentic, and measured as the largest discontinuity in the whole
+         * transition, larger than any musical transient. */
+        if (g_recvMono > 0.001f) {
+            if (g_recvLocked) { if (u < g_recvLockU - 0.14f) g_recvLocked = 0; }
+            else if (u > g_recvLockU) g_recvLocked = 1;
+            float kSnap = 1.0f - expf(-1.0f / (0.001f * g_recvLockMs * (float)g_busRate));
+            g_recvLockW = mix_undenorm(g_recvLockW + ((g_recvLocked ? 1.0f : 0.0f) - g_recvLockW) * kSnap);
+            float w = 1.0f - g_recvMono * (1.0f - g_recvLockW);
+            float m = 0.5f * (l + r), sd = 0.5f * (l - r) * w;
+            l = m + sd; r = m - sd;
+        }
+
+        /* The receiver's own volume. The programme carried its voice gain in, but the NOISE has
+         * no voice to inherit from -- and between stations there is no voice at all -- so the
+         * radio's level (context volume x duck) is pushed in from managed and applied here. */
+        g_bus[o]     += l * g_recvLevel;
+        g_bus[o + 1] += r * g_recvLevel;
+    }
+}
+
 static int render_voice_add(mix_voice* v, int n) {
     int frames = (v->conv == NULL) ? produce_direct(v, n) : produce_conv(v, n);
     /* Emitter voices are NOT spatialized here: they produce a DRY MONO signal (× fade/track gain)
@@ -602,121 +786,23 @@ static int render_voice_add(mix_voice* v, int n) {
          * cancel and only the noise, which was never pre-emphasised, eats the curve. So the noise
          * gets its own one-pole and the programme does not. */
         if (v->recvOn && !emit) {
-            if (v->recvSigStep != 0.0f) {
-                v->recvSig += v->recvSigStep;
-                if ((v->recvSigStep > 0.0f && v->recvSig >= v->recvSigTarget) ||
-                    (v->recvSigStep < 0.0f && v->recvSig <= v->recvSigTarget))
-                { v->recvSig = v->recvSigTarget; v->recvSigStep = 0.0f; }
-            }
-            float u = v->recvSig < 0.0f ? 0.0f : (v->recvSig > 1.0f ? 1.0f : v->recvSig);
-            float l = g_voiceStereo[o], r = g_voiceStereo[o + 1];
-
-            /* THE KNEE. A linear ramp through a linear law is a fade, and no amount of tuning the
-             * endpoints changes that -- which is why the last version read as "too smooth"
-             * whatever the numbers were. Real FM is not gradual: the whole audible break-up of a
-             * signal lives inside about EIGHT DECIBELS of carrier-to-noise, and either side of it
-             * nothing changes at all. So bend the ramp into plateau -> event -> plateau with a
-             * logistic and let every rule below read off the result. g_recvKneeW is how wide the
-             * event is as a fraction of the ramp; small is correct. */
+            /* PROGRAMME ONLY. The noise, the clicks, the hi-cut and the width all moved to the
+             * bus stage -- one receiver, not one per station. What is left here are the stages
+             * that act on THIS voice's audio: the level law and the mangle. */
+            float u = g_recvU[f];
             float q;
             if      (u <= 0.0005f) q = 0.0f;
             else if (u >= 0.9995f) q = 1.0f;
             else q = 1.0f / (1.0f + expf(-(u - g_recvKnee) * (4.0f / g_recvKneeW)));
-            float snr = -4.0f + 64.0f * q;    /* an SNR-like dB scale; the rules below are in dB */
+            float snr = -4.0f + 64.0f * q;
+            int rising = (g_recvSigStep > 0.0f);
 
-            /* PROGRAMME LEVEL BARELY MOVES. A hard limiter sits ahead of the discriminator, so RF
-             * level cannot reach audio level. The only thing that touches it is soft mute, and a
-             * real chip's rule is 2 dB of cut per dB of SNR below 4, floored at 16 dB (Si47xx
-             * AN332 defaults). Below that the noise has taken over anyway. */
+            /* PROGRAMME LEVEL BARELY MOVES -- soft mute only, and a real chip's rule is 2 dB of
+             * cut per dB of SNR below 4, floored well before the noise takes over anyway. */
             float mute = (g_recvFloorDb / g_recvMuteW) * (14.0f - snr);
             if (mute < 0.0f) mute = 0.0f; else if (mute > g_recvFloorDb) mute = g_recvFloorDb;
             float progG = mute > 0.0f ? powf(10.0f, -mute * 0.05f) : 1.0f;
-
-            /* NOISE, DERIVED FROM the signal rather than automated alongside it. Its level is
-             * simply minus the SNR, so the two can never disagree about where they are. */
-            /* WANDER: a slow random walk on the noise level. A real receiver's AGC breathes as
-             * the signal fades in and out, and it is why interstation noise never sits still.
-             * FLUTTER on top, and it is BAND-LIMITED NOISE rather than an oscillator -- two fixed
-             * sines gave the wobble a rate, and a rate is a metronome you can hear counting. */
-            if (--v->recvWHold <= 0) {
-                v->recvRng = v->recvRng * 1664525u + 1013904223u;
-                float uw = (float)(v->recvRng >> 8) * (1.0f / 16777216.0f);
-                v->recvWTgt = 1.0f + g_recvWander * (uw * 2.0f - 1.0f);
-                if (v->recvWTgt < 0.05f) v->recvWTgt = 0.05f;
-                v->recvRng = v->recvRng * 1664525u + 1013904223u;
-                float uh = (float)(v->recvRng >> 8) * (1.0f / 16777216.0f);
-                v->recvWHold = (int)((float)g_busRate * (0.18f + 0.9f * uh));
-                if (v->recvWHold < 1) v->recvWHold = 1;
-            }
-            v->recvWCur += (v->recvWTgt - v->recvWCur) * 0.00012f;
-            v->recvRng = v->recvRng * 1664525u + 1013904223u;
-            float fw = (float)(int)v->recvRng * (1.0f / 2147483648.0f);
-            v->recvFA = mix_undenorm(v->recvFA + g_recvFlutK * (fw - v->recvFA));
-            v->recvFB = mix_undenorm(v->recvFB + g_recvFlutSlowK * (v->recvFA - v->recvFB));
-            float fmod = (v->recvFA - v->recvFB) * 46.0f;
-            if (fmod > 1.4f) fmod = 1.4f; else if (fmod < -1.4f) fmod = -1.4f;
-            float flut = 1.0f + g_recvFlutter * fmod;
-            if (flut < 0.05f) flut = 0.05f;
-
-            /* THE HISS MUST OUTLAST THE TUNING. Tied to the signal alone it was gone while the
-             * station was still opening up, leaving a stretch of clean-but-dull music fading in
-             * with nothing over it -- and a fade with nothing over it is just a fade. On the way
-             * IN the noise gets its own, later window, plus a residual bed that never quite goes:
-             * a set at full lock still has a noise floor, and hitting absolute zero is what says
-             * "sound effect ended" rather than "receiver". */
-            int rising = (v->recvSigStep > 0.0f);
-            float nLvl = powf(10.0f, -snr * 0.05f);
-            if (g_recvNoiseHold > 0.001f && rising) {
-                float na = 0.22f, nb = 0.55f + 0.42f * g_recvNoiseHold;
-                float nf = 1.0f - (u - na) / (nb - na);
-                if (nf < 0.0f) nf = 0.0f; else if (nf > 1.0f) nf = 1.0f;
-                nf = nf * nf * (3.0f - 2.0f * nf);
-                float held = g_recvNoiseFloorR + (1.0f - g_recvNoiseFloorR) * nf;
-                if (held > nLvl) nLvl = held;
-            }
-            float nAmp = nLvl * g_recvNoiseTrim * v->recvWCur * flut;
-            if (nAmp > 1.6f) nAmp = 1.6f;
-            v->recvRng = v->recvRng * 1664525u + 1013904223u;
-            float wn = (float)(int)v->recvRng * (1.0f / 2147483648.0f);
-            /* De-emphasis, noise only. This is what gives the between-stations sound its body:
-             * with no carrier the demodulator's noise is FLAT, so after this curve it is a dark,
-             * full ROAR. With a weak carrier it is triangular and comes out bright and thin. The
-             * off-station sound is the DARKER of the two, which is the opposite of most people's
-             * intuition and a large part of why synthetic versions do not convince. */
-            v->recvNzLp = mix_undenorm(v->recvNzLp + g_recvDeemK * (wn - v->recvNzLp));
-            v->recvNzLp2 = mix_undenorm(v->recvNzLp2 + g_recvDeemK * (v->recvNzLp - v->recvNzLp2));
-            float nz = v->recvNzLp2 * nAmp * 2.0f;   /* x2: two poles cost about 6 dB of level */
-
-            /* CLICKS. Below threshold the noise phasor overtakes the carrier, and every overtake
-             * is a phase step the demodulator renders as an audible tick -- isolated at first,
-             * merging into a rattle as the signal goes. They are EVENTS: additive and bipolar,
-             * rising ABOVE the surrounding noise. The old "crackle" could never be one, because
-             * it was a multiplier with a ceiling of 1.0 -- purely subtractive, so every "event"
-             * in it was the bed briefly returning to normal. Rate falls about an order of
-             * magnitude per decibel near threshold, which is the steepest thing in the model and
-             * the reason the transition can be felt at all. */
-            if (g_recvClickAmt > 0.001f && snr < 14.0f) {
-                if (--v->recvClkNext <= 0) {
-                    float rate = g_recvClickMax * powf(10.0f, -(snr + 4.0f) * 0.1667f);
-                    if (rate < 0.05f) rate = 0.05f;
-                    v->recvRng = v->recvRng * 1664525u + 1013904223u;
-                    float uu = (float)(v->recvRng >> 8) * (1.0f / 16777216.0f);
-                    if (uu < 1e-4f) uu = 1e-4f;
-                    v->recvClkNext = (int)(-logf(uu) * (float)g_busRate / rate);
-                    if (v->recvClkNext < 1) v->recvClkNext = 1;
-                    v->recvRng = v->recvRng * 1664525u + 1013904223u;
-                    float sgn = ((v->recvRng >> 8) & 1u) ? 1.0f : -1.0f;
-                    v->recvRng = v->recvRng * 1664525u + 1013904223u;
-                    float mag = 0.4f + 0.6f * ((float)(v->recvRng >> 8) * (1.0f / 16777216.0f));
-                    v->recvClk = sgn * mag * g_recvClickAmt
-                               * (nAmp > 0.05f ? nAmp : 0.05f) * 1.0f;
-                }
-                v->recvClk *= g_recvClickDecay;
-                nz += v->recvClk;
-            }
-
-            /* --- THE SUM. From here down there is one signal. ------------------------------ */
-            float pl = l * progG, pr = r * progG;
+            float pl = g_voiceStereo[o] * progG, pr = g_voiceStereo[o + 1] * progG;
 
             /* ===== THE MUSIC ITSELF CHANGES SHAPE ==========================================
              * Every earlier attempt added things ON TOP of a full-fidelity source, and a
@@ -782,75 +868,26 @@ static int render_voice_add(mix_voice* v, int n) {
             }
 
             if (g_recvDrive > 0.001f) {
-                /* Damage, not just dulling: a weak station in a real set is clipping and squashed,
-                 * and clean music behind a blanket reads as a fader however dull you make it.
-                 * tanh(x*d)/d, so quiet parts pass at UNITY and only loud ones get squashed -- the
-                 * first version compensated with a hand-picked curve unrelated to the drive and
-                 * put the station through fourteen decibels hot, which is what "the volume ramps
-                 * way up before settling" was. */
+                /* Damage, not just dulling: clean music behind a blanket reads as a fader however
+                 * dull you make it. tanh(x*d)/d, so quiet parts pass at UNITY and only loud ones
+                 * get squashed -- an earlier version compensated with a hand-picked curve
+                 * unrelated to the drive and put the station through fourteen decibels hot. */
                 float d = 1.0f + g_recvDrive * 7.0f * (1.0f - q);
                 pl = tanhf(pl * d) / d; pr = tanhf(pr * d) / d;
             }
-            l = pl + nz;
-            r = pr + nz * 0.85f;          /* not dead centre: FM noise is far worse in the side */
-
-            /* SHARED hi-cut, 15 kHz down to g_recvHiFloor across the same knee. Real receivers
-             * slam this shut and reopen it slowly, and that asymmetry is much of why it never
-             * reads as an EQ sweep. */
-            if (u < 0.9995f && v->recvDull > 0.001f) {
-                /* AN332's real hi-cut window is SNR 24 down to 15, but that is nine decibels
-                 * against the 64 this knee sweeps, so using it literally made the treble a
-                 * STEP rather than a sweep. Widened to span the knee, which is the same idea
-                 * at this scale: treble is the last thing to come back. */
-                /* KEYED TO RAMP POSITION, NOT SNR. snr saturates near its maximum long before
-                 * the station is merely audible, so anything read off it necessarily fires early
-                 * and lands inside the knee -- which made the treble a STEP. The window spans the
-                 * ramp instead, and both directions share it: with the arrival 2.3x longer than
-                 * the departure the same span is a slower gesture coming back, which is what a
-                 * receiver recovering its treble over seconds actually is. */
-                float t = 1.0f - (u - g_recvWinA) / (g_recvWinB - g_recvWinA);
-                if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-                t *= v->recvDull;
-                float fc = 15000.0f * powf(g_recvHiFloor / 15000.0f, t);
-                float ny = (float)g_busRate * 0.45f;
-                if (fc > ny) fc = ny;
-                float k = 1.0f - expf(-6.2831853f * fc / (float)g_busRate);
-                v->recvLp[0] = mix_undenorm(v->recvLp[0] + k * (l - v->recvLp[0])); l = v->recvLp[0];
-                v->recvLp[1] = mix_undenorm(v->recvLp[1] + k * (r - v->recvLp[1])); r = v->recvLp[1];
-            } else { v->recvLp[0] = l; v->recvLp[1] = r; }
-
-            /* SHARED width. Stereo needs about 21 dB more signal than mono -- measured across
-             * eight real tuners, 20.0 to 22.9 dB -- so it collapses long before the station does,
-             * and it takes the noise's image down with it. */
-            if (v->recvMono > 0.001f) {
-                /* A DECODER LATCHES; IT DOES NOT GLIDE. And it latches on ramp POSITION -- keyed
-                 * to snr it fired while the station was still buried, so the station arrived
-                 * already in stereo, which is the one thing a real decoder never does. Stereo is
-                 * the LAST thing to come good, after the treble. Hysteresis because a lock is
-                 * harder to acquire than to keep.
-                 *
-                 * No clunk. A real decoder does thump as it engages, and that thump was in here
-                 * as a one-sample DC step of 0.34 -- measured at -14.6 dBFS, the largest
-                 * discontinuity anywhere in the transition, larger than any musical transient.
-                 * It is authentic and it is not wanted. */
-                float w;
-                if (v->recvLocked) {
-                    if (u < g_recvLockU - 0.14f) v->recvLocked = 0;
-                } else if (u > g_recvLockU) v->recvLocked = 1;
-                { float kSnap = 1.0f - expf(-1.0f / (0.001f * g_recvLockMs * (float)g_busRate));
-                  v->recvLockW = mix_undenorm(v->recvLockW + ((v->recvLocked ? 1.0f : 0.0f) - v->recvLockW) * kSnap);
-                  w = v->recvLockW; }
-                w = 1.0f - v->recvMono * (1.0f - w);
-                float m = 0.5f * (l + r), sd = 0.5f * (l - r) * w;
-                l = m + sd; r = m - sd;
-            }
-            g_voiceStereo[o] = l; g_voiceStereo[o + 1] = r;
+            g_voiceStereo[o] = pl; g_voiceStereo[o + 1] = pr;
         }
         if (emit) {
             /* Dry mono into this voice's SLOT lane (accumulated: two voices sharing a slot during
              * a track-advance crossfade sum; different stations land in different lanes). */
             g_emitterMono[(size_t)v->emitSlot * BUS_MAXFRAMES + f] +=
                 0.5f * (g_voiceStereo[o] + g_voiceStereo[o + 1]) * g;
+        } else if (v->recvOn) {
+            /* Radio programme goes to the receiver's own bus, never straight out: the noise has
+             * to be summed with it BEFORE the shared filter and the shared width, or they are two
+             * objects again. */
+            g_radioBus[o]     += g_voiceStereo[o]     * g;
+            g_radioBus[o + 1] += g_voiceStereo[o + 1] * g;
         } else {
             g_bus[o]     += g_voiceStereo[o]     * g;
             g_bus[o + 1] += g_voiceStereo[o + 1] * g;
@@ -870,15 +907,9 @@ static int render_voice_add(mix_voice* v, int n) {
         if ((v->trackGainStep > 0.0f && v->trackGain >= v->trackGainTarget) ||
             (v->trackGainStep < 0.0f && v->trackGain <= v->trackGainTarget)) { v->trackGain = v->trackGainTarget; v->trackGainStep = 0.0f; }
     }
-    /* The receiver ramp gets the same treatment, for the same reason. A voice that under-produces
-     * -- converter priming, a loop reseek, a streaming decode hitch -- would otherwise freeze its
-     * signal while the managed side's wall-clock mirror of the same ramp keeps going, and the two
-     * would then disagree about where the signal is when the player interrupts. */
-    if (silent > 0 && v->recvOn && v->recvSigStep != 0.0f) {
-        v->recvSig += v->recvSigStep * silent;
-        if ((v->recvSigStep > 0.0f && v->recvSig >= v->recvSigTarget) ||
-            (v->recvSigStep < 0.0f && v->recvSig <= v->recvSigTarget)) { v->recvSig = v->recvSigTarget; v->recvSigStep = 0.0f; }
-    }
+    /* The receiver's ramp used to need catching up here when a voice under-produced. It is a
+     * mixer-level ramp now, advanced once per block regardless of what any voice managed to
+     * decode, so there is nothing left to keep in step. */
 
     if (v->ended && frames < n) return 0;                 /* finished + drained */
     if (v->targetGain == 0.0f && v->gain <= 0.0f) return 0; /* crossfaded out */
@@ -1092,6 +1123,7 @@ static void pump_body(void) {
         if (n < 1) { mix_sleep_ms(2); continue; }
 
         memset(g_bus, 0, (size_t)n * g_busChannels * sizeof(float));
+        memset(g_radioBus, 0, (size_t)n * g_busChannels * sizeof(float));
         memset(g_emitterMono, 0, (size_t)CMM_MAX_EMIT_VOICES * BUS_MAXFRAMES * sizeof(float));
 
         int emActive[CMM_MAX_EMIT_VOICES];   /* per slot: an emitter voice produced this block (write its
@@ -1103,6 +1135,7 @@ static void pump_body(void) {
         mix_lock(&g_lock);
         {
             int i;
+            receiver_advance(n);     /* ONE ramp, before anybody reads it */
             for (i = 0; i < g_voiceCount; i++)
                 if (g_voices[i]->isEmitter) emActive[g_voices[i]->emitSlot] = 1;
             for (i = g_voiceCount - 1; i >= 0; i--) {
@@ -1114,6 +1147,11 @@ static void pump_body(void) {
                     if (wasStinger) restore_ducked_locked();
                 }
             }
+
+            /* The receiver sums the radio programme out, with its noise, after every voice
+             * has contributed and BEFORE the UI SFX -- the clicks are the dial's own body, not
+             * something coming out of the speaker, so they do not go through the detector. */
+            render_receiver_add(n);
 
             /* Radio UI SFX (v35) sum in after the voices — same bus, same master, but never
              * part of the crossfade/duck/eviction machinery above. */
@@ -1300,7 +1338,10 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_voiceStereo = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_convTmp     = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_emitterMono = (float*)malloc((size_t)CMM_MAX_EMIT_VOICES * BUS_MAXFRAMES * sizeof(float));
-    if (!g_bus || !g_voiceStereo || !g_convTmp || !g_emitterMono) { if (err) *err = -2; return -2; }
+    g_radioBus    = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
+    g_recvU       = (float*)malloc((size_t)BUS_MAXFRAMES * sizeof(float));
+    if (!g_bus || !g_voiceStereo || !g_convTmp || !g_emitterMono || !g_radioBus || !g_recvU)
+    { if (err) *err = -2; return -2; }
 
     mix_mutex_init(&g_lock);
     g_running = 1;
@@ -2246,40 +2287,81 @@ CMM_API void cmm_mix_set_receiver_radio(float amount, float makeupDb,
     if (highCutHz > 300.0f && highCutHz <= 15000.0f) g_recvRadioLp = highCutHz;
 }
 
-CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePerSec,
-                                       float dullness, float mononess, float gainPow) {
+/* v48 -- MARK A VOICE AS RADIO PROGRAMME. That is all it does now. The voice no longer owns a
+ * signal, a noise generator, a filter or a stereo image: there is one receiver and it belongs to
+ * the mixer. See cmm_mix_set_receiver_signal. */
+CMM_API int cmm_mix_set_voice_radio(long long id, int on) {
     int i, found = 0;
-    float s = signal < 0.0f ? 0.0f : (signal > 1.0f ? 1.0f : signal);
     mix_lock(&g_lock);
     for (i = 0; i < g_voiceCount; i++) {
         mix_voice* v = g_voices[i];
         if (v->id != id) continue;
-        /* FIRST ARM STARTS AT FULLY TUNED, not at the target. Setting recvSig = s here and then
-         * computing the step against recvSig -- now equal to s -- made the step ZERO, so the very
-         * first arm always jumped and silently ignored ratePerSec. Harmless while the caller
-         * happened to arm with rate 0 first; a trap the moment anyone armed a live voice with a
-         * ramp and wondered why it snapped. A voice nobody has tuned is by definition fully in. */
-        if (!v->recvOn) {
-            v->recvOn = 1; v->recvSig = 1.0f;
-            v->recvLp[0] = v->recvLp[1] = 0.0f;
-            v->recvNzLp = v->recvNzLp2 = 0.0f; v->recvClk = 0.0f; v->recvClkNext = 1;
-            v->recvWCur = v->recvWTgt = 1.0f; v->recvWHold = 1;
-            v->recvFA = v->recvFB = 0.0f;
-            v->recvRng = (unsigned)(id * 2654435761u) | 1u;
+        if (on && !v->recvOn) {
+            int k;
+            for (k = 0; k < 4; k++) { v->recvMlp[k] = 0.0f; v->recvMhp[k] = 0.0f; }
+            v->recvCEnv = 0.0f;
         }
-        v->recvDull = dullness < 0.0f ? 0.0f : (dullness > 1.0f ? 1.0f : dullness);
-        v->recvMono = mononess < 0.0f ? 0.0f : (mononess > 1.0f ? 1.0f : mononess);
-        (void)gainPow;   /* retired: the knee owns the level law now, see the receiver stage */
-        v->recvSigTarget = s;
-        if (ratePerSec <= 0.0f) { v->recvSig = s; v->recvSigStep = 0.0f; }
-        else {
-            float per = ratePerSec / (float)g_busRate;          /* units of signal per frame */
-            v->recvSigStep = (s > v->recvSig) ? per : (s < v->recvSig ? -per : 0.0f);
-        }
+        v->recvOn = on ? 1 : 0;
         found = 1; break;
     }
     mix_unlock(&g_lock);
     return found;
+}
+
+/* v48 -- THE RECEIVER'S SIGNAL, and it is not attached to anything. 1 = fully tuned, 0 = nothing
+ * there. Ramped by RATE rather than duration, so interrupting a half-finished tune-in fades from
+ * half and takes half as long; a fixed duration drags on an early interrupt and snaps on a late
+ * one.
+ *
+ * `active` is the radio being ON. While it is set the receiver produces noise whether or not any
+ * station voice exists -- which is the point of moving it here, because the window between the
+ * old station retiring and the new one opening is the longest part of a dial press and it used to
+ * be filled by an entirely different noise generator. Clear it and the stage is a no-op.
+ *
+ * `level` is the radio's own volume (context volume x duck). The programme carries its voice gain
+ * in with it, but the noise has no voice to inherit from -- and between stations there is no voice
+ * at all -- so it is pushed in here. */
+/* v48 -- ARM/LEVEL ONLY, safe to push every tick. The signal must NOT be re-pushed on a timer:
+ * it is ramped natively, and re-stating the target with rate 0 would snap it. So arming and the
+ * level get their own call.
+ *
+ * `level` matters because ducking is per-voice and the receiver is not a voice. The noise used to
+ * ride its station's gain and duck for free; at bus level it has to be told. Between stations
+ * there is no voice to ride anyway, which is exactly when the noise is loudest and most exposed. */
+CMM_API void cmm_mix_set_receiver_active(int active, float level) {
+    mix_lock(&g_lock);
+    if (active && !g_recvActive) {
+        g_recvSig = 1.0f; g_recvSigStep = 0.0f; g_recvSigTarget = 1.0f;
+        g_recvWCur = g_recvWTgt = 1.0f; g_recvWHold = 1; g_recvClkNext = 1;
+    }
+    g_recvActive = active ? 1 : 0;
+    g_recvLevel = level < 0.0f ? 0.0f : (level > 4.0f ? 4.0f : level);
+    mix_unlock(&g_lock);
+}
+
+CMM_API void cmm_mix_set_receiver_signal(float signal, float ratePerSec, float dullness,
+                                         float mononess, int active, float level) {
+    float sg = signal < 0.0f ? 0.0f : (signal > 1.0f ? 1.0f : signal);
+    mix_lock(&g_lock);
+    /* FIRST ARM STARTS AT FULLY TUNED, not at the target. Setting the signal to `sg` here and
+     * then computing the step against it -- now equal -- made the step ZERO, so the very first
+     * arm always jumped and silently ignored ratePerSec. A receiver nobody has tuned is by
+     * definition fully in. */
+    if (active && !g_recvActive) {
+        g_recvSig = 1.0f; g_recvSigStep = 0.0f;
+        g_recvWCur = g_recvWTgt = 1.0f; g_recvWHold = 1; g_recvClkNext = 1;
+    }
+    g_recvActive = active ? 1 : 0;
+    g_recvDull  = dullness < 0.0f ? 0.0f : (dullness > 1.0f ? 1.0f : dullness);
+    g_recvMono  = mononess < 0.0f ? 0.0f : (mononess > 1.0f ? 1.0f : mononess);
+    g_recvLevel = level < 0.0f ? 0.0f : (level > 4.0f ? 4.0f : level);
+    g_recvSigTarget = sg;
+    if (ratePerSec <= 0.0f) { g_recvSig = sg; g_recvSigStep = 0.0f; }
+    else {
+        float per = ratePerSec / (float)g_busRate;      /* units of signal per frame */
+        g_recvSigStep = (sg > g_recvSig) ? per : (sg < g_recvSig ? -per : 0.0f);
+    }
+    mix_unlock(&g_lock);
 }
 
 /* Update a live voice's per-track gain in place (loudness settle / trim key). */

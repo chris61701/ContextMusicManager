@@ -197,10 +197,21 @@ namespace CMM
         internal static extern void cmm_mix_set_receiver_radio(float amount, float makeupDb,
                                                                float lowCutHz, float highCutHz);
 
+        // v48 — ONE RECEIVER, and it is not attached to a voice. A voice is only marked as
+        // radio PROGRAMME; the signal, the noise, the filter and the stereo image belong to the
+        // mixer. The noise used to be per-voice, which meant a dial press — old station leaving,
+        // new station loaded and holding at signal 0, i.e. maximum noise — emitted two full-scale
+        // uncorrelated roars at once.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int cmm_mix_set_voice_receiver(long id, float signal, float ratePerSec,
-                                                              float dullness, float mononess,
-                                                              float gainPow);
+        internal static extern int cmm_mix_set_voice_radio(long id, int on);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_receiver_active(int active, float level);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_receiver_signal(float signal, float ratePerSec,
+                                                                float dullness, float mononess,
+                                                                int active, float level);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_mix_reclaim(long id, float fade);
@@ -587,10 +598,31 @@ namespace CMM
             NativeMix.cmm_mix_set_receiver_radio(amount, makeupDb, lowCutHz, highCutHz);
         }
 
-        public bool SetVoiceReceiver(long id, float signal, float ratePerSec, float dullness,
-                                     float mononess, float gainPow)
+        // Mark a voice's audio as radio programme. Returns false when the voice has already
+        // retired, which is the normal race when a station is abandoned mid-load.
+        public bool SetVoiceRadio(long id, bool on)
         {
-            return NativeMix.cmm_mix_set_voice_receiver(id, signal, ratePerSec, dullness, mononess, gainPow) != 0;
+            return NativeMix.cmm_mix_set_voice_radio(id, on ? 1 : 0) != 0;
+        }
+
+        // Arm the receiver and set its level. Safe to push every tick — unlike the signal,
+        // which is ramped natively and would SNAP if its target were re-stated on a timer.
+        public void SetReceiverActive(bool active, float level)
+        {
+            NativeMix.cmm_mix_set_receiver_active(active ? 1 : 0, level);
+        }
+
+        // Aim THE receiver at `signal` (0 = nothing there, 1 = fully tuned). Idempotent, so it
+        // can be pushed every tick. `active` is the radio being on: while it is set the receiver
+        // makes noise whether or not a station voice exists, which is what covers the window
+        // between the old station retiring and the new one opening. No voice id — that is the
+        // point, and it also removes a whole class of bug where a receiver instruction was
+        // silently dropped because the voice it named had gone.
+        public void SetReceiverSignal(float signal, float ratePerSec, float dullness,
+                                      float mononess, bool active, float level)
+        {
+            NativeMix.cmm_mix_set_receiver_signal(signal, ratePerSec, dullness, mononess,
+                                                  active ? 1 : 0, level);
         }
 
         // Ramp the CONSUMER-side output gain toward `target` over `seconds` (0 = immediate). Used

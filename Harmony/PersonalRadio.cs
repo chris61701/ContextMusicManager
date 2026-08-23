@@ -115,11 +115,15 @@ namespace CMM
                                                 CMMConfig.RadioRecvMakeupDb,
                                                 CMMConfig.RadioRecvLowCutHz,
                                                 CMMConfig.RadioRecvHighCutHz);
-            if (voiceId != 0)
-                CmmMixer.Instance?.SetVoiceReceiver(voiceId, to, ratePerSec,
-                                                    CMMConfig.RadioTuneDullness,
-                                                    CMMConfig.RadioTuneMononess,
-                                                    CMMConfig.RadioTuneGainPow);
+            // THE RECEIVER IS NOT A VOICE. It is armed for as long as the radio is on, so the
+            // voice-less window between stations is covered by the SAME noise as either side of
+            // it, and an instruction can no longer be dropped because the voice it named had
+            // already retired — which is exactly how the radio went silent once before.
+            CmmMixer.Instance?.SetReceiverSignal(to, ratePerSec,
+                                                 CMMConfig.RadioTuneDullness,
+                                                 CMMConfig.RadioTuneMononess,
+                                                 _on, 1f);
+            if (voiceId != 0) CmmMixer.Instance?.SetVoiceRadio(voiceId, true);
         }
         private static float _nextStaticAt;
 
@@ -266,6 +270,9 @@ namespace CMM
             _offAir = false;
             _staticWanted = false;
             StopStatic();
+            // Disarm the receiver, or its noise outlives the radio. Off is not a station and gets
+            // no tuning — rolling onto Off goes silent at once.
+            CmmMixer.Instance?.SetReceiverActive(false, 1f);
             // OFF IS NOT A STATION, SO IT GETS NO TUNING. Chris's call: rolling onto Off goes
             // silent at once — no leave ramp, no static, nothing to search for. The plain fade
             // below is short enough to read as immediate and long enough not to click.
@@ -747,17 +754,20 @@ namespace CMM
             // same stereo width, so pinging the separate hash on top would put the two-objects
             // problem straight back. This keepalive is for the genuinely voice-less window only:
             // after the old station has gone and before the new one has opened.
-            if (_staticWanted && _voiceId == 0 && Time.realtimeSinceStartup >= _nextStaticAt)
-            {
-                _nextStaticAt = Time.realtimeSinceStartup + TickInterval;
-                Sfx(CmmMixer.SfxTuningStatic);
-            }
-            // The moment a voice exists, hand the noise over to it and let the hash release.
-            if (_staticWanted && _voiceId != 0)
-            {
-                _staticWanted = false;
-                StopStatic();
-            }
+            // Re-arm every tick. The receiver is not a voice, so it does not inherit the duck a
+            // stinger applies to everything else — Death and Spawn take the bus outright, and a
+            // roar continuing underneath one would be worse than the silence. The SIGNAL is never
+            // re-pushed here: it is ramped natively and re-stating its target would snap it.
+            CmmMixer.Instance?.SetReceiverActive(
+                _on && !ContextMusicManager.PlayOnceStingerActive, 1f);
+
+            // THE HASH IS GONE. There is one receiver and it is armed for as long as the radio
+            // is on, so the voice-less window between stations is covered by the same noise as
+            // everything either side of it. It used to be filled by a separate generator — fixed
+            // band-pass, sample-and-hold sputter, no de-emphasis, no wander, no clicks — pinged
+            // every 250 ms, which is a different sound arriving in the middle of the one event
+            // this whole system exists to make continuous.
+            if (_staticWanted && _voiceId != 0) _staticWanted = false;
 
             if (_voiceId != 0)
             {
@@ -945,10 +955,14 @@ namespace CMM
             // already loaded" and "it took a second" sound the same — the floor is spent either
             // way and the station is genuinely there throughout rather than being started late.
             bool tuning = _staticWanted;
-            CmmMixer.Instance?.SetVoiceReceiver(id, tuning ? 0f : 1f, 0f,
-                                                CMMConfig.RadioTuneDullness,
-                                                CMMConfig.RadioTuneMononess,
-                                                CMMConfig.RadioTuneGainPow);
+            CmmMixer.Instance?.SetVoiceRadio(id, true);
+            // The voice only carries programme now. The SIGNAL is the receiver's, so a dial move
+            // does not re-aim it here — it is already sitting at 0 from the leave, and re-pushing
+            // it per voice is what used to produce a second full-scale roar the moment the new
+            // station finished opening. A non-dial join (world entry, a track ending, a resync
+            // after a pause) still snaps the receiver to fully tuned, because nothing is being
+            // tuned and putting the ceremony on those would dull the start of every track.
+            if (!tuning) AimSignal(0, 1f, 0f);
             _sigFrom = _sigTo = tuning ? 0f : 1f;
             _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
             _arriving = !tuning;

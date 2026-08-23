@@ -196,8 +196,23 @@ typedef struct cmm_decoder cmm_decoder;
  *        rather than SNR (which saturates too early to be usable); and the stereo decoder LATCHES
  *        late with hysteresis instead of gliding -- without the authentic decoder clunk, which was
  *        a one-sample 0.34 DC step and measured as the single largest discontinuity in the whole
- *        transition. */
-#define CMM_DECODER_ABI 47
+ *        transition.
+ *
+ *   v48: ONE RECEIVER, AT THE BUS. cmm_mix_set_voice_receiver is replaced by
+ *        cmm_mix_set_voice_radio (mark a voice as programme) + cmm_mix_set_receiver_signal
+ *        (the signal, and it belongs to nothing). The noise used to be generated per VOICE,
+ *        which was right when a radio meant one voice and wrong the moment a dial press meant
+ *        two: changing station overlaps the station being left with the station being loaded,
+ *        and the loading one HOLDS AT SIGNAL 0, which is maximum noise. Signal does not
+ *        attenuate a voice, so both emitted full-scale hiss at once from independent generators
+ *        with independent wander and flutter -- two uncorrelated roars, which is not a louder
+ *        receiver but two receivers. A THIRD noise existed as well: a separate synthesized hash
+ *        pinged every 250 ms whenever no voice existed at all, on a completely different
+ *        generator (fixed band-pass, sample-and-hold sputter, no de-emphasis, no wander, no
+ *        clicks). Three sounds for one event. Now radio voices contribute programme only into a
+ *        radio sub-bus and one bus-level stage generates the noise, sums, and applies the shared
+ *        hi-cut and width. It runs with no voices at all, which is what retires the hash. */
+#define CMM_DECODER_ABI 48
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
