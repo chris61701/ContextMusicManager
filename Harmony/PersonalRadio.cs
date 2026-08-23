@@ -531,7 +531,12 @@ namespace CMM
             // interrupting a half-finished arrival fades from half and takes half as long.
             float leaveSec = Mathf.Max(0.02f, Signal / LeaveRate);
             AimSignal(_voiceId, 0f, LeaveRate);
-            FadeVoiceOut(leaveSec);
+            // ONE AUDIBLE CURVE, NOT TWO. Native gain is `gain × trackGain × signal`, so running
+            // both ramps over the same span multiplies them into t² — the leave dives early and
+            // its last third is inaudible. The receiver is the curve we want to hear; trackGain
+            // only has to reach zero eventually, because the voice is orphaned here and otherwise
+            // retires at EOF. Give it twice the span so it stays out of the way.
+            FadeVoiceOut(leaveSec * 2f);
             _nextStartFade = 0.01f;      // the receiver does the arriving; don't fade twice
             _nextTick = 0f;              // dispatch next frame, not in ≤250 ms
 
@@ -668,6 +673,61 @@ namespace CMM
                     ContextMusicManager.RequestPrewarm(st.Order[(paIdx + k) % st.Order.Length]);
             }
 
+            // ── THE RECEIVER RUNS BEFORE ANYTHING CAN RETURN ────────────────────────────────
+            // This block used to sit at the BOTTOM of Tick, below the `if (_voiceId != 0) { …
+            // return; }` immediately following. Two of its three branches require a live voice,
+            // so they could only ever be evaluated when there wasn't one: dead code from the
+            // moment it was written. Every station armed itself silent and nothing ever raised
+            // it, which is 'the radio plays no music at all'. A follow-up fix added the RESCUE
+            // into the same dead region and therefore changed nothing.
+            //
+            // It lives here now, and the ordering is deliberate: bring the station up FIRST,
+            // then ping the static, so the tick that arrives doesn't fire one more burst of hash
+            // immediately before stopping it.
+
+            // ARRIVE. The station is open and holding silent, and the minimum has expired. Bring
+            // it up — dull and mono under the static, opening out as the signal rises.
+            if (_staticWanted && !_arriving && _voiceId != 0
+                && Time.realtimeSinceStartup >= _searchUntil)
+            {
+                _arriving = true;
+                _searchGiveUp = 0f;          // landed: the backstop must not fire later
+                AimSignal(_voiceId, 1f, ArriveRate);
+                _staticWanted = false;
+                StopStatic();
+                CMMConfig.D($"[CMM] Radio: arriving — voice {_voiceId}, {CMMConfig.RadioTuneArriveMs:0} ms.");
+            }
+            // RESCUE, and it is deliberately NOT part of the chain above. A voice sitting at zero
+            // with nothing searching for it is a silent radio, which is a far worse failure than
+            // a missing flourish — so it gets its own unconditional test rather than an `else if`
+            // that a guard above can shadow. That is exactly how the first attempt was disabled.
+            if (!_arriving && _voiceId != 0 && !_staticWanted)
+            {
+                _arriving = true;
+                _searchGiveUp = 0f;
+                AimSignal(_voiceId, 1f, ArriveRate);
+            }
+            // The backstop: a station that neither opened nor errored (a wedged file — a missing
+            // one is handled by the failure path seeking on). Rather than sit in static for ever,
+            // move along in the direction of travel.
+            if (_staticWanted && _voiceId == 0 && _searchGiveUp > 0f
+                && Time.realtimeSinceStartup >= _searchGiveUp)
+            {
+                Log.Warning($"[CMM] Radio: '{_tunedName}' did not open in " +
+                            $"{CMMConfig.RadioTuneGiveUpMs:0} ms — seeking on.");
+                _searchGiveUp = 0f;
+                Step(_lastStepDir >= 0 ? 1 : -1);
+                return;
+            }
+            // Keep the tuning hash alive while a dial move is still searching. Native KEEPALIVE:
+            // each ping extends ONE seamless hash rather than layering bursts. It must be above
+            // the return too, or it stops the instant the voice lands and never covers the floor.
+            if (_staticWanted && Time.realtimeSinceStartup >= _nextStaticAt)
+            {
+                _nextStaticAt = Time.realtimeSinceStartup + TickInterval;
+                Sfx(CmmMixer.SfxTuningStatic);
+            }
+
             if (_voiceId != 0)
             {
                 // Sync audit: periodic voice-vs-paper delta (see RadioStationCatalog.AuditVoice).
@@ -703,52 +763,6 @@ namespace CMM
                     StartFromClock(st, AdvanceOverride: ended);
                 }
                 return;
-            }
-
-            // A user dial is still waiting for its voice (async open/seek in flight, or the
-            // loudness gain-gate's "tuning…" hold): keep the tuning static alive. The static is
-            // a native KEEPALIVE (v36) — each ping extends ONE seamless hash rather than layering
-            // bursts (which audibly double-fired), and StopStatic ends it the moment the voice
-            // lands.
-            if (_staticWanted && Time.realtimeSinceStartup >= _nextStaticAt)
-            {
-                _nextStaticAt = Time.realtimeSinceStartup + TickInterval;
-                Sfx(CmmMixer.SfxTuningStatic);
-            }
-
-            // ── ARRIVE ──────────────────────────────────────────────────────────────────────
-            // The station is open and holding silent; the minimum has now expired. Bring it up —
-            // dull and mono under the static first, opening out as the signal rises — and let the
-            // static release against it rather than switching off underneath it.
-            if (_staticWanted && !_arriving && _voiceId != 0
-                && Time.realtimeSinceStartup >= _searchUntil)
-            {
-                _arriving = true;
-                AimSignal(_voiceId, 1f, ArriveRate);
-                _staticWanted = false;
-                StopStatic();
-            }
-            // RESCUE. A voice held at zero with nothing searching for it is a silent radio, and a
-            // silent radio is a far worse failure than a missing flourish. Any path that starts a
-            // voice without going through the dial — and there are several, plus whatever gets
-            // added later — lands here and is simply brought up. This already earned its place
-            // once: gating the arrival on the tuning flag muted world-entry restores and every
-            // track advance, because neither is a keypress.
-            else if (!_staticWanted && !_arriving && _voiceId != 0)
-            {
-                _arriving = true;
-                AimSignal(_voiceId, 1f, ArriveRate);
-            }
-            // The backstop. Only reached when a station neither opened nor errored — a wedged
-            // file rather than a missing one, which the failure path already handles by seeking
-            // on. Rather than sit in static for ever, move along in the direction of travel.
-            else if (_staticWanted && _voiceId == 0 && _searchGiveUp > 0f
-                     && Time.realtimeSinceStartup >= _searchGiveUp)
-            {
-                Log.Warning($"[CMM] Radio: '{_tunedName}' did not open in " +
-                            $"{CMMConfig.RadioTuneGiveUpMs:0} ms — seeking on.");
-                _searchGiveUp = 0f;
-                Step(_lastStepDir >= 0 ? 1 : -1);
             }
 
             // Idle but on (world entry with a persisted on-state, a gain-wait retry, or it just

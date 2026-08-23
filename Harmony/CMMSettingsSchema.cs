@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 5;
+        internal const int CurrentSchema = 6;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -451,15 +451,17 @@ mid-hash — so dial between stations while editing and hear each change immedia
                   lower = dull rumble.
   StaticCrackle : 0..1 sputter depth. 0 = smooth ""shhh""; 1 = full pops-and-sputter radio
                   crackle (random dropouts a few ms to ~30 ms long)."),
-            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              900f),
-            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  260f),
-            F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 420f),
-            F("RadioTuneDullness",                   "CMMConfig.RadioTuneDullness",                 0.85f),
-            F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f),
-            F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f),
+            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              900f, since: 6),
+            F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  260f, since: 6),
+            F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 420f, since: 6),
+            F("RadioTuneDullness",                   "CMMConfig.RadioTuneDullness",                 0.85f, since: 6),
+            F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f, since: 6),
+            F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f, since: 6),
             F("RadioStaticVolume",                   "CMMConfig.RadioStaticVolume",                 -1f),
-            F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  50f),
-            F("RadioStaticHighHz",                   "CMMConfig.RadioStaticHighHz",                 2100f),
+            F("RadioStaticLowHz",                    "CMMConfig.RadioStaticLowHz",                  50f,
+              since: 1, changedIn: 6, was: 350f),
+            F("RadioStaticHighHz",                   "CMMConfig.RadioStaticHighHz",                 2100f,
+              since: 1, changedIn: 6, was: 2000f),
             F("RadioStaticCrackle",                  "CMMConfig.RadioStaticCrackle",                0.8f),
             Cmt(@"Power-click character, one set per click (all hot-reload — heard on the next dial):
 Hz       : tone cap (300..10000) — higher = bright tick, lower = dull thud.

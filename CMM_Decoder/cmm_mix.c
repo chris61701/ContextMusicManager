@@ -510,6 +510,15 @@ static int produce_conv(mix_voice* v, int n) {
 
 /* Produce n bus frames from v, apply its gain ramps, ADD into the bus. Returns 0
  * when the voice should be retired. Mirrors CmmMixer.RenderVoiceAdd (bus is stereo). */
+/* Flush IEEE-754 denormals to zero. Same helper and same reason as cmm_reverb.h's — a filter fed
+ * silence drifts into denormal range and costs 10–100× on the audio thread from then on. Copied
+ * rather than included: that header pulls in the whole reverb, and this is four lines. */
+static inline float mix_undenorm(float x)
+{
+    unsigned int u; memcpy(&u, &x, sizeof(u));
+    return (u & 0x7f800000u) == 0u ? 0.0f : x;
+}
+
 static int render_voice_add(mix_voice* v, int n) {
     int frames = (v->conv == NULL) ? produce_direct(v, n) : produce_conv(v, n);
     /* Emitter voices are NOT spatialized here: they produce a DRY MONO signal (× fade/track gain)
@@ -546,7 +555,15 @@ static int render_voice_add(mix_voice* v, int n) {
             }
             float s = v->recvSig < 0.0f ? 0.0f : (v->recvSig > 1.0f ? 1.0f : v->recvSig);
             float l = g_voiceStereo[o], r = g_voiceStereo[o + 1];
-            if (v->recvDull > 0.001f) {
+            /* FULLY TUNED IS A BYPASS. recvOn never returns to 0, so without this the low-pass
+             * runs for the entire life of every track -- a permanent filter the design never
+             * intended (~-3 dB at 16 kHz), plus a powf AND an expf per frame, ~96k transcendentals
+             * a second on the producer thread, forever. Keep the filter state in step with the
+             * input while bypassed so re-entry on the next dial move cannot click. */
+            if (s >= 0.999f) {
+                v->recvLp[0] = l; v->recvLp[1] = r;
+            }
+            else if (v->recvDull > 0.001f) {
                 /* Treble opens as the signal comes up. A ONE-POLE, deliberately: every filter in
                  * this codebase is one, and a bench that settles a corner against anything
                  * steeper hands over numbers that do not survive the port. Coefficient is
@@ -556,8 +573,12 @@ static int render_voice_add(mix_voice* v, int n) {
                 float ny = (float)g_busRate * 0.45f;
                 if (fc > ny) fc = ny;
                 float k = 1.0f - expf(-6.2831853f * fc / (float)g_busRate);
-                v->recvLp[0] += k * (l - v->recvLp[0]); l = v->recvLp[0];
-                v->recvLp[1] += k * (r - v->recvLp[1]); r = v->recvLp[1];
+                /* Denormal guard, same reason as the reverb: a one-pole fed
+                 * silence decays into denormal range in tens of milliseconds and costs 10-100x on
+                 * the audio thread from then on. A radio holding at signal 0 is fed silence by
+                 * definition, so this one would sit there. */
+                v->recvLp[0] = mix_undenorm(v->recvLp[0] + k * (l - v->recvLp[0])); l = v->recvLp[0];
+                v->recvLp[1] = mix_undenorm(v->recvLp[1] + k * (r - v->recvLp[1])); r = v->recvLp[1];
             }
             if (v->recvMono > 0.001f) {
                 /* Stereo needs about 20 dB more signal than mono in a real receiver, so it goes
@@ -592,6 +613,15 @@ static int render_voice_add(mix_voice* v, int n) {
         v->trackGain += v->trackGainStep * silent;
         if ((v->trackGainStep > 0.0f && v->trackGain >= v->trackGainTarget) ||
             (v->trackGainStep < 0.0f && v->trackGain <= v->trackGainTarget)) { v->trackGain = v->trackGainTarget; v->trackGainStep = 0.0f; }
+    }
+    /* The receiver ramp gets the same treatment, for the same reason. A voice that under-produces
+     * -- converter priming, a loop reseek, a streaming decode hitch -- would otherwise freeze its
+     * signal while the managed side's wall-clock mirror of the same ramp keeps going, and the two
+     * would then disagree about where the signal is when the player interrupts. */
+    if (silent > 0 && v->recvOn && v->recvSigStep != 0.0f) {
+        v->recvSig += v->recvSigStep * silent;
+        if ((v->recvSigStep > 0.0f && v->recvSig >= v->recvSigTarget) ||
+            (v->recvSigStep < 0.0f && v->recvSig <= v->recvSigTarget)) { v->recvSig = v->recvSigTarget; v->recvSigStep = 0.0f; }
     }
 
     if (v->ended && frames < n) return 0;                 /* finished + drained */
@@ -1882,8 +1912,13 @@ CMM_API int cmm_mix_set_voice_receiver(long long id, float signal, float ratePer
     for (i = 0; i < g_voiceCount; i++) {
         mix_voice* v = g_voices[i];
         if (v->id != id) continue;
-        if (!v->recvOn) {                 /* first arm: start where we were told, not at zero */
-            v->recvOn = 1; v->recvSig = s;
+        /* FIRST ARM STARTS AT FULLY TUNED, not at the target. Setting recvSig = s here and then
+         * computing the step against recvSig -- now equal to s -- made the step ZERO, so the very
+         * first arm always jumped and silently ignored ratePerSec. Harmless while the caller
+         * happened to arm with rate 0 first; a trap the moment anyone armed a live voice with a
+         * ramp and wondered why it snapped. A voice nobody has tuned is by definition fully in. */
+        if (!v->recvOn) {
+            v->recvOn = 1; v->recvSig = 1.0f;
             v->recvLp[0] = v->recvLp[1] = 0.0f;
         }
         v->recvDull = dullness < 0.0f ? 0.0f : (dullness > 1.0f ? 1.0f : dullness);
