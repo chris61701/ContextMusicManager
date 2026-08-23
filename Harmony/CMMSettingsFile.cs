@@ -107,11 +107,14 @@ namespace CMM
 
                     if (s.DefaultChangedIn > fileSchema && s.WasDefault != null
                         && CMMSettingsIO.TryParse(s, el.InnerText, out object current)
-                        && CMMSettingsIO.SameValue(s, current, s.WasDefault))
+                        && CMMSettingsIO.MatchesAnyFormerDefault(s, current))
                     {
+                        // Report what the FILE held, not what the schema expected — with several
+                        // former defaults in play those are not the same thing, and the one that
+                        // tells you whether the migration did the right thing is the file's.
+                        string had = CMMSettingsIO.Format(s, current);
                         el.InnerText = CMMSettingsIO.Format(s, s.Default);
-                        migrated.Add($"{s.Name} {CMMSettingsIO.Format(s, s.WasDefault)}"
-                                   + $"→{CMMSettingsIO.Format(s, s.Default)}");
+                        migrated.Add($"{s.Name} {had}→{CMMSettingsIO.Format(s, s.Default)}");
                     }
                 }
 

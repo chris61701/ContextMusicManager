@@ -125,6 +125,27 @@ namespace CMM
         // "is this still sitting on the old default?", so it must compare PARSED
         // values — "5" and "5.0" and " true " are the same setting untouched, and a
         // text compare would call them customised and strand them on the old value.
+        // EVERY default a setting has ever had, not just the most recent one. `WasDefault`
+        // may be a single value or an object[] of them, and a file is migrated if it still
+        // holds ANY of them.
+        //
+        // This exists because the single-value form silently destroys its own history. Change a
+        // default twice and the second edit overwrites the first `was`, so anyone who never
+        // launched the version in between is holding a value the rule no longer recognises —
+        // and an unrecognised value reads as a deliberate user override and is left alone
+        // forever. That is exactly what happened to the radio timings: a file still at schema 8
+        // held the original 1100 ms, the schema-9 rule that would have moved it was replaced by
+        // a schema-10 rule looking for 7000, and the file kept 1100 through both.
+        internal static bool MatchesAnyFormerDefault(SettingDef s, object current)
+        {
+            if (s.WasDefault == null) return false;
+            object[] arr = s.WasDefault as object[];
+            if (arr == null) return SameValue(s, current, s.WasDefault);
+            for (int i = 0; i < arr.Length; i++)
+                if (arr[i] != null && SameValue(s, current, arr[i])) return true;
+            return false;
+        }
+
         internal static bool SameValue(SettingDef s, object a, object b)
         {
             if (a == null || b == null) return ReferenceEquals(a, b);

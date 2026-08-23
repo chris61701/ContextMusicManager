@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 10;
+        internal const int CurrentSchema = 11;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -451,12 +451,15 @@ mid-hash — so dial between stations while editing and hear each change immedia
                   lower = dull rumble.
   StaticCrackle : 0..1 sputter depth. 0 = smooth ""shhh""; 1 = full pops-and-sputter radio
                   crackle (random dropouts a few ms to ~30 ms long)."),
+            // Three defaults deep, so all three former values are listed. A file that never
+            // saw schema 9 still holds the originals; the schema-10 rule only knew about the
+            // schema-9 values and therefore walked straight past them. See MatchesAnyFormerDefault.
             F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              1500f,
-              since: 6, changedIn: 10, was: 4000f),
+              since: 6, changedIn: 11, was: new object[] { 900f, 4000f }),
             F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  1200f,
-              since: 6, changedIn: 10, was: 3400f),
+              since: 6, changedIn: 11, was: new object[] { 260f, 3400f }),
             F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 2800f,
-              since: 6, changedIn: 10, was: 7000f),
+              since: 6, changedIn: 11, was: new object[] { 1100f, 7000f }),
             F("RadioTuneDullness",                   "CMMConfig.RadioTuneDullness",                 0.85f, since: 6),
             F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f, since: 6),
             F("RadioTuneGainPow",                    "CMMConfig.RadioTuneGainPow",                  0.30f, since: 7),
