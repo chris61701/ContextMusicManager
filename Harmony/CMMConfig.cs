@@ -551,6 +551,9 @@ namespace CMM
         // fast, precise response is tuned separately), and occlusion DROPS are never capped — sound
         // ARRIVING should track the event. 0 disables the cap (old behavior).
         public static float  WorldEmitterOcclusionFadeRate      = 50f;
+        // How often the occlusion decision and the speaker point-set are refreshed, in Hz. The
+        // listener basis is pushed every frame regardless -- this is only how fast WALLS catch up.
+        public static float  WorldEmitterTickHz                  = 10f;
         // Path routing: when a speaker's direct line is blocked, FLOOD-FILL through open air (a portal
         // search) to find whether sound has a real way around the wall / up the stairwell, and how far
         // it has to travel — so it routes through openings instead of slamming to the floor gain. This

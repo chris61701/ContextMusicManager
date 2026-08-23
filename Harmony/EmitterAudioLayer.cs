@@ -97,9 +97,21 @@ namespace CMM
         internal static bool DoorMovingOrJustMoved =>
             EmitterAcoustics.AnyDoorAnimating || CmmClock.Now - _doorEventAt < 1.5f;
 
-        // Decision + point-set refresh cadence (4 Hz). The listener itself is pushed every frame; this
-        // only governs how fast start/stop and the in-range speaker SET react as you move.
-        private const float TickInterval = 0.25f;
+        // Decision + point-set refresh cadence. The listener itself is pushed every FRAME (pan and
+        // distance already track smoothly); this governs how fast the OCCLUSION -- what a wall
+        // between you and a speaker is doing -- catches up as you move, and it is the thing that
+        // reads as "it takes a moment to settle on what I should be hearing".
+        //
+        // It was a hardcoded 4 Hz, chosen when a tick cost 6.1 ms. Measured 2026-08-23 after the
+        // chunk-lookup hoist and the field reader's 3x redundant read were fixed, a tick costs
+        // 2.1 ms -- so 10 Hz now costs 21 ms/s against the 24 ms/s that 4 Hz used to. The
+        // responsiveness is bought with the optimisation rather than charged on top of it.
+        //
+        // Config, not a constant, because the right number is a judgement about feel and the only
+        // instrument for it is a person sprinting at a speaker. Raise it if the shaping still lags;
+        // watch EmitPoll in the perf line, which is what it costs.
+        private static float TickInterval =>
+            1f / Mathf.Clamp(CMMConfig.WorldEmitterTickHz, 1f, 30f);
         private const float DoorTickInterval = 0.05f;   // ~20 Hz while a door is mid-swing (tight fade/mute timing)
         private static float _nextTick;
         private static bool _unsupportedLogged;         // one-shot "needs 3.0+" notice when configured on an older game

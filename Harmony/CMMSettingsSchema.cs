@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 19;
+        internal const int CurrentSchema = 20;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -621,6 +621,13 @@ of hard-cutting it the tick the route flips to blocked. Door open/close events b
 (their timing is tuned separately) and occlusion DROPS are never capped — sound arriving tracks
 the event. 0 = no cap (old instant behavior). Hot-reloads."),
             F("WorldEmitterOcclusionFadeRate",       "CMMConfig.WorldEmitterOcclusionFadeRate",     50f),
+            Cmt(@"How often the occlusion decision and the speaker point-set refresh, in Hz (1-30). Your
+listener position is pushed every FRAME regardless, so distance and panning always track
+smoothly — this is only how fast a WALL between you and a speaker catches up, i.e. how
+quickly the sound re-shapes when you sprint past cover. Was a hardcoded 4 Hz; 10 costs
+about what 4 did before the scan optimisations. Raise it if the shaping still lags behind
+you, lower it to claw back CPU. Watch EmitPoll in the [CMM PERF] Phases line for the cost."),
+            F("WorldEmitterTickHz",                   "CMMConfig.WorldEmitterTickHz",                10f, since: 20),
             Cmt(@"Mid-swing door acoustics follow the physical GAP IN METRES (swing fraction × the door's largest
 dimension), so the same two knobs are right for every door size: a 3 m garage door with a metre
 still to go is a huge aperture (full sound); a vault leaf the same fraction open is a hand-width
