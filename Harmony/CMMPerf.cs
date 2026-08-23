@@ -40,12 +40,22 @@ namespace CMM
             ScanGate,        // change-detection / stack rebuild gate
             ScanMarshal,     // ScriptHost: GameState/cfg → Lua tables (per-enemy table alloc lives here)
             ScanLuaCall,     // ScriptHost: _script.Call + result-table walk (MoonSharp's own alloc)
+            // The emitter registry. EmitProx is the one the widen-the-discovery-box decision turns
+            // on: its box is a KNOWN voxel count, so avg ms over that count is nanoseconds per
+            // block read, which is the only number that says what a bigger box would actually
+            // cost. It had never been measured -- the "~21k reads, a couple of ms" in
+            // EmitterRegistry was an estimate someone wrote down, and estimates are what the
+            // radio tuning spent weeks paying for.
+            EmitPoll,        // EmitterRegistry.Poll — the whole 4 Hz registry tick
+            EmitProx,        // EmitterRegistry.ScanProximity — the placed-radio discovery box (2 Hz)
+            EmitPoiScan,     // EmitterRegistry.ContinueScan — amortised POI walk (ScanBudgetMs-capped)
             COUNT
         }
 
         static readonly string[] Names =
         {
-            "ScanPoll", "ScanResolve", "ScanGate", "ScanMarshal", "ScanLuaCall"
+            "ScanPoll", "ScanResolve", "ScanGate", "ScanMarshal", "ScanLuaCall",
+            "EmitPoll", "EmitProx", "EmitPoiScan"
         };
 
         const int N = (int)Phase.COUNT;

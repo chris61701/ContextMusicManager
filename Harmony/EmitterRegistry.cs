@@ -128,7 +128,13 @@ namespace CMM
         {
             if (Time.realtimeSinceStartup < _nextPollTime) return;
             _nextPollTime = Time.realtimeSinceStartup + PollInterval;
+            // The throttle stays OUT of the measurement: wrapping the whole method would count
+            // every frame that returned immediately and divide the real cost by ~15.
+            using (CMMPerf.Measure(CMMPerf.Phase.EmitPoll)) PollInner();
+        }
 
+        private static void PollInner()
+        {
             World world = GameManager.Instance?.World;
             EntityPlayerLocal player = world?.GetPrimaryPlayer();
             if (world == null || player == null) return;
@@ -268,6 +274,23 @@ namespace CMM
         // so a placed radio has full range, not just this discovery radius. Cheap (small box).
         private static void ScanProximity(World world, Vector3 pp)
         {
+            using (CMMPerf.Measure(CMMPerf.Phase.EmitProx)) ScanProximityInner(world, pp);
+        }
+
+        // The discovery box is a FIXED voxel count -- (2*ProxRadiusXZ+1)^2 * (2*ProxRadiusY+1),
+        // 41*41*13 = 21,853 today -- so EmitProx's avg ms divided by that is nanoseconds per
+        // world.GetBlock, which is the whole basis for costing a wider box. Log it once so the
+        // reader of a perf line does not have to recompute it from the constants.
+        private static void ScanProximityInner(World world, Vector3 pp)
+        {
+            if (!_proxSizeLogged)
+            {
+                _proxSizeLogged = true;
+                int vox = (2 * ProxRadiusXZ + 1) * (2 * ProxRadiusXZ + 1) * (2 * ProxRadiusY + 1);
+                CMMConfig.D($"[CMM PERF] EmitProx box: {2 * ProxRadiusXZ + 1}x{2 * ProxRadiusY + 1}x" +
+                            $"{2 * ProxRadiusXZ + 1} = {vox} voxels/sweep at {1f / (PollInterval * 2f):0.#} Hz " +
+                            "(divide EmitProx avg by that for ns/block-read).");
+            }
             int px = Mathf.FloorToInt(pp.x), py = Mathf.FloorToInt(pp.y), pz = Mathf.FloorToInt(pp.z);
             int y0 = Mathf.Max(0, py - ProxRadiusY), y1 = Mathf.Min(256, py + ProxRadiusY + 1);
             for (int x = px - ProxRadiusXZ; x <= px + ProxRadiusXZ; x++)
@@ -370,7 +393,14 @@ namespace CMM
         // Advance the in-flight scan until the time budget elapses; commit on completion.
         private static void ContinueScan(World world)
         {
-            if (!_scanActive) return;
+            if (!_scanActive) return;   // cheap, and outside the measurement on purpose
+            using (CMMPerf.Measure(CMMPerf.Phase.EmitPoiScan)) ContinueScanInner(world);
+        }
+
+        private static bool _proxSizeLogged;
+
+        private static void ContinueScanInner(World world)
+        {
             _scanPolls++;
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
