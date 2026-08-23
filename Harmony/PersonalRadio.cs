@@ -553,10 +553,10 @@ namespace CMM
                 ContextMusicManager.StopNativeIfActive(CMMConfig.ManualSkipFadeDuration);
             }
 
-            // Retune = fade the old voice NOW and let the tick dispatch the ASYNC start (open +
-            // seek on a worker — see StartFromClock). A keypress never blocks the frame, rapid
-            // dialing just re-aims the single in-flight start (FadeVoiceOut bumped _startGen),
-            // and the old station can never keep playing under the new dial position.
+            // Retune = RELEASE the old voice now (it keeps playing, buried) and let the tick
+            // dispatch the ASYNC start (open + seek on a worker — see StartFromClock). A keypress
+            // never blocks the frame, and rapid dialing just re-aims the single in-flight start
+            // because ReleaseVoiceStillPlaying bumps _startGen exactly as FadeVoiceOut does.
             // ── LEAVE ───────────────────────────────────────────────────────────────────────
             // The receiver takes the signal down, which dulls and narrows the old station on its
             // way out rather than just turning it down. The gain fade runs alongside over the
@@ -572,8 +572,9 @@ namespace CMM
             // mid-note and the new one appeared in the clear. Click, silence, then static, then
             // a tune-in on a station you could already hear.
             //
-            // So: no FadeVoiceOut here. This voice plays on, sinking under the rising hiss, until
+            // So: released rather than faded. It plays on, sinking under the rising hiss, until
             // the handover retires it at _swapAt.
+            ReleaseVoiceStillPlaying();
             _nextStartFade = SwapFade;   // a real crossfade, spent entirely underneath the static
             _nextTick = 0f;              // dispatch next frame, not in ≤250 ms
 
@@ -1020,6 +1021,24 @@ namespace CMM
             _startGen++;
             if (_voiceId == 0) return;
             CmmMixer.Instance?.SetVoiceTrackGain(_voiceId, 0f, fade);
+            _voiceId = 0;
+            _track = null;
+        }
+
+        // RELEASE THE VOICE WITHOUT SILENCING IT. Everything FadeVoiceOut does except the part
+        // that makes it inaudible: the station carries on playing at full level and the receiver
+        // buries it under the rising hiss, which is the whole point of the leave. It is retired
+        // for real when the incoming station's add crossfades it out at _swapAt, down in the
+        // static where the swap cannot be heard.
+        //
+        // Clearing _voiceId is NOT incidental — it is what moves the state machine into
+        // "searching". Tick returns early whenever a voice is live (PersonalRadio's dispatch for
+        // the next station sits in the _voiceId == 0 branch), so a leave that keeps the id would
+        // never load anything and the dial would simply stop working. That is exactly what
+        // happened when this was first written as "delete the FadeVoiceOut call".
+        private static void ReleaseVoiceStillPlaying()
+        {
+            _startGen++;
             _voiceId = 0;
             _track = null;
         }
