@@ -45,30 +45,34 @@ All notable changes to Context Music Manager are documented here.
   clicks' `RadioClickOn*` / `RadioClickOff*` (tone cap Hz, snap = sharp tick vs soft thud,
   length, volume). Edits are audible mid-static / on the next dial. Native ABI 38.
 - **Changing station sounds like tuning a radio, not like a crossfade.** Pressing next/previous
-  now plays the whole event: the station you are leaving is buried under interstation noise,
-  the noise runs for as long as the next station needs to load, and then that station is
-  *acquired* rather than faded up. The difference is what happens to the music itself. An
-  arriving station comes in squeezed to roughly a telephone's bandwidth, distorted and
-  squashed flat with no dynamics left, and then opens out — bass first, then treble, and the
-  stereo image last of all, snapping in the way a real decoder locks. Nothing is
-  crossfaded: the programme holds its level throughout and the noise does the moving, which
-  is what a real receiver does and is the reason it no longer reads as two sounds passing
-  each other. The whole change takes about 5.5 seconds when the next station is ready
-  instantly, and stretches only as long as loading actually needs.
-  - Everything is live in `settings.xml`. The timing is `RadioTuneMinStaticMs` /
-    `RadioTuneLeaveMs` / `RadioTuneArriveMs` (1500 / 1200 / 2800 — these are much shorter
-    than before; the old values were three times too long). How wrecked the arriving station
-    gets is `RadioRecvMangle` (0 turns the whole thing off and restores the old plain
-    fade-in), with `RadioRecvLowCutHz` / `RadioRecvHighCutHz` setting the band it is squeezed
-    into and `RadioRecvMakeupDb` the level put back.
+  now plays the whole event. The station you are leaving does not stop — it starts breaking up
+  the instant you press the key, sinking under rising interstation noise until it is buried.
+  The changeover to the next station happens down inside that noise, where neither one is
+  audible. Then the new station is *acquired* rather than faded up.
+  - The difference is what happens to the music itself. An arriving station comes in squeezed
+    to roughly a telephone's bandwidth, distorted, and squashed flat with no dynamics left,
+    and then opens out — bass first, then treble, and the stereo image last of all, snapping
+    in the way a real decoder locks. Nothing is crossfaded: the programme holds its level
+    throughout and the noise does all the moving, which is what a real receiver does and is
+    why it no longer reads as two sounds passing each other.
+  - **The key responds immediately.** The station begins falling apart within about 75 ms, and
+    the whole change is done in under two seconds when the next station is ready. A slow file
+    simply extends the static; it never adds dead air at the front, because the next track is
+    opened *while* the current one is still going out.
+  - Everything is live in `radio.xml` and takes effect on the next dial. The timing is
+    `RadioTuneLeaveMs` / `RadioTuneMinStaticMs` / `RadioTuneArriveMs`; `RadioRecvKnee` is where
+    in the fade the break-up happens (higher = sooner after the key). How wrecked the arriving
+    station gets is `RadioRecvMangle` — **0 turns the whole thing off and restores the old
+    plain fade-in** — with `RadioRecvLowCutHz` / `RadioRecvHighCutHz` setting the band it is
+    squeezed into and `RadioRecvMakeupDb` the level put back.
   - The noise's own character is `RadioRecvNoise`, `RadioRecvClicks` / `RadioRecvClickRate`,
     `RadioRecvWander` and `RadioRecvFlutter`; how far into the arrival it lasts is
     `RadioRecvNoiseHold`, and `RadioRecvNoiseFloor` is the residual hiss a locked station
     keeps. `RadioRecvWindowA` / `RadioRecvWindowB` are when the treble comes back, and
     `RadioRecvLockAt` / `RadioRecvLockMs` are when and how fast the stereo image opens.
-  - Interrupting a half-finished change is handled: signal is ramped by rate rather than
+  - Interrupting a half-finished change is handled: the signal is ramped by rate rather than
     duration, so dialling on from half way fades from half and takes half as long instead of
-    dragging or snapping. Native ABI 47.
+    dragging or snapping. Native ABI 49.
 
 - **Ham radios sound like ham radios.** The `radioHam` block now has its own always-on
   "small communications speaker" voicing — narrowed band, a touch of soft-clip breakup, a
@@ -481,6 +485,33 @@ All notable changes to Context Music Manager are documented here.
   audible in about a second, with the new `WorldEmitterBirthFade` controlling its fade-in
   (`-1` inherits the station start fade; the fade also covers a fresh station voice born from
   the placement).
+- **The interstation static no longer changes volume with the song.** The hiss was being
+  scaled by each track's loudness correction, so a quiet song that needed a large boost got a
+  correspondingly loud burst of static, and a loud song got a quiet one — a swing of well over
+  10 dB across a normalised library. A receiver's noise floor does not depend on what station
+  is tuned; it is now fixed, and `RadioRecvNoise` alone sets it.
+
+- **Music no longer starts at the wrong volume and slides into place a second later.** A track
+  whose loudness had not been measured yet started uncorrected and had its real level eased in
+  later, which on a quiet file needing the full boost is an audible climb a second into the
+  song. Playback now waits, silently, for the measurement — up to `LoudnessStartHoldMs`
+  (3 s), after which it starts anyway rather than leaving you in silence. The personal radio
+  has always done this; context music now does too, and both use the same setting. With
+  `LoudnessNormalizationEnabled` off there is nothing to wait for and the hold is skipped.
+
+- **Changed settings now actually reach an existing config file.** The migration that updates
+  a setting you never touched only recognised **one** previous default, so changing the same
+  default twice left anyone who had skipped the version in between stranded on a value the
+  rule no longer recognised — permanently, since it read as a deliberate override. Every
+  former default a setting has ever had is now recognised. This had silently stranded the
+  radio timings at values from several versions back.
+
+- **Config files open correctly in text editors.** `settings.xml`, `radio.xml` and
+  `contexts.xml` are UTF-8 and always were, but they were written without a byte-order mark,
+  so Windows editors guessed Windows-1252 and every accented character, arrow and rule in the
+  comments appeared as mojibake — a correct file that read as a corrupted one. The mark is now
+  written, and an existing file missing it is rewritten once to gain it.
+
 - **Radio tracks no longer start loud and then settle.** Two causes: the personal radio's
   upcoming tracks were never loudness-measured ahead of time (the world-emitter prewarm only
   covers stations with a nearby speaker), so every track change started at full volume until
@@ -577,6 +608,14 @@ All notable changes to Context Music Manager are documented here.
   with no source changes. The release zip is named `... for A20-A21-2.6-3.1.zip` accordingly.
 - **VS Code "Package (Release zip)" task** now invokes the single-zip `Package` MSBuild
   target (was `PackageAll`).
+- **Radio tuning bench** (development only): `tools/CmmRadioSim` renders a whole station change
+  to a WAV by driving the shipping `CMM_Decoder.dll` headless — the real mixer, the real
+  receiver, the real voice lifecycle — in about four seconds, instead of loading a world to
+  hear one dial press. `tools/CmmRadioLab` is a UI over it: a slider per setting, the game's
+  render next to the approved reference render, and A/B playback. It reads a live `radio.xml`
+  and reports every value that differs from the shipped default, which is the check whose
+  absence had the whole feature being judged against settings nobody had approved.
+
 - **Acoustics validation tooling** (development only): an in-game `cmm acsweep` console
   command exports a POI's voxel grid, occlusion floods and acoustic fields as game-truth
   dumps, and `tools/CmmAcousticsJudge/judge3d.js` replays the shipped model against them
