@@ -222,7 +222,19 @@ namespace CMM
         // about EIGHT DECIBELS of carrier-to-noise, with flat plateaus either side, so the ramp
         // is bent into plateau → event → plateau. KneeWidth is how much of the ramp the event
         // gets: NARROW is correct, and widening it is the thing that will make it smooth again.
-        public static float  RadioRecvKnee        = 0.65f;   // where the break-up happens, 0..1 — HIGHER = sooner after the key
+        // 0.90 = the station starts falling apart the INSTANT you press the key (0.075 s).
+        //
+        // This number was 0.45 for a long time and it was wrong for the wrong reason. The knee
+        // exists so the break-up is an EVENT with flat plateaus either side rather than a smooth
+        // fade — correct. But it models a station fading out ON ITS OWN, the way one does when
+        // you drive out of range: quiet for a while, then break-up, then gone. That leading
+        // stretch of "nothing has happened yet" is right for THAT story.
+        //
+        // Nobody drives out of range here. They press a button. There is nothing to wait for, and
+        // the wait read as an unresponsive key — two thirds of a second of it at 0.45. Put the
+        // knee at the top and the leading plateau disappears; the event and the trailing plateau,
+        // which are the parts that make it sound like a receiver, are untouched.
+        public static float  RadioRecvKnee        = 0.90f;   // where the break-up happens, 0..1 — HIGHER = sooner after the key
         public static float  RadioRecvKneeWidth   = 0.22f;   // how much of the ramp it occupies
         // How loud the hiss gets against the music. The old separate static topped out 5.9 dB
         // QUIETER than the music it was meant to bury, so it never buried anything.

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 13;
+        internal const int CurrentSchema = 14;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -464,8 +464,8 @@ mid-hash — so dial between stations while editing and hear each change immedia
             F("RadioTuneMononess",                   "CMMConfig.RadioTuneMononess",                 1f, since: 6),
             F("RadioTuneGainPow",                    "CMMConfig.RadioTuneGainPow",                  0.30f, since: 7),
             F("RadioTuneGiveUpMs",                   "CMMConfig.RadioTuneGiveUpMs",                 10000f, since: 6),
-            F("RadioRecvKnee",                       "CMMConfig.RadioRecvKnee",                     0.65f,
-              since: 8, changedIn: 13, was: 0.45f),
+            F("RadioRecvKnee",                       "CMMConfig.RadioRecvKnee",                     0.90f,
+              since: 8, changedIn: 14, was: new object[] { 0.45f, 0.65f }),
             F("RadioRecvKneeWidth",                  "CMMConfig.RadioRecvKneeWidth",                0.22f, since: 8),
             F("RadioRecvNoise",                      "CMMConfig.RadioRecvNoise",                    0.55f, since: 8, changedIn: 9, was: 0.45f),
             F("RadioRecvClicks",                     "CMMConfig.RadioRecvClicks",                   0.18f, since: 8, changedIn: 9, was: 0.22f),
