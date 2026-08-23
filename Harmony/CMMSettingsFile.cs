@@ -86,7 +86,12 @@ namespace CMM
                 }
 
                 int fileSchema = ReadStamp(root);
-                if (fileSchema == currentSchema) return;   // nothing to do
+                // A file at the current schema normally needs nothing — EXCEPT that everything
+                // written before the BOM fix is sitting on disk without one, and those only get
+                // rewritten if a schema bump happens to come along. Rewrite once for the mark
+                // alone so an existing install stops rendering its own comments as mojibake.
+                bool needsBom = !HasUtf8Bom(path);
+                if (fileSchema == currentSchema && !needsBom) return;   // nothing to do
 
                 var added = new List<SettingDef>();
                 var migrated = new List<string>();
@@ -242,9 +247,31 @@ namespace CMM
         // Not doc.Save(path) either: that overload emits a UTF-8 BOM and these files
         // have never had one. NewLineHandling.None leaves the CRLFs exactly as read,
         // and Indent=false because PreserveWhitespace already carries the user's layout.
+        // WITH THE BOM. These files are UTF-8 and always were — the comments carry box-drawing
+        // rules, µ, ×, arrows and en dashes — but written without a byte-order mark a Windows
+        // editor has to GUESS the encoding, and it guesses Windows-1252. Every one of those
+        // characters then opens as mojibake ("â”€â”€â”€" for a rule), which looks like a corrupted
+        // file and is really a correct one being misread.
+        //
+        // Nothing here reads the mark: XmlDocument.Load handles its presence or absence either
+        // way. It exists purely so the file opens correctly in whatever the user double-clicks.
+        // Cheap byte peek — no decoding, no exceptions on a missing/locked file.
+        private static bool HasUtf8Bom(string path)
+        {
+            try
+            {
+                using (var fs = File.OpenRead(path))
+                {
+                    int a = fs.ReadByte(), b = fs.ReadByte(), c = fs.ReadByte();
+                    return a == 0xEF && b == 0xBB && c == 0xBF;
+                }
+            }
+            catch { return true; }   // unreadable: do NOT trigger a rewrite on top of it
+        }
+
         private static XmlWriterSettings WriterSettings() => new XmlWriterSettings
         {
-            Encoding        = new UTF8Encoding(false),
+            Encoding        = new UTF8Encoding(true),
             NewLineHandling = NewLineHandling.None,
             Indent          = false,
         };
@@ -256,7 +283,7 @@ namespace CMM
                });
 
         private static bool WriteAtomic(string path, string text, string label)
-            => WriteVia(path, label, tmp => File.WriteAllText(tmp, text, new UTF8Encoding(false)));
+            => WriteVia(path, label, tmp => File.WriteAllText(tmp, text, new UTF8Encoding(true)));
 
         private static bool WriteVia(string path, string label, Action<string> writeTmp)
         {
