@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 18;
+        internal const int CurrentSchema = 19;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -842,19 +842,25 @@ reverb (the reflections carry the colored sound). Three independent 0..1 levers;
 ColorDrive  = soft-clip amount — crushes peaks into speaker breakup/grit (level-compensated, so
               it adds distortion, not volume).
 ColorStatic = constant static-hiss bed from the radio (panned + muffled like the music).
-ColorVoice  = band-pass voicing — strips lows (<~250 Hz) and highs (>~4 kHz), the ""small cheap
-              speaker"" body. 0 = full-range hi-fi, 1 = fully boxed-in. All hot-reload.
-Disabled (all 0) by default — the coloration pass is parked until the acoustics work settles."),
+ColorVoice  = SPEAKER VOICING — the knob sweeps the band EDGES themselves (20 Hz-320 Hz at the
+              bottom, 18 kHz-3 kHz at the top, two poles each) and adds the cone
+              resonance a small driver in a small box has. Nothing dry is blended
+              back, so the low end really does leave — which is what says ""small
+              speaker"". 0 = full-range hi-fi and an exact bypass, 1 = a
+              communications speaker.
+Drive and Static default OFF. Voice defaults 0.5 — a shelf speaker with a body to it
+rather than a hi-fi in a wall. All hot-reload."),
             F("WorldEmitterColorDrive",              "CMMConfig.WorldEmitterColorDrive",            0f),
             F("WorldEmitterColorStatic",             "CMMConfig.WorldEmitterColorStatic",           0f),
-            F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0f),
+            F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —
-voiced narrow, driven slightly, a whisper of static (""slightly distorted"" is its character).
+voiced HARD at 0.9, driven slightly, a whisper of static (""slightly distorted"" is its
+character).
 Set all three to 0 for a clean ham. All hot-reload."),
             F("WorldEmitterHamColorDrive",           "CMMConfig.WorldEmitterHamColorDrive",         0.3f),
             F("WorldEmitterHamColorStatic",          "CMMConfig.WorldEmitterHamColorStatic",        0.04f),
-            F("WorldEmitterHamColorVoice",           "CMMConfig.WorldEmitterHamColorVoice",         0.65f),
+            F("WorldEmitterHamColorVoice",           "CMMConfig.WorldEmitterHamColorVoice",         0.9f, changedIn: 19, was: 0.65f),
         };
     }
 }

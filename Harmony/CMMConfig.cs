@@ -685,14 +685,14 @@ namespace CMM
         // Disabled (all 0) by default — parked until the acoustics work settles.
         public static float  WorldEmitterColorDrive  = 0f;
         public static float  WorldEmitterColorStatic = 0f;
-        public static float  WorldEmitterColorVoice  = 0f;
+        public static float  WorldEmitterColorVoice  = 0.5f;
         // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead
         // of the speaker set above, so a ham always reads as a small communications speaker: voiced
         // narrow, driven slightly, a whisper of static. ON by default ("slightly distorted" is the
         // ham's character, not a tuning option); hot-reloads like the speaker set.
         public static float  WorldEmitterHamColorDrive  = 0.3f;
         public static float  WorldEmitterHamColorStatic = 0.04f;
-        public static float  WorldEmitterHamColorVoice  = 0.65f;
+        public static float  WorldEmitterHamColorVoice  = 0.9f;
 
         // ── Loudness normalization (EBU R128) ─────────────────────────────────
         // When enabled, each track's measured integrated loudness yields a per-track
