@@ -45,7 +45,7 @@ extern "C" {
 #endif
 
 /* Bumped on any breaking change; the managed side checks it on load. */
-#define CMM_FLD_ABI 5
+#define CMM_FLD_ABI 6
 CMM_FLD_API int cmm_fld_abi(void);
 
 typedef struct cmm_fld cmm_fld;

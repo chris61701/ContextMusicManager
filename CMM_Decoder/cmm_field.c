@@ -162,6 +162,23 @@ struct cmm_fld {
     short *order;                   /* 3 shorts per cell: dx, dy, dz from the window centre */
     long long cursor;
 
+    /* THE PRIORITY LANE. A door's cells must not wait behind a full-window sweep.
+     *
+     * The reader is one cursor over `order`, and cmm_fld_dirty resets it to 0, so a TARGETED
+     * invalidation is served promptly WHEN THE FIELD IS OTHERWISE IDLE. It is not when the
+     * ten-second sweep is running: then every cell in the window is dirty, the door's are simply
+     * more of them, and the wait is however long the cursor takes to reach that radius. Idle or
+     * mid-sweep is the difference between "immediately" and seconds, it depends on nothing the
+     * player can see, and it is why door timings could not be tuned by ear -- every judgement was
+     * made against a different delay.
+     *
+     * So small invalidations go in this ring and are drained FIRST. Entries are ABSOLUTE cell
+     * coordinates, not indices: a recentre changes what an index means, and in_win re-validates
+     * a coordinate for free at drain time. Overflow silently drops -- the cell is still marked
+     * dirty and the cursor will reach it, which is exactly today's behaviour. */
+    int *prioX, *prioY, *prioZ;
+    int prioCap, prioHead, prioCount;
+
     float dbPerBlock, maxDb;
     long long pending, reached, lastUs;
 };
@@ -224,6 +241,8 @@ static inline int b2c(int b, int s) { return (b >= 0 ? b : b - s + 1) / s; }
 
 int cmm_fld_abi(void) { return CMM_FLD_ABI; }
 
+#define FLD_PRIO_CAP 8192
+
 cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ) {
     if (nx <= 0 || ny <= 0 || nz <= 0 || stepX < 1 || stepY < 1 || stepZ < 1) return NULL;
     cmm_fld *f = (cmm_fld *)calloc(1, sizeof(cmm_fld));
@@ -251,6 +270,16 @@ cmm_fld *cmm_fld_create(int nx, int ny, int nz, int stepX, int stepY, int stepZ)
 
     f->order = (short *)malloc(sizeof(short) * 3 * f->n);
     if (!f->order) { cmm_fld_destroy(f); return NULL; }
+
+    /* Sized above the largest set that should ever jump the queue: the near re-read ring is
+     * 17x17x17 = 4913 one-block cells, a door about 200. A full sweep is orders of magnitude
+     * larger and deliberately does not qualify. */
+    f->prioCap = FLD_PRIO_CAP;
+    f->prioX = (int *)malloc(sizeof(int) * f->prioCap);
+    f->prioY = (int *)malloc(sizeof(int) * f->prioCap);
+    f->prioZ = (int *)malloc(sizeof(int) * f->prioCap);
+    if (!f->prioX || !f->prioY || !f->prioZ) { cmm_fld_destroy(f); return NULL; }
+    f->prioHead = f->prioCount = 0;
     {
         /* Bucket by squared distance rather than qsort: the values are small integers and this is
          * a one-off, but an O(n log n) sort of a quarter-million entries at scene creation is a
@@ -296,6 +325,7 @@ void cmm_fld_destroy(cmm_fld *f) {
     free(f->cur); free(f->prev); free(f->nxt);
     free(f->curMat); free(f->nxtMat); free(f->bnext); free(f->bprev); free(f->binb); free(f->bhead);
     free(f->order);
+    free(f->prioX); free(f->prioY); free(f->prioZ);
     free(f);
 }
 
@@ -339,6 +369,18 @@ int cmm_fld_recentre(cmm_fld *f, int bx, int by, int bz) {
 
 int cmm_fld_next_pending(cmm_fld *f, int *cx, int *cy, int *cz) {
     if (!f || f->pending <= 0) return 0;
+    /* The priority lane first. Entries can be stale -- read since, or scrolled out of the window
+     * by a recentre -- so each is validated exactly as the cursor walk validates its own. */
+    while (f->prioCount > 0) {
+        int px = f->prioX[f->prioHead], py = f->prioY[f->prioHead], pz = f->prioZ[f->prioHead];
+        f->prioHead = (f->prioHead + 1) % f->prioCap;
+        f->prioCount--;
+        if (!in_win(f, px, py, pz)) continue;
+        long long pi = widx(f, px, py, pz);
+        if (f->have[pi] && !f->dirty[pi]) continue;
+        *cx = px; *cy = py; *cz = pz;
+        return 1;
+    }
     int mx = f->nx / 2, my = f->ny / 2, mz = f->nz / 2;
     for (long long pass = 0; pass < f->n; pass++) {
         if (f->cursor >= f->n) f->cursor = 0;
@@ -395,6 +437,14 @@ void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
     int x0 = bx - (radiusBlocks + f->stepX), x1 = bx + (radiusBlocks + f->stepX);
     int y0 = by - (radiusBlocks + f->stepY), y1 = by + (radiusBlocks + f->stepY);
     int z0 = bz - (radiusBlocks + f->stepZ), z1 = bz + (radiusBlocks + f->stepZ);
+    /* TARGETED or a SWEEP? Decided from the box volume before walking it, so the answer is the
+     * same for every cell in the call. A targeted set jumps the queue; a sweep keeps the old
+     * behaviour of restarting the cursor nearest-first. */
+    long long cnx = (long long)((x1 - x0) / f->stepX) + 1;
+    long long cny = (long long)((y1 - y0) / f->stepY) + 1;
+    long long cnz = (long long)((z1 - z0) / f->stepZ) + 1;
+    int targeted = (cnx * cny * cnz) <= FLD_PRIO_CAP;
+
     for (int by2 = y0; by2 <= y1; by2 += f->stepY)
     for (int bz2 = z0; bz2 <= z1; bz2 += f->stepZ)
     for (int bx2 = x0; bx2 <= x1; bx2 += f->stepX) {
@@ -404,8 +454,16 @@ void cmm_fld_dirty(cmm_fld *f, int bx, int by, int bz, int radiusBlocks) {
         /* Queue a re-read WITHOUT discarding the values. See the have/dirty note on the struct. */
         if (f->have[i]) { if (!f->dirty[i]) { f->dirty[i] = 1; f->pending++; } }
         else if (!f->dirty[i]) { /* never read: already counted as pending */ }
+        if (targeted && f->prioCount < f->prioCap) {
+            int w = (f->prioHead + f->prioCount) % f->prioCap;
+            f->prioX[w] = cx; f->prioY[w] = cy; f->prioZ[w] = cz;
+            f->prioCount++;
+        }
     }
-    f->cursor = 0;
+    /* Only a SWEEP rewinds the cursor. A targeted set is already served by the lane above, and
+     * rewinding for it threw the sweep's progress away several times a second -- the near ring
+     * alone fires every 0.4 s -- which is the other half of why a full read so rarely finished. */
+    if (!targeted) f->cursor = 0;
 }
 
 /* Unlink a cell from whatever bucket it is in, then put it in bucket q. */

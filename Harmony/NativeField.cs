@@ -14,7 +14,7 @@ namespace CMM
         private const string Dll = "CMM_Decoder";
 
         // Checked on first use so a stale DLL fails with a number rather than inside the flood.
-        internal const int ExpectedAbi = 5;
+        internal const int ExpectedAbi = 6;   // v6 +priority lane: targeted invalidations (doors, the near ring) are read BEFORE the sweep's cursor walk, so a door's response no longer depends on where that cursor happened to be
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int cmm_fld_abi();

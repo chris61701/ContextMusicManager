@@ -686,6 +686,24 @@ int main(int argc, char** argv) {
     float sealed = cmm_fld_sample_db(f, 44.5f, 1.5f, 32.5f);
     ckf("sealed in rock: reads max, never 0", sealed > 40.0f, "%.2f dB", sealed);
 
+    /* THE PRIORITY LANE: a door must not wait behind a full-window sweep.
+     *
+     * This is the ordering check the physics checks above cannot make. Everything is read, then
+     * the WHOLE window is dirtied (the ten-second sweep), then one small spot is dirtied (a
+     * door). The very next cell handed out must be the door's. Before the lane it was whatever
+     * the sweep cursor happened to reach next, which is why the same door sounded fast one time
+     * and slow the next -- and why door timings could not be tuned by ear. */
+    {
+        fill_all(f);
+        cmm_fld_dirty(f, 32, 1, 32, 64);   /* a sweep: the whole window */
+        cmm_fld_dirty(f, 48, 1, 20, 1);    /* a door, away from the sweep nearest-first start */
+        int px = -1, py = -1, pz = -1;
+        int got = cmm_fld_next_pending(f, &px, &py, &pz);
+        int atDoor = got && px >= 46 && px <= 50 && pz >= 18 && pz <= 22;
+        ckf("a door jumps the queue, mid-sweep", atDoor,
+            "first cell out was (%d,%d,%d) -- want it beside the door at (48,1,20)", px, py, pz);
+    }
+
     printf("\n  cells %lld   reached %lld   solve %lld us\n",
            cmm_fld_stat(f, 0), cmm_fld_stat(f, 2), cmm_fld_stat(f, 3));
     cmm_fld_destroy(f);
