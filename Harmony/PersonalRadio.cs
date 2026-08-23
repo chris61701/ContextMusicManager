@@ -728,6 +728,17 @@ namespace CMM
                 _staticWanted = false;
                 StopStatic();
             }
+            // RESCUE. A voice held at zero with nothing searching for it is a silent radio, and a
+            // silent radio is a far worse failure than a missing flourish. Any path that starts a
+            // voice without going through the dial — and there are several, plus whatever gets
+            // added later — lands here and is simply brought up. This already earned its place
+            // once: gating the arrival on the tuning flag muted world-entry restores and every
+            // track advance, because neither is a keypress.
+            else if (!_staticWanted && !_arriving && _voiceId != 0)
+            {
+                _arriving = true;
+                AimSignal(_voiceId, 1f, ArriveRate);
+            }
             // The backstop. Only reached when a station neither opened nor errored — a wedged
             // file rather than a missing one, which the failure path already handles by seeking
             // on. Rather than sit in static for ever, move along in the direction of travel.
@@ -877,17 +888,24 @@ namespace CMM
                 return;
             }
             _voiceId = id; _track = file; _gainApplied = gain;
-            // ── THE STATION IS OPEN, BUT NOT NECESSARILY AUDIBLE YET ────────────────────────
-            // Hold it at signal 0 — decoding, in step with the broadcast clock, and silent. The
-            // static keeps rolling until the minimum floor expires, and the tick starts the
-            // arrival then. This is what makes "it was already loaded" and "it took a second"
-            // sound the same: the floor is spent either way, and the station is genuinely there
-            // the whole time rather than being started late.
-            CmmMixer.Instance?.SetVoiceReceiver(id, 0f, 0f,
+            // ── ONLY A DIAL MOVE GETS TUNED IN ─────────────────────────────────────────────
+            // Most voice starts are not the player turning a knob: the radio being restored on
+            // world entry, a track ending and the next one joining, a resync after a pause. Those
+            // must come up at full signal immediately — there is nothing being tuned, and putting
+            // the ceremony on them would dull and quieten the start of every single track.
+            //
+            // A DIAL MOVE (_staticWanted, set by Tune) holds at signal 0 instead: open, decoding,
+            // in step with the broadcast clock, and silent, while the static keeps rolling. The
+            // tick starts the arrival once the minimum floor expires. That is what makes "it was
+            // already loaded" and "it took a second" sound the same — the floor is spent either
+            // way and the station is genuinely there throughout rather than being started late.
+            bool tuning = _staticWanted;
+            CmmMixer.Instance?.SetVoiceReceiver(id, tuning ? 0f : 1f, 0f,
                                                 CMMConfig.RadioTuneDullness,
                                                 CMMConfig.RadioTuneMononess);
-            _sigFrom = _sigTo = 0f; _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
-            _arriving = false;
+            _sigFrom = _sigTo = tuning ? 0f : 1f;
+            _sigRate = 0f; _sigT0 = Time.realtimeSinceStartup;
+            _arriving = !tuning;
             _advanceCarry = null;   // consumed — the next idle start is a plain join
             ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if unmeasured
             Log.Out($"[CMM] Radio: '{station}' playing {Path.GetFileName(file)} @ {off:0}s " +
