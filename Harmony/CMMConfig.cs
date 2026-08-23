@@ -192,7 +192,7 @@ namespace CMM
         // 14 seconds end to end was the original, and it came from applying "double is fine" to a
         // listening demo and then shipping it as a gameplay timing without anyone checking it as
         // one. 5.5 s total is what settled: 1.2 out, 1.5 of static, 2.8 back in.
-        public static float  RadioTuneMinStaticMs = 1500f;
+        public static float  RadioTuneMinStaticMs = 100f;
         public static float  RadioTuneLeaveMs     = 1200f;
         public static float  RadioTuneArriveMs    = 2800f;
         public static float  RadioTuneDullness    = 0.85f;   // 0 = no treble loss on the way in/out

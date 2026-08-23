@@ -81,7 +81,10 @@ namespace CMM
         // When the station being left hands over to the station being joined. Down in the middle
         // of the static, where neither of them is audible — the same place the sound preview
         // swaps its two source files.
-        private static float _swapAt;    // realtime the minimum static floor expires
+        private static float _swapAt;
+        // The same instant as _swapAt, in wall clock, because the worker thread that opens the
+        // next station cannot read Unity's clock. Set together with it, always.
+        private static DateTime _swapAtUtc;    // realtime the minimum static floor expires
         private static float _searchGiveUp;   // realtime the backstop abandons a wedged load
         private static bool  _arriving;       // the new voice exists and is being brought up
 
@@ -587,6 +590,7 @@ namespace CMM
             // actual static — a fifth of what was auditioned.
             float searchSec = CMMConfig.RadioTuneMinStaticMs / 1000f;
             _swapAt      = Time.realtimeSinceStartup + leaveSec + searchSec * 0.5f;
+            _swapAtUtc   = DateTime.UtcNow.AddSeconds(leaveSec + searchSec * 0.5f);
             _searchUntil = Time.realtimeSinceStartup + leaveSec + searchSec;
             _searchGiveUp = Time.realtimeSinceStartup + CMMConfig.RadioTuneGiveUpMs / 1000f;
             _arriving = false;
@@ -837,13 +841,12 @@ namespace CMM
             // Idle but on (world entry with a persisted on-state, a gain-wait retry, or it just
             // came back on air): join the broadcast. The carry re-arms a gated EOF advance.
             //
-            // On a DIAL MOVE the start is held until _swapAt — the middle of the static. Adding a
-            // voice crossfades every other one out, so the add IS the handover; doing it early is
-            // what cut the outgoing station off in the clear. Held here, both stations are at
-            // zero signal and buried, and the crossfade is inaudible. A slow file pushes the
-            // handover later and simply extends the static, which is what a real one does.
-            if (st.Ready && (!_staticWanted || Time.realtimeSinceStartup >= _swapAt))
-                StartFromClock(st, AdvanceOverride: _advanceCarry);
+            // DISPATCHED AT THE PRESS, not at the handover. Holding the whole start until _swapAt
+            // meant the file's open and seek were spent AFTER the static had already run, so every
+            // change cost the load time on top of the timings — dead air nobody asked for. The
+            // open happens during the leave now, hidden under the station going out, and only the
+            // ADD waits (see the worker). What is left is the seek, which is the small half.
+            if (st.Ready) StartFromClock(st, AdvanceOverride: _advanceCarry);
         }
 
         // ── Voice ───────────────────────────────────────────────────────────────────────────────
@@ -927,12 +930,34 @@ namespace CMM
                     else
                     {
                         long startFrame = srcRate > 0 ? (long)(offCap * srcRate) : 0;
-                        if (total > 0 && startFrame >= total) startFrame = 0;   // clock/length mismatch safety
+                        if (total > 0 && startFrame >= total) startFrame = 0;
+                        // HOLD THE ADD UNTIL THE HANDOVER. The add is what retires the outgoing
+                        // station -- cmm_mix_add crossfades every other music voice out -- so
+                        // doing it as soon as the file is open is what used to cut that station
+                        // off in the clear, before the static was loud enough to hide anything.
+                        // Waiting here rather than deferring the whole dispatch keeps the open
+                        // (the slow half) underneath the leave, so the change costs no more than
+                        // the timings say it should.
+                        //
+                        // Wall clock, not Unity's: this is a ThreadPool thread. Re-checks the
+                        // generation throughout so a second dial press abandons this one promptly
+                        // instead of adding a station nobody is waiting for any more.
+                        while (DateTime.UtcNow < _swapAtUtc)
+                        {
+                            if (System.Threading.Volatile.Read(ref _startGen) != gen) break;
+                            System.Threading.Thread.Sleep(5);
+                        }
+                        if (System.Threading.Volatile.Read(ref _startGen) != gen || ContextMusicManager.playerIsDead)
+                        {
+                            AudioDecoder.CloseNativeHandle(dec, kind);
+                            dec = IntPtr.Zero;
+                        }   // clock/length mismatch safety
                         // Play crossfades every other music voice out (the retune/takeover
                         // transition) and runs the resume SEEK on this worker thread.
-                        id = mixer.Play(dec, kind, srcRate, srcCh, total, fade,
-                                        loop: false, startFrame, trackGain,
-                                        duckOthersTo: -1f, snapTight: !advance);
+                        if (dec != IntPtr.Zero)
+                            id = mixer.Play(dec, kind, srcRate, srcCh, total, fade,
+                                            loop: false, startFrame, trackGain,
+                                            duckOthersTo: -1f, snapTight: !advance);
                     }
                 }
                 catch { /* commit treats id 0 without openFailed as a no-op */ }

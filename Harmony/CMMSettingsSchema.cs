@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 11;
+        internal const int CurrentSchema = 12;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -454,8 +454,8 @@ mid-hash — so dial between stations while editing and hear each change immedia
             // Three defaults deep, so all three former values are listed. A file that never
             // saw schema 9 still holds the originals; the schema-10 rule only knew about the
             // schema-9 values and therefore walked straight past them. See MatchesAnyFormerDefault.
-            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              1500f,
-              since: 6, changedIn: 11, was: new object[] { 900f, 4000f }),
+            F("RadioTuneMinStaticMs",                "CMMConfig.RadioTuneMinStaticMs",              100f,
+              since: 6, changedIn: 12, was: new object[] { 900f, 4000f, 1500f }),
             F("RadioTuneLeaveMs",                    "CMMConfig.RadioTuneLeaveMs",                  1200f,
               since: 6, changedIn: 11, was: new object[] { 260f, 3400f }),
             F("RadioTuneArriveMs",                   "CMMConfig.RadioTuneArriveMs",                 2800f,

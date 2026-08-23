@@ -62,8 +62,11 @@ namespace CmmRadioSim
         // a knob and not an assumption.
         static float GainA = 0.557f, GainB = 0.557f;
 
-        // Matches PersonalRadio: SwapFade, and the ~150 ms an async open+seek really costs.
-        const float SwapFade = 0.25f, OpenSeekSec = 0.15f;
+        // Matches PersonalRadio: SwapFade, and what still lands AFTER the handover instant.
+        // The dispatch happens at the press now and the worker parks until the swap, so the file's
+        // OPEN is spent under the leave and only the seek is left here. Kept as a knob because it
+        // is the one number in this file measured rather than read out of the source.
+        const float SwapFade = 0.25f, SeekSec = 0.05f;
         // Seconds of fully-tuned station before the press, and of locked station after.
         const float PreRoll = 3.0f, PostRoll = 3.0f;
 
@@ -199,7 +202,7 @@ namespace CmmRadioSim
                 }
                 // 2: the handover, down in the static. Adding B crossfades A out over SwapFade —
                 //    the add IS the retire, which is why it must not happen before now.
-                if (_step == 2 && t >= _swapAt + OpenSeekSec)
+                if (_step == 2 && t >= _swapAt + SeekSec)
                 {
                     _voiceB = Add(_b, _startB, fade: SwapFade, gain: GainB);
                     N.cmm_mix_set_voice_radio(_voiceB, 1);
