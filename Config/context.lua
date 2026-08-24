@@ -261,8 +261,16 @@ function resolve(gameState, cfg)
         add(active, "POI_Cleared")
       end
       memory.wasInfested = false
-      add(active, "POI" .. suffix)
     end
+    -- NOT MUTUALLY EXCLUSIVE ANY MORE. The un-infested POI context of this tier goes on the
+    -- stack whether or not the place is infested, so an infested POI carries BOTH: the infested
+    -- tier on top at priority 22, POI_Tn underneath at 18.
+    --
+    -- This used to be the else-branch, so POI_Tn simply did not exist while sleepers were alive.
+    -- That made an empty poi/infested/t5 fall past everything to Stack with nothing POI-ish left
+    -- on it. Now the plain tier is already there to catch it, and it catches the generic
+    -- POI_Infested's Stack fallback too -- no context has to name another one to reach it.
+    add(active, "POI" .. suffix)
     memory.lastPoiId = gameState.poiId
   else
     memory.wasInfested = false

@@ -99,25 +99,33 @@ namespace CMM
             Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home", link:"HomeNight");
             Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home", link:"HomeDay");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
-            // A TIER FALLS BACK TO ITS OWN TIER, not to the generic infested bed. An empty
-            // poi/infested/t5 now plays the T5 music rather than dropping to poi/infested, which
-            // keeps the tier -- the thing the player is actually reading as difficulty -- and only
-            // loses the infested colour. It also lengthens the chain, because POI_Tn falls back to
-            // POI in turn: t5 -> POI_T5 -> POI. The old chain ended at POI_Infested.
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_T5",      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_T4",      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_T3",      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_T2",      priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_T1",      priority:22, warmup:10, warmgroup:"poi");
+            // A TIER FALLS BACK TO THE GENERIC INFESTED BED, and the un-infested POI context of
+            // the same tier is on the stack UNDERNEATH it (see context.lua -- the two are no
+            // longer mutually exclusive). So the tier does not need to name POI_Tn as its
+            // fallback: an empty poi/infested/t5 drops to poi/infested, and if that is empty too
+            // the chain ends at Stack, where POI_T5 is already sitting at priority 18.
+            //
+            // Briefly (d9d1283) these pointed at POI_Tn directly. That was the wrong lever: it
+            // reached the same music by hard-wiring one context to another, where letting both be
+            // active gets there through the stack that already exists.
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
             Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, warmup:10, warmgroup:"poi");
             Add("POI_Infested",        "poi/infested",          priority:20, warmup:10, warmgroup:"poi");
-            Add("POI_T5",              "poi/t5",                "POI",        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T4",              "poi/t4",                "POI",        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T3",              "poi/t3",                "POI",        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T2",              "poi/t2",                "POI",        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T1",              "poi/t1",                "POI",        priority:18, warmup:5, warmgroup:"poi");
-            Add("POI_T0",              "poi/t0",                priority:17, warmup:5, warmgroup:"poi");
-            Add("POI",                 "poi",                   priority:16, warmup:5, warmgroup:"poi");
+            // WARMUP 10, MATCHING THE INFESTED TIERS. Both are on the stack together now, so a
+            // 5-vs-10 split meant the plain tier became eligible five seconds before the infested
+            // one covering the same POI -- the lower-priority context arriving FIRST and then
+            // being displaced, which is an audible swap for nothing.
+            Add("POI_T5",              "poi/t5",                "POI",        priority:18, warmup:10, warmgroup:"poi");
+            Add("POI_T4",              "poi/t4",                "POI",        priority:18, warmup:10, warmgroup:"poi");
+            Add("POI_T3",              "poi/t3",                "POI",        priority:18, warmup:10, warmgroup:"poi");
+            Add("POI_T2",              "poi/t2",                "POI",        priority:18, warmup:10, warmgroup:"poi");
+            Add("POI_T1",              "poi/t1",                "POI",        priority:18, warmup:10, warmgroup:"poi");
+            Add("POI_T0",              "poi/t0",                priority:17, warmup:10, warmgroup:"poi");
+            Add("POI",                 "poi",                   priority:16, warmup:10, warmgroup:"poi");
             Add("Ambient_Forest_Night",      "ambient/forest/_night",       "Ambient_Night",             priority:12);
             Add("Ambient_Forest",            "ambient/forest",              "Ambient",                   priority:11);
             Add("Ambient_Burnt_Forest_Night","ambient/burnt_forest/_night", "Ambient_Night",             priority:12);
