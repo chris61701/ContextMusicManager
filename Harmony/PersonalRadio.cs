@@ -1035,8 +1035,9 @@ namespace CMM
             _arriving = !tuning;
             _advanceCarry = null;   // consumed — the next idle start is a plain join
             ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if unmeasured
-            Log.Out($"[CMM] Radio: '{station}' playing {Path.GetFileName(file)} @ {off:0}s " +
-                    $"(B={RadioStationCatalog.BroadcastSeconds():0}s).");
+            Log.Out($"[CMM] Radio '{station}': {Path.GetFileName(file)}");
+            CMMConfig.D($"[CMM] Radio: joined @ {off:0}s "
+                      + $"(B={RadioStationCatalog.BroadcastSeconds():0}s).");
             // Sync audit, one-shot at the join: Δ here isolates the async-start latency (offset
             // was resolved at DISPATCH on the main thread; open+seek ran on a worker since).
             if (_tunedName != null && RadioStationCatalog.ByName.TryGetValue(_tunedName, out RadioStation ast))

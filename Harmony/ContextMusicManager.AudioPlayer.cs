@@ -218,8 +218,9 @@ namespace CMM
                             continue;
                         }
                         Interlocked.Exchange(ref _nativeVoiceId, voiceId);
-                        Log.Out($"[CMM] native: playing {Path.GetFileName(req.File)} for {req.Context} " +
-                                $"(fade {req.Fade:F1}s, loop {req.Loop}, gain {req.TrackGain:F2}, start {req.StartSeconds:F1}s)");
+                        Log.Out($"[CMM] Now playing: {Path.GetFileName(req.File)} [{req.Context}]");
+                        CMMConfig.D($"[CMM] native: fade {req.Fade:F1}s, loop {req.Loop}, "
+                                  + $"gain {req.TrackGain:F2}, start {req.StartSeconds:F1}s");
                     }
                 }
             }

@@ -160,7 +160,7 @@ namespace CMM
             _doorLatencyLoggedFor = _doorEventAt;
             float ms = (CmmClock.Now - _doorEventAt) * 1000f;
             if (ms >= 0f && ms < 5000f)
-                Log.Out($"[CMM] door -> occlusion: {ms:0} ms (latch to published field, "
+                CMMConfig.D($"[CMM] door -> occlusion: {ms:0} ms (latch to published field, "
                       + $"frame {Time.unscaledDeltaTime * 1000f:0} ms)");
         }
         private static float _nextReverbLog;           // throttle for the reverb diagnostic (DebugLogging only)
