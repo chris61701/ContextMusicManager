@@ -273,7 +273,13 @@ is relationship-only and ignores the server PvP mode (PlayerKillingMode)."),
             Gap(),
             Cmt(@"── Home ────────────────────────────────────────"),
             Cmt(@"Home plays by day (and is the default); Home_Night provides night-exclusive
-tracks and falls back to Home when it has no files."),
+tracks and falls back to Home when it has no files.
+Priority 19 puts Home ABOVE every plain POI context (16-18) and BELOW every
+infested one (20-22), so a base built in an ordinary POI plays your home music,
+while an infested building still takes over. Both Home contexts share priority
+19 on purpose - equal priority never interrupts, so the day/night handoff runs
+through the shared warmgroup instead of one outranking the other. Give them
+different numbers and one will win permanently."),
             Ctx("Home_Night"),
             Ctx("Home"),
 

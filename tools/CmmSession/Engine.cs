@@ -95,8 +95,8 @@ namespace CMM
             Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, warmup:3);
             Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, warmup:3);
             Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25, warmup:3);
-            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home");
-            Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home");
+            Add("Home_Night",          "home/night",            "Home",                                        priority:19, warmup:5, warmgroup:"home");
+            Add("Home",                "home",                                                                 priority:19, warmup:5, warmgroup:"home");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
             Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");
             Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", stale:60,                      priority:22, warmup:10, warmgroup:"poi");

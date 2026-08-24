@@ -96,8 +96,8 @@ namespace CMM
             Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, link:"TraderBob");
             Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, link:"TraderHugh");
             Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25);
-            Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home", link:"HomeNight");
-            Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home", link:"HomeDay");
+            Add("Home_Night",          "home/night",            "Home",                                        priority:19, warmup:5, warmgroup:"home", link:"HomeNight");
+            Add("Home",                "home",                                                                 priority:19, warmup:5, warmgroup:"home", link:"HomeDay");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
             // A TIER FALLS BACK TO THE GENERIC INFESTED BED, and the un-infested POI context of
             // the same tier is on the stack UNDERNEATH it (see context.lua -- the two are no
