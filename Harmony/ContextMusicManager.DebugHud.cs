@@ -100,37 +100,32 @@ namespace CMM
         private static readonly int[] _hudGcBaseGen = new int[3];
         private static readonly int[] _hudGcNowGen  = new int[3];
 
-        // Called from the unified Update() in ContextMusicManager.Keybinds.cs (a
-        // MonoBehaviour may declare Update() only once, so the HUD toggle lives here
-        // as a helper rather than its own Update). Compiled only with the HUD.
-        private void HandleDebugHudToggle()
+        // Cycles the HUD: hidden → compact → expanded → hidden. Driven from
+        // HandleMusicKeybinds, so it inherits that method's gates for free — KeybindsEnabled,
+        // the F1-console lockout (numpad digits typed as command args must not cycle the HUD),
+        // and the Alt/Ctrl modifier requirement. Bound to KeyContextHud (Alt+Numpad8 default).
+        internal static void CycleContextHud()
         {
-            // Numpad digits typed into the F1 console (teleport coords, command args) must
-            // not cycle the HUD or reset the GC gauge behind it — same gate as the music keys.
-            if (ConsoleIsOpen()) return;
-
-            // Numpad 8 cycles the HUD: hidden → compact → expanded → hidden. Cheap per-frame
-            // check, no allocation.
-            if (Input.GetKeyDown(KeyCode.Keypad8))
-            {
-                bool wasHidden = _hudMode == 0;
-                _hudMode = (_hudMode + 1) % 3;
-                if (wasHidden) ArmGcWindow();   // fresh GC window when it (re)opens from hidden
-                CMMConfig.D($"[CMM] Context HUD {(_hudMode == 0 ? "hidden" : _hudMode == 1 ? "compact" : "expanded")}.");
-            }
-
-            // Numpad 9 re-arms the GC measurement window without hiding the HUD, so each arm
-            // of an enabled-vs-dormant A/B starts from a clean, comparable baseline.
-            if (_hudMode != 0 && Input.GetKeyDown(KeyCode.Keypad9))
-            {
-                ArmGcWindow();
-                CMMConfig.D("[CMM] GC gauge window reset.");
-            }
-
-            // (Numpad 7 used to flip the functionally-dormant A/B arm; that key now
-            // belongs to the Now Playing overlay — see KeyNowPlaying in Keybinds.cs.
-            // _functionallyDormant itself remains, just with no key bound to it.)
+            bool wasHidden = _hudMode == 0;
+            _hudMode = (_hudMode + 1) % 3;
+            if (wasHidden) ArmGcWindow();   // fresh GC window when it (re)opens from hidden
+            CMMConfig.D($"[CMM] Context HUD {(_hudMode == 0 ? "hidden" : _hudMode == 1 ? "compact" : "expanded")}.");
         }
+
+        // Re-arms the GC measurement window without hiding the HUD, so each arm of an
+        // enabled-vs-dormant A/B starts from a clean, comparable baseline. No-op while the
+        // HUD is hidden — nothing is on screen for it to affect, and silently resetting an
+        // invisible gauge only confuses whoever opens it next.
+        internal static void ResetContextHudWindow()
+        {
+            if (_hudMode == 0) return;
+            ArmGcWindow();
+            CMMConfig.D("[CMM] GC gauge window reset.");
+        }
+
+        // (Numpad 7 used to flip the functionally-dormant A/B arm; that key now
+        // belongs to the Now Playing overlay — see KeyNowPlaying in Keybinds.cs.
+        // _functionallyDormant itself remains, just with no key bound to it.)
 
         // (Re)start the GC measurement window: snapshot the current heap and per-generation
         // collection counts as the baseline. Boehm-mode Mono reports MaxGeneration 0 (only

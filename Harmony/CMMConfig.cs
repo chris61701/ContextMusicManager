@@ -828,6 +828,8 @@ namespace CMM
         // Shows/hides the persistent Now Playing overlay (top-left track + context
         // readout). NowPlayingEnabled below picks the state at launch.
         public static KeyCode KeyNowPlaying       = KeyCode.Keypad7;
+        public static KeyCode KeyContextHud      = KeyCode.Keypad8;
+        public static KeyCode KeyContextHudReset = KeyCode.Keypad9;
         // Personal radio dial (PersonalRadio): steps through Off → station → station → Off,
         // wrapping both ways — two keys give on/off/next/prev. On the same physical key
         // cluster as Ins/Del/Home/End, same modifier gate. In-game only.

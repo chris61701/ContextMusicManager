@@ -10,6 +10,17 @@ they now behave, rather than as a history of how they got there.
 
 ### Added
 
+- **The Context HUD now ships.** An on-screen readout of what is playing and *why* — press
+  Alt+Numpad8 to cycle it hidden -> compact -> expanded. It lists the context you are
+  hearing, the context tokens the decision script resolved (in red where a context has no
+  music), the fallback chain actually walked to reach the playing track, the file and folder
+  it came from, and how many tracks are staged and loudness-measured. Expanded adds whether
+  the current track started already normalized and the next-track readiness of every other
+  context. It answers "why is this playing?" without reading a log, and it is purely a
+  readout — it never influences playback. Previously it existed only in development builds
+  and was stripped from every release. Both keys are rebindable (`KeyContextHud`,
+  `KeyContextHudReset`).
+
 - **Music packs can ship as their own mods.** CMM now reads its music from your `MusicPath`
   folder AND the `Music` folder of every installed mod, treating all of them as one folder
   per context. A soundtrack author can publish a pack as an ordinary mod instead of asking

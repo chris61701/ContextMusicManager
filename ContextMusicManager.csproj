@@ -90,8 +90,6 @@
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
     <Prefer32Bit>false</Prefer32Bit>
-    <!-- Default the in-game debug HUD ON for Debug builds (overridable below). -->
-    <EnableDebugHud Condition="'$(EnableDebugHud)' == ''">true</EnableDebugHud>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -112,12 +110,13 @@
     <OutputPath>bin\CI\</OutputPath>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
-  <!-- In-game debug HUD (Numpad 8 threat overlay) compiles in only when
-       CMM_DEBUG_HUD is defined. On by default for Debug builds (set above), off for
-       Release so the shipped mod excludes it. Override on any build with
-       -p:EnableDebugHud=true (or =false). -->
+  <!-- In-game context HUD (Alt+Numpad8) compiles in only when CMM_DEBUG_HUD is
+       defined. ON for every configuration now, Release included: it stays hidden
+       until the key is pressed and only reads engine state, so it costs a shipped
+       player nothing, and it is the one tool that answers "why is THIS playing?"
+       without reading a log. Build with -p:EnableDebugHud=false to strip it. -->
   <PropertyGroup>
-    <EnableDebugHud Condition="'$(EnableDebugHud)' == ''">false</EnableDebugHud>
+    <EnableDebugHud Condition="'$(EnableDebugHud)' == ''">true</EnableDebugHud>
     <DefineConstants Condition="'$(EnableDebugHud)' == 'true'">$(DefineConstants);CMM_DEBUG_HUD</DefineConstants>
   </PropertyGroup>
   <!-- Per-version compile symbol (GV_V3 / GV_V26 / GV_A20 / GV_A21) so source can

@@ -84,9 +84,6 @@ namespace CMM
             // Acoustics sweep exporter (`cmm acsweep`): no-op unless a sweep is running.
             EmitterSweep.Tick();
 #endif
-#if CMM_DEBUG_HUD
-            HandleDebugHudToggle();
-#endif
         }
 
         private void OnGUI()
@@ -145,6 +142,10 @@ namespace CMM
             else if (Input.GetKeyDown(CMMConfig.KeyNowPlaying))        ToggleNowPlaying();
             else if (Input.GetKeyDown(CMMConfig.KeyRadioNext))         PersonalRadio.Step(+1);
             else if (Input.GetKeyDown(CMMConfig.KeyRadioPrev))         PersonalRadio.Step(-1);
+#if CMM_DEBUG_HUD
+            else if (Input.GetKeyDown(CMMConfig.KeyContextHud))        CycleContextHud();
+            else if (Input.GetKeyDown(CMMConfig.KeyContextHudReset))   ResetContextHudWindow();
+#endif
         }
 
         // The context backing the music actually playing. _nativeActiveContext names what
