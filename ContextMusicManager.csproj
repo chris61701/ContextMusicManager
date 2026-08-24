@@ -129,7 +129,15 @@
   <ItemGroup>
     <!-- Localization.txt is excluded: it was leftover template junk from another mod
          (crosshair/weapons keys) and 7DTD auto-loads it, so it must not ship. -->
-    <Content Include="Sounds\**\*" />
+    <!-- The recorded dial sounds. CopyToOutputDirectory is NOT optional here: without it
+         the Content item declares the files without staging them, so Debug got them only
+         because DeployConfig force-copies Sounds\ separately, and the RELEASE ZIP
+         SHIPPED WITHOUT THEM — a documented 1.0.5 feature ("swap them for anything you
+         like") where the files were not there to swap. It failed quietly, too: a missing
+         sound falls back to the synthesized click by design, so the radio still worked. -->
+    <Content Include="Sounds\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <!-- settings.xml and radio.xml are NOT shipped: CMM writes them at first run and
          backfills what later versions add (see Harmony/CMMSettingsFile.cs). Shipping them
          is what used to reset every user setting on update.
