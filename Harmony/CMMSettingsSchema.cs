@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 20;
+        internal const int CurrentSchema = 21;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -791,7 +791,7 @@ If a door seals too late, raise WorldEmitterDoorGapClosed instead - globally, or
 one door type via WorldEmitterDoorGapOverrides. 0 here ignores the animation entirely and
 snaps at the latch, which is the only thing this is still good for."),
             F("WorldEmitterDoorSwingFrac",           "CMMConfig.WorldEmitterDoorSwingFrac",         1f),
-            F("WorldEmitterDoorMaxLoss",             "CMMConfig.WorldEmitterDoorMaxLoss",           0.6f),
+            F("WorldEmitterDoorMaxLoss",             "CMMConfig.WorldEmitterDoorMaxLoss",           0.6f, since: 21),
 
             Gap(),
             B("WorldEmitterNativeAcoustics",         "CMMConfig.WorldEmitterNativeAcoustics",       false),

@@ -342,7 +342,12 @@ namespace CMM
                 // CRLFs exactly as they were read.
                 var xs = new XmlWriterSettings
                 {
-                    Encoding = new UTF8Encoding(false),
+                    // WITH the BOM. PersistSetting rewrites settings.xml on every keybind that
+                    // persists (Alt+Home most often), and writing it BOM-less here silently
+                    // undid CMMSettingsFile's BOM the first time anyone pressed one -- observed
+                    // on the RC1 clean install, where radio.xml kept its mark and settings.xml
+                    // had lost it. Same encoding either way; only the mark differs.
+                    Encoding = new UTF8Encoding(true),
                     NewLineHandling = NewLineHandling.None,
                     Indent = false,               // PreserveWhitespace already carries the layout
                 };

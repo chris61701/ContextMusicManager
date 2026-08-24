@@ -262,7 +262,11 @@ namespace CMM
                {
                    var xs = new XmlWriterSettings
                    {
-                       Encoding = new UTF8Encoding(false),
+                       // WITH the BOM, matching CMMSettingsFile. Without it Windows editors
+                       // guess Windows-1252 and every rule and arrow in the comments reads as
+                       // mojibake -- a correct file that looks corrupted. contexts.xml never
+                       // got the 1.0.5 BOM fix because only CMMSettingsFile was changed.
+                       Encoding = new UTF8Encoding(true),
                        NewLineHandling = NewLineHandling.None,
                        Indent = false,
                    };
@@ -270,7 +274,7 @@ namespace CMM
                });
 
         private static bool Write(string path, string text)
-            => Via(path, tmp => File.WriteAllText(tmp, text, new UTF8Encoding(false)));
+            => Via(path, tmp => File.WriteAllText(tmp, text, new UTF8Encoding(true)));
 
         private static bool Via(string path, Action<string> writeTmp)
         {
