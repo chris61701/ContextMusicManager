@@ -99,11 +99,16 @@ namespace CMM
             Add("Home_Night",          "home/night",            "Home",                                        priority:15, warmup:5, warmgroup:"home", link:"HomeNight");
             Add("Home",                "home",                                                                 priority:15, warmup:5, warmgroup:"home", link:"HomeDay");
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
+            // A TIER FALLS BACK TO ITS OWN TIER, not to the generic infested bed. An empty
+            // poi/infested/t5 now plays the T5 music rather than dropping to poi/infested, which
+            // keeps the tier -- the thing the player is actually reading as difficulty -- and only
+            // loses the infested colour. It also lengthens the chain, because POI_Tn falls back to
+            // POI in turn: t5 -> POI_T5 -> POI. The old chain ended at POI_Infested.
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_T5",      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_T4",      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_T3",      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_T2",      priority:22, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_T1",      priority:22, warmup:10, warmgroup:"poi");
             Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, warmup:10, warmgroup:"poi");
             Add("POI_Infested",        "poi/infested",          priority:20, warmup:10, warmgroup:"poi");
             Add("POI_T5",              "poi/t5",                "POI",        priority:18, warmup:5, warmgroup:"poi");
