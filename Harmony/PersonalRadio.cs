@@ -235,7 +235,24 @@ namespace CMM
         // direction rather than reversing into the one the player was trying to leave.
         private static int _lastStepDir = 1;
 
+        // THE DIAL IS A LIVING PLAYER'S CONTROL. Corpses do not tune radios, and the death
+        // screen is exactly where a stray PgUp/PgDn lands. Gating here rather than inside the
+        // keybind block means a future radio UI inherits the rule instead of having to
+        // remember it — every PLAYER-initiated station change funnels through this method.
+        // The mod's own auto-seek (a station that failed to open) calls StepInternal below and
+        // is deliberately NOT gated: it is housekeeping, not input, and leaving it blocked
+        // would strand the receiver in static until the player respawned.
         internal static void Step(int dir)
+        {
+            if (ContextMusicManager.playerIsDead)
+            {
+                CMMConfig.D("[CMM] Radio: dial ignored - player is dead.");
+                return;
+            }
+            StepInternal(dir);
+        }
+
+        internal static void StepInternal(int dir)
         {
             if (!ContextMusicManager.inGame) return;
             if (dir != 0) _lastStepDir = dir > 0 ? 1 : -1;
@@ -789,7 +806,7 @@ namespace CMM
                 Log.Warning($"[CMM] Radio: '{_tunedName}' did not open in " +
                             $"{CMMConfig.RadioTuneGiveUpMs:0} ms — seeking on.");
                 _searchGiveUp = 0f;
-                Step(_lastStepDir >= 0 ? 1 : -1);
+                StepInternal(_lastStepDir >= 0 ? 1 : -1);
                 return;
             }
             // Keep the tuning hash alive while a dial move is still searching. Native KEEPALIVE:

@@ -406,7 +406,17 @@ namespace CMM
                 ContextMusicManager.OnEnterGame();
             }
 
-            if (ContextMusicManager.playerIsDead)
+            // CLEAR THE DEAD FLAG BEFORE THE RISKY WORK, NOT AFTER IT. Everything below reads
+            // MP-fragile world state, and this whole body runs inside a catch — so an exception
+            // in ResolveContext used to leave playerIsDead stuck true. The scan loop SKIPS while
+            // that flag is set, so "CMM self-recovers via the scan loop" was not true of this
+            // one failure: the mod went silent until the world was reloaded. The dial now reads
+            // the same flag, so a stuck value would strand that too. Latch it into a local and
+            // clear it first; the branch below wants the value, not the flag.
+            bool wasDead = ContextMusicManager.playerIsDead;
+            ContextMusicManager.playerIsDead = false;
+
+            if (wasDead)
             {
                 // Death-respawn: rebuild the stack immediately so the post-stinger
                 // re-resolve can return to the correct zone when Spawn ends.
@@ -432,7 +442,6 @@ namespace CMM
                 // Spawn stinger only fired on initial entry (from low-priority Menu), not on a
                 // death respawn. bypassPriority=0 drops the bar so the forced Spawn always takes.
                 ContextMusicManager.SendContextUpdate("Spawn", 0);
-                ContextMusicManager.playerIsDead = false;
             }
             else
             {
@@ -444,7 +453,6 @@ namespace CMM
                 // so the wrong zone plays until eviction clears it. Leaving the stack empty
                 // lets the scan loop read the actual destination position on its next tick
                 // and populate the stack cleanly with no stale competition.
-                ContextMusicManager.playerIsDead = false;
             }
         }
     }
