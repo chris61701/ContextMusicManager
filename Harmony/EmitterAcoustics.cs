@@ -476,6 +476,8 @@ namespace CMM
                 Vector3i parent = bv.ischild ? b.multiBlockPos.GetParentPos(cell, bv) : cell;
                 if (_doors.TryGetValue(parent, out DoorAnim da))
                 {
+                    // The leaf swings; the cells it never occupies do not. See LeafKnownAbsentFromCell.
+                    if (LeafKnownAbsentFromCell(cell, parent, bv.type)) return 0f;
                     _doorCellsBlended++;
                     // Swing and battle damage both open the door; the LARGER opening wins (holes don't
                     // add anything once the leaf has swung past them). An undamaged SEAL-class door
@@ -522,8 +524,16 @@ namespace CMM
                 // applied to a closet was reading decoration as a doorway. Asked of the game's own placement
                 // helper (Place="Door"/"DrawBridge" in blocks.xml), which covers doors, hatches, garage doors
                 // and drawbridges in every supported version without naming any of them.
-                if (IsSwingingLeaf(b, bv.type)
-                    && !b.IsMovementBlocked(world, new Vector3i(x, y, z), bv, BlockFace.None)) return 0f;
+                if (IsSwingingLeaf(b, bv.type))
+                {
+                    Vector3i mcell = new Vector3i(x, y, z);
+                    if (!b.IsMovementBlocked(world, mcell, bv, BlockFace.None)) return 0f;
+                    // SHUT, and every cell of the multiblock says so because the predicate answers
+                    // for the PARENT. Only the cells the leaf actually occupies are material.
+                    Vector3i mpar = bv.ischild && b.multiBlockPos != null
+                                  ? b.multiBlockPos.GetParentPos(mcell, bv) : mcell;
+                    if (LeafKnownAbsentFromCell(mcell, mpar, bv.type)) return 0f;
+                }
                 float mdmg = DamageOpenness(b, bv, world, x, y, z);
                 return DoorShutLoss(b, bv, mdmg) * (1f - mdmg);
             }
@@ -842,9 +852,31 @@ namespace CMM
         // Returns false when the prefab is not reachable (chunk not resident, pooled object not yet
         // handed out) or its colliders have been blanked. Bounds are in WORLD BLOCKS, not cell
         // local, so one measurement can be remembered and re-projected into any cell.
+        // THE LEAF, WITH ITS ORIENTATION KEPT. Collider.bounds is an axis-aligned box in WORLD
+        // space, which describes a leaf faithfully only when the leaf is axis-aligned. A cellar
+        // door's leaf lies at an ANGLE: its world AABB is fat on all three axes, so the thin-one-way
+        // test below rejected it, nothing else looked like a leaf either, and the whole prefab got
+        // unioned into a box that filled all 2x2x2 cells ("occludes while standing in block on the
+        // other side", user 2026-08-24). Carrying the oriented box lets a tilted plate be
+        // recognised AND tested as the thin thing it actually is.
+        internal struct LeafBox
+        {
+            public Vector3 Min, Max;        // world-block AABB - always valid, conservative
+            public bool Oriented;           // Center/Half/Rot below describe the real plate
+            public Vector3 Center, Half;
+            public Quaternion Rot;
+        }
+
         internal static bool MeasureLeafWorld(BlockEntityData bed, out Vector3 wmin, out Vector3 wmax)
         {
-            wmin = Vector3.zero; wmax = Vector3.zero;
+            bool ok = MeasureLeafBox(bed, out LeafBox lb);
+            wmin = lb.Min; wmax = lb.Max;
+            return ok;
+        }
+
+        internal static bool MeasureLeafBox(BlockEntityData bed, out LeafBox box)
+        {
+            box = default(LeafBox);
             if (bed == null || !bed.bHasTransform || bed.transform == null) return false;
             Collider[] cols;
             try { cols = bed.transform.GetComponentsInChildren<Collider>(true); }
@@ -868,21 +900,57 @@ namespace CMM
             // fall back to the union when nothing looks like a leaf at all.
             bool any = false; Bounds acc = new Bounds();
             bool anyLeaf = false; Bounds leaf = new Bounds(); float leafArea = -1f;
+            bool leafOriented = false; Vector3 leafCentre = Vector3.zero, leafHalf = Vector3.zero;
+            Quaternion leafRot = Quaternion.identity;
             for (int i = 0; i < cols.Length; i++)
             {
                 if (cols[i] == null) continue;
                 Bounds wb = cols[i].bounds;                 // world, in RENDER space
                 if (wb.size.sqrMagnitude <= 1e-6f) continue;
                 if (!any) { acc = wb; any = true; } else acc.Encapsulate(wb);
-                if (!IsLeafShaped(wb.size)) continue;
-                Vector3 e = wb.size;                        // plate area = the two broad extents
-                float area = (e.x * e.y * e.z) / Mathf.Max(1e-4f, Mathf.Min(e.x, Mathf.Min(e.y, e.z)));
-                if (area > leafArea) { leafArea = area; leaf = wb; anyLeaf = true; }
+
+                // SHAPE-TEST THE PLATE, NOT ITS SHADOW. For a BoxCollider the true extents are its
+                // own size scaled by the transform, which is rotation-independent; wb.size is that
+                // box's world SHADOW and grows as it tilts. Testing the shadow is what made a
+                // tilted cellar-door leaf unrecognisable. Non-box colliders have no cheap oriented
+                // extent, so they keep the old test.
+                Vector3 oe = wb.size; bool oriented = false;
+                Vector3 oc = wb.center, oh = wb.extents; Quaternion orot = Quaternion.identity;
+                BoxCollider bc = cols[i] as BoxCollider;
+                if (bc != null)
+                {
+                    Vector3 ls = bc.transform.lossyScale;
+                    oe = new Vector3(Mathf.Abs(bc.size.x * ls.x), Mathf.Abs(bc.size.y * ls.y),
+                                     Mathf.Abs(bc.size.z * ls.z));
+                    oh = oe * 0.5f;
+                    oc = bc.transform.TransformPoint(bc.center);
+                    orot = bc.transform.rotation;
+                    oriented = true;
+                }
+                if (!IsLeafShaped(oe)) continue;
+                float area = (oe.x * oe.y * oe.z) / Mathf.Max(1e-4f, Mathf.Min(oe.x, Mathf.Min(oe.y, oe.z)));
+                if (area > leafArea)
+                {
+                    leafArea = area; leaf = wb; anyLeaf = true;
+                    leafOriented = oriented; leafCentre = oc; leafHalf = oh; leafRot = orot;
+                }
             }
             if (!any) return false;
-            Bounds use = anyLeaf ? leaf : acc;
-            wmin = use.min + Origin.position;               // render space -> world blocks
-            wmax = use.max + Origin.position;
+
+            // NEVER UNION THE WHOLE PREFAB. The comment above says why a union is wrong; falling
+            // back to it anyway is how a drawbridge (multiblock 5x6x7 = 210 cells) came to charge
+            // every cell on BOTH sides of itself, and how a garage door charged the depth its leaf
+            // swings through. If nothing in this prefab looks like a leaf we do not know where the
+            // door is, and saying so lets the caller keep its own per-cell answer instead of being
+            // handed a confidently wrong box.
+            if (!anyLeaf) return false;
+
+            box.Min = leaf.min + Origin.position;           // render space -> world blocks
+            box.Max = leaf.max + Origin.position;
+            box.Oriented = leafOriented;
+            box.Center = leafCentre + Origin.position;
+            box.Half = leafHalf;
+            box.Rot = leafRot;
             return true;
         }
 
@@ -931,7 +999,7 @@ namespace CMM
         // So a door with no remembered plane gets NO plane. Falling through to the isotropic lump
         // is blunt, but it is the same in every direction; a guessed plane is confidently wrong in
         // one, and one of the two rooms is always the one you are listening to.
-        private struct LeafPlane { public int Type; public Vector3 Min, Max; }
+        private struct LeafPlane { public int Type; public LeafBox Box; }
         private static readonly Dictionary<Vector3i, LeafPlane> _leafPlanes = new Dictionary<Vector3i, LeafPlane>();
 
         // A LEAF IS THIN. That one gate does a surprising amount of work: it gives a hatch its
@@ -960,20 +1028,23 @@ namespace CMM
         // pin the aperture to wherever the leaf was parked.
         internal static void RememberLeaf(BlockEntityData bed, Vector3i parent, int type)
         {
-            if (!MeasureLeafWorld(bed, out Vector3 wmin, out Vector3 wmax)) return;
-            if (!IsThinLeaf(wmin, wmax)) return;
+            if (!MeasureLeafBox(bed, out LeafBox lb)) return;
+            Vector3 wmin = lb.Min, wmax = lb.Max;
+            // Thin-ness is a property of the PLATE. For an oriented box that is its own extents;
+            // for anything else all we have is the world AABB, as before.
+            if (!IsLeafShaped(lb.Oriented ? lb.Half * 2f : (wmax - wmin))) return;
             // Bounded: doors are per-world and this only ever holds ones the listener has met, but
             // a long session across many POIs should not accumulate for ever. Dropping the lot is
             // fine — each one is re-learned the next time its door is stood in or opened.
             if (_leafPlanes.Count > 1024) _leafPlanes.Clear();
             bool isNew = !_leafPlanes.ContainsKey(parent);
-            _leafPlanes[parent] = new LeafPlane { Type = type, Min = wmin, Max = wmax };
+            _leafPlanes[parent] = new LeafPlane { Type = type, Box = lb };
             if (isNew && CMMConfig.DebugLogging)
             {
-                Vector3 e = wmax - wmin;
-                Block lb = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
-                CMMConfig.D($"[CMM] Aperture learned {(lb != null ? lb.GetBlockName() : "?")} at {parent} " +
-                            $"extent {e.x:0.00}x{e.y:0.00}x{e.z:0.00} " +
+                Vector3 e = lb.Oriented ? lb.Half * 2f : (wmax - wmin);
+                Block ab = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
+                CMMConfig.D($"[CMM] Aperture learned {(ab != null ? ab.GetBlockName() : "?")} at {parent} " +
+                            $"{(lb.Oriented ? "oriented" : "aabb")} plate {e.x:0.00}x{e.y:0.00}x{e.z:0.00} " +
                             $"world {wmin.x:0.00},{wmin.y:0.00},{wmin.z:0.00} -> {wmax.x:0.00},{wmax.y:0.00},{wmax.z:0.00}");
             }
         }
@@ -989,7 +1060,7 @@ namespace CMM
             // Where the opening is does not move; only how much of it is blocked does, and that is
             // the ramp. Reading the leaf here would price the same swing twice — once as geometry
             // leaving the voxel, once as the scalar shrinking.
-            if (animating && haveHeld) { how = "held"; return ClipToCell(held.Min, held.Max, cell); }
+            if (animating && haveHeld) { how = "held"; return ClipToCell(held.Box.Min, held.Box.Max, cell); }
 
             BlockEntityData bed = world.ChunkCache != null ? world.ChunkCache.GetBlockEntity(parent) : null;
             if (MeasureLeafWorld(bed, out Vector3 wmin, out Vector3 wmax))
@@ -998,8 +1069,74 @@ namespace CMM
                 how = "measured";
                 return ClipToCell(wmin, wmax, cell);
             }
-            if (haveHeld) { how = "held"; return ClipToCell(held.Min, held.Max, cell); }
+            if (haveHeld) { how = "held"; return ClipToCell(held.Box.Min, held.Box.Max, cell); }
             return null;
+        }
+
+        // ── A DOOR IS A LEAF, NOT A BLOCK OF MATERIAL THE SIZE OF ITS MULTIBLOCK ────────────────
+        // Every cell of a multiblock door answers the same question the same way, because
+        // Block.IsMovementBlocked redirects a CHILD to its PARENT and returns the parent's answer.
+        // So a shut 3x2x2 garage door charged all twelve cells, a 2x2x2 cellar door all eight, and
+        // a 5x6x7 drawbridge all TWO HUNDRED AND TEN - both sides of itself and the space beneath
+        // it (user, 2026-08-24). The leaf is one thin plate somewhere inside that volume; the rest
+        // is the air it swings through.
+        //
+        // Once the aperture has been learned we know exactly where the plate is, so a cell it does
+        // not reach is AIR and should say so. Pure data - a dictionary probe and a box test, no
+        // Unity calls and no allocation - because this is called per cell from the geometry fill.
+        // Returns false when there is no remembered plane: not knowing is not the same as knowing
+        // it is absent, and the caller must keep its own answer.
+        internal static bool LeafKnownAbsentFromCell(Vector3i cell, Vector3i parent, int type)
+        {
+            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Type != type) return false;
+            LeafBox lb = p.Box;
+            // Cheap conservative reject on the AABB first; it is exact for an axis-aligned leaf.
+            if (lb.Max.x <= cell.x || lb.Min.x >= cell.x + 1f) return true;
+            if (lb.Max.y <= cell.y || lb.Min.y >= cell.y + 1f) return true;
+            if (lb.Max.z <= cell.z || lb.Min.z >= cell.z + 1f) return true;
+            if (!lb.Oriented) return false;
+            // Tilted plate: the AABB overlaps but the plate itself may not. Separating-axis test of
+            // the unit cell against the oriented box - 15 axes, no allocation.
+            return !ObbOverlapsCell(lb, cell);
+        }
+
+        // SAT: axis-aligned unit cell vs oriented box. Both are convex boxes, so 3 cell axes +
+        // 3 box axes + 9 cross products decide it.
+        private static bool ObbOverlapsCell(LeafBox lb, Vector3i cell)
+        {
+            Vector3 ca = new Vector3(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
+            Vector3 ce = new Vector3(0.5f, 0.5f, 0.5f);
+            Vector3 d = lb.Center - ca;
+            Vector3[] ax = { lb.Rot * Vector3.right, lb.Rot * Vector3.up, lb.Rot * Vector3.forward };
+            float[] he = { lb.Half.x, lb.Half.y, lb.Half.z };
+
+            for (int i = 0; i < 3; i++)                       // cell's own axes
+            {
+                Vector3 L = i == 0 ? Vector3.right : i == 1 ? Vector3.up : Vector3.forward;
+                if (Separated(L, d, ce, ax, he)) return false;
+            }
+            for (int i = 0; i < 3; i++)                       // box's own axes
+                if (Separated(ax[i], d, ce, ax, he)) return false;
+            for (int i = 0; i < 3; i++)                       // cross products
+            {
+                Vector3 L0 = i == 0 ? Vector3.right : i == 1 ? Vector3.up : Vector3.forward;
+                for (int j = 0; j < 3; j++)
+                {
+                    Vector3 L = Vector3.Cross(L0, ax[j]);
+                    if (L.sqrMagnitude < 1e-8f) continue;     // parallel: covered by a face axis
+                    if (Separated(L.normalized, d, ce, ax, he)) return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool Separated(Vector3 L, Vector3 d, Vector3 ce, Vector3[] ax, float[] he)
+        {
+            float rCell = ce.x * Mathf.Abs(L.x) + ce.y * Mathf.Abs(L.y) + ce.z * Mathf.Abs(L.z);
+            float rBox = he[0] * Mathf.Abs(Vector3.Dot(L, ax[0]))
+                       + he[1] * Mathf.Abs(Vector3.Dot(L, ax[1]))
+                       + he[2] * Mathf.Abs(Vector3.Dot(L, ax[2]));
+            return Mathf.Abs(Vector3.Dot(L, d)) > rCell + rBox;
         }
 
         // Is this door mid-swing? Main thread only, same discipline as every other _doors read.
