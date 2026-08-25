@@ -168,7 +168,15 @@ namespace CMM
         // Called when a flood completes; the first one after a change is the one carrying it.
         internal static void NoteFieldPublished()
         {
-            if (_watchAt > 0f && _watchFieldAt < _watchAt) _watchFieldAt = CmmClock.Now;
+            if (_watchAt <= 0f || _watchFieldAt >= _watchAt) return;
+            _watchFieldAt = CmmClock.Now;
+            // AND DO NOT LET IT SIT FOR THE NEXT TICK. The emitter layer publishes at
+            // WorldEmitterTickHz -- 100 ms at the default 10 -- and the answer is ready NOW.
+            // Measured: once the flood stopped waiting out its own cadence, the publish stage
+            // became the whole cost at ~130 ms median, which is that tick almost exactly. The door
+            // path has always collapsed it here, on the flood that carries the door; a block
+            // change is the same event and was not asking.
+            EmitterAudioLayer.RequestImmediatePublish();
         }
 
         // Called from the emitter publish with the change in the value the mixer is handed.
