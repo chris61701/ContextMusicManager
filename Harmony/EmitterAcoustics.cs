@@ -721,6 +721,9 @@ namespace CMM
         // HasOpenCenter, which asked narrower questions of the same bounds and are now gone.
         private const int CoverGrid = 8;
         internal static readonly float[] FullCover = { 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f };
+        // The opposite: this cell's material is somewhere else, so no half of it is covered.
+        // Published as 1 - cov * (1 - t), so zero cover is transparent whatever t says.
+        internal static readonly float[] NoCover  = { 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f };
         private static readonly Dictionary<int, float[]> _coverCache = new Dictionary<int, float[]>();
 
         internal static float[] CoverOf(Block b, BlockValue bv)

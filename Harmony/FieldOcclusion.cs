@@ -636,8 +636,23 @@ namespace CMM
                                    EmitterAcoustics.IsDoorAnimating(par), shut, out how);
                     }
 
-                    if (leaf != null) cov = EmitterAcoustics.CoverSplitAtBounds(leaf, fr[0], fr[1], fr[2]);
-                    else              cov = EmitterAcoustics.CoverSplitAt(b, bv, fr[0], fr[1], fr[2]);
+                    // KNOWING THE LEAF IS ELSEWHERE IS AN ANSWER, NOT A FAILURE. `how` is set
+                    // whenever the leaf's position was established -- measured live, or held from
+                    // the shut pose -- and a null `leaf` alongside it means the plate does not
+                    // reach THIS cell. The fallback treated that identically to "no idea where the
+                    // door is" and charged the isotropic lump, so a cell the leaf had just swung
+                    // out of published its full material in every direction:
+                    //
+                    //   EarTrace cell 487,39,-490  leaf swung clear of this cell
+                    //     published -X 26.8 -Y 26.8 -Z 26.8  +X 26.8 +Y 26.8 +Z 26.8
+                    //
+                    // 26.8 dB on all six faces of a cell containing nothing. That is the report
+                    // that an opening drawbridge occludes MORE than a shut one, and it is why
+                    // walking through any door mid-swing blares -- you clip through the leaf's old
+                    // cells, because a door has no collision while it animates.
+                    if (leaf != null)      cov = EmitterAcoustics.CoverSplitAtBounds(leaf, fr[0], fr[1], fr[2]);
+                    else if (how != null)  cov = EmitterAcoustics.NoCover;    // leaf is elsewhere: air
+                    else                   cov = EmitterAcoustics.CoverSplitAt(b, bv, fr[0], fr[1], fr[2]);
 
                     if (CMMConfig.DebugLogging)
                         why = (b != null ? b.GetBlockName() : "?") + (bv.ischild ? " CHILD" : "")
