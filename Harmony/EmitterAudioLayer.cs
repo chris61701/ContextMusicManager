@@ -359,6 +359,7 @@ namespace CMM
             // from the PRE-toggle door state — abandon it so the restart samples the swing fresh.
             if (_forceRefresh) { _forceRefresh = false; _nextTick = 0f; _occlPending = false; _floodRoomOnly = false; }
             if (CmmClock.Now < _nextTick) return;
+            EmitterBlockHook.NoteTickEntered();   // block stopwatch: the tick that carries it began
             _nextTick = CmmClock.Now + (EmitterAcoustics.AnyDoorAnimating ? DoorTickInterval : TickInterval);
             // Everything below is what WorldEmitterTickHz multiplies. Measured here and NOT via
             // EmitPoll, which is the registry's own 4 Hz loop and is unaffected by the tick rate.

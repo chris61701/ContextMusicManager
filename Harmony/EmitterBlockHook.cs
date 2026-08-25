@@ -147,14 +147,14 @@ namespace CMM
         //
         // That last stage is the one no existing counter covered, and it is the one with a rate
         // cap in it (WorldEmitterOcclusionFadeRate), so it can legitimately dominate.
-        private static float _watchAt = -999f, _watchFieldAt = -999f;
+        private static float _watchAt = -999f, _watchFieldAt = -999f, _watchTickAt = -999f;
         private static Vector3i _watchPos;
 
         private static void Arm(Vector3i pos)
         {
             // Only one in flight: a wall goes up as many changes and the first is the one to time.
             if (_watchAt > 0f && CmmClock.Now - _watchAt < 5f) return;
-            _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchPos = pos;
+            _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchTickAt = -999f; _watchPos = pos;
         }
 
         // A BLOCK IS AS URGENT AS A DOOR. The flood is gated to one every FloodSec (0.30 s)
@@ -179,6 +179,15 @@ namespace CMM
             EmitterAudioLayer.RequestImmediatePublish();
         }
 
+        // The emitter tick that will carry it has STARTED. Splits the old publish stage into the
+        // wait for the tick and the work inside it, because collapsing the tick did not move the
+        // number and one of those two has to be where it went.
+        internal static void NoteTickEntered()
+        {
+            if (_watchAt > 0f && _watchFieldAt >= _watchAt && _watchTickAt < _watchFieldAt)
+                _watchTickAt = CmmClock.Now;
+        }
+
         // Called from the emitter publish with the change in the value the mixer is handed.
         internal static void NoteGainMoved(float delta)
         {
@@ -186,8 +195,11 @@ namespace CMM
             float now = CmmClock.Now;
             float total = (now - _watchAt) * 1000f;
             if (total > 5000f) { _watchAt = -999f; return; }          // stale: nothing moved
+            float tickWait = _watchTickAt >= _watchFieldAt ? (_watchTickAt - _watchFieldAt) * 1000f : -1f;
+            float inTick   = _watchTickAt >= _watchFieldAt ? (now - _watchTickAt) * 1000f : -1f;
             CMMConfig.D($"[CMM] block -> sound: {total:0} ms "
-                      + $"(field {(_watchFieldAt - _watchAt) * 1000f:0} + publish {(now - _watchFieldAt) * 1000f:0}, "
+                      + $"(field {(_watchFieldAt - _watchAt) * 1000f:0} "
+                      + $"+ tickwait {tickWait:0} + intick {inTick:0}, "
                       + $"gain moved {delta:0.00} at {_watchPos})");
             _watchAt = -999f;
         }
