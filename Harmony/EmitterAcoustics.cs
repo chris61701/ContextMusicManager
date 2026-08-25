@@ -487,8 +487,13 @@ namespace CMM
                     // REMAP THE SWING so the sound arrives with the act rather than with the
                     // animation. Openness is scaled up and clamped, so a door is acoustically shut
                     // once its leaf is WorldEmitterDoorSwingFrac of the way closed and acoustically
-                    // open once it is that far open. Measured latch-to-field is 33-79 ms, so what
-                    // reads as delay is this ramp, not the pipeline. Damage openness is a static
+                    // open once it is that far open. The "measured latch-to-field is 33-79 ms" that
+                    // used to justify this number came from a counter that reported the first flood
+                    // finishing after a latch WITHOUT checking the door's cells had been re-read --
+                    // so it was frequently timing a flood solved from pre-toggle geometry. The
+                    // counter now verifies that (see FieldOcclusion's door stopwatch) and prints
+                    // read/wait/solve separately. TREAT THIS KNOB AS UNCALIBRATED until it has been
+                    // re-tuned against a VERIFIED number. Damage openness is a static
                     // hole and is not remapped -- there is no swing to be early for.
                     float frac = CMMConfig.WorldEmitterDoorSwingFrac;
                     float swing = da.Openness;
@@ -1554,7 +1559,7 @@ namespace CMM
         // so radius 0 is the smallest request there is (it still grows by one step on each side,
         // which is wanted -- the half-voxel split reads neighbours). Returns false when no aperture
         // has been learned yet, which is the caller's signal to fall back to the box.
-        private static bool InvalidateLeafCells(Vector3i parent, int type)
+        private static bool InvalidateLeafCells(Vector3i parent, int type, bool await)
         {
 #if GV_V3
             if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Boxes == null || p.Type != type)
@@ -1578,11 +1583,29 @@ namespace CMM
                 for (int x = x0; x <= x1; x++)
                     for (int y = y0; y <= y1; y++)
                         for (int z = z0; z <= z1; z++)
-                            FieldOcclusion.Invalidate(new Vector3i(x, y, z), 0);
+                        {
+                            Vector3i c = new Vector3i(x, y, z);
+                            FieldOcclusion.Invalidate(c, 0);
+                            if (await) FieldOcclusion.AwaitCell(c);
+                        }
             }
             return true;
 #else
             return false;
+#endif
+        }
+
+        // The box fallback, with every cell it dirties awaited, so a door with no learned
+        // aperture is measured as honestly as one that has it.
+        private static void InvalidateBoxAwaited(Vector3i centre, int radius)
+        {
+#if GV_V3
+            FieldOcclusion.Invalidate(centre, radius);
+            int r = radius + 1;                 // cmm_fld_dirty grows the box by one step a side
+            for (int x = centre.x - r; x <= centre.x + r; x++)
+                for (int y = centre.y - r; y <= centre.y + r; y++)
+                    for (int z = centre.z - r; z <= centre.z + r; z++)
+                        FieldOcclusion.AwaitCell(new Vector3i(x, y, z));
 #endif
         }
 
@@ -1605,7 +1628,7 @@ namespace CMM
                 // times a second is four times oversubscribed, and that note also records what
                 // oversubscription does: "six percent is enough to never converge", with a shut
                 // door publishing its correct value on two ticks out of seventy.
-                if (InvalidateLeafCells(kv.Key, kv.Value.Type)) continue;
+                if (InvalidateLeafCells(kv.Key, kv.Value.Type, await: false)) continue;
                 FieldOcclusion.Invalidate(kv.Key, MinDoorInvalidateRadius);   // no aperture yet
             }
 #endif
@@ -1647,8 +1670,11 @@ namespace CMM
                                                    Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed,
                                                    Type = p.Type, StartedAt = Time.realtimeSinceStartup };
                     // The latch's invalidation, moved here so it happens on the main thread.
-                    if (!InvalidateLeafCells(p.Pos, p.Type))
-                        FieldOcclusion.Invalidate(p.Pos, MinDoorInvalidateRadius);
+                    // BeginDoorWait arms the stopwatch: from here the reader has to consume these
+                    // exact cells before any flood can claim to have carried this door.
+                    FieldOcclusion.BeginDoorWait();
+                    if (!InvalidateLeafCells(p.Pos, p.Type, await: true))
+                        InvalidateBoxAwaited(p.Pos, MinDoorInvalidateRadius);
                 }
                 _doorPending.Clear();
                 _doorPendingCount = 0;

@@ -139,29 +139,49 @@ namespace CMM
         // been arithmetic over a chain I did not time, and the chain has surprised me each round.
         // Logged once per door, on the first flood that lands after the latch: latch to field, in
         // milliseconds, with the frame time beside it so a slow frame is not read as slow code.
-        internal static void ReportDoorLatency()
+        internal static void ReportDoorLatency(float floodStartedAt)
         {
             if (_doorEventAt < 0f) return;
-            // ONCE PER DOOR, WITHOUT TOUCHING _doorEventAt.
-            //
-            // This used to clear _doorEventAt to get the once-per-door behaviour, which meant a
-            // DIAGNOSTIC was silently switching off the door exemption -- and only on the field
-            // path, because FieldOcclusion.SchedulerTick is this method's only caller. Two things
-            // read _doorEventAt: DoorMovingOrJustMoved (the field's dB slew exemption, 1.5 s) and
-            // doorWindow (the publish rise-limiter exemption, 1 s). Both exist so a door SNAPS
-            // instead of being eased in like ordinary model noise. Clearing the timestamp 33-79 ms
-            // after the latch collapsed both to AnyDoorAnimating, so the field spent the rest of
-            // the swing rate-limited while legacy and native -- which never call this -- kept
-            // their full windows. That is a door that slams on one model and oozes on the other.
-            //
-            // Keyed on the event timestamp instead: a new toggle stamps a new _doorEventAt, so the
-            // line still prints once per door and the exemption survives its own measurement.
+#if GV_V3
+            // THE FLOOD MUST HAVE SEEN THE DOOR. The reader is main-thread, the flood is not, so a
+            // flood can finish after a latch having solved entirely PRE-TOGGLE geometry. Reporting
+            // that as the door's latency is what made every previous number meaningless. Only a
+            // flood that STARTED after the door's cells finished entering the arena carries it;
+            // any earlier one is skipped, and because the logged-marker is not set here, the next
+            // qualifying flood still gets to report.
+            float readAt = FieldOcclusion.DoorReadAt;
+            bool verified = FieldOcclusion.DoorWaitUsable;
+            if (verified)
+            {
+                if (readAt < 0f) return;                    // cells not all re-read yet
+                if (floodStartedAt < readAt) return;        // this flood predates them
+            }
+#else
+            float readAt = -999f; bool verified = false;
+#endif
             if (_doorLatencyLoggedFor == _doorEventAt) return;
             _doorLatencyLoggedFor = _doorEventAt;
-            float ms = (CmmClock.Now - _doorEventAt) * 1000f;
-            if (ms >= 0f && ms < 5000f)
-                CMMConfig.D($"[CMM] door -> occlusion: {ms:0} ms (latch to published field, "
-                      + $"frame {Time.unscaledDeltaTime * 1000f:0} ms)");
+
+            float now = CmmClock.Now;
+            float ms = (now - _doorEventAt) * 1000f;
+            if (ms < 0f || ms >= 5000f) return;
+            if (verified)
+            {
+                // The split is the point: read = latch to the door's geometry being in the arena
+                // (main-thread budget), solve = the flood that then carried it (scheduler thread).
+                float readMs = (readAt - _doorEventAt) * 1000f;
+                float waitMs = (floodStartedAt - readAt) * 1000f;
+                float solveMs = (now - floodStartedAt) * 1000f;
+                CMMConfig.D($"[CMM] door -> occlusion: {ms:0} ms VERIFIED "
+                          + $"(read {readMs:0} + wait {waitMs:0} + solve {solveMs:0}, "
+                          + $"frame {Time.unscaledDeltaTime * 1000f:0} ms)");
+            }
+            else
+            {
+                CMMConfig.D($"[CMM] door -> occlusion: {ms:0} ms UNVERIFIED "
+                          + $"(cell step != 1, cannot confirm the flood saw the door; "
+                          + $"frame {Time.unscaledDeltaTime * 1000f:0} ms)");
+            }
         }
         private static float _nextReverbLog;           // throttle for the reverb diagnostic (DebugLogging only)
 

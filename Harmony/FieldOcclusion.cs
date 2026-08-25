@@ -2,6 +2,7 @@
 // EmitterAudioLayer, both on the same gate.
 #if GV_V3
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace CMM
@@ -131,6 +132,39 @@ namespace CMM
         // Doors are not relying on this in the first place — the latch hook invalidates them
         // directly (EmitterDoorHook). This ring is only for changes nothing reported, and it was
         // starving the targeted invalidations it exists to back up.
+        // ── THE DOOR STOPWATCH ──────────────────────────────────────────────────────────────────
+        // ReportDoorLatency used to fire on the first flood that finished after a latch, with no
+        // check that the door's own cells had been re-read first. The reader is main-thread and
+        // the flood is not, so the flood it reported on had frequently been solved from PRE-TOGGLE
+        // geometry -- the number said the door had landed while nothing about the door had reached
+        // the arena. Every door-timing figure this project has quoted came from that counter,
+        // including the "measured latch-to-field is 33-79 ms" claim in EmitterAcoustics.
+        //
+        // Now the cells the door dirtied are held here and struck off as the reader consumes them.
+        // The door is not READ until the set empties, and only a flood that STARTED after that
+        // moment can be the one carrying it.
+        private static readonly HashSet<Vector3i> _doorAwait = new HashSet<Vector3i>();
+        private static float _doorDirtiedAt = -999f, _doorReadAt = -999f;
+        internal static float DoorReadAt => _doorReadAt;
+        internal static float DoorDirtiedAt => _doorDirtiedAt;
+
+        // Cell coords equal block coords only at step 1. At any other step the awaited set cannot
+        // be matched against what next_pending returns, so the wait is skipped and the report says
+        // so rather than quietly going back to being a lie.
+        internal static bool DoorWaitUsable => StepXZ == 1 && StepY == 1;
+
+        internal static void BeginDoorWait()
+        {
+            _doorAwait.Clear();
+            _doorDirtiedAt = CmmClock.Now;
+            _doorReadAt = -999f;
+        }
+
+        internal static void AwaitCell(Vector3i c)
+        {
+            if (_doorAwait.Count < 4096) _doorAwait.Add(c);
+        }
+
         private const float NearRefreshSec = 0.4f, FarRefreshSec = 10f;
         private const int   NearRefreshBlocks = 8;
         private static float _nearRefreshAt, _farRefreshAt;
@@ -295,6 +329,11 @@ namespace CMM
                 while (NativeField.cmm_fld_next_pending(_f, out int cx, out int cy, out int cz) != 0)
                 {
                     FillCell(world, cx, cy, cz);
+                    // Struck off here, where the cell's new material actually enters the arena.
+                    if (_doorAwait.Count > 0
+                        && _doorAwait.Remove(new Vector3i(cx, cy, cz))
+                        && _doorAwait.Count == 0)
+                        _doorReadAt = CmmClock.Now;
                     if ((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * toMs >= budgetMs) break;
                 }
             }
@@ -653,12 +692,13 @@ namespace CMM
                 if (System.Threading.Volatile.Read(ref _f) != f) return;
                 NativeField.cmm_fld_set_tuning(f, CMMConfig.WorldEmitterFieldDetourDb, 60f);
                 Vector3 e = _ear;
+                float floodStartedAt = CmmClock.Now;
                 if (NativeField.cmm_fld_solve(f, e.x, e.y, e.z) < 0) Discarded++;
                 // A door is waiting on this result. Do not let it sit for the next 4 Hz tick.
                 else if (door)
                 {
                     EmitterAudioLayer.RequestImmediatePublish();
-                    EmitterAudioLayer.ReportDoorLatency();
+                    EmitterAudioLayer.ReportDoorLatency(floodStartedAt);
                 }
             }
             catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }
