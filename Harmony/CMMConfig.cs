@@ -836,6 +836,9 @@ namespace CMM
         public static KeyCode KeyNowPlaying       = KeyCode.Keypad7;
         public static KeyCode KeyContextHud      = KeyCode.Keypad8;
         public static KeyCode KeyContextHudReset = KeyCode.Keypad9;
+        // Testing aid: dump the acoustic column from wherever you are standing, without opening
+        // the console -- which would mean letting go of the movement keys.
+        public static KeyCode KeyAcousticsDump    = KeyCode.Keypad5;
         // Personal radio dial (PersonalRadio): steps through Off → station → station → Off,
         // wrapping both ways — two keys give on/off/next/prev. On the same physical key
         // cluster as Ins/Del/Home/End, same modifier gate. In-game only.

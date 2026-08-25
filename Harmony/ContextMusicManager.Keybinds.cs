@@ -146,6 +146,25 @@ namespace CMM
             else if (Input.GetKeyDown(CMMConfig.KeyContextHud))        CycleContextHud();
             else if (Input.GetKeyDown(CMMConfig.KeyContextHudReset))   ResetContextHudWindow();
 #endif
+            else if (Input.GetKeyDown(CMMConfig.KeyAcousticsDump))     DumpAcousticColumn();
+        }
+
+        // Push the acoustic column to the log from where the player is STANDING. The console
+        // route needs both hands and the character slides off anything sloped in the meantime,
+        // which is exactly the pose the cellar-door edge case has to be reported from.
+        private static void DumpAcousticColumn()
+        {
+#if GV_V3
+            try
+            {
+                string col = CmmConsole.AcousticsColumn() ?? "null";
+                Log.Out("[CMM] acoustics column (keybind)");
+                foreach (string line in col.Split('\n'))
+                    Log.Out("[CMM]   " + line.TrimEnd());
+                ShowNotice("Acoustic column written to the log.");
+            }
+            catch (System.Exception e) { Log.Warning($"[CMM] acoustics dump failed: {e.Message}"); }
+#endif
         }
 
         // The context backing the music actually playing. _nativeActiveContext names what

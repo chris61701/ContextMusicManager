@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 23;
+        internal const int CurrentSchema = 24;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -328,6 +328,12 @@ against loud nearby sound effects; leave it false for normal play."),
             B("DebugMuteGameAudio",                   "CMMConfig.DebugMuteGameAudio",                false, since: 23),
             E("KeyContextHud",                       "CMMConfig.KeyContextHud",                     @"Keypad8", since: 22),
             E("KeyContextHudReset",                  "CMMConfig.KeyContextHudReset",                @"Keypad9", since: 22),
+            Cmt(@"TESTING AID. Dumps the acoustic column -- every block between your ear and the
+speaker, with its loss, openness, material and whether it blocks movement -- to the
+log, from wherever you are standing. Same report as the console's `cmm ac col`, but
+without opening the console, which means letting go of the movement keys and
+sliding off the spot you were trying to describe."),
+            E("KeyAcousticsDump",                    "CMMConfig.KeyAcousticsDump",                  @"Keypad5", since: 24),
             Cmt(@"Personal radio dial (in-game only, works on EVERY game version): the two keys step
 through Off → station → station → … → Off, wrapping both ways, so they give you
 on, off, next and previous with just PgUp/PgDn. Stations are the subfolders of the

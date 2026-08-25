@@ -330,53 +330,7 @@ namespace CMM
             // and the block's name and shape. Exists because three separate guesses about what a
             // floor is made of have now been wrong, and the only thing that can settle it is the
             // actual column in the actual world.
-            if (arg == "column" || arg == "col")
-            {
-                var pl = GameManager.Instance?.World?.GetPrimaryPlayer();
-                var w = GameManager.Instance?.World;
-                if (pl == null || w == null) return "no player";
-                Vector3 ear = pl.getHeadPosition();
-                Vector3 spk;
-                if (!EmitterAudioLayer.TryGetNearestSpeaker(ear, out spk)) return "no speaker in range";
-                var sb = new System.Text.StringBuilder();
-                float dist = Vector3.Distance(ear, spk);
-                sb.Append("ear ").Append(ear.ToCultureInvariantString())
-                  .Append("  ->  speaker ").Append(spk.ToCultureInvariantString())
-                  .Append("   d=").Append(dist.ToString("0.0"));
-                int steps = Mathf.Clamp(Mathf.CeilToInt(dist * 2f), 1, 64);
-                var seen = new HashSet<Vector3i>();
-                for (int i = 0; i <= steps; i++)
-                {
-                    Vector3 sp = Vector3.Lerp(ear, spk, i / (float)steps);
-                    var v = new Vector3i(Mathf.FloorToInt(sp.x), Mathf.FloorToInt(sp.y), Mathf.FloorToInt(sp.z));
-                    if (!seen.Add(v)) continue;
-                    BlockValue bv = w.GetBlock(v.x, v.y, v.z);
-                    float loss = bv.isair ? 0f : EmitterAcoustics.DebugCellLoss(bv, w, v.x, v.y, v.z);
-                    // the same ramp the router uses, so this reports what it actually sees
-                    float open = bv.isair ? 1f
-                               : loss >= 0.5f ? 0f
-                               : loss <= 0.05f ? 1f
-                               : 1f - (loss - 0.05f) / 0.45f;
-                    var b = bv.Block;
-                    sb.Append("\n  ").Append(v.ToString().PadRight(20))
-                      .Append(bv.isair ? "AIR" : (b != null ? b.GetBlockName() : "?"))
-                      .Append("  loss ").Append(loss.ToString("0.000"))
-                      .Append("  open ").Append(open.ToString("0.00"))
-                      .Append(bv.isair || b == null ? "" :
-                              "  shape " + (b.shape != null ? b.shape.GetType().Name : "-")
-                              + (b.shape != null && b.shape.IsSolidCube ? " CUBE" : " partial")
-                              // WHERE THE LOSS CAME FROM, because "loss 0.700" on a pot plant is a
-                              // number with no author until you can see which bucket it fell in.
-                              // mat = the SurfaceCategory MaterialLoss switches on; opa = the block's
-                              // resolved lightOpacity, which is the only extent signal a model entity
-                              // has (its real geometry is in a prefab); mv = does it stop the player.
-                              + "  mat " + (b.blockMaterial != null
-                                            ? (b.blockMaterial.SurfaceCategory ?? "-") : "-")
-                              + "  opa " + b.lightOpacity
-                              + (b.IsMovementBlocked(w, v, bv, BlockFace.None) ? "  MOVEBLOCK" : "  walkthru"));
-                }
-                return sb.ToString();
-            }
+            if (arg == "column" || arg == "col") return AcousticsColumn();
 
             // ── cmm acoustics shape ───────────────────────────────────────────────────────
             // WHERE the model thinks a block's material sits inside its voxel: the fraction of
@@ -554,6 +508,59 @@ namespace CMM
             return PersonalRadio.DescribeClicks()
                  + "\n  usage: cmm sfx test [dial|on|off|spin] | jitter <hz> | samples on|off"
                  + "\n         cmm sfx vol <0..1>";
+        }
+
+        // THE COLUMN, CALLABLE WITHOUT THE CONSOLE. Opening the console to type this means letting
+        // go of the movement keys, and the report that needs it most is "I am standing halfway up a
+        // cellar door" -- a spot the player slides off the instant they stop holding a key. The
+        // KeyAcousticsDump keybind calls this and pushes the result straight to the log, so the
+        // position being described is the position that was actually measured.
+        internal static string AcousticsColumn()
+        {
+                var pl = GameManager.Instance?.World?.GetPrimaryPlayer();
+                var w = GameManager.Instance?.World;
+                if (pl == null || w == null) return "no player";
+                Vector3 ear = pl.getHeadPosition();
+                Vector3 spk;
+                if (!EmitterAudioLayer.TryGetNearestSpeaker(ear, out spk)) return "no speaker in range";
+                var sb = new System.Text.StringBuilder();
+                float dist = Vector3.Distance(ear, spk);
+                sb.Append("ear ").Append(ear.ToCultureInvariantString())
+                  .Append("  ->  speaker ").Append(spk.ToCultureInvariantString())
+                  .Append("   d=").Append(dist.ToString("0.0"));
+                int steps = Mathf.Clamp(Mathf.CeilToInt(dist * 2f), 1, 64);
+                var seen = new HashSet<Vector3i>();
+                for (int i = 0; i <= steps; i++)
+                {
+                    Vector3 sp = Vector3.Lerp(ear, spk, i / (float)steps);
+                    var v = new Vector3i(Mathf.FloorToInt(sp.x), Mathf.FloorToInt(sp.y), Mathf.FloorToInt(sp.z));
+                    if (!seen.Add(v)) continue;
+                    BlockValue bv = w.GetBlock(v.x, v.y, v.z);
+                    float loss = bv.isair ? 0f : EmitterAcoustics.DebugCellLoss(bv, w, v.x, v.y, v.z);
+                    // the same ramp the router uses, so this reports what it actually sees
+                    float open = bv.isair ? 1f
+                               : loss >= 0.5f ? 0f
+                               : loss <= 0.05f ? 1f
+                               : 1f - (loss - 0.05f) / 0.45f;
+                    var b = bv.Block;
+                    sb.Append("\n  ").Append(v.ToString().PadRight(20))
+                      .Append(bv.isair ? "AIR" : (b != null ? b.GetBlockName() : "?"))
+                      .Append("  loss ").Append(loss.ToString("0.000"))
+                      .Append("  open ").Append(open.ToString("0.00"))
+                      .Append(bv.isair || b == null ? "" :
+                              "  shape " + (b.shape != null ? b.shape.GetType().Name : "-")
+                              + (b.shape != null && b.shape.IsSolidCube ? " CUBE" : " partial")
+                              // WHERE THE LOSS CAME FROM, because "loss 0.700" on a pot plant is a
+                              // number with no author until you can see which bucket it fell in.
+                              // mat = the SurfaceCategory MaterialLoss switches on; opa = the block's
+                              // resolved lightOpacity, which is the only extent signal a model entity
+                              // has (its real geometry is in a prefab); mv = does it stop the player.
+                              + "  mat " + (b.blockMaterial != null
+                                            ? (b.blockMaterial.SurfaceCategory ?? "-") : "-")
+                              + "  opa " + b.lightOpacity
+                              + (b.IsMovementBlocked(w, v, bv, BlockFace.None) ? "  MOVEBLOCK" : "  walkthru"));
+                }
+                return sb.ToString();
         }
 
         static void Out(string s)
