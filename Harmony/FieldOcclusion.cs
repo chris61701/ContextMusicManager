@@ -726,11 +726,15 @@ namespace CMM
                 Vector3 e = _ear;
                 float floodStartedAt = CmmClock.Now;
                 if (NativeField.cmm_fld_solve(f, e.x, e.y, e.z) < 0) Discarded++;
-                // A door is waiting on this result. Do not let it sit for the next 4 Hz tick.
-                else if (door)
+                else
                 {
-                    EmitterAudioLayer.RequestImmediatePublish();
-                    EmitterAudioLayer.ReportDoorLatency(floodStartedAt);
+                    EmitterBlockHook.NoteFieldPublished();   // block stopwatch: field stage done
+                    // A door is waiting on this result. Do not let it sit for the next 4 Hz tick.
+                    if (door)
+                    {
+                        EmitterAudioLayer.RequestImmediatePublish();
+                        EmitterAudioLayer.ReportDoorLatency(floodStartedAt);
+                    }
                 }
             }
             catch (Exception ex) { CMMConfig.D($"[CMM] field flood failed: {ex.Message}"); }

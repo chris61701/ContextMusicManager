@@ -125,7 +125,9 @@ namespace CMM
                 foreach (object ci in list)
                 {
                     if (ci == null || _pending.Count >= MaxQueued) break;
-                    _pending.Add(PosOf(ci));
+                    Vector3i bp = PosOf(ci);
+                    _pending.Add(bp);
+                    Arm(bp);
                 }
                 _pendingCount = _pending.Count;
             }
@@ -133,6 +135,46 @@ namespace CMM
 
         // Radius for the caller, kept beside the queue it belongs to.
         internal static int Radius => ChangeRadius;
+
+        // ── THE BLOCK STOPWATCH ─────────────────────────────────────────────────────────────
+        // The door stopwatch stops at the field publish, which is not where anybody hears it.
+        // This one runs to the number the MIXER receives: place or destroy a block enclosing an
+        // emitter, and it reports how long until the gain that block changed actually moved.
+        //
+        // Three stamps, so a slow answer says WHICH stage was slow:
+        //   change -> field : the geometry re-read plus the flood that carried it
+        //   field  -> sound : the emitter tick picking it up, and the rise limiter letting it out
+        //
+        // That last stage is the one no existing counter covered, and it is the one with a rate
+        // cap in it (WorldEmitterOcclusionFadeRate), so it can legitimately dominate.
+        private static float _watchAt = -999f, _watchFieldAt = -999f;
+        private static Vector3i _watchPos;
+
+        private static void Arm(Vector3i pos)
+        {
+            // Only one in flight: a wall goes up as many changes and the first is the one to time.
+            if (_watchAt > 0f && CmmClock.Now - _watchAt < 5f) return;
+            _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchPos = pos;
+        }
+
+        // Called when a flood completes; the first one after a change is the one carrying it.
+        internal static void NoteFieldPublished()
+        {
+            if (_watchAt > 0f && _watchFieldAt < _watchAt) _watchFieldAt = CmmClock.Now;
+        }
+
+        // Called from the emitter publish with the change in the value the mixer is handed.
+        internal static void NoteGainMoved(float delta)
+        {
+            if (_watchAt <= 0f || _watchFieldAt < _watchAt) return;   // field has not answered yet
+            float now = CmmClock.Now;
+            float total = (now - _watchAt) * 1000f;
+            if (total > 5000f) { _watchAt = -999f; return; }          // stale: nothing moved
+            CMMConfig.D($"[CMM] block -> sound: {total:0} ms "
+                      + $"(field {(_watchFieldAt - _watchAt) * 1000f:0} + publish {(now - _watchFieldAt) * 1000f:0}, "
+                      + $"gain moved {delta:0.00} at {_watchPos})");
+            _watchAt = -999f;
+        }
     }
 }
 #endif

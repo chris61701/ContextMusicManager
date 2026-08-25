@@ -88,6 +88,10 @@ namespace CMM
         private struct PublishedExtra { public float Value; public float At; }
         private static readonly Dictionary<Vector3i, PublishedExtra> _publishedExtra = new Dictionary<Vector3i, PublishedExtra>();
         private static float _doorEventAt = -999f;   // last door toggle (see NotifyAcousticChange)
+        // How far the published gain must move before the block stopwatch calls it a reaction.
+        // Units are the same "extra virtual blocks" the field publishes; under this is measurement
+        // noise, and timing noise would report a reaction that nobody heard.
+        private const float BlockWatchMinDelta = 1.0f;
         // The _doorEventAt value ReportDoorLatency has already printed. Separate from the timestamp
         // itself so the diagnostic cannot expire the door exemption -- see ReportDoorLatency.
         private static float _doorLatencyLoggedFor = -999f;
@@ -875,6 +879,13 @@ namespace CMM
                     float step = rate * Mathf.Clamp(now - prev.At, 0.02f, 1f);
                     if (gains[i] > prev.Value + step) gains[i] = prev.Value + step;
                     else if (gains[i] < prev.Value - step) gains[i] = prev.Value - step;
+                }
+                // Block stopwatch: this is the number the mixer is handed, AFTER the rate cap, so
+                // it is the first instant the change is genuinely on its way to the ear.
+                if (_publishedExtra.TryGetValue(key, out PublishedExtra was2))
+                {
+                    float moved = gains[i] - was2.Value; if (moved < 0f) moved = -moved;
+                    if (moved >= BlockWatchMinDelta) EmitterBlockHook.NoteGainMoved(moved);
                 }
                 _publishedExtra[key] = new PublishedExtra { Value = gains[i], At = now };
             }
