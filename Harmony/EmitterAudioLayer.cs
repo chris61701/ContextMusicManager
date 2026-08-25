@@ -854,7 +854,18 @@ namespace CMM
             // delivery beats the give-up timer). Settling can last 30 s, and an exemption that wide
             // means the limiter is simply not running in any house with doors in it -- while the
             // handover back to native, a genuine large step, is exactly the moment it should be.
-            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f;
+            // A BLOCK CHANGE IS A DELIBERATE EVENT, LIKE A DOOR. The limiter exists for the model
+            // changing its mind between floods; a player walling a speaker in did it on purpose
+            // and is listening for the result, which is the same argument the door exemption makes.
+            //
+            // Measured, and it is worse than merely slow. The step is rate x elapsed, so a tick
+            // that fires PROMPTLY gets a SMALL step: collapsing the tick shrank dt, the first tick
+            // could only move the gain by about 1.0, and the real change waited a whole interval
+            // for the next one. The stopwatch shows it exactly -- intick is (ticks-1) x 113 ms,
+            // and the two-tick cases all report "gain moved 5.65", which is 50 x 0.113 to the
+            // decimal. Speeding the tick up made the limiter throttle harder.
+            bool doorWindow = EmitterAcoustics.AnyDoorAnimating || now - _doorEventAt < 1f
+                            || EmitterBlockHook.RecentChange;
             for (int i = 0; i < count; i++)
             {
                 Vector3i key = SlotKey(pts, i);
