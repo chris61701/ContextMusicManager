@@ -920,6 +920,7 @@ namespace CMM
             // obstacle check), which is how you can stand exactly where the leaf is. We want the
             // geometry, not whether it is currently pushing anybody.
             List<LeafBox> found = null;
+            var pending = new List<PendingLeaf>(8);   // rejects, for the relative second pass
             for (int i = 0; i < cols.Length; i++)
             {
                 if (cols[i] == null) continue;
@@ -944,7 +945,7 @@ namespace CMM
                     orot = bc.transform.rotation;
                     oriented = true;
                 }
-                if (!IsLeafShaped(oe)) continue;
+                if (!IsLeafShaped(oe)) { pending.Add(new PendingLeaf { Box = MakeBox(wb, oriented, oc, oh, orot), Ext = oe }); continue; }
                 if (found == null) found = new List<LeafBox>(4);
                 found.Add(new LeafBox
                 {
@@ -964,10 +965,59 @@ namespace CMM
             // drawbridge (multiblock 5x6x7 = 210 cells) came to charge every cell on BOTH sides of
             // itself. If nothing here looks like a leaf we do not know where the door is, and
             // saying so lets the caller keep its own per-cell answer.
+            // ── SECOND PASS: THIN RELATIVE TO ITS OWN SPAN ──────────────────────────────────
+            // The absolute test asks for a plate under 0.25 blocks thick, which is right for a
+            // door leaf and wrong for a drawbridge: its deck is timber, measured in game at 0.71
+            // and 0.78 thick over spans of 3.5 and 3.2. It is a plate, just a chunky one, and
+            // rejecting it dropped the whole 5x6x7 multiblock -- 210 cells -- into the isotropic
+            // lump ("standing under the entire patch under the door occludes almost everything").
+            //
+            // Only reached when the strict pass found NOTHING, so every door that works today
+            // takes the first path and cannot be changed by this. Against the drawbridge's own
+            // measured colliders: the two deck sections pass at ratios 0.20 and 0.25, the housing
+            // (6.19x4.99x1.74) fails at 0.35, and the edge rail (4.94x0.37x0.21) fails because a
+            // rail is thin in TWO axes and its middle extent is nowhere near a block.
+            if (found == null && pending.Count > 0)
+            {
+                for (int i = 0; i < pending.Count; i++)
+                {
+                    Vector3 e = pending[i].Ext;
+                    float big = -1f, mid = -1f, small = float.MaxValue;
+                    for (int k = 0; k < 3; k++)
+                    {
+                        float v = e[k];
+                        if (v > big) { mid = big; big = v; } else if (v > mid) mid = v;
+                        if (v < small) small = v;
+                    }
+                    if (small >= 1.0f) continue;               // genuinely thick: not a plate
+                    if (mid <= 1.0f) continue;                 // a rail, not a plate
+                    if (small >= 0.30f * mid) continue;        // not thin against its own span
+                    if (found == null) found = new List<LeafBox>(4);
+                    found.Add(pending[i].Box);
+                    if (found.Count >= MaxLeaves) break;
+                }
+                if (found != null)
+                    CMMConfig.D($"[CMM] Aperture: {found.Count} chunky plate(s) accepted on the "
+                              + "relative test (nothing passed the thin-plate test)");
+            }
+
             if (found == null) { ReportNoLeaf(bed, cols); return false; }
             boxes = found.ToArray();
             return true;
         }
+
+        private struct PendingLeaf { public LeafBox Box; public Vector3 Ext; }
+
+        private static LeafBox MakeBox(Bounds wb, bool oriented, Vector3 oc, Vector3 oh, Quaternion orot)
+            => new LeafBox
+            {
+                Min = wb.min + Origin.position,
+                Max = wb.max + Origin.position,
+                Oriented = oriented,
+                Center = oc + Origin.position,
+                Half = oh,
+                Rot = orot
+            };
 
         // A DOOR THAT LEARNS NOTHING FALLS BACK TO THE ISOTROPIC LUMP, AND SAYS NOTHING ABOUT IT.
         // The drawbridge does exactly that: 5x6x7 = 210 cells of solid material on both sides of
