@@ -548,6 +548,9 @@ namespace CMM
         // What the last PublishEarCell actually decided. Three separate guesses about why a door
         // would not go directional have now been wrong; the answer is to print the decision.
         internal static string EarCellWhy = "not published yet";
+        // The position the FIELD is working from, as opposed to whatever a caller asks the player
+        // for. They are not always the same and the difference has been most of a block.
+        internal static Vector3 EarPosition => _ear;
 
         // WHICH SIDE OF A DOOR YOU ARE ON IS A QUESTION ABOUT YOUR BODY, NOT YOUR CAMERA.
         //

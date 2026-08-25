@@ -525,6 +525,17 @@ namespace CMM
                 if (!EmitterAudioLayer.TryGetNearestSpeaker(ear, out spk)) return "no speaker in range";
                 var sb = new System.Text.StringBuilder();
                 float dist = Vector3.Distance(ear, spk);
+                // THE SPLIT IS THE ANSWER, AND IT WAS NOT IN HERE. The per-cell `loss` below is the
+                // cell's ISOTROPIC material: for the cell the listener is standing in -- a door
+                // cell, in every report that matters -- what decides what is heard is the
+                // DIRECTIONAL half-voxel split, and that lives in EarCellWhy. It was only ever
+                // logged while a door was mid-swing, so the static poses people actually complain
+                // from ("I am standing in the door and both sides are occluded") had no way to show
+                // it. Also print the field's OWN ear position: this command reads getHeadPosition()
+                // and the field publishes from _ear, and a crouch has been seen to separate them by
+                // most of a block -- which is a different CELL, and so a different answer.
+                sb.Append("field ear ").Append(FieldOcclusion.EarPosition.ToCultureInvariantString())
+                  .Append("\n  ear cell: ").Append(FieldOcclusion.EarCellWhy).Append("\n");
                 sb.Append("ear ").Append(ear.ToCultureInvariantString())
                   .Append("  ->  speaker ").Append(spk.ToCultureInvariantString())
                   .Append("   d=").Append(dist.ToString("0.0"));
