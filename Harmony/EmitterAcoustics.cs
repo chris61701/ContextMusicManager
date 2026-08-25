@@ -1018,16 +1018,52 @@ namespace CMM
         private static Bounds[] ClipBoxes(LeafBox[] boxes, Vector3i cell)
         {
             if (boxes == null || boxes.Length == 0) return null;
-            if (boxes.Length == 1) return ClipToCell(boxes[0].Min, boxes[0].Max, cell);
             List<Bounds> outb = null;
             for (int i = 0; i < boxes.Length; i++)
             {
+                if (boxes[i].Oriented)
+                {
+                    if (outb == null) outb = new List<Bounds>(16);
+                    AppendOrientedClip(boxes[i], cell, outb);
+                    continue;
+                }
                 Bounds[] c = ClipToCell(boxes[i].Min, boxes[i].Max, cell);
                 if (c == null) continue;
                 if (outb == null) outb = new List<Bounds>(boxes.Length);
                 outb.AddRange(c);
             }
-            return outb == null ? null : outb.ToArray();
+            return (outb == null || outb.Count == 0) ? null : outb.ToArray();
+        }
+
+        // A TILTED PLATE IS NOT ITS BOUNDING BOX. The cellar door's leaf is 0.07 thick and lies at
+        // an angle, so its axis-aligned box fills the cell it is in -- and the half-voxel split
+        // then finds "leaf" in BOTH halves of every axis and charges both. Measured in game:
+        //
+        //   cell 488,38,-484  cellarDoorDoubleWood  LEAF measured  split 0.95,0.86,0.64
+        //   published  -X 8.7  -Y 8.7  -Z 20.2   +X 8.7  +Y 8.7  +Z 20.2
+        //
+        // Six faces, symmetric: a door occluding equally in every direction, which is the report
+        // ("occluding speakers on both sides of the door"). The AABB was never the leaf; it was
+        // the smallest box containing a diagonal.
+        //
+        // So follow the tilt. Subdivide the cell and keep the sub-boxes the ORIENTED plate actually
+        // passes through -- a diagonal band, not a solid block. The split then sees material only
+        // where the plate is. One cell per frame, at most 64 SAT tests, and the plate's thinness
+        // means most are rejected on the first axis.
+        private const int OrientedSubdiv = 4;
+        private static void AppendOrientedClip(LeafBox lb, Vector3i cell, List<Bounds> outb)
+        {
+            const float step = 1f / OrientedSubdiv;
+            Vector3 half = new Vector3(step, step, step) * 0.5f;
+            for (int i = 0; i < OrientedSubdiv; i++)
+                for (int j = 0; j < OrientedSubdiv; j++)
+                    for (int k = 0; k < OrientedSubdiv; k++)
+                    {
+                        Vector3 mn = new Vector3(i * step, j * step, k * step);
+                        Vector3 centreWorld = new Vector3(cell.x, cell.y, cell.z) + mn + half;
+                        if (!ObbOverlapsBox(lb, centreWorld, half)) continue;
+                        outb.Add(new Bounds(mn + half, new Vector3(step, step, step)));
+                    }
         }
 
         private static Bounds[] ClipToCell(Vector3 wmin, Vector3 wmax, Vector3i cell)
@@ -1186,9 +1222,11 @@ namespace CMM
         // SAT: axis-aligned unit cell vs oriented box. Both are convex boxes, so 3 cell axes +
         // 3 box axes + 9 cross products decide it.
         private static bool ObbOverlapsCell(LeafBox lb, Vector3i cell)
+            => ObbOverlapsBox(lb, new Vector3(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f),
+                              new Vector3(0.5f, 0.5f, 0.5f));
+
+        private static bool ObbOverlapsBox(LeafBox lb, Vector3 ca, Vector3 ce)
         {
-            Vector3 ca = new Vector3(cell.x + 0.5f, cell.y + 0.5f, cell.z + 0.5f);
-            Vector3 ce = new Vector3(0.5f, 0.5f, 0.5f);
             Vector3 d = lb.Center - ca;
             Vector3[] ax = { lb.Rot * Vector3.right, lb.Rot * Vector3.up, lb.Rot * Vector3.forward };
             float[] he = { lb.Half.x, lb.Half.y, lb.Half.z };
