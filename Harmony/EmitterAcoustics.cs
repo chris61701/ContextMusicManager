@@ -629,8 +629,42 @@ namespace CMM
             if (damageOpenness <= 0f && IsSealDoor(b, bv.type)) return AirtightLoss;
             float loss = SolidLoss(b, bv);
             if (!IsSwingingLeaf(b, bv.type)) return loss;        // furniture: not a door, no cap
+            // SOME DOORS REALLY ARE WALLS. The cap exists so a metal DOOR is not priced as a metal
+            // WALL, and it is right for a hinged leaf you could shoulder through. It is wrong for a
+            // raised drawbridge, which is a slab of timber and iron standing in a gateway: measured
+            // in game, one capped cell published 6.0 dB to a speaker four metres away, through a
+            // barrier a player can see is massive ("the bridge between me and the speaker did not
+            // occlude"). The cellar door, uncapped by comparison, publishes 20.2 dB.
+            if (IsFullLossDoor(b, bv.type)) return loss;
             float cap = CMMConfig.WorldEmitterDoorMaxLoss;
             return (cap > 0f && loss > cap) ? cap : loss;
+        }
+
+        // ── Doors exempt from the cap (config name-prefix list, same shape as the seal list) ─────
+        private static string _fullLossCfgCache;
+        private static string[] _fullLossPrefixes = System.Array.Empty<string>();
+        private static readonly Dictionary<int, bool> _fullLossTypeCache = new Dictionary<int, bool>();
+        private static bool IsFullLossDoor(Block b, int type)
+        {
+            string cfg = CMMConfig.WorldEmitterDoorFullLossTypes ?? "";
+            if (!ReferenceEquals(cfg, _fullLossCfgCache))   // config hot-reload swaps the instance
+            {
+                _fullLossCfgCache = cfg;
+                _fullLossPrefixes = cfg.Split(new[] { ',' }, System.StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < _fullLossPrefixes.Length; i++)
+                    _fullLossPrefixes[i] = _fullLossPrefixes[i].Trim();
+                _fullLossTypeCache.Clear();
+            }
+            if (_fullLossPrefixes.Length == 0) return false;
+            if (_fullLossTypeCache.TryGetValue(type, out bool f)) return f;
+            string bn = b != null ? (b.GetBlockName() ?? "") : "";
+            f = false;
+            for (int i = 0; i < _fullLossPrefixes.Length && !f; i++)
+                f = _fullLossPrefixes[i].Length > 0
+                 && bn.IndexOf(_fullLossPrefixes[i], System.StringComparison.OrdinalIgnoreCase) >= 0;
+            _fullLossTypeCache[type] = f;
+            if (f) CMMConfig.D($"[CMM] FullLossDoor {bn} = uncapped (priced as its own material)");
+            return f;
         }
 
         // ── Seal-class doors (airtight when shut+undamaged; config name-prefix list) ─────────────────

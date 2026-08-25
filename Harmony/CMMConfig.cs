@@ -664,6 +664,9 @@ namespace CMM
         // wood door's 20.2, and clearly not a wall's 52. Wood doors are 0.5 and so are unaffected.
         // 0 disables the cap.
         public static float  WorldEmitterDoorMaxLoss  = 0.6f;
+        // Doors that are structurally WALLS, exempt from WorldEmitterDoorMaxLoss and priced as
+        // their own material. Case-insensitive substring of the block name, comma separated.
+        public static string WorldEmitterDoorFullLossTypes = "drawBridge";
         // ReverbRangeMult (≥1): the reverb's audible reach as a multiple of the dry Range. The reflections
         // carry FARTHER than the direct sound, so a brief step past the dry range in a connected cave doesn't
         // drop the tail (it fades continuously past the dry edge instead of cutting at it). Safe in the open:

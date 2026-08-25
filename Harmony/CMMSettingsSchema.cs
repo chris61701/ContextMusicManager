@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 25;
+        internal const int CurrentSchema = 26;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -667,6 +667,12 @@ one threshold made a close-tuned door slow to come alive on open. Hot-reloads.")
 Format: ""match=full/fullOpen/closed;match=..."" — match is a case-insensitive SUBSTRING of the
 block name (""garageDoor"" catches wooden/steel/iron variants), ""-"" inherits the global, first match
 wins. Default slows the garage/roll-up OPEN ramp to suit their long lift. Hot-reloads."),
+            Cmt(@"Doors that are structurally WALLS rather than hinged leaves, exempt from
+WorldEmitterDoorMaxLoss and charged their own material in full. A raised drawbridge
+is a slab of timber and iron standing in a gateway; capped, it published 6 dB to a
+speaker four metres away. Case-insensitive SUBSTRING of the block name, comma
+separated. Leave empty to cap every door."),
+            Str("WorldEmitterDoorFullLossTypes",      "CMMConfig.WorldEmitterDoorFullLossTypes",     @"drawBridge", since: 26),
             Str("WorldEmitterDoorGapOverrides",        "CMMConfig.WorldEmitterDoorGapOverrides",      @"drawBridge=6/5/1;garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1",
               since: 1, changedIn: 25, was: @"garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1"),
             Cmt(@"DoorSealTypes: comma-separated block-name prefixes of doors that are AIRTIGHT when fully shut and
