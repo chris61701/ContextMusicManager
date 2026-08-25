@@ -919,6 +919,30 @@ namespace CMM
             // door's colliders when a player is standing in the doorway (AnimatorDoorState's
             // obstacle check), which is how you can stand exactly where the leaf is. We want the
             // geometry, not whether it is currently pushing anybody.
+            // A LEAF BELONGS TO ITS OWN DOOR. includeInactive is deliberate -- the game disables a
+            // shut door's colliders while a player stands in the doorway -- but an INACTIVE child
+            // has never been posed, so its bounds sit at the local origin and describe nothing.
+            // The strict test rejected those as fat by luck; the relative test accepted them, and
+            // a drawbridge at (485,38,-490) recorded its aperture at world (-2.5,1.3,0.0) and
+            // therefore occluded nothing anywhere ("against the deck while the bridge is up, no
+            // occlusion from either side"). Distance from the block is the check that catches it
+            // whichever test let it through.
+            Vector3 anchor;
+            float leash;
+            try
+            {
+                anchor = new Vector3(bed.pos.x, bed.pos.y, bed.pos.z);
+                Block ab = Block.list[bed.blockValue.type];
+                int dim = 1;
+                if (ab != null && ab.isMultiBlock && ab.multiBlockPos != null)
+                {
+                    Vector3i d = ab.multiBlockPos.dim;
+                    dim = Mathf.Max(d.x, Mathf.Max(d.y, d.z));
+                }
+                leash = dim + 3f;             // the whole multiblock, plus swing room
+            }
+            catch { anchor = Vector3.zero; leash = float.MaxValue; }
+
             List<LeafBox> found = null;
             var pending = new List<PendingLeaf>(8);   // rejects, for the relative second pass
             for (int i = 0; i < cols.Length; i++)
@@ -945,6 +969,12 @@ namespace CMM
                     orot = bc.transform.rotation;
                     oriented = true;
                 }
+                // Off its own door ⇒ an unposed inactive child, not this door's leaf.
+                Vector3 wc = wb.center + Origin.position;
+                if (leash < float.MaxValue
+                    && (Mathf.Abs(wc.x - anchor.x) > leash
+                     || Mathf.Abs(wc.y - anchor.y) > leash
+                     || Mathf.Abs(wc.z - anchor.z) > leash)) continue;
                 if (!IsLeafShaped(oe)) { pending.Add(new PendingLeaf { Box = MakeBox(wb, oriented, oc, oh, orot), Ext = oe }); continue; }
                 if (found == null) found = new List<LeafBox>(4);
                 found.Add(new LeafBox
