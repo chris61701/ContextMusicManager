@@ -148,13 +148,15 @@ namespace CMM
         // That last stage is the one no existing counter covered, and it is the one with a rate
         // cap in it (WorldEmitterOcclusionFadeRate), so it can legitimately dominate.
         private static float _watchAt = -999f, _watchFieldAt = -999f, _watchTickAt = -999f;
+        private static int _watchTicks;   // emitter ticks that ran before the gain moved
         private static Vector3i _watchPos;
 
         private static void Arm(Vector3i pos)
         {
             // Only one in flight: a wall goes up as many changes and the first is the one to time.
             if (_watchAt > 0f && CmmClock.Now - _watchAt < 5f) return;
-            _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchTickAt = -999f; _watchPos = pos;
+            _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchTickAt = -999f;
+            _watchTicks = 0; _watchPos = pos;
         }
 
         // A BLOCK IS AS URGENT AS A DOOR. The flood is gated to one every FloodSec (0.30 s)
@@ -184,8 +186,12 @@ namespace CMM
         // number and one of those two has to be where it went.
         internal static void NoteTickEntered()
         {
-            if (_watchAt > 0f && _watchFieldAt >= _watchAt && _watchTickAt < _watchFieldAt)
-                _watchTickAt = CmmClock.Now;
+            if (_watchAt <= 0f || _watchFieldAt < _watchAt) return;
+            // COUNT them, do not just stamp the first. 110 ms inside one tick would be a frame
+            // hitch nobody has reported; several ticks each declining to publish would look
+            // identical from outside and is the far likelier shape.
+            _watchTicks++;
+            if (_watchTickAt < _watchFieldAt) _watchTickAt = CmmClock.Now;
         }
 
         // Called from the emitter publish with the change in the value the mixer is handed.
@@ -199,7 +205,7 @@ namespace CMM
             float inTick   = _watchTickAt >= _watchFieldAt ? (now - _watchTickAt) * 1000f : -1f;
             CMMConfig.D($"[CMM] block -> sound: {total:0} ms "
                       + $"(field {(_watchFieldAt - _watchAt) * 1000f:0} "
-                      + $"+ tickwait {tickWait:0} + intick {inTick:0}, "
+                      + $"+ tickwait {tickWait:0} + intick {inTick:0} over {_watchTicks} tick(s), "
                       + $"gain moved {delta:0.00} at {_watchPos})");
             _watchAt = -999f;
         }
