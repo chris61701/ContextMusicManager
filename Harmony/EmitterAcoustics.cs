@@ -1537,6 +1537,18 @@ namespace CMM
         // position so the door reads right until its clip actually begins (opening ⇒ shut 0; closing ⇒ open 1).
         // Mark every mid-swing door's cells for re-reading. Called per frame while any door is
         // animating; the field then follows the leaf rather than snapping when it stops.
+        // ASK FOR THE DOOR, AND ONLY FOR THE DOOR. cmm_fld_dirty grows the box by (radius + step)
+        // on every side, so a request costs (2r+3)^3 cells at step 1, and it stays in the PRIORITY
+        // LANE only while that is <= FLD_PRIO_CAP (8192). Past it the call is treated as a sweep,
+        // which rewinds the cursor -- the exact full-window wait the lane was built to avoid.
+        //
+        // r = 3 + maxDim overshot: a 7x4 roll-up asked for r=10, i.e. 23^3 = 12167 cells, fell out
+        // of the lane, and its door latency went 45-108 ms -> 73-151 ms. Measured, in the log, one
+        // build after the change. r = maxDim already covers the whole multiblock (the box spans
+        // +/-(r+1) from the parent), and 8 is the largest radius that still fits: 19^3 = 6859.
+        private const int MinDoorInvalidateRadius = 3;
+        private const int MaxDoorInvalidateRadius = 8;
+
         // A CONSTANT RADIUS CANNOT COVER A DOOR THAT IS BIGGER THAN IT. Radius 3 around the parent
         // covers a single door and a cellar door, and does NOT cover a 5x4 roll-up, a 7x4, or a
         // 5x6x7 drawbridge -- whose outer cells were then only re-read by the next FULL sweep,
@@ -1548,15 +1560,15 @@ namespace CMM
 #if GV_V3
             foreach (var kv in _doors)
             {
-                int r = 3;
+                int r = MinDoorInvalidateRadius;
                 DoorAnim da = kv.Value;
                 Block db = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
                 if (db != null && db.isMultiBlock && db.multiBlockPos != null)
                 {
                     Vector3i dim = db.multiBlockPos.dim;
-                    r = 3 + Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z));
+                    r = Mathf.Max(r, Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z)));
                 }
-                FieldOcclusion.Invalidate(kv.Key, r);
+                FieldOcclusion.Invalidate(kv.Key, Mathf.Min(r, MaxDoorInvalidateRadius));
             }
 #endif
         }
