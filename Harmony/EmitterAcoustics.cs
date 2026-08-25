@@ -1547,7 +1547,44 @@ namespace CMM
         // build after the change. r = maxDim already covers the whole multiblock (the box spans
         // +/-(r+1) from the parent), and 8 is the largest radius that still fits: 19^3 = 6859.
         private const int MinDoorInvalidateRadius = 3;
-        private const int MaxDoorInvalidateRadius = 8;
+        // Past this many cells a leaf is not worth walking one call at a time; fall back to the box.
+        private const int MaxLeafInvalidateCells = 96;
+
+        // Mark just the cells the door's leaves occupy. cmm_fld_dirty has no per-cell entry point,
+        // so radius 0 is the smallest request there is (it still grows by one step on each side,
+        // which is wanted -- the half-voxel split reads neighbours). Returns false when no aperture
+        // has been learned yet, which is the caller's signal to fall back to the box.
+        private static bool InvalidateLeafCells(Vector3i parent, int type)
+        {
+#if GV_V3
+            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Boxes == null || p.Type != type)
+                return false;
+            int total = 0;
+            for (int i = 0; i < p.Boxes.Length; i++)
+            {
+                LeafBox lb = p.Boxes[i];
+                int x0 = Mathf.FloorToInt(lb.Min.x), x1 = Mathf.FloorToInt(lb.Max.x);
+                int y0 = Mathf.FloorToInt(lb.Min.y), y1 = Mathf.FloorToInt(lb.Max.y);
+                int z0 = Mathf.FloorToInt(lb.Min.z), z1 = Mathf.FloorToInt(lb.Max.z);
+                total += (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
+                if (total > MaxLeafInvalidateCells) return false;
+            }
+            for (int i = 0; i < p.Boxes.Length; i++)
+            {
+                LeafBox lb = p.Boxes[i];
+                int x0 = Mathf.FloorToInt(lb.Min.x), x1 = Mathf.FloorToInt(lb.Max.x);
+                int y0 = Mathf.FloorToInt(lb.Min.y), y1 = Mathf.FloorToInt(lb.Max.y);
+                int z0 = Mathf.FloorToInt(lb.Min.z), z1 = Mathf.FloorToInt(lb.Max.z);
+                for (int x = x0; x <= x1; x++)
+                    for (int y = y0; y <= y1; y++)
+                        for (int z = z0; z <= z1; z++)
+                            FieldOcclusion.Invalidate(new Vector3i(x, y, z), 0);
+            }
+            return true;
+#else
+            return false;
+#endif
+        }
 
         // A CONSTANT RADIUS CANNOT COVER A DOOR THAT IS BIGGER THAN IT. Radius 3 around the parent
         // covers a single door and a cellar door, and does NOT cover a 5x4 roll-up, a 7x4, or a
@@ -1560,15 +1597,16 @@ namespace CMM
 #if GV_V3
             foreach (var kv in _doors)
             {
-                int r = MinDoorInvalidateRadius;
-                DoorAnim da = kv.Value;
-                Block db = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
-                if (db != null && db.isMultiBlock && db.multiBlockPos != null)
-                {
-                    Vector3i dim = db.multiBlockPos.dim;
-                    r = Mathf.Max(r, Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z)));
-                }
-                FieldOcclusion.Invalidate(kv.Key, Mathf.Min(r, MaxDoorInvalidateRadius));
+                // ASK FOR THE LEAF, NOT FOR A BOX ROUND THE WHOLE DOOR. Only the leaf's material
+                // changes as it swings, and it is a thin plate: tens of cells. A box big enough to
+                // contain a 7x4 door is 6859 cells -- and this runs EVERY FRAME, against a reader
+                // that manages roughly 1700 a frame. FieldOcclusion's own near-ring note calls
+                // 6859 cells "about a third of the budget" for a 0.4s refresh; asking for it 30
+                // times a second is four times oversubscribed, and that note also records what
+                // oversubscription does: "six percent is enough to never converge", with a shut
+                // door publishing its correct value on two ticks out of seventy.
+                if (InvalidateLeafCells(kv.Key, kv.Value.Type)) continue;
+                FieldOcclusion.Invalidate(kv.Key, MinDoorInvalidateRadius);   // no aperture yet
             }
 #endif
         }
@@ -1608,6 +1646,9 @@ namespace CMM
                     _doors[p.Pos] = new DoorAnim { Opening = p.Opening, Openness = p.Opening ? 0f : 1f, Started = false, Ticks = 0,
                                                    Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed,
                                                    Type = p.Type, StartedAt = Time.realtimeSinceStartup };
+                    // The latch's invalidation, moved here so it happens on the main thread.
+                    if (!InvalidateLeafCells(p.Pos, p.Type))
+                        FieldOcclusion.Invalidate(p.Pos, MinDoorInvalidateRadius);
                 }
                 _doorPending.Clear();
                 _doorPendingCount = 0;

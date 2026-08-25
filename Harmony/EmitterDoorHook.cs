@@ -55,11 +55,16 @@ namespace CMM
                 // (Tier 2) and the occlusion tracks the physical swing, then poke the emitter to refresh now.
                 EmitterAcoustics.RegisterAnimatingDoor(door.blockValue.type, door.ToWorldPos(), _open);
                 EmitterAudioLayer.NotifyAcousticChange();
-                // Tell the FIELD here, at the latch. It used to hear about a door only from
-                // AcousticBridge.WatchDoors, which fires on the FALLING edge -- after the swing
-                // has finished, a second or so later -- so the model could not even begin to
-                // respond until the door had stopped moving. This is the earliest signal there is.
-                FieldOcclusion.Invalidate(door.ToWorldPos(), 3);
+                // THE FIELD IS TOLD BY THE DRAIN, NOT FROM HERE. This postfix can run off the main
+                // thread -- the line above says so, and it is why RegisterAnimatingDoor only
+                // enqueues -- but cmm_fld_dirty mutates the arena's dirty flags, pending count,
+                // priority ring and cursor with NO lock, concurrently with cmm_fld_next_pending
+                // and cmm_fld_set_cell on the main thread. Ring corruption there looks exactly
+                // like "the door sometimes doesn't land", which is a report we have.
+                //
+                // Nothing is lost by deferring: the only consumer of a dirty flag is the world
+                // READER, which is main-thread and cannot run between this postfix and the drain.
+                // Marking early buys no earlier read.
             }
             catch { /* a door must never break because of us */ }
         }
