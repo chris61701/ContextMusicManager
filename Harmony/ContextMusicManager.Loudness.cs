@@ -140,12 +140,29 @@ namespace CMM
                         vid, LoudnessStore.GetTrackGain(file), TrackGainSettleSeconds);
         }
 
+        private static bool _gameAudioMuted;
+        private static float _gameAudioMutedFrom = 1f;
+
         private IEnumerator VolumeSyncLoop()
         {
             while (true)
             {
                 yield return new WaitForSeconds(0.1f);
                 if (_functionallyDormant) continue;   // A/B dormant arm
+                // Testing aid: silence the GAME while CMM keeps playing. AudioListener governs
+                // Unity's audio only -- our emitters and music go out through the native mixer,
+                // which never reaches the listener -- so this cleanly separates the two. Restores
+                // whatever the game had when switched back off, rather than assuming 1.0.
+                if (CMMConfig.DebugMuteGameAudio)
+                {
+                    if (!_gameAudioMuted) { _gameAudioMutedFrom = AudioListener.volume; _gameAudioMuted = true; }
+                    if (AudioListener.volume != 0f) AudioListener.volume = 0f;
+                }
+                else if (_gameAudioMuted)
+                {
+                    _gameAudioMuted = false;
+                    AudioListener.volume = _gameAudioMutedFrom;
+                }
                 // Keep the native mixer's master volume in lock-step with the game's
                 // music slider. Sampled here on the main thread (GamePrefs is not safe
                 // to read from the mixer thread) and stored in a volatile the mixer reads.

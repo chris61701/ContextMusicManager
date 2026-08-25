@@ -964,9 +964,48 @@ namespace CMM
             // drawbridge (multiblock 5x6x7 = 210 cells) came to charge every cell on BOTH sides of
             // itself. If nothing here looks like a leaf we do not know where the door is, and
             // saying so lets the caller keep its own per-cell answer.
-            if (found == null) return false;
+            if (found == null) { ReportNoLeaf(bed, cols); return false; }
             boxes = found.ToArray();
             return true;
+        }
+
+        // A DOOR THAT LEARNS NOTHING FALLS BACK TO THE ISOTROPIC LUMP, AND SAYS NOTHING ABOUT IT.
+        // The drawbridge does exactly that: 5x6x7 = 210 cells of solid material on both sides of
+        // itself and under the span, and the only evidence in the log was the ABSENCE of an
+        // "Aperture learned" line -- which is not evidence anyone reads. Print the collider
+        // inventory that failed the shape test so the next question is answerable instead of
+        // guessable. Once per block type; a door that never learns would otherwise say it every
+        // cell, every frame.
+        private static readonly HashSet<int> _noLeafReported = new HashSet<int>();
+        private static void ReportNoLeaf(BlockEntityData bed, Collider[] cols)
+        {
+            if (!CMMConfig.DebugLogging || bed == null) return;
+            int type = 0;
+            try { type = bed.blockValue.type; } catch { }
+            if (!_noLeafReported.Add(type)) return;
+            Block b = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[CMM] Aperture NOT learned ").Append(b != null ? b.GetBlockName() : "?")
+              .Append(" - ").Append(cols.Length).Append(" collider(s), none leaf-shaped:");
+            int shown = 0;
+            for (int i = 0; i < cols.Length && shown < 6; i++)
+            {
+                if (cols[i] == null) continue;
+                Bounds wb = cols[i].bounds;
+                if (wb.size.sqrMagnitude <= 1e-6f) continue;
+                Vector3 oe = wb.size; string kind = cols[i].GetType().Name;
+                BoxCollider bc = cols[i] as BoxCollider;
+                if (bc != null)
+                {
+                    Vector3 ls = bc.transform.lossyScale;
+                    oe = new Vector3(Mathf.Abs(bc.size.x * ls.x), Mathf.Abs(bc.size.y * ls.y),
+                                     Mathf.Abs(bc.size.z * ls.z));
+                }
+                sb.Append($" [{kind} {oe.x:0.00}x{oe.y:0.00}x{oe.z:0.00}]");
+                shown++;
+            }
+            sb.Append("  (need thinnest < 0.25 and middle > 0.50)");
+            CMMConfig.D(sb.ToString());
         }
 
         private static bool MeasureLeafWorld(World world, Vector3i parent, out Vector3 wmin, out Vector3 wmax)

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 22;
+        internal const int CurrentSchema = 23;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -320,6 +320,12 @@ hidden -> compact -> expanded; expanded adds whether the playing track started
 pre-normalized and the next-track readiness of every other context. Purely a
 readout: it never influences playback. The reset key re-arms the HUD's memory
 and GC gauge from a clean baseline, and only does anything while it is open."),
+            Cmt(@"TESTING AID. true = silence the GAME's own audio (footsteps, door slams, ambience,
+vanilla music) while CMM's world-emitter speakers and its own music keep playing.
+They render through CMM's native mixer, which does not pass through the game's
+listener, so this separates the two. Intended for judging emitter behaviour by ear
+against loud nearby sound effects; leave it false for normal play."),
+            B("DebugMuteGameAudio",                   "CMMConfig.DebugMuteGameAudio",                false, since: 23),
             E("KeyContextHud",                       "CMMConfig.KeyContextHud",                     @"Keypad8", since: 22),
             E("KeyContextHudReset",                  "CMMConfig.KeyContextHudReset",                @"Keypad9", since: 22),
             Cmt(@"Personal radio dial (in-game only, works on EVERY game version): the two keys step

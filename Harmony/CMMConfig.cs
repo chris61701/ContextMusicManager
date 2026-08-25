@@ -447,6 +447,12 @@ namespace CMM
         // act, and the sound should land with the latch. The limiter is for the model changing its
         // mind, not for the world changing.
         public static float  WorldEmitterFieldSlewDb   = 40f;
+        // TESTING ONLY. Mutes the GAME's own audio (Unity's AudioListener) while leaving CMM's
+        // emitters and music running, because those go out through the native mixer and never
+        // touch the listener. A door slam is far louder than a speaker heard through a wall, so
+        // judging door timing by ear is otherwise judging the slam. Hot-reloadable: flip it in
+        // settings.xml with the game running.
+        public static bool   DebugMuteGameAudio       = false;
         // HOW MUCH OF A DOOR'S SWING THE SOUND WAITS FOR, 0..1. The occlusion tracks a door's
         // ANIMATION -- a leaf half open is half a door -- which is physically right and reads as
         // lag, because the seal only completes when the leaf stops moving, half a second to a
