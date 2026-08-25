@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 26;
+        internal const int CurrentSchema = 27;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -673,6 +673,17 @@ is a slab of timber and iron standing in a gateway; capped, it published 6 dB to
 speaker four metres away. Case-insensitive SUBSTRING of the block name, comma
 separated. Leave empty to cap every door."),
             Str("WorldEmitterDoorFullLossTypes",      "CMMConfig.WorldEmitterDoorFullLossTypes",     @"drawBridge", since: 26),
+            Cmt(@"How much of a door's SWING the sound transition should occupy.
+  0 = the thresholds above are metres of opening. A 0.70 m gap is acoustically open
+      whatever the door's width, which is true -- but it means a wide door finishes
+      what you can hear at 35% of its animation (measured, cellar door) or 14% on a
+      five-metre gate, while a one-metre door takes 70%. The doors then disagree
+      with each other and with what you are watching.
+  1 = the thresholds are a fraction of the travel, so every door completes at the
+      same point in its swing regardless of size.
+Between the two, a wide door is stretched without pretending its aperture does not
+matter. Try 0.5 and adjust by ear. Hot-reloadable; 0 is exactly the old behaviour."),
+            F("WorldEmitterDoorSpanExponent",         "CMMConfig.WorldEmitterDoorSpanExponent",      0f, since: 27),
             Str("WorldEmitterDoorGapOverrides",        "CMMConfig.WorldEmitterDoorGapOverrides",      @"drawBridge=6/5/1;garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1",
               since: 1, changedIn: 25, was: @"garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1"),
             Cmt(@"DoorSealTypes: comma-separated block-name prefixes of doors that are AIRTIGHT when fully shut and

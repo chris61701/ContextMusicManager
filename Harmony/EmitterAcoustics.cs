@@ -1647,10 +1647,48 @@ namespace CMM
         // registration), so one door type can be retuned without touching the rest.
         private static float DoorAcoustic(float physical, ref DoorAnim da)
         {
-            float gap  = physical * Mathf.Max(1f, da.Span);
+            float span = Mathf.Max(1f, da.Span);
             float full = Mathf.Max(0.05f, da.Opening ? da.GapFullOpen : da.GapFull);
             float shut = Mathf.Clamp(da.GapClosed, 0f, full - 0.01f);
-            return Mathf.Clamp01((gap - shut) / (full - shut));
+
+            // ── HOW MUCH OF THE SWING THE EAR SHOULD SPEND LISTENING ────────────────────────
+            // The metres model is not wrong: a 0.70 m opening IS acoustically open whatever the
+            // door's total width. What it does not account for is that the player is WATCHING the
+            // door, and a wide one finishes its transition while the animation still has most of
+            // its travel left. Measured on the cellar door opening, len 2.60 s:
+            //
+            //   t=0.29s  nt=0.10  gap=0.19m  open=0.077     the ear starts
+            //   t=0.93s  nt=0.35  gap=0.71m  open=1.000     the ear is done
+            //   ...then 1.7 s of visible swing with nothing left to hear.
+            //
+            // Because the threshold is fixed in metres, the fraction of the swing it lands at is
+            // 0.70/span: 70% on a one-metre door, 35% here, 14% on a five-metre gate. Small doors
+            // track their animation, big ones are over before they look it, and that spread IS
+            // the inconsistency between door types.
+            //
+            // The exponent slides between the two readings rather than picking one:
+            //   0 = the threshold is metres of gap        (exactly the behaviour above)
+            //   1 = the threshold is a fraction of travel (every door completes at the same %)
+            // Anything between stretches a wide door's transition without pretending its aperture
+            // does not matter. Tune it by ear -- it is one knob and it is hot-reloadable.
+            //
+            // At 0 this returns the old arithmetic untouched, deliberately: the doors that were
+            // signed off by ear were signed off under it, and an opt-in knob cannot regress them.
+            float e = Mathf.Clamp01(CMMConfig.WorldEmitterDoorSpanExponent);
+            if (e <= 0f)
+            {
+                float gap = physical * span;
+                return Mathf.Clamp01((gap - shut) / (full - shut));
+            }
+
+            // Work in fractions of the swing. k = span^e scales the metre threshold toward one.
+            float k = Mathf.Pow(span, e);
+            // Clamped below 1 so a door ALWAYS finishes its transition inside its own animation:
+            // an override in metres (garageDoor's 2 m, drawBridge's 5 m) scaled up can otherwise
+            // exceed the travel available and the door would never read open at all.
+            float fFull = Mathf.Clamp(full * k / span, 0.02f, 0.95f);
+            float fShut = Mathf.Clamp(shut * k / span, 0f, fFull - 0.01f);
+            return Mathf.Clamp01((physical - fShut) / (fFull - fShut));
         }
 
         // ── Per-door-type gap overrides ──────────────────────────────────────────────────────────────

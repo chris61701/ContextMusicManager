@@ -630,6 +630,10 @@ namespace CMM
         public static float  WorldEmitterDoorGapFull     = 1.25f;  // CLOSING: fade spans GapClosed→GapFull metres of opening
         public static float  WorldEmitterDoorGapFullOpen = 0.7f;   // OPENING: full sound this early (sound floods a real gap)
         public static float  WorldEmitterDoorGapClosed   = 0.15f;
+        // 0 = door thresholds are metres of gap (the shipped behaviour); 1 = they are a fraction
+        // of the swing, so every door completes at the same point in its animation. Between the
+        // two, a wide door's transition is stretched without ignoring its aperture. Tune by ear.
+        public static float  WorldEmitterDoorSpanExponent = 0f;
         // Per-door-type overrides of the three gap thresholds: "match=full/fullOpen/closed;match=…" —
         // match is a case-insensitive SUBSTRING of the block name ("garageDoor" catches wooden/steel/
         // iron variants), "-" inherits the global, first match wins. Lets one door type be retuned
