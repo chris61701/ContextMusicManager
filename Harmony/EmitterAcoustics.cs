@@ -527,12 +527,20 @@ namespace CMM
                 if (IsSwingingLeaf(b, bv.type))
                 {
                     Vector3i mcell = new Vector3i(x, y, z);
+                    Vector3i tpar = bv.ischild && b.multiBlockPos != null
+                                  ? b.multiBlockPos.GetParentPos(mcell, bv) : mcell;
+                    // TOGGLED THIS INSTANT, NOT YET DRAINED: answer from the PRE-toggle pose, not
+                    // from the latch that has already flipped. See TryGetPendingDoor.
+                    if (TryGetPendingDoor(tpar, out bool tOpening))
+                    {
+                        if (tOpening)                                  // was shut, leaf has not moved
+                            return DoorShutLoss(b, bv, DamageOpenness(b, bv, world, x, y, z));
+                        return 0f;                                     // was open, still open
+                    }
                     if (!b.IsMovementBlocked(world, mcell, bv, BlockFace.None)) return 0f;
                     // SHUT, and every cell of the multiblock says so because the predicate answers
                     // for the PARENT. Only the cells the leaf actually occupies are material.
-                    Vector3i mpar = bv.ischild && b.multiBlockPos != null
-                                  ? b.multiBlockPos.GetParentPos(mcell, bv) : mcell;
-                    if (LeafKnownAbsentFromCell(mcell, mpar, bv.type)) return 0f;
+                    if (LeafKnownAbsentFromCell(mcell, tpar, bv.type)) return 0f;
                 }
                 float mdmg = DamageOpenness(b, bv, world, x, y, z);
                 return DoorShutLoss(b, bv, mdmg) * (1f - mdmg);
@@ -1361,6 +1369,36 @@ namespace CMM
         private static readonly List<PendingDoor> _doorPending = new List<PendingDoor>();
         private static readonly object _doorLock = new object();
 
+        // ── THE LATCH FLIPS BEFORE WE KNOW THE DOOR MOVED ───────────────────────────────────────
+        // The hook is a POSTFIX on TEFeatureDoor.SetOpen, so by the time it runs isOpen has already
+        // flipped, and the door does not enter _doors until RefreshDoorAnim drains this queue on the
+        // main thread. In that window CellLoss finds nothing in _doors and falls through to the
+        // at-rest branch, whose only source of truth is IsMovementBlocked == !isOpen -- the value
+        // that just flipped and that the leaf has not caught up with yet.
+        //
+        // That is the reported "quickly block a little sound, then not, then starts to dampen as
+        // they close": one or more reads charging a CLOSING door as fully shut, then the drain
+        // landing with Openness = 1 and dropping it to nothing, then the real ramp. The OPENING
+        // case is the same fault mirrored -- the latch says open, the at-rest branch returns air,
+        // and sound floods through a leaf that has not moved.
+        //
+        // The drain already knows the answer: "Openness starts at the PRE-toggle position so the
+        // door reads right until its clip actually begins". The window just never got it. Counter
+        // is volatile so the per-cell fast path costs one read and never takes the lock -- it is
+        // non-zero for a frame or two per toggle.
+        private static volatile int _doorPendingCount;
+        internal static bool TryGetPendingDoor(Vector3i parent, out bool opening)
+        {
+            opening = false;
+            if (_doorPendingCount == 0) return false;
+            lock (_doorLock)
+            {
+                for (int i = _doorPending.Count - 1; i >= 0; i--)   // latest wins
+                    if (_doorPending[i].Pos == parent) { opening = _doorPending[i].Opening; return true; }
+            }
+            return false;
+        }
+
         // The acoustic openness of a mid-swing door is driven by the physical GAP IN METERS, not the
         // fraction of the swing (v29.2). Fractions treated all doors alike, which can't be right at both
         // ends of the size spectrum: a 3 m garage door 25% from shut still has a ~0.75 m opening — a huge
@@ -1468,10 +1506,27 @@ namespace CMM
         // position so the door reads right until its clip actually begins (opening ⇒ shut 0; closing ⇒ open 1).
         // Mark every mid-swing door's cells for re-reading. Called per frame while any door is
         // animating; the field then follows the leaf rather than snapping when it stops.
+        // A CONSTANT RADIUS CANNOT COVER A DOOR THAT IS BIGGER THAN IT. Radius 3 around the parent
+        // covers a single door and a cellar door, and does NOT cover a 5x4 roll-up, a 7x4, or a
+        // 5x6x7 drawbridge -- whose outer cells were then only re-read by the next FULL sweep,
+        // which is seconds away. That is the "giant delay" on the big doors: not the pipeline, just
+        // cells nobody had asked to be refreshed. Ask for the door's own extent plus the same
+        // margin, so every cell the leaf can occupy is in the targeted lane.
         internal static void InvalidateFieldForAnimatingDoors()
         {
 #if GV_V3
-            foreach (var kv in _doors) FieldOcclusion.Invalidate(kv.Key, 3);
+            foreach (var kv in _doors)
+            {
+                int r = 3;
+                DoorAnim da = kv.Value;
+                Block db = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
+                if (db != null && db.isMultiBlock && db.multiBlockPos != null)
+                {
+                    Vector3i dim = db.multiBlockPos.dim;
+                    r = 3 + Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z));
+                }
+                FieldOcclusion.Invalidate(kv.Key, r);
+            }
 #endif
         }
 
@@ -1479,7 +1534,10 @@ namespace CMM
         {
             // May be off-thread — just enqueue; RefreshDoorAnim applies it on the main thread.
             lock (_doorLock)
+            {
                 _doorPending.Add(new PendingDoor { Type = blockType, Pos = parentPos, Opening = opening });
+                _doorPendingCount = _doorPending.Count;
+            }
         }
 
         // Refresh every tracked door from its Animator; drop the ones that settled / can't be read. Runs at
@@ -1509,6 +1567,7 @@ namespace CMM
                                                    Type = p.Type, StartedAt = Time.realtimeSinceStartup };
                 }
                 _doorPending.Clear();
+                _doorPendingCount = 0;
             }
             if (_doors.Count == 0) return;
             _doorPrune.Clear();
