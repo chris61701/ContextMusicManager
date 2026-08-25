@@ -708,7 +708,10 @@ namespace CMM
         {
             float nowF = CmmClock.Now;
             bool door = EmitterAudioLayer.DoorMovingOrJustMoved;
-            if (!door && nowF - _lastFloodAt < FloodSec) return;
+            // A block just placed or destroyed is the same class of event as a door toggle: the
+            // player did it on purpose and is listening for the result. Both jump the cadence.
+            bool urgent = door || EmitterBlockHook.RecentChange;
+            if (!urgent && nowF - _lastFloodAt < FloodSec) return;
             _lastFloodAt = nowF;
             // `door` is read once here and reused below, so a swing ending mid-flood cannot make
             // this tick forget it was the one somebody was waiting on.

@@ -157,6 +157,14 @@ namespace CMM
             _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchPos = pos;
         }
 
+        // A BLOCK IS AS URGENT AS A DOOR. The flood is gated to one every FloodSec (0.30 s)
+        // unless a door is mid-swing, and a block change set no such flag -- so it waited out the
+        // cadence. Measured: the field stage of a block change ran ~230 ms against a door's ~115,
+        // and a uniform 0-300 ms wait plus a ~65 ms flood predicts exactly that. The player did
+        // the same thing in both cases, deliberately, and is listening for the result.
+        private const float UrgentWindow = 1.0f;
+        internal static bool RecentChange => _watchAt > 0f && CmmClock.Now - _watchAt < UrgentWindow;
+
         // Called when a flood completes; the first one after a change is the one carrying it.
         internal static void NoteFieldPublished()
         {
