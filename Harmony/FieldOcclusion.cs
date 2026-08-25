@@ -144,6 +144,7 @@ namespace CMM
         // The door is not READ until the set empties, and only a flood that STARTED after that
         // moment can be the one carrying it.
         private static readonly HashSet<Vector3i> _doorAwait = new HashSet<Vector3i>();
+        private static readonly List<Vector3i> _blockDrain = new List<Vector3i>();
         private static float _doorDirtiedAt = -999f, _doorReadAt = -999f;
         internal static float DoorReadAt => _doorReadAt;
         internal static float DoorDirtiedAt => _doorDirtiedAt;
@@ -320,6 +321,19 @@ namespace CMM
                 Invalidate(new Vector3i(Mathf.FloorToInt(_ear.x), Mathf.FloorToInt(_ear.y),
                                         Mathf.FloorToInt(_ear.z)), _range);
                 FarRefreshes++;
+            }
+
+            // Blocks placed or destroyed since the last frame, dirtied here on the MAIN thread
+            // (cmm_fld_dirty has no lock; the hook only enqueues). Before this existed a block
+            // change waited for the 0.4 s near ring -- a poll, not a response.
+            if (EmitterBlockHook.HasPending)
+            {
+                _blockDrain.Clear();
+                EmitterBlockHook.Drain(_blockDrain);
+                for (int i = 0; i < _blockDrain.Count; i++)
+                    Invalidate(_blockDrain[i], EmitterBlockHook.Radius);
+                if (_blockDrain.Count > 0)
+                    CMMConfig.D($"[CMM] field: {_blockDrain.Count} block change(s) invalidated");
             }
 
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();

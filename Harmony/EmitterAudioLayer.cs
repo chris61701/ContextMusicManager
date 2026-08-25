@@ -1042,11 +1042,11 @@ namespace CMM
                     // Truly gone (grace expired) → release. A track that ENDS while unseen just
                     // releases quietly — the schedule rejoins mid-song when the speakers return.
                     if (CmmClock.Now - st.LastSeenAt > UnseenGrace)
-                        StopStation(st);
+                        StopStation(st, "unseen past grace");
                     else if (CmmMixer.Instance != null && !CmmMixer.Instance.TryGetState(st.VoiceId, out _, out _, out _))
                     {
                         st.VoiceId = 0; st.VoiceTrack = null;
-                        StopStation(st);   // frees the slot; no restart while unseen
+                        StopStation(st, "voice gone while unseen");   // frees the slot; no restart while unseen
                     }
                     continue;
                 }
@@ -1055,7 +1055,7 @@ namespace CMM
                 {
                     CMMConfig.D($"[CMM] Station '{st.Name}': airing track gone ({Path.GetFileName(st.VoiceTrack)}) — hot-swapping (interrupt).");
                     string ended = st.VoiceTrack;
-                    StopVoice(st);
+                    StopVoice(st, "airing track deleted");
                     AdvanceStation(st, ended);
                     StartStation(st, player, AdvanceFade, fresh: false);
                     continue;
@@ -1105,7 +1105,7 @@ namespace CMM
                     }
                     if (far == null || cand.NearestDist + StealMargin >= far.NearestDist) return;
                     CMMConfig.D($"[CMM] Station '{cand.Name}' ({cand.NearestDist:0.0}m) steals the slot of '{far.Name}' ({far.NearestDist:0.0}m).");
-                    StopStation(far);
+                    StopStation(far, "slot taken by a nearer station");
                 }
                 StartStation(cand, player, StartFade(), fresh: !HasActiveVoice);
                 if (cand.VoiceId == 0) return;   // start failed (no playable track) — don't spin
@@ -1141,7 +1141,7 @@ namespace CMM
             {
                 Station st = _stations[i];
                 if (st.VoiceId == 0) continue;
-                if (st.NearestDist > audibleR) { StopStation(st); continue; }
+                if (st.NearestDist > audibleR) { StopStation(st, $"out of range {st.NearestDist:0.0}m > {audibleR:0.0}m"); continue; }
                 StopVoice(st);
                 st.OnAir = null;   // force a fresh paper resolve in StartStation
                 StartStation(st, player, AdvanceFade, fresh: false);
@@ -1276,9 +1276,9 @@ namespace CMM
         }
 
         // Release a station's voice AND its slot.
-        private static void StopStation(Station st)
+        private static void StopStation(Station st, string why = "?")
         {
-            StopVoice(st);
+            StopVoice(st, why);
             if (st.Slot >= 0)
             {
                 if (_slotOwner[st.Slot] == st) _slotOwner[st.Slot] = null;
@@ -1287,18 +1287,23 @@ namespace CMM
         }
 
         // Release just the native voice (keep the slot — used by the interrupt+restart path).
-        private static void StopVoice(Station st)
+        // WHY IT STOPPED, NOT JUST THAT IT DID. A restart is a decoder open plus a seek to the
+        // broadcast position -- real disk work, which is why players report the radios "seeming
+        // like they are loading" after being briefly cut off. Whether that is correct depends
+        // entirely on what stopped them, and "Station 'X' stopped." said nothing. Same lesson as
+        // the door stopwatch: a diagnostic that omits the deciding term settles no argument.
+        private static void StopVoice(Station st, string why = "?")
         {
             if (st.VoiceId == 0) return;
             CmmMixer.Instance?.RemoveEmitter(st.VoiceId, StopFade);
-            CMMConfig.D($"[CMM] Station '{st.Name}' stopped.");
+            CMMConfig.D($"[CMM] Station '{st.Name}' stopped ({why}).");
             st.VoiceId = 0;
             st.VoiceTrack = null;
         }
 
         private static void StopAll()
         {
-            for (int i = 0; i < _stations.Count; i++) StopStation(_stations[i]);
+            for (int i = 0; i < _stations.Count; i++) StopStation(_stations[i], "stop all");
             _occlPending = false;   // abandon any in-flight flood (its finish targets dead voices)
         }
 

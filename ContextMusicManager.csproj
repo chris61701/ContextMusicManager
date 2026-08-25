@@ -226,6 +226,7 @@
     <Compile Include="Harmony\EmitterAcousticsSweep.cs" />
     <Compile Include="Harmony\EmitterFieldCache.cs" />
     <Compile Include="Harmony\EmitterDoorHook.cs" />
+    <Compile Include="Harmony\EmitterBlockHook.cs" />
     <Compile Include="Harmony\ContextMusicManager.Keybinds.cs" />
     <Compile Include="Harmony\HarmonyPatches.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
