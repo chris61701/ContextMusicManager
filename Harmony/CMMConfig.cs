@@ -637,7 +637,7 @@ namespace CMM
         // NOTE the big POI roll-up is named rollUpDoor5x4*, NOT *garageDoor* — both entries are needed.
         // Defaults are the hand-tuned in-game values (2026-07-08): heavy hatches fade through the whole
         // close but snap alive on open; the vault hatch swings light because its slam is the seal below.
-        public static string WorldEmitterDoorGapOverrides = "garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1";
+        public static string WorldEmitterDoorGapOverrides = "drawBridge=6/5/1;garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1";
         // DoorSealTypes: comma-separated block-name PREFIXES of doors that are AIRTIGHT when fully shut
         // and undamaged — a closed vault door is a pressure seal, not a metal panel's worth of muffle.
         // Sealed doors read as gate-class solid (true silence via the hard-stop), and because the seal
