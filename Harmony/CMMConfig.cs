@@ -635,6 +635,10 @@ namespace CMM
         // closet door or a seven-metre roll-up. Raise it if doors sound open before they look
         // open; lower it if you can see through a door and still hear nothing.
         public static float  WorldEmitterDoorHalfArea    = 0.35f;
+        // ...and the same thing as a FRACTION of the door's own area. The knee is the LARGER of
+        // the two, so small doors keep the absolute one and big doors get one in proportion to the
+        // hole they are. Without this a 7 m roll-up is half-open after five centimetres of lift.
+        public static float  WorldEmitterDoorHalfAreaFrac = 0.15f;
         // How abrupt the transition is. 1 = the plain soft knee. Above 1 the door holds its muffle
         // and then lets go all at once; below 1 smears the transition across more of the swing.
         public static float  WorldEmitterDoorKnee        = 1f;

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 32;
+        internal const int CurrentSchema = 33;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -673,6 +673,13 @@ real openings differed by four metres. Raise it if doors sound open before they 
 lower it if you can see daylight through a door and still hear nothing. Moves every door
 together, which is the point -- there is no longer a per-door override table."),
             F("WorldEmitterDoorHalfArea",             "CMMConfig.WorldEmitterDoorHalfArea",          0.35f, since: 32),
+            Cmt(@"The same half-way point as a FRACTION of the door's own area. The knee used is whichever of
+the two is LARGER, so a closet door keeps the absolute one above and a seven-metre roll-up gets
+one in proportion to the hole it is. Without it a big door is half open after a few centimetres
+of lift -- it goes bright the instant it moves, and closing it holds wide open until the last
+sliver and then cuts hard. Raise it to make BIG doors more gradual and hold their muffle longer;
+the crossover sits near a 2.3 m2 doorway at the default, so small doors are untouched."),
+            F("WorldEmitterDoorHalfAreaFrac",         "CMMConfig.WorldEmitterDoorHalfAreaFrac",      0.15f, since: 33),
             Cmt(@"How abrupt a door's transition is. 1 = the plain soft knee. Above 1 the door holds its
 muffle and then lets go all at once; below 1 smears the transition across more of the swing."),
             F("WorldEmitterDoorKnee",                 "CMMConfig.WorldEmitterDoorKnee",              1f, since: 32),

@@ -1271,6 +1271,10 @@ namespace CMM
         // disabled the clip-time fallback for all of them. See LeafOpenArea for what replaced it.
 
         private static readonly Dictionary<Vector3i, LeafPlane> _leafPlanes = new Dictionary<Vector3i, LeafPlane>();
+        // Doors whose aperture provably cannot be read, so the clip clock is used from the FIRST
+        // tick of every later swing. Learned per INSTANCE, never per type -- a type-wide latch is
+        // the exact mistake the old learned range made. Costs one swing, once, per door.
+        private static readonly Dictionary<Vector3i, bool> _deadMeasure = new Dictionary<Vector3i, bool>();
 
         // A LEAF IS THIN. That one gate does a surprising amount of work: it gives a hatch its
         // horizontal aperture by measurement rather than by a name list (a hatch is thin on Y, and
@@ -1304,7 +1308,7 @@ namespace CMM
             // Bounded: doors are per-world and this only ever holds ones the listener has met, but
             // a long session across many POIs should not accumulate for ever. Dropping the lot is
             // fine — each one is re-learned the next time its door is stood in or opened.
-            if (_leafPlanes.Count > 1024) _leafPlanes.Clear();
+            if (_leafPlanes.Count > 1024) { _leafPlanes.Clear(); _deadMeasure.Clear(); }
             bool isNew = !_leafPlanes.ContainsKey(parent);
             Transform owner = lbs[0].Owner;
             LeafPlane lp = new LeafPlane
@@ -2070,7 +2074,21 @@ namespace CMM
         // the geometry feeding it was.
         private static float DoorAcoustic(float aOpen, float aDoor, float travel)
         {
-            float a50 = Mathf.Max(0.01f, CMMConfig.WorldEmitterDoorHalfArea);
+            // THE KNEE HAS TO KNOW HOW BIG THE DOOR IS. A purely absolute knee put the
+            // half-way point of a seven-metre roll-up at 0.35 m2 -- which over 7 m of width is
+            // FIVE CENTIMETRES of lift. So it went bright the instant it moved ("opening is too
+            // bright too quickly") and, closing, held ~100% open until the last five centimetres
+            // and then fell off a cliff ("goes from 0 to 100 when it is close to closing, nothing
+            // gradual about the last metre, it just cuts too hard").
+            //
+            // A purely relative knee is the fraction model that failed six times. So take the
+            // larger of the two: small doors keep the absolute knee that makes half a metre of
+            // daylight sound like half a metre of daylight, and big doors get one proportional to
+            // the hole they are, which is the only thing that can make the last metre of a 7 m
+            // door gradual. At the default 0.15 the crossover sits around a 2.3 m2 doorway --
+            // between a closet door and a garage door, which is where the two complaints divide.
+            float a50 = Mathf.Max(0.01f, Mathf.Max(CMMConfig.WorldEmitterDoorHalfArea,
+                                                   CMMConfig.WorldEmitterDoorHalfAreaFrac * Mathf.Max(0f, aDoor)));
             float knee = Mathf.Clamp(CMMConfig.WorldEmitterDoorKnee, 0.2f, 5f);
             float x = Mathf.Max(0f, aOpen) / a50;
             float u = (Mathf.Abs(knee - 1f) < 0.01f) ? x : Mathf.Pow(x, knee);
@@ -2320,7 +2338,7 @@ namespace CMM
             // ---- HOW OPEN IS IT, IN SQUARE METRES ----------------------------------------
             float travel, aOpen, aDoor;
             int src;
-            if (CMMConfig.WorldEmitterDoorMeasureLeaf && !da.DeadMeasure
+            if (CMMConfig.WorldEmitterDoorMeasureLeaf && !da.DeadMeasure && !_deadMeasure.ContainsKey(parent)
                 && LeafOpenArea(parent, da.Type, da.Src == 3 ? 0 : da.Src, out aOpen, out aDoor, out src)
                 && aDoor > 0.01f)
             {
@@ -2329,13 +2347,14 @@ namespace CMM
                 // Watch the spread. A real swing moves the aperture; a dead reading does not.
                 if (da.MaxOpen <= 0f && da.MinOpen <= 0f) { da.MinOpen = aOpen; da.MaxOpen = aOpen; }
                 else { if (aOpen < da.MinOpen) da.MinOpen = aOpen; if (aOpen > da.MaxOpen) da.MaxOpen = aOpen; }
-                if (nt > 0.5f && (da.MaxOpen - da.MinOpen) < 0.05f * aDoor)
+                if (da.Ticks > 3 && nt > 0.15f && (da.MaxOpen - da.MinOpen) < 0.05f * aDoor)
                 {
                     // Half the clip has played and the doorway has not changed by a twentieth.
                     // Whatever this rig does, we are not reading it. Say so once, out loud, and
                     // hand the rest of the swing to the clip clock rather than publishing a
                     // sealed door that is visibly open.
                     da.DeadMeasure = true;
+                    _deadMeasure[parent] = true;   // and never pay for it again on this door
                     if (CMMConfig.DebugLogging)
                     {
                         Block bb = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
