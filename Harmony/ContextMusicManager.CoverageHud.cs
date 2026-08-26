@@ -159,13 +159,16 @@ namespace CMM
                 foreach (string dir in MusicRoots.DirsFor(ctx))
                 {
                     if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
-                    string[] files = Directory.GetFiles(dir);
+                    // subfolders="true" recurses and ignores .m3u, per the source contract.
+                    string[] files = Directory.GetFiles(dir, "*",
+                        ctx.IncludeSubfolders ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
                     for (int i = 0; i < files.Length; i++)
                     {
                         string ext = Path.GetExtension(files[i]);
                         if (AudioDecoder.IsSupported(files[i])) total++;
-                        else if (string.Equals(ext, ".m3u", StringComparison.OrdinalIgnoreCase)
-                              || string.Equals(ext, ".m3u8", StringComparison.OrdinalIgnoreCase))
+                        else if (!ctx.IncludeSubfolders
+                              && (string.Equals(ext, ".m3u", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(ext, ".m3u8", StringComparison.OrdinalIgnoreCase)))
                         {
                             string[] tr = PlaylistSource.ReadTracks(files[i]);
                             if (tr != null) total += tr.Length;
@@ -233,6 +236,7 @@ namespace CMM
         {
             _covScratch.Clear();
             int nPop = 0, nCov = 0, nStk = 0, nVan = 0, nSha = 0, nDead = 0;
+            long nTracks = 0;   // every playable file the panel can see, contexts + stations
 
             // Snapshot the table first. It can be swapped wholesale by the config watcher
             // on another thread, and a half-enumerated dictionary is the one failure this
@@ -317,6 +321,7 @@ namespace CMM
                     tail = sb.ToString();
                 }
 
+                nTracks += n;
                 _covScratch.Add(new CovRow
                 {
                     Gap = gap,
@@ -337,6 +342,10 @@ namespace CMM
                     int n = s.Order != null ? s.Order.Length : 0;
                     bool live = n > 0;
                     if (!live) nDead++;
+                    // Stations sit UNDER the Radio context but their tracks are not counted in
+                    // it -- Radio's own source folder holds the station subfolders, not audio --
+                    // so adding them here totals rather than double counts.
+                    nTracks += n;
                     _covScratch.Add(new CovRow
                     {
                         Gap = !live,
@@ -348,7 +357,7 @@ namespace CMM
             }
             catch { /* catalogue rebuilding under us — next pass picks it up */ }
 
-            _covSummary = nPop + " with tracks \u2022 " + nCov + " with fallback \u2022 " + nStk
+            _covSummary = nTracks.ToString("N0") + " tracks \u2022 " + nPop + " with tracks \u2022 " + nCov + " with fallback \u2022 " + nStk
                         + " to stack \u2022 " + nVan + " to vanilla"
                         + (nSha > 0 ? " \u2022 " + nSha + " never play" : "")
                         + (nDead > 0 ? " \u2022 " + nDead + " dead air" : "");
