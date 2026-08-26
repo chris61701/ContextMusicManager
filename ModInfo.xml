@@ -22,13 +22,13 @@
   <Author value="Velasha"/>
   <Description value="Plays custom music based on context."/>
   <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
-  <Version value="1.0.5"/>
+  <Version value="1.0.5RC2"/>
   <!-- Alpha 20 only reads this nested block (see header). Keep Version matched above. -->
   <ModInfo xmlns="urn:cmm-legacy">
     <Name value="ContextMusicManager"/>
     <Description value="Plays custom music based on context."/>
     <Author value="Velasha"/>
-    <Version value="1.0.5"/>
+    <Version value="1.0.5RC2"/>
     <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
   </ModInfo>
 </xml>

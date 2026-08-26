@@ -10,6 +10,19 @@ they now behave, rather than as a history of how they got there.
 
 ### Added
 
+- **A coverage panel** (`Alt+Numpad8`, cycling off → everything → gaps only → off). One row per
+  context: whether it has music of its own, how many tracks, and — when it has none — the
+  fallback chain it walks, with the context that will actually be heard marked at the end of it.
+  Radio stations are listed individually, since a station with no tracks is dead air rather than
+  something a fallback covers. Everything is read live from disk, so editing `contexts.xml` or
+  `context.lua`, dropping files into a folder or deleting a station all show up within a second
+  without reopening the panel — and it works on the main menu, before a world is loaded.
+- **A centre-screen announcement** when combat/tension music is muted or unmuted. That toggle
+  changes what the game will play at all, so it no longer reports itself in the same corner box
+  used for small confirmations. Wide text across the middle, held briefly and then faded out;
+  both timings are settings (`BannerHoldSeconds`, `BannerFadeSeconds`).
+- **7 Days to Die 3.2.0 b9 support.** The mod compiles and ships against 3.2 with no source
+  changes — nothing in the game API it touches moved between 3.1 and 3.2.
 - **The Context HUD now ships.** An on-screen readout of what is playing and *why* — press
   Alt+Numpad8 to cycle it hidden -> compact -> expanded. It lists the context you are
   hearing, the context tokens the decision script resolved (in red where a context has no
@@ -135,6 +148,14 @@ they now behave, rather than as a history of how they got there.
 
 ### Changed
 
+- **Debug keybinds moved** to make room for the coverage panel: `Alt+Numpad8` is now coverage,
+  the context HUD moves to `Alt+Numpad9`, and its GC re-arm to `Alt+Numpad6`. Existing settings
+  files are migrated. Both panels now read their keys from your configuration and show them in
+  their own header, so a rebind is reflected on screen instead of the header naming stale keys.
+- **`WorldEmitterFieldDetourDb` now defaults to 3** (was 1.5). This is the cost of sound taking
+  the long way around rather than through a wall, and 3 is the value the acoustics were actually
+  tuned against — 1.5 leaked under a raised drawbridge. Existing configs on the old default are
+  migrated; a value you set yourself is left alone.
 - **A big library now sounds like a big library: every track plays before any track repeats.**
   `RandomNoRepeat` — the default track order — has always been weaker than its name suggests.
   It excluded exactly one track, the one just playing, so on a 200-track folder a song could
@@ -223,6 +244,23 @@ they now behave, rather than as a history of how they got there.
 
 ### Fixed
 
+- **Occlusion changes arrived late, and by a different amount on every door.** The smoothing at
+  the very bottom of the audio chain used a coefficient applied per audio buffer rather than per
+  second, so its real time constant was ~330 ms on a 10 ms audio device and ~660 ms on a 20 ms
+  one — nobody had chosen either number, they fell out of the buffer size. It was also
+  *adaptive*: it sped up only for large jumps, so it ran three to seven times faster on a closing
+  door than an opening one. The result was a lag that varied with the door, with how fast it
+  swung, and with where you were standing, which no fixed compensation could ever cancel. It is
+  now one time constant in seconds (`WorldEmitterOcclusionSlewMs`, default 50), the same for
+  every door and every listening position, and the door model's lead is set to the measured
+  pipeline delay rather than a guess at it.
+- **Door timing was rebuilt around what a doorway actually opens.** A door's sound now follows
+  the measured open area of its doorway in square metres rather than a fraction of its animation,
+  so a garage door and a closet door behave consistently without a per-door table. The aperture is
+  measured once at the shut pose, and a shut door reads as sealed by construction rather than by a
+  tolerance.
+- **The muffle arrived after the level.** Tone and level are now slewed on the same time constant,
+  so an occlusion change lands as one event instead of two.
 - **Installing the mod on a dedicated server no longer freezes joining players.** CMM is
   client-side only, but server admins sometimes install it server-side anyway — and the full
   client stack (patches, coroutines, audio init) used to start up on the headless server,
