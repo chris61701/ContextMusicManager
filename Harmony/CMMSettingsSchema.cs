@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 29;
+        internal const int CurrentSchema = 30;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -664,6 +664,15 @@ Because the lead is divided by each door's own swing length, a fast door gets a
 large correction and a slow one a small one, which is the difference that made
 doors of different speeds impossible to reconcile by threshold alone.
 Raise it if doors still sound late; lower it if they now sound early. 0 disables."),
+            Cmt(@"true = a door's openness is read from how far its LEAF has actually turned;
+false = from how far through the animation CLIP it is, which is what it has always
+been. Clip time is linear, but an animator curve eases in and out, holds, and can
+overshoot and bounce before settling -- so at half the clip an eased door may be a
+tenth or nine tenths open, and the number driving the sound does not describe the
+door at all. Doors with plain linear swings are unaffected either way.
+Each door type learns its own range on the way through, and any door whose leaf
+cannot be read falls back to clip time, so nothing can behave worse than before."),
+            B("WorldEmitterDoorUseLeafAngle",         "CMMConfig.WorldEmitterDoorUseLeafAngle",      true, since: 30),
             F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            180f, since: 29),
             F("WorldEmitterDoorGapFull",             "CMMConfig.WorldEmitterDoorGapFull",           1.25f),
             Cmt(@"GapFullOpen: the OPENING direction's full-sound threshold (metres of gap). Kept separate from

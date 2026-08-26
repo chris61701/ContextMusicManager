@@ -631,6 +631,11 @@ namespace CMM
         // the pipeline's own delay (geometry read + flood + emitter tick + glide). 0 disables it.
         public static float  WorldEmitterDoorLeadMs      = 180f;
 
+        // true = read a door's openness from how far its LEAF has actually rotated, instead of how
+        // far through the animation CLIP it is. Clip time is linear; an eased or bouncing animation
+        // is not. Falls back to clip time on any door whose leaf cannot be read.
+        public static bool   WorldEmitterDoorUseLeafAngle = true;
+
         // ALL THREE ARE FRACTIONS OF THE SWING (0-1), not metres. See DoorAcoustic.
         public static float  WorldEmitterDoorGapFull     = 0.60f;  // CLOSING: fade begins once the door is this far open
         public static float  WorldEmitterDoorGapFullOpen = 0.45f;  // OPENING: fully open to the ear at this much travel

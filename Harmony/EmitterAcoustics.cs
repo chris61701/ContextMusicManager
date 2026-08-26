@@ -915,6 +915,7 @@ namespace CMM
             public bool Oriented;           // Center/Half/Rot below describe the real plate
             public Vector3 Center, Half;
             public Quaternion Rot;
+            public Transform Owner;         // the animated child; null once the prefab is recycled
         }
 
         internal static bool MeasureLeafWorld(BlockEntityData bed, out Vector3 wmin, out Vector3 wmax)
@@ -1012,7 +1013,7 @@ namespace CMM
                     && (Mathf.Abs(wc.x - anchor.x) > leash
                      || Mathf.Abs(wc.y - anchor.y) > leash
                      || Mathf.Abs(wc.z - anchor.z) > leash)) continue;
-                if (!IsLeafShaped(oe)) { pending.Add(new PendingLeaf { Box = MakeBox(wb, oriented, oc, oh, orot), Ext = oe }); continue; }
+                if (!IsLeafShaped(oe)) { pending.Add(new PendingLeaf { Box = MakeBox(wb, oriented, oc, oh, orot, cols[i].transform), Ext = oe }); continue; }
                 if (found == null) found = new List<LeafBox>(4);
                 found.Add(new LeafBox
                 {
@@ -1021,7 +1022,8 @@ namespace CMM
                     Oriented = oriented,
                     Center = oc + Origin.position,
                     Half = oh,
-                    Rot = orot
+                    Rot = orot,
+                    Owner = cols[i].transform
                 });
                 if (found.Count >= MaxLeaves) break;
             }
@@ -1075,7 +1077,7 @@ namespace CMM
 
         private struct PendingLeaf { public LeafBox Box; public Vector3 Ext; }
 
-        private static LeafBox MakeBox(Bounds wb, bool oriented, Vector3 oc, Vector3 oh, Quaternion orot)
+        private static LeafBox MakeBox(Bounds wb, bool oriented, Vector3 oc, Vector3 oh, Quaternion orot, Transform owner)
             => new LeafBox
             {
                 Min = wb.min + Origin.position,
@@ -1083,7 +1085,8 @@ namespace CMM
                 Oriented = oriented,
                 Center = oc + Origin.position,
                 Half = oh,
-                Rot = orot
+                Rot = orot,
+                Owner = owner
             };
 
         // A DOOR THAT LEARNS NOTHING FALLS BACK TO THE ISOTROPIC LUMP, AND SAYS NOTHING ABOUT IT.
@@ -1223,7 +1226,42 @@ namespace CMM
         // So a door with no remembered plane gets NO plane. Falling through to the isotropic lump
         // is blunt, but it is the same in every direction; a guessed plane is confidently wrong in
         // one, and one of the two rooms is always the one you are listening to.
-        private struct LeafPlane { public int Type; public LeafBox[] Boxes; }
+        private struct LeafPlane
+        {
+            public int Type; public LeafBox[] Boxes;
+            public Transform Owner;         // the animated child at the SHUT pose
+            public Quaternion ShutRot;      // its local rotation there
+        }
+
+        // ── THE LEAF'S REAL MOTION, NOT THE CLIP'S CLOCK ────────────────────────────────────
+        // Openness has always come from Animator.normalizedTime -- how far through the CLIP the
+        // animation is, which is linear in time. The leaf's actual travel is not: an animator
+        // curve eases in, eases out, holds, and on a cellar door overshoots and bounces before it
+        // settles. At 50% of the clip a linear door is half open and an eased one may be a tenth
+        // or nine tenths, so the number driving the sound is simply wrong -- and no threshold and
+        // no lead can correct an input that does not describe the door.
+        //
+        // That shows up exactly where it was reported: "no graduation, its animation is a jarring
+        // one" (roll-up 3x3) and "occlusion doesn't kick in until the animation is complete, and
+        // it bounces and buckles before it settles" (cellar door). Every door with a plain linear
+        // swing was already fine.
+        //
+        // The COLLIDERS are blanked mid-swing -- that is documented and true -- but the TRANSFORM
+        // keeps moving, because the door is visibly moving. So follow its rotation from the shut
+        // pose. The travel is normalised by the largest angle that door type has been seen to
+        // reach, learned on the way through; until that is known the clip clock is used, so a
+        // door type behaves exactly as before on its first swing and can never be made worse.
+        private static readonly Dictionary<int, float> _doorMaxAngle = new Dictionary<int, float>();
+
+        // Angle travelled from the shut pose, or -1 when it cannot be read.
+        private static float LeafTravelAngle(Vector3i parent, int type)
+        {
+            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Type != type) return -1f;
+            Transform o = p.Owner;
+            if (o == null) return -1f;                  // prefab recycled, or never captured
+            try { return Quaternion.Angle(p.ShutRot, o.localRotation); }
+            catch { return -1f; }
+        }
         private static readonly Dictionary<Vector3i, LeafPlane> _leafPlanes = new Dictionary<Vector3i, LeafPlane>();
 
         // A LEAF IS THIN. That one gate does a surprising amount of work: it gives a hatch its
@@ -1260,7 +1298,12 @@ namespace CMM
             // fine — each one is re-learned the next time its door is stood in or opened.
             if (_leafPlanes.Count > 1024) _leafPlanes.Clear();
             bool isNew = !_leafPlanes.ContainsKey(parent);
-            _leafPlanes[parent] = new LeafPlane { Type = type, Boxes = lbs };
+            Transform owner = lbs[0].Owner;
+            _leafPlanes[parent] = new LeafPlane
+            {
+                Type = type, Boxes = lbs, Owner = owner,
+                ShutRot = owner != null ? owner.localRotation : Quaternion.identity
+            };
             if (isNew && CMMConfig.DebugLogging)
             {
                 LeafBox l0 = lbs[0];
@@ -1986,6 +2029,36 @@ namespace CMM
             if (lead > 0f && swingLen > 0.05f)
                 t = Mathf.Clamp01(t + lead / swingLen);
 
+            // ── PREFER THE LEAF'S REAL TRAVEL OVER THE CLIP CLOCK ───────────────────────────
+            // See LeafTravelAngle. The clip clock is linear; the leaf is not, and on the two doors
+            // still reported wrong it is dramatically not. Learn the largest angle this type
+            // reaches and read travel as a fraction of it. The lead still applies, projected onto
+            // the same axis by the same clip fraction, because the pipeline delay is unchanged.
+            //
+            // Falls back silently whenever the angle cannot be read or the type's range is not yet
+            // known, which is every door's FIRST swing -- so nothing that behaves today can be
+            // made worse by this, only later swings improved.
+            if (CMMConfig.WorldEmitterDoorUseLeafAngle)
+            {
+                float ang = LeafTravelAngle(parent, da.Type);
+                if (ang >= 0f)
+                {
+                    float best;
+                    _doorMaxAngle.TryGetValue(da.Type, out best);
+                    if (ang > best) { best = ang; _doorMaxAngle[da.Type] = best; }
+                    // Needs a real range before it can mean anything: a door barely off its stop
+                    // has an angle, not a fraction.
+                    if (best > 5f)
+                    {
+                        float travel = Mathf.Clamp01(ang / best);
+                        // The lead, expressed in this door's own clip, carried onto the angle axis.
+                        if (lead > 0f && swingLen > 0.05f)
+                            travel = Mathf.Clamp01(travel + lead / swingLen);
+                        t = da.Opening ? travel : 1f - travel;
+                    }
+                }
+            }
+
             float physical = da.Opening ? t : 1f - t;
             da.Openness = DoorAcoustic(physical, ref da);
             // Mute a hair BEFORE the leaf finishes closing — its end-of-swing bounce shouldn't still be
@@ -2001,7 +2074,10 @@ namespace CMM
             if (CMMConfig.DebugLogging)
             {
                 Block dbb = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
+                float dbgAng = LeafTravelAngle(parent, da.Type);
+                float dbgMax; _doorMaxAngle.TryGetValue(da.Type, out dbgMax);
                 CMMConfig.D($"[CMM] DoorTrace {(da.Opening ? "OPEN " : "CLOSE")} {(dbb != null ? dbb.GetBlockName() : "?")} " +
+                            $"ang={dbgAng:0.0}/{dbgMax:0.0} " +
                             $"t={Time.realtimeSinceStartup - da.StartedAt:0.000}s nt={t:0.000} len={swingLen:0.00}s " +
                             $"span={da.Span:0.##}m gap={physical * Mathf.Max(1f, da.Span):0.00}m " +
                             $"thresh={(da.Opening ? da.GapFullOpen : da.GapFull):0.00}/{da.GapClosed:0.00} open={da.Openness:0.000} " +
