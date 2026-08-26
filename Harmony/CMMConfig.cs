@@ -627,13 +627,10 @@ namespace CMM
         // hand-width crack. DoorGapFull = opening (m) at/above which sound is acoustically fully open;
         // DoorGapClosed = opening (m) at/below which it's fully shut (a sliver of crack is ignored —
         // heavy doors read as a slam). Both hot-reload.
-        public static float  WorldEmitterDoorGapFull     = 1.25f;  // CLOSING: fade spans GapClosed→GapFull metres of opening
-        public static float  WorldEmitterDoorGapFullOpen = 0.7f;   // OPENING: full sound this early (sound floods a real gap)
-        public static float  WorldEmitterDoorGapClosed   = 0.15f;
-        // 0 = door thresholds are metres of gap (the shipped behaviour); 1 = they are a fraction
-        // of the swing, so every door completes at the same point in its animation. Between the
-        // two, a wide door's transition is stretched without ignoring its aperture. Tune by ear.
-        public static float  WorldEmitterDoorSpanExponent = 0f;
+        // ALL THREE ARE FRACTIONS OF THE SWING (0-1), not metres. See DoorAcoustic.
+        public static float  WorldEmitterDoorGapFull     = 0.60f;  // CLOSING: fade begins once the door is this far open
+        public static float  WorldEmitterDoorGapFullOpen = 0.45f;  // OPENING: fully open to the ear at this much travel
+        public static float  WorldEmitterDoorGapClosed   = 0.08f;  // acoustically shut below this much travel
         // Per-door-type overrides of the three gap thresholds: "match=full/fullOpen/closed;match=…" —
         // match is a case-insensitive SUBSTRING of the block name ("garageDoor" catches wooden/steel/
         // iron variants), "-" inherits the global, first match wins. Lets one door type be retuned
@@ -641,7 +638,7 @@ namespace CMM
         // NOTE the big POI roll-up is named rollUpDoor5x4*, NOT *garageDoor* — both entries are needed.
         // Defaults are the hand-tuned in-game values (2026-07-08): heavy hatches fade through the whole
         // close but snap alive on open; the vault hatch swings light because its slam is the seal below.
-        public static string WorldEmitterDoorGapOverrides = "drawBridge=6/5/1;garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1";
+        public static string WorldEmitterDoorGapOverrides = "drawBridge=0.85/0.70/0.14;garageDoor=0.75/0.50/0.12;rollUp=0.45/0.30/0.08;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10";
         // DoorSealTypes: comma-separated block-name PREFIXES of doors that are AIRTIGHT when fully shut
         // and undamaged — a closed vault door is a pressure seal, not a metal panel's worth of muffle.
         // Sealed doors read as gate-class solid (true silence via the hard-stop), and because the seal
