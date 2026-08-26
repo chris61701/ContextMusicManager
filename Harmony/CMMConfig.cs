@@ -658,7 +658,7 @@ namespace CMM
         // overshoots and settles, the vault hatch runs a 3.1 s clip -- so the sound goes on opening
         // after the doorway is already open. "match=fraction;..." , match is a case-insensitive
         // SUBSTRING of the block name, first match wins, unlisted doors use the whole clip.
-        public static string WorldEmitterDoorSwingSpans = "cellarDoor=0.55;vaultHatch=0.6";
+        public static string WorldEmitterDoorSwingSpans = "cellarDoor=0.4;vaultHatch=0.6;vaultDoor=0.6";
         // false = ignore the measured leaf's MOTION and drive every door's openness from its
         // animation clip. Default false, on evidence: of fourteen door types only the steel garage
         // 4x3 tracks its leaf honestly, and it is the one door whose occlusion reads jittery. The

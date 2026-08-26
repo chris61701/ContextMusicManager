@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 36;
+        internal const int CurrentSchema = 37;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -710,7 +710,8 @@ wins, and any door not listed uses the whole clip (1.0, no change). 0.55 means t
 open a little over half way through the animation and the rest is settle. LOWER it if that door
 still opens too slowly; raise it toward 1 if it now opens before the door has visibly moved. You can
 check the number by eye: watch when the leaf stops, against the length of the animation."),
-            Str("WorldEmitterDoorSwingSpans",         "CMMConfig.WorldEmitterDoorSwingSpans",        @"cellarDoor=0.55;vaultHatch=0.6", since: 36),
+            Str("WorldEmitterDoorSwingSpans",         "CMMConfig.WorldEmitterDoorSwingSpans",        @"cellarDoor=0.4;vaultHatch=0.6;vaultDoor=0.6",
+                since: 36, changedIn: 37, was: @"cellarDoor=0.55;vaultHatch=0.6"),
             F("WorldEmitterDoorClipEase",             "CMMConfig.WorldEmitterDoorClipEase",          1.5f, since: 32),
             Cmt(@"false = ignore the measured leaf entirely and drive every door from its animation clip.
 A kill switch for the open-area measurement, not a tuning knob."),
