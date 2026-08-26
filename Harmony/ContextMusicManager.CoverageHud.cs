@@ -107,13 +107,19 @@ namespace CMM
         private static readonly Dictionary<string, int> _covPlCache =
             new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        // OUR SCAN WINS. Preferring directorySnapshot was wrong in the one situation this
+        // panel is used in: the moment a context has been scanned once its snapshot is
+        // non-null, so moving files in or out of that folder changed nothing on screen until
+        // the engine's own file watch got round to it. The snapshot is only a fallback now,
+        // for a folder our scan could not read at all.
         private static int CovCount(string name)
         {
+            int n;
+            if (_covCount.TryGetValue(name, out n)) return n;
             ContextCache c;
             if (cacheMap.TryGetValue(name, out c) && c != null && c.directorySnapshot != null)
                 return c.directorySnapshot.Length;
-            int n;
-            return _covCount.TryGetValue(name, out n) ? n : 0;
+            return 0;
         }
 
         // One context's playable entries, straight off disk. Playlists are expanded, which is
@@ -135,8 +141,10 @@ namespace CMM
                         {
                             string[] tr = PlaylistSource.ReadTracks(p);
                             cached = tr != null ? tr.Length : 0;
+                            // Keyed by path+mtime, so every edit adds an entry. Editing a
+                            // playlist while the panel is open would grow this without end.
+                            if (_covPlCache.Count > 256) _covPlCache.Clear();
                             _covPlCache[key] = cached;
-                            if (_covPlCache.Count > 256) { }   // bounded by playlist count in practice
                         }
                         total += cached;
                     }
@@ -165,8 +173,8 @@ namespace CMM
 
         private static bool CovPlayable(string name)
         {
-            try { if (ContextHasFiles(name)) return true; } catch { }
-            return CovCount(name) > 0;
+            if (CovCount(name) > 0) return true;
+            try { return ContextHasFiles(name); } catch { return false; }
         }
 
         private static string Pad(string s, int w)
@@ -248,7 +256,16 @@ namespace CMM
                     if (string.Equals(_covCtx[k].Fallback, name, StringComparison.OrdinalIgnoreCase))
                     { kids++; if (CovPlayable(_covCtx[k].Context)) kidsFull++; }
                 }
-                bool allKids = kids > 0 && kidsFull == kids;
+                // A context that hands to the STACK cannot strand anything: when it is skipped,
+                // whatever else is active takes over -- POI indoors, Ambient outdoors. So it is
+                // never worth warning about, which is what Home was doing. Home has exactly one
+                // sub-variant, Home_Night, and it is TIME-gated: filling home/night made
+                // "all sub-variants populated" true while Home carries on playing all day, and
+                // even if it did not, the stack would cover it. The warning only means something
+                // where being skipped actually costs you the music you put in the folder.
+                bool stackFallback = string.Equals(ctx.Fallback, "Stack", StringComparison.OrdinalIgnoreCase)
+                                     || string.IsNullOrEmpty(ctx.Fallback);
+                bool allKids = kids > 0 && kidsFull == kids && !stackFallback;
 
                 string term, termName;
                 CovChain(ctx, _covHops, out term, out termName);
@@ -259,8 +276,7 @@ namespace CMM
                 { glyph = "\u2717"; hex = CovRed; gap = true; nSha++;
                   tail = Col(CovRed, "unreachable \u2014 all sub-variants populated"); }
                 else if (playable)
-                { glyph = "\u25cf"; hex = CovGreen; gap = false; nPop++;
-                  if (allKids) tail = Col(CovAmber, "\u26a0 all sub-variants populated \u2014 check it still applies"); }
+                { glyph = "\u25cf"; hex = CovGreen; gap = false; nPop++; }
                 else if (term == "ctx")
                 { glyph = "\u25cf"; hex = CovBlue; gap = false; nCov++; }
                 else if (term == "stack")
