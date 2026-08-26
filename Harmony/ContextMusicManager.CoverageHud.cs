@@ -55,6 +55,29 @@ namespace CMM
         private const string CovPink  = "#ff8a8a";
         private const string CovDim   = "#7f868e";
 
+
+        // ---- HOTKEY HINTS -------------------------------------------------------------
+        // Both panels advertise their own keys in their header, and both used to do it with
+        // a HARDCODED string. When the bindings moved (coverage took Numpad8, the context HUD
+        // went to Numpad9, the GC re-arm to Numpad6) the labels kept naming the old ones, so
+        // the context HUD sat there claiming "Num9 reset GC" while Num9 was the panel itself.
+        // Read the binding, and colour it so it reads as a control rather than prose.
+        private const string KeyHi = "#8fe3ff";
+
+        internal static string KeyLabel(KeyCode k)
+        {
+            int n = (int)k - (int)KeyCode.Keypad0;
+            string name = (n >= 0 && n <= 9) ? "Num" + n : k.ToString();
+            string mod = "";
+            if (CMMConfig.KeybindRequireCtrl) mod += "Ctrl+";
+            if (CMMConfig.KeybindRequireAlt) mod += "Alt+";
+            return mod + name;
+        }
+
+        // "<key> what it does", with the key highlighted.
+        internal static string KeyHint(KeyCode k, string what) =>
+            Col(KeyHi, KeyLabel(k)) + " " + what;
+
         internal static void CycleCoverageHud()
         {
             _covMode = (_covMode + 1) % 3;
@@ -325,7 +348,7 @@ namespace CMM
             GUI.DrawTexture(new Rect(x, y, w, h), _covBgTex, ScaleMode.StretchToFill);
             GUI.Label(new Rect(x + padX, y + 4f, w - padX * 2f, headerH),
                 "CMM \u2022 Coverage (" + (_covMode == 1 ? "everything" : "gaps only") + ")  \u2022  "
-                + _covSummary + "   [Num8 cycle]", _covHeadStyle);
+                + _covSummary + "   [" + KeyHint(CMMConfig.KeyCoverageHud, "cycle") + "]", _covHeadStyle);
             GUI.Label(new Rect(x + padX, y + 4f + headerH, w - padX * 2f, legendH),
                 Col(CovGreen, "\u25cf has tracks") + "   " + Col(CovBlue, "\u25cf has fallback") + "   "
                 + Col(CovAmber, "\u25b2 vanilla") + "   " + Col(CovViolet, "\u25bc stack") + "   "

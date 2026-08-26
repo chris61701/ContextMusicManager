@@ -362,7 +362,9 @@ namespace CMM
             // Dark translucent backdrop so the text stays legible over any scene.
             GUI.DrawTexture(new Rect(x, y, w, h), _hudBgTex, ScaleMode.StretchToFill);
             GUI.Label(new Rect(x + padX, y + 6f, w - padX * 2f, 22f),
-                $"CMM • Context ({(_hudMode == 2 ? "expanded" : "compact")})  [Num8 cycle • Num9 reset GC]",
+                $"CMM • Context ({(_hudMode == 2 ? "expanded" : "compact")})  " +
+                $"[{KeyHint(CMMConfig.KeyContextHud, "cycle")} • {KeyHint(CMMConfig.KeyContextHudReset, "reset GC")}" +
+                $" • {KeyHint(CMMConfig.KeyCoverageHud, "coverage")}]",
                 _hudHeaderStyle);
             GUI.Label(new Rect(x + padX, y + 6f + headerH, w - padX * 2f, bodyH), bodyContent, _hudBodyStyle);
             _hudBottomY = y + h;   // the coverage panel stacks under this, not over it
@@ -575,7 +577,8 @@ namespace CMM
                 {
                     fontSize = 15,
                     fontStyle = FontStyle.Bold,
-                    alignment = TextAnchor.UpperLeft
+                    alignment = TextAnchor.UpperLeft,
+                    richText = true          // the hotkey hints are coloured
                 };
                 _hudHeaderStyle.normal.textColor = new Color(1f, 0.85f, 0.4f);
             }
