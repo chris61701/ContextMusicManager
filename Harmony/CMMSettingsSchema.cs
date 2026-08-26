@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 30;
+        internal const int CurrentSchema = 32;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -664,45 +664,32 @@ Because the lead is divided by each door's own swing length, a fast door gets a
 large correction and a slow one a small one, which is the difference that made
 doors of different speeds impossible to reconcile by threshold alone.
 Raise it if doors still sound late; lower it if they now sound early. 0 disables."),
-            Cmt(@"true = a door's openness is read from how far its LEAF has actually turned;
-false = from how far through the animation CLIP it is, which is what it has always
-been. Clip time is linear, but an animator curve eases in and out, holds, and can
-overshoot and bounce before settling -- so at half the clip an eased door may be a
-tenth or nine tenths open, and the number driving the sound does not describe the
-door at all. Doors with plain linear swings are unaffected either way.
-Each door type learns its own range on the way through, and any door whose leaf
-cannot be read falls back to clip time, so nothing can behave worse than before."),
-            B("WorldEmitterDoorUseLeafAngle",         "CMMConfig.WorldEmitterDoorUseLeafAngle",      true, since: 30),
-            Cmt(@"Shape of a door's openness ramp. 1 = a straight line, which is what it has always
-been. The loss a door applies is proportional to (1 - openness), so a straight line
-spends most of its decibels in the FIRST half of the travel -- a door half open has
-already given up most of what there was to hear. Above 1 holds the muffle longer and
-releases later; below 1 opens up sooner. Per door type via the 5th override field."),
-            F("WorldEmitterDoorCurve",                "CMMConfig.WorldEmitterDoorCurve",             1f, since: 31),
+            Cmt(@"HOW BIG A HOLE GETS YOU HALFWAY TO HEARING THROUGH, in square metres. This is the one
+number that decides when a door stops muffling, and it is ABSOLUTE, not a fraction of the
+door: half a metre of daylight sounds like half a metre of daylight whether it is a closet
+door or a seven-metre roll-up. That is what replaced the old fraction-of-the-swing
+thresholds, which made a 3 m and a 7 m roll-up behave identically in percent while their
+real openings differed by four metres. Raise it if doors sound open before they look open;
+lower it if you can see daylight through a door and still hear nothing. Moves every door
+together, which is the point -- there is no longer a per-door override table."),
+            F("WorldEmitterDoorHalfArea",             "CMMConfig.WorldEmitterDoorHalfArea",          0.35f, since: 32),
+            Cmt(@"How abrupt a door's transition is. 1 = the plain soft knee. Above 1 the door holds its
+muffle and then lets go all at once; below 1 smears the transition across more of the swing."),
+            F("WorldEmitterDoorKnee",                 "CMMConfig.WorldEmitterDoorKnee",              1f, since: 32),
+            Cmt(@"Only touches doors whose leaf cannot be measured at all -- they read src=clip in the
+DoorTrace log. Every hand-authored door clip in this game eases in, so the clip clock
+OVERSTATES how far the leaf has gone early in the swing; this takes that out. 1 disables it."),
+            F("WorldEmitterDoorClipEase",             "CMMConfig.WorldEmitterDoorClipEase",          1.5f, since: 32),
+            Cmt(@"false = ignore the measured leaf entirely and drive every door from its animation clip.
+A kill switch for the open-area measurement, not a tuning knob."),
+            B("WorldEmitterDoorMeasureLeaf",          "CMMConfig.WorldEmitterDoorMeasureLeaf",       true, since: 32),
             F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            180f, since: 29),
-            F("WorldEmitterDoorGapFull",              "CMMConfig.WorldEmitterDoorGapFull",           0.70f,
-              since: 1, changedIn: 31, was: new object[] { 1.25f, 0.60f }),
-            Cmt(@"GapFullOpen: the OPENING direction's full-sound threshold, as a FRACTION of the swing. Kept separate from
-GapFull because the two directions want different feels: closing is tuned for when the shut lands
-(fade begins early), but sound should FLOOD IN the moment an opening door has a real gap — sharing
-one threshold made a close-tuned door slow to come alive on open. Hot-reloads."),
-            F("WorldEmitterDoorGapFullOpen",          "CMMConfig.WorldEmitterDoorGapFullOpen",       0.50f,
-              since: 1, changedIn: 31, was: new object[] { 0.7f, 0.45f }),
-            F("WorldEmitterDoorGapClosed",            "CMMConfig.WorldEmitterDoorGapClosed",         0.15f,
-              since: 1, changedIn: 31, was: 0.08f),
-            Cmt(@"DoorGapOverrides: per-door-type overrides of the three gap thresholds, without touching the rest.
-Format: ""match=full/fullOpen/closed[/leadMs[/curve]];..."" — the last two are optional and
-inherit the global when omitted. match is a case-insensitive SUBSTRING of the
-block name (""garageDoor"" catches wooden/steel/iron variants), ""-"" inherits the global, first match
-wins. Default slows the garage/roll-up OPEN ramp to suit their long lift. Hot-reloads."),
             Cmt(@"Doors that are structurally WALLS rather than hinged leaves, exempt from
 WorldEmitterDoorMaxLoss and charged their own material in full. A raised drawbridge
 is a slab of timber and iron standing in a gateway; capped, it published 6 dB to a
 speaker four metres away. Case-insensitive SUBSTRING of the block name, comma
 separated. Leave empty to cap every door."),
             Str("WorldEmitterDoorFullLossTypes",      "CMMConfig.WorldEmitterDoorFullLossTypes",     @"drawBridge", since: 26),
-            Str("WorldEmitterDoorGapOverrides",        "CMMConfig.WorldEmitterDoorGapOverrides",      @"drawBridge=0.85/0.70/0.14;garageDoor=0.55/0.35/0.12;rollUp=0.70/0.55/0.08/0/2.0;cellarDoor=0.70/0.40/0.15;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10",
-              since: 1, changedIn: 28, was: new object[] { @"drawBridge=6/5/1;garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1", @"garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1" }),
             Cmt(@"DoorSealTypes: comma-separated block-name prefixes of doors that are AIRTIGHT when fully shut and
 undamaged. A closed vault door is a pressure seal — TRUE SILENCE via the hard-stop, landing while
 the leaf is still visibly closing (the slam) — not just a metal panel's worth of muffle. No volume
@@ -841,12 +828,11 @@ change is the model or the smoothing. Live: cmm field slew <n>"),
 ANIMATION, so the seal only completes when the leaf stops moving - half a second to a
 second after you press. That is physically right and it reads as lag. Measured latch to
 published field is 33-79 ms, so the pipeline is not the delay; this ramp is.
-LEAVE THIS AT 1. Openness is already the output of the per-door GAP model below (physical
-opening in metres, per-type overrides, asymmetric for opening vs closing, tuned by hand),
-and scaling it squashes all of that with one global number.
-If a door seals too late, raise WorldEmitterDoorGapClosed instead - globally, or for that
-one door type via WorldEmitterDoorGapOverrides. 0 here ignores the animation entirely and
-snaps at the latch, which is the only thing this is still good for."),
+LEAVE THIS AT 1. Openness is already the output of the OPEN-AREA model (the measured square
+metres of doorway currently unblocked, through a soft knee), and scaling it squashes all of
+that with one global number.
+If a door seals too late, lower WorldEmitterDoorHalfArea instead. 0 here ignores the
+animation entirely and snaps at the latch, which is the only thing this is still good for."),
             F("WorldEmitterDoorSwingFrac",           "CMMConfig.WorldEmitterDoorSwingFrac",         1f),
             F("WorldEmitterDoorMaxLoss",             "CMMConfig.WorldEmitterDoorMaxLoss",           0.6f, since: 21),
 

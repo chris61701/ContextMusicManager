@@ -1232,53 +1232,44 @@ namespace CMM
             public Transform Owner;         // the animated child at the SHUT pose
             public Quaternion ShutRot;      // its local rotation there
             public Vector3 ShutPos;         // and its local position
+
+            // -- THE APERTURE AS A RECTANGLE, AND THE LEAVES AS THINGS THAT COVER IT --------
+            // Everything below exists to answer one question every tick: how many square metres
+            // of this doorway are currently NOT blocked. See LeafOpenArea.
+            public bool HasAp;
+            public Vector3 ApCentre;        // world blocks
+            public Vector3 ApU, ApV, ApN;   // unit basis; N is the leaf's thin axis
+            public float ApHalfU, ApHalfV;
+            public float ADoor;             // m^2 of the opening, measured once at the shut pose
+            public float AShutOpen;         // ...and what still reads open when it is SHUT: seams
+                                            // between panels, the hinge gap, rasterisation bias.
+                                            // Subtracted from every later reading, so a shut door
+                                            // is zero by construction on every door in the game
+                                            // rather than by a tolerance somebody had to guess.
+            public LeafRel[] Rel;           // one per box: how to re-pose it from its live owner
         }
 
-        // ── THE LEAF'S REAL MOTION, NOT THE CLIP'S CLOCK ────────────────────────────────────
-        // Openness has always come from Animator.normalizedTime -- how far through the CLIP the
-        // animation is, which is linear in time. The leaf's actual travel is not: an animator
-        // curve eases in, eases out, holds, and on a cellar door overshoots and bounces before it
-        // settles. At 50% of the clip a linear door is half open and an eased one may be a tenth
-        // or nine tenths, so the number driving the sound is simply wrong -- and no threshold and
-        // no lead can correct an input that does not describe the door.
-        //
-        // That shows up exactly where it was reported: "no graduation, its animation is a jarring
-        // one" (roll-up 3x3) and "occlusion doesn't kick in until the animation is complete, and
-        // it bounces and buckles before it settles" (cellar door). Every door with a plain linear
-        // swing was already fine.
-        //
-        // The COLLIDERS are blanked mid-swing -- that is documented and true -- but the TRANSFORM
-        // keeps moving, because the door is visibly moving. So follow its rotation from the shut
-        // pose. The travel is normalised by the largest angle that door type has been seen to
-        // reach, learned on the way through; until that is known the clip clock is used, so a
-        // door type behaves exactly as before on its first swing and can never be made worse.
-        // A LEAF DOES NOT ALWAYS TURN. Reading travel as rotation alone was right for the hinged
-        // doors -- the cellar door went from the worst in the set to "perfect" on it -- and wrong
-        // for every door that SLIDES. A garage door's panels and a roll-up's curtain translate;
-        // their rotation is near zero, so the fraction was noise divided by noise and both went
-        // "completely broken" in the same test that fixed the hinged one.
-        //
-        // So measure both and take whichever this door actually does. Each is normalised by its
-        // own learned range, so a hinged door scores on angle, a sliding one on distance, and a
-        // door that does some of each still reaches 1 at full travel.
-        private static readonly Dictionary<int, float> _doorMaxAngle = new Dictionary<int, float>();
-        private static readonly Dictionary<int, float> _doorMaxShift = new Dictionary<int, float>();
-
-        // Travel from the shut pose as (degrees, metres), or (-1, -1) when it cannot be read.
-        private static bool LeafTravel(Vector3i parent, int type, out float ang, out float shift)
+        // A leaf box, expressed so it can be re-posed from whatever is actually animating it.
+        // TWO independent ways, because a door has two ways of being driven and only one of them
+        // shows up in the collider node's own transform. See LeafOpenArea.
+        private struct LeafRel
         {
-            ang = -1f; shift = -1f;
-            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Type != type) return false;
-            Transform o = p.Owner;
-            if (o == null) return false;                // prefab recycled, or never captured
-            try
-            {
-                ang = Quaternion.Angle(p.ShutRot, o.localRotation);
-                shift = Vector3.Distance(p.ShutPos, o.localPosition);
-                return true;
-            }
-            catch { ang = -1f; shift = -1f; return false; }
+            public Transform Owner;         // the collider's node
+            public Vector3 RelPos;          // box centre in Owner space, at the shut pose
+            public Quaternion RelRot;       // box rotation relative to Owner, at the shut pose
+            public Vector3 Half;            // half extents, constant
+            public Vector3 OwnShutPos;      // Owner's own local pose at the shut pose, so "has it
+            public Quaternion OwnShutRot;   // moved at all" is answerable with no learned range
+            public Renderer Rend;           // the visual for this leaf, if one could be found
+            public Vector3 RendShutCtr;     // and its bounds at the shut pose, render space
+            public Vector3 RendShutSize;
         }
+
+        // The per-TYPE learned travel range that used to live here is gone. It was a
+        // process-lifetime ratchet shared by every instance of a door type, and it selected the
+        // measurement AXIS as well as scaling it -- so one bad reading on one door permanently
+        // disabled the clip-time fallback for all of them. See LeafOpenArea for what replaced it.
+
         private static readonly Dictionary<Vector3i, LeafPlane> _leafPlanes = new Dictionary<Vector3i, LeafPlane>();
 
         // A LEAF IS THIN. That one gate does a surprising amount of work: it gives a hatch its
@@ -1316,12 +1307,14 @@ namespace CMM
             if (_leafPlanes.Count > 1024) _leafPlanes.Clear();
             bool isNew = !_leafPlanes.ContainsKey(parent);
             Transform owner = lbs[0].Owner;
-            _leafPlanes[parent] = new LeafPlane
+            LeafPlane lp = new LeafPlane
             {
                 Type = type, Boxes = lbs, Owner = owner,
                 ShutRot = owner != null ? owner.localRotation : Quaternion.identity,
                 ShutPos = owner != null ? owner.localPosition : Vector3.zero
             };
+            BuildAperture(bed, ref lp);
+            _leafPlanes[parent] = lp;
             if (isNew && CMMConfig.DebugLogging)
             {
                 LeafBox l0 = lbs[0];
@@ -1330,11 +1323,307 @@ namespace CMM
                 for (int i = 1; i < lbs.Length; i++)
                 { wmin = Vector3.Min(wmin, lbs[i].Min); wmax = Vector3.Max(wmax, lbs[i].Max); }
                 Block ab = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
+                int nRend = 0;
+                if (lp.Rel != null)
+                    for (int i = 0; i < lp.Rel.Length; i++) if (lp.Rel[i].Rend != null) nRend++;
                 CMMConfig.D($"[CMM] Aperture learned {(ab != null ? ab.GetBlockName() : "?")} at {parent} " +
-                            $"{lbs.Length} leaf/leaves, {(l0.Oriented ? "oriented" : "aabb")}, " +
+                            $"{lbs.Length} leaf/leaves ({nRend} with renderers), {(l0.Oriented ? "oriented" : "aabb")}, " +
                             $"first plate {e.x:0.00}x{e.y:0.00}x{e.z:0.00} " +
+                            $"opening {lp.ADoor:0.00}m2 (shut leak {lp.AShutOpen:0.00}m2) " +
                             $"world {wmin.x:0.00},{wmin.y:0.00},{wmin.z:0.00} -> {wmax.x:0.00},{wmax.y:0.00},{wmax.z:0.00}");
             }
+        }
+
+        // ---- THE APERTURE, AND HOW MUCH OF IT IS OPEN -------------------------------------
+        // Six models asked "how far through its travel is this door", normalised that against a
+        // range LEARNED AT RUNTIME, and tuned by ear against thresholds expressed as a fraction
+        // of it. Every one of them failed, and the measurement is why:
+        //
+        //   * the learned range was keyed by BLOCK TYPE while the pose it was measured from was
+        //     per INSTANCE, so two garage doors in one POI shared -- and poisoned -- one number;
+        //   * it was a process-lifetime ratchet that also SELECTED THE AXIS, so one bad reading
+        //     (ironGarageDoorGrey recorded 83.9 degrees once) permanently disabled the working
+        //     clip-time fallback for every door of that type and pinned openness near zero;
+        //   * a fraction of the swing makes a 3 m and a 7 m roll-up behave identically in percent
+        //     while their real openings differ by four metres, which is "every other rolling door
+        //     feels linear" exactly;
+        //   * and the thresholds were matched by SUBSTRING, so "garageDoor=" governed the 3x2 and
+        //     the 4x3 together. Tuning one really was tuning the other.
+        //
+        // So stop asking for a fraction. Ask for the thing sound actually cares about: HOW MANY
+        // SQUARE METRES OF THIS DOORWAY ARE OPEN. That number needs no learned range, cannot be
+        // poisoned by another instance, is directly comparable between a hatch and a drawbridge,
+        // and is the same question for a leaf that swings, a panel that slides and a curtain that
+        // rolls -- all three merely cover the rectangle differently.
+        //
+        // The rectangle is measured ONCE, at the shut pose, where the leaves by definition fill
+        // it. After that the leaves are re-posed from whatever is animating them, and the
+        // rectangle is sampled to see what is left.
+        private const float SlabHalf = 0.15f;      // a leaf is thin; give it this much grace on the plane
+        private const float SamplePitch = 0.08f;   // metres between aperture samples
+
+        private static void BuildAperture(BlockEntityData bed, ref LeafPlane lp)
+        {
+            lp.HasAp = false;
+            LeafBox[] lbs = lp.Boxes;
+            if (lbs == null || lbs.Length == 0) return;
+
+            // Basis from the BIGGEST plate: its own thin axis is the doorway's normal. Taking it
+            // from the plate rather than from world axes is what lets a tilted cellar door have a
+            // rectangle at all.
+            int bi = 0; float bestArea = -1f;
+            for (int i = 0; i < lbs.Length; i++)
+            {
+                Vector3 e = lbs[i].Oriented ? lbs[i].Half * 2f : (lbs[i].Max - lbs[i].Min);
+                float a = Mathf.Max(e.x, Mathf.Max(e.y, e.z)) * Mid3(e);
+                if (a > bestArea) { bestArea = a; bi = i; }
+            }
+            LeafBox b0 = lbs[bi];
+            Vector3 e0 = b0.Oriented ? b0.Half * 2f : (b0.Max - b0.Min);
+            int thin = (e0.x <= e0.y && e0.x <= e0.z) ? 0 : (e0.y <= e0.z ? 1 : 2);
+            Quaternion rot = b0.Oriented ? b0.Rot : Quaternion.identity;
+            Vector3 ax = rot * Vector3.right, ay = rot * Vector3.up, az = rot * Vector3.forward;
+            Vector3 n = thin == 0 ? ax : (thin == 1 ? ay : az);
+            Vector3 u = thin == 0 ? ay : ax;
+            Vector3 v = thin == 2 ? ay : az;
+
+            // Extents: every plate's corners, projected onto that basis. A double door's two
+            // leaves become one rectangle, which is the doorway -- that is the point.
+            float uMin = float.MaxValue, uMax = float.MinValue;
+            float vMin = float.MaxValue, vMax = float.MinValue;
+            float nMin = float.MaxValue, nMax = float.MinValue;
+            for (int i = 0; i < lbs.Length; i++)
+            {
+                LeafBox lb = lbs[i];
+                Vector3 c = lb.Oriented ? lb.Center : (lb.Min + lb.Max) * 0.5f;
+                Vector3 h = lb.Oriented ? lb.Half : (lb.Max - lb.Min) * 0.5f;
+                Quaternion r = lb.Oriented ? lb.Rot : Quaternion.identity;
+                for (int k = 0; k < 8; k++)
+                {
+                    Vector3 o = new Vector3((k & 1) == 0 ? -h.x : h.x,
+                                            (k & 2) == 0 ? -h.y : h.y,
+                                            (k & 4) == 0 ? -h.z : h.z);
+                    Vector3 pp = c + r * o;
+                    float pu = Vector3.Dot(pp, u), pv = Vector3.Dot(pp, v), pn = Vector3.Dot(pp, n);
+                    if (pu < uMin) uMin = pu;
+                    if (pu > uMax) uMax = pu;
+                    if (pv < vMin) vMin = pv;
+                    if (pv > vMax) vMax = pv;
+                    if (pn < nMin) nMin = pn;
+                    if (pn > nMax) nMax = pn;
+                }
+            }
+            float hu = 0.5f * (uMax - uMin), hv = 0.5f * (vMax - vMin);
+            if (hu < 0.05f || hv < 0.05f) return;              // not a rectangle worth sampling
+
+            lp.ApU = u; lp.ApV = v; lp.ApN = n;
+            lp.ApHalfU = hu; lp.ApHalfV = hv;
+            lp.ApCentre = u * (0.5f * (uMin + uMax)) + v * (0.5f * (vMin + vMax)) + n * (0.5f * (nMin + nMax));
+            lp.ADoor = 4f * hu * hv;
+
+            // Each plate, expressed relative to whatever might move it. BOTH routes are recorded
+            // now, because which one is live cannot be known until the door actually swings.
+            var rel = new LeafRel[lbs.Length];
+            Vector3 org = Origin.position;
+            for (int i = 0; i < lbs.Length; i++)
+            {
+                LeafBox lb = lbs[i];
+                Vector3 c = lb.Oriented ? lb.Center : (lb.Min + lb.Max) * 0.5f;
+                Vector3 h = lb.Oriented ? lb.Half : (lb.Max - lb.Min) * 0.5f;
+                Quaternion r = lb.Oriented ? lb.Rot : Quaternion.identity;
+                Vector3 cRender = c - org;
+                Transform ow = lb.Owner;
+                LeafRel lr = new LeafRel { Owner = ow, Half = h };
+                if (ow != null)
+                {
+                    lr.RelPos = ow.InverseTransformPoint(cRender);
+                    lr.RelRot = Quaternion.Inverse(ow.rotation) * r;
+                    lr.OwnShutPos = ow.localPosition;
+                    lr.OwnShutRot = ow.localRotation;
+                }
+                else { lr.RelPos = cRender; lr.RelRot = r; lr.OwnShutRot = Quaternion.identity; }
+                lr.Rend = FindLeafRenderer(ow, bed != null ? bed.transform : null);
+                if (lr.Rend != null)
+                {
+                    Bounds rb = lr.Rend.bounds;
+                    lr.RendShutCtr = rb.center; lr.RendShutSize = rb.size;
+                }
+                rel[i] = lr;
+            }
+            lp.Rel = rel;
+            lp.HasAp = true;
+
+            // AND WHAT READS OPEN WHILE IT IS SHUT. The plates are at their shut pose right now,
+            // so whatever the rasteriser finds here is the door's own seams -- and on a four-panel
+            // garage door or a pair of leaves with a hinge gap that is not a small number. Without
+            // this a shut door would publish a permanent leak and every knob would be tuned around
+            // it. Measured per instance, so it costs nothing to be exactly right.
+            int shutSrc = 0;
+            for (int i = 0; i < rel.Length && shutSrc == 0; i++)
+            {
+                if (rel[i].Owner != null) shutSrc = 1;
+                else if (rel[i].Rend != null) shutSrc = 2;
+            }
+            lp.AShutOpen = shutSrc == 0 ? 0f : Mathf.Min(RasterOpen(ref lp, shutSrc), lp.ADoor * 0.5f);
+        }
+
+        private static float Mid3(Vector3 e)
+        {
+            float big = Mathf.Max(e.x, Mathf.Max(e.y, e.z));
+            float small = Mathf.Min(e.x, Mathf.Min(e.y, e.z));
+            return e.x + e.y + e.z - big - small;
+        }
+
+        // A CURTAIN IS NOT ITS COLLIDER. Three roll-ups and the grey iron door read a leaf travel
+        // of exactly zero on every swing -- not because they do not move, but because the animator
+        // drives an ANCESTOR of the collider node (or deforms a skinned mesh), so that node's own
+        // local pose never changes. The renderer does move, always, because the door is visibly
+        // moving. Preferring the collider's own node keeps every door that already works on its
+        // existing route; this is only consulted when that route reads dead still.
+        private static Renderer FindLeafRenderer(Transform t, Transform stopAt)
+        {
+            try
+            {
+                for (Transform c = t; c != null; c = c.parent)
+                {
+                    Renderer r0 = c.GetComponent<Renderer>();
+                    if (r0 != null) return r0;
+                    if (c == stopAt) break;
+                }
+                if (t != null)
+                {
+                    Renderer r1 = t.GetComponentInChildren<Renderer>(true);
+                    if (r1 != null) return r1;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static Vector3[] _poseC, _poseH;
+        private static Quaternion[] _poseR;
+        private static bool[] _poseOk;
+
+        // A leaf is thinner than the grace the plane needs. Without this a plate lying exactly in
+        // the aperture can miss its own samples to float error and read as a wide open door.
+        private static Vector3 ThickenThin(Vector3 h)
+        {
+            int k = (h.x <= h.y && h.x <= h.z) ? 0 : (h.y <= h.z ? 1 : 2);
+            if (h[k] < SlabHalf) h[k] = SlabHalf;
+            return h;
+        }
+
+        // The doorway's total area as measured at the shut pose, or 0 if it was never measured.
+        private static float ApertureArea(Vector3i parent, int type)
+        {
+            if (_leafPlanes.TryGetValue(parent, out LeafPlane p) && p.Type == type && p.HasAp) return p.ADoor;
+            return 0f;
+        }
+
+        // Square metres of this doorway currently unblocked. "src" reports which route answered:
+        // 1 = the collider's own transform, 2 = its renderer's bounds, 0 = nothing moved and the
+        // caller must fall back to the clip clock. "prefer" latches a route for the rest of a
+        // swing so it cannot flap halfway through one.
+        private static bool LeafOpenArea(Vector3i parent, int type, int prefer,
+                                         out float aOpen, out float aDoor, out int src)
+        {
+            aOpen = 0f; aDoor = 0f; src = 0;
+            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Type != type
+                || !p.HasAp || p.Rel == null || p.Rel.Length == 0) return false;
+            aDoor = p.ADoor;
+
+            bool xformMoved = false, rendMoved = false, haveX = false, haveR = false;
+            for (int i = 0; i < p.Rel.Length; i++)
+            {
+                LeafRel lr = p.Rel[i];
+                if (lr.Owner != null)
+                {
+                    haveX = true;
+                    if (Vector3.Distance(lr.Owner.localPosition, lr.OwnShutPos) > 0.02f
+                        || Quaternion.Angle(lr.Owner.localRotation, lr.OwnShutRot) > 1.0f) xformMoved = true;
+                }
+                if (lr.Rend != null)
+                {
+                    haveR = true;
+                    Bounds rb;
+                    try { rb = lr.Rend.bounds; } catch { continue; }
+                    if (Vector3.Distance(rb.center, lr.RendShutCtr) > 0.05f
+                        || Vector3.Distance(rb.size, lr.RendShutSize) > 0.05f) rendMoved = true;
+                }
+            }
+            if (prefer == 1 && haveX) src = 1;
+            else if (prefer == 2 && haveR) src = 2;
+            else src = xformMoved ? 1 : (rendMoved ? 2 : 0);
+            if (src == 0) return false;
+
+            float raw = RasterOpen(ref p, src);
+            float span = Mathf.Max(0.01f, aDoor - p.AShutOpen);
+            aOpen = Mathf.Clamp(raw - p.AShutOpen, 0f, span);
+            aDoor = span;               // report the range the door can actually travel over
+            return true;
+        }
+
+        // The rasteriser: how many square metres of the aperture no plate is currently standing in.
+        private static float RasterOpen(ref LeafPlane p, int src)
+        {
+            // Pose the plates as they are RIGHT NOW, in render space (where transforms live).
+            int nb = p.Rel.Length;
+            if (_poseC == null || _poseC.Length < nb)
+            {
+                _poseC = new Vector3[nb]; _poseH = new Vector3[nb];
+                _poseR = new Quaternion[nb]; _poseOk = new bool[nb];
+            }
+            for (int i = 0; i < nb; i++)
+            {
+                LeafRel lr = p.Rel[i];
+                _poseOk[i] = false;
+                try
+                {
+                    if (src == 1)
+                    {
+                        Transform ow = lr.Owner;
+                        if (ow == null) continue;
+                        _poseC[i] = ow.TransformPoint(lr.RelPos);
+                        _poseR[i] = ow.rotation * lr.RelRot;
+                        _poseH[i] = ThickenThin(lr.Half);
+                    }
+                    else
+                    {
+                        if (lr.Rend == null) continue;
+                        Bounds rb = lr.Rend.bounds;
+                        _poseC[i] = rb.center;
+                        _poseR[i] = Quaternion.identity;
+                        _poseH[i] = ThickenThin(rb.extents);
+                    }
+                    _poseOk[i] = true;
+                }
+                catch { }
+            }
+
+            int nu = Mathf.Clamp(Mathf.CeilToInt(2f * p.ApHalfU / SamplePitch), 4, 64);
+            int nv = Mathf.Clamp(Mathf.CeilToInt(2f * p.ApHalfV / SamplePitch), 4, 32);
+            Vector3 org = Origin.position;
+            Vector3 baseP = p.ApCentre - org;
+            int covered = 0;
+            for (int iu = 0; iu < nu; iu++)
+            {
+                float fu = (iu + 0.5f) / nu * 2f - 1f;
+                Vector3 rowP = baseP + p.ApU * (fu * p.ApHalfU);
+                for (int iv = 0; iv < nv; iv++)
+                {
+                    float fv = (iv + 0.5f) / nv * 2f - 1f;
+                    Vector3 pt = rowP + p.ApV * (fv * p.ApHalfV);
+                    for (int i = 0; i < nb; i++)
+                    {
+                        if (!_poseOk[i]) continue;
+                        Vector3 d = Quaternion.Inverse(_poseR[i]) * (pt - _poseC[i]);
+                        Vector3 h = _poseH[i];
+                        if (Mathf.Abs(d.x) <= h.x && Mathf.Abs(d.y) <= h.y && Mathf.Abs(d.z) <= h.z)
+                        { covered++; break; }
+                    }
+                }
+            }
+            return Mathf.Max(0f, p.ADoor * (1f - (float)covered / (nu * nv)));
         }
 
         // The reader's one entry point for "where is this door's material, inside this cell".
@@ -1637,10 +1926,19 @@ namespace CMM
         // the cheap at-rest see-through path takes back over.
         private struct DoorAnim
         {
-            public bool Opening; public float Openness; public bool Started; public int Ticks; public float Span;
-            public float GapFull, GapFullOpen, GapClosed, LeadMs, Curve;   // per-door thresholds + lead (globals + type overrides), resolved at registration
+            public bool Opening; public float Openness; public bool Started; public int Ticks;
+            public float Span, SpanB;                       // the two largest multiblock dims, metres
             public int Type;                                // block type — names the door in the DoorTrace log
             public float StartedAt;                         // realtime the swing was registered (trace time base)
+
+            // The aperture measurement, carried across the swing. Src latches which route is
+            // reading this door (1 transform, 2 renderer, 3 clip clock) so it cannot change
+            // halfway through one. PrevOpen/PrevAt are the per-tick derivative the lead rides on,
+            // which is what replaced dividing a fixed lead by an animator clip length that was
+            // observed to read 0.00 on real doors.
+            public int Src;
+            public float ADoor, AOpen;
+            public float PrevOpen, PrevAt;
         }
         private static readonly Dictionary<Vector3i, DoorAnim> _doors = new Dictionary<Vector3i, DoorAnim>();
         private static readonly HashSet<int> _doorTypes = new HashSet<int>();   // block types the hook has seen animate
@@ -1690,129 +1988,45 @@ namespace CMM
             return false;
         }
 
-        // The acoustic openness of a mid-swing door is driven by the physical GAP IN METERS, not the
-        // fraction of the swing (v29.2). Fractions treated all doors alike, which can't be right at both
-        // ends of the size spectrum: a 3 m garage door 25% from shut still has a ~0.75 m opening — a huge
-        // aperture, full sound ("it doesn't make sense that the sound is already muffled with a meter to
-        // go", user 2026-07-08) — while a ~1 m vault leaf 25% open is a hand-width crack. gap = swing
-        // fraction × the door's largest dimension; sound is fully open above DoorGapFull metres of
-        // opening and silent below DoorGapClosed (both config, hot). Size does the per-door work a
-        // per-type table would have: big doors hold sound until genuinely nearly shut and come alive
-        // almost immediately on open; small heavy leaves read as a slam. Symmetric in gap — the
-        // asymmetries players feel emerge from door size, and CloseLeadSeconds still trims the tail.
-        // Direction-asymmetric thresholds: CLOSING uses GapFull (fade begins early — the tuned "when
-        // does the shut land" feel); OPENING uses the smaller GapFullOpen, because sound floods through
-        // a real gap immediately — with one shared threshold, a close tuned to fade early made the open
-        // take just as long to reach full ("takes a while for the audio to come in", user 2026-07-08).
-        // Thresholds come from the DoorAnim (globals merged with per-type DoorGapOverrides at
-        // registration), so one door type can be retuned without touching the rest.
-        private static float DoorAcoustic(float physical, ref DoorAnim da)
+        // ---- OPENNESS FROM OPEN AREA ------------------------------------------------------
+        // Openness is not a fraction of the swing and no longer has thresholds. It is a soft knee
+        // on the doorway's ACTUAL OPEN AREA in square metres, plus a residual term that guarantees
+        // a fully-open door reads fully open.
+        //
+        //     u  = pow(aOpen / A50, Knee)
+        //     og = u / (1 + u)                 // 0 at shut, asymptotic to 1, no clamps
+        //     o  = 1 - (1 - og) * (1 - travel) // the two residuals multiply
+        //
+        // A50 is the size of hole that gets you halfway to hearing through, and it is ABSOLUTE.
+        // That is the whole difference from every model before it, and the user's own words are
+        // the calibration: "a door that is open half a metre wide is not occluding audio any more,
+        // but it looks like the door is open 1.5 metres before occlusion finally fades." The
+        // fraction model put the knee at 0.55 of a 3 m garage door -- 1.65 m, which is that
+        // sentence's second half exactly. An absolute knee puts it where the first half asks.
+        //
+        // The residual product is what stops a 7 m roll-up feeling binary. The knee alone would
+        // have it wide open within a metre of lift and then flat for six more seconds; multiplying
+        // by (1 - travel) keeps a shrinking amount of muffle right up to the end of the animation,
+        // so the tail stretches over the door's own duration without any per-door constant.
+        //
+        // WHAT THIS DELETES: GapFull, GapFullOpen, GapClosed, Curve, the whole substring-matched
+        // override table, and the open/close threshold asymmetry. The asymmetry was compensating
+        // for the pipeline lag that the lead now cancels properly.
+        //
+        // ONE CORRECTION TO THE PREMISE OF THE LAST MODEL: openness is NOT linear in amplitude.
+        // It drives virtual distance through CurveDb, and for a capped wooden door the dB already
+        // released at openness .25/.5/.75/1 runs 30%/56%/79%/100%. Openness has always been very
+        // nearly "fraction of this door's dB that has arrived". The mapping was never the fault;
+        // the geometry feeding it was.
+        private static float DoorAcoustic(float aOpen, float aDoor, float travel)
         {
-            // ── THRESHOLDS ARE FRACTIONS OF THE SWING ────────────────────────────────────────
-            // They used to be metres of opening, with gap = swingFraction x span. The physics of
-            // that is sound -- a 0.70 m gap IS acoustically open whatever the door's width -- but
-            // what a player perceives is a FRACTION of the swing, and the conversion between the
-            // two is the span. So the same threshold landed in a different perceptual place on
-            // every door size: 70% of the travel on a one-metre door, 35% on a two-metre cellar
-            // door, 14% on a five-metre gate. Every size needed its own override to feel the same,
-            // the override table grew a line per door family, and it still did not cover them all.
-            // "None feel right with either setting" was the end of that road.
-            //
-            // In fractions there is one unit and an override reads as a sentence you can check
-            // against what you are watching: this door's transition runs from 8% to 45% of its
-            // swing. Doors of different sizes agree by construction, which was the complaint.
-            //
-            // WHAT THIS GIVES UP, deliberately: a five-metre gate and a one-metre door now
-            // transition at the same fraction, though the gate opens a physically larger hole
-            // sooner. That reasoning was right and it produced a table nobody could tune.
-            float full = Mathf.Clamp(da.Opening ? da.GapFullOpen : da.GapFull, 0.02f, 0.98f);
-            float shut = Mathf.Clamp(da.GapClosed, 0f, full - 0.01f);
-            float o = Mathf.Clamp01((physical - shut) / (full - shut));
-
-            // ── THE SHAPE, NOT THE TIMING ───────────────────────────────────────────────────
-            // Openness is linear in travel, and the loss it drives is shutLoss x (1 - openness).
-            // That is linear in an AMPLITUDE multiplier, so the first half of the ramp spends
-            // most of the decibels: by the time a door is half open, most of what there was to
-            // hear has already arrived. That is the roll-up report exactly -- "less about timing
-            // and more about how much occlusion is applied early on; it goes from occlusion to no
-            // occlusion way too quickly".
-            //
-            // The curve exponent reshapes it without moving either end. Above 1 the early travel
-            // yields less openness, so the door holds its muffle and releases later; below 1 it
-            // opens up sooner. 1 is a straight line and is exactly the previous behaviour, which
-            // is why it is the default and why every door not carrying an override is untouched.
-            float g = da.Curve;
-            if (g > 0.01f && Mathf.Abs(g - 1f) > 0.01f) o = Mathf.Pow(o, g);
-            return o;
-        }
-
-        // ── Per-door-type gap overrides ──────────────────────────────────────────────────────────────
-        // Config WorldEmitterDoorGapOverrides: "match=full/fullOpen/closed;match=..." — match is a
-        // case-insensitive SUBSTRING of the block name (catches wooden/steel/ironGarageDoor with one
-        // "garageDoor" entry); "-" inherits the global. First matching entry wins. Cached per type.
-        // Lead is an OPTIONAL fourth field: "match=full/fullOpen/closed/leadMs". NaN = inherit
-        // the global. A door can need a different lead from every other door because the lead
-        // cancels a pipeline delay that is a different fraction of every swing -- and the roll-up
-        // 3x3, alone in the set, wanted about 200 ms less of it ("occlusion goes too quickly").
-        // Fifth optional field is the CURVE: match=full/fullOpen/closed/leadMs/curve.
-        private struct GapOvr { public string Match; public float Full, FullOpen, Closed, LeadMs, Curve; }
-        private static string _ovrCfgCache;
-        private static GapOvr[] _gapOvrs = System.Array.Empty<GapOvr>();
-        private static readonly Dictionary<int, int> _gapOvrByType = new Dictionary<int, int>();
-        private static void ResolveDoorGaps(int type, out float full, out float fullOpen, out float closed, out float leadMs, out float curve)
-        {
-            full = CMMConfig.WorldEmitterDoorGapFull;
-            fullOpen = CMMConfig.WorldEmitterDoorGapFullOpen;
-            closed = CMMConfig.WorldEmitterDoorGapClosed;
-            leadMs = CMMConfig.WorldEmitterDoorLeadMs;
-            curve = CMMConfig.WorldEmitterDoorCurve;
-            string cfg = CMMConfig.WorldEmitterDoorGapOverrides ?? "";
-            if (!ReferenceEquals(cfg, _ovrCfgCache))   // config hot-reload swaps the string instance
-            {
-                _ovrCfgCache = cfg;
-                _gapOvrByType.Clear();
-                var list = new List<GapOvr>();
-                foreach (string entry in cfg.Split(new[] { ';' }, System.StringSplitOptions.RemoveEmptyEntries))
-                {
-                    int eq = entry.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string[] v = entry.Substring(eq + 1).Split('/');
-                    GapOvr o = new GapOvr { Match = entry.Substring(0, eq).Trim(), Full = float.NaN, FullOpen = float.NaN, Closed = float.NaN, LeadMs = float.NaN, Curve = float.NaN };
-                    if (v.Length > 0 && ParseOvr(v[0], out float f0)) o.Full = f0;
-                    if (v.Length > 1 && ParseOvr(v[1], out float f1)) o.FullOpen = f1;
-                    if (v.Length > 2 && ParseOvr(v[2], out float f2)) o.Closed = f2;
-                    if (v.Length > 3 && ParseOvr(v[3], out float f3)) o.LeadMs = f3;
-                    if (v.Length > 4 && ParseOvr(v[4], out float f4)) o.Curve = f4;
-                    if (o.Match.Length > 0) list.Add(o);
-                }
-                _gapOvrs = list.ToArray();
-            }
-            if (_gapOvrs.Length == 0) return;
-            if (!_gapOvrByType.TryGetValue(type, out int idx))
-            {
-                idx = -1;
-                Block b = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
-                string bn = b != null ? (b.GetBlockName() ?? "") : "";
-                for (int i = 0; i < _gapOvrs.Length && idx < 0; i++)
-                    if (bn.IndexOf(_gapOvrs[i].Match, System.StringComparison.OrdinalIgnoreCase) >= 0) idx = i;
-                _gapOvrByType[type] = idx;
-                if (idx >= 0) CMMConfig.D($"[CMM] DoorGapOverride {bn} ← {_gapOvrs[idx].Match}");
-            }
-            if (idx < 0) return;
-            GapOvr ov = _gapOvrs[idx];
-            if (!float.IsNaN(ov.Full)) full = ov.Full;
-            if (!float.IsNaN(ov.FullOpen)) fullOpen = ov.FullOpen;
-            if (!float.IsNaN(ov.Closed)) closed = ov.Closed;
-            if (!float.IsNaN(ov.LeadMs)) leadMs = ov.LeadMs;
-            if (!float.IsNaN(ov.Curve)) curve = ov.Curve;
-        }
-        private static bool ParseOvr(string s, out float v)
-        {
-            s = s.Trim();
-            v = 0f;
-            if (s.Length == 0 || s == "-") return false;
-            return float.TryParse(s, System.Globalization.NumberStyles.Float,
-                                  System.Globalization.CultureInfo.InvariantCulture, out v);
+            float a50 = Mathf.Max(0.01f, CMMConfig.WorldEmitterDoorHalfArea);
+            float knee = Mathf.Clamp(CMMConfig.WorldEmitterDoorKnee, 0.2f, 5f);
+            float x = Mathf.Max(0f, aOpen) / a50;
+            float u = (Mathf.Abs(knee - 1f) < 0.01f) ? x : Mathf.Pow(x, knee);
+            float og = u / (1f + u);
+            float t = Mathf.Clamp01(travel);
+            return Mathf.Clamp01(1f - (1f - og) * (1f - t));
         }
 
         // Mute this many seconds before a CLOSE animation ends (skip the end-of-swing bounce). Time-based so
@@ -1956,17 +2170,23 @@ namespace CMM
                     _doorTypes.Add(p.Type);
                     // The door's physical span (largest multiblock dimension, metres) — the gap-based
                     // acoustic mapping scales the swing fraction by it. Main thread here, Block.list safe.
-                    float span = 1f;
+                    float span = 1f, spanB = 1f;
                     Block db = (p.Type > 0 && p.Type < Block.list.Length) ? Block.list[p.Type] : null;
                     if (db != null && db.isMultiBlock && db.multiBlockPos != null)
                     {
                         Vector3i dim = db.multiBlockPos.dim;
-                        span = Mathf.Max(1, Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z)));
+                        // The two LARGEST dims, because a doorway is a rectangle and its area is
+                        // the fallback aperture when the leaf itself could never be measured.
+                        int a = dim.x, b = dim.y, c = dim.z;
+                        int big = Mathf.Max(a, Mathf.Max(b, c));
+                        int small = Mathf.Min(a, Mathf.Min(b, c));
+                        span = Mathf.Max(1, big);
+                        spanB = Mathf.Max(1, a + b + c - big - small);
                     }
-                    ResolveDoorGaps(p.Type, out float gFull, out float gFullOpen, out float gClosed, out float gLead, out float gCurve);
                     _doors[p.Pos] = new DoorAnim { Opening = p.Opening, Openness = p.Opening ? 0f : 1f, Started = false, Ticks = 0,
-                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed, LeadMs = gLead, Curve = gCurve,
-                                                   Type = p.Type, StartedAt = Time.realtimeSinceStartup };
+                                                   Span = span, SpanB = spanB, Type = p.Type,
+                                                   StartedAt = Time.realtimeSinceStartup,
+                                                   Src = 0, PrevOpen = -1f, PrevAt = 0f };
                     // The latch's invalidation, moved here so it happens on the main thread.
                     // BeginDoorWait arms the stopwatch: from here the reader has to consume these
                     // exact cells before any flood can claim to have carried this door.
@@ -2023,134 +2243,117 @@ namespace CMM
                     if (si.normalizedTime < 0.95f && si.length > swingLen) { swingLen = si.length; swingNt = si.normalizedTime; }
                 }
             }
-            if (!anyEnabled)
-            {
-                // AT REST, AND THEREFORE AUTHORITATIVE. The range was being learned as the LARGEST
-                // travel seen during the swing, which on a door that overshoots and bounces before
-                // it settles is the BOUNCE, not the open pose. Every later swing then reads as
-                // less than full travel, the curve stretches, and the door goes slightly late --
-                // which is what happened to the wood cellar door the moment its bounce had been
-                // seen once ("did you do something with Wood Cellar Door? It's slightly delayed").
-                //
-                // The settled pose is the truth. Take it on the way out and REPLACE the range
-                // rather than maxing into it, so an overshoot can never become the denominator.
-                if (da.Opening && LeafTravel(parent, da.Type, out float rAng, out float rShift))
-                {
-                    if (rAng   > 5f)    _doorMaxAngle[da.Type] = rAng;
-                    if (rShift > 0.20f) _doorMaxShift[da.Type] = rShift;
-                }
-                return false;   // every animator disabled ⇒ door at rest
-            }
+            if (!anyEnabled) return false;   // every animator disabled => door at rest
 
             if (!da.Started)
             {
-                // CAPTURE THE APERTURE WHILE THERE IS STILL SOMETHING TO MEASURE. No clip of this
-                // swing has begun yet, so the leaf is at its PRE-TOGGLE pose and OnStateUpdate has
-                // not yet blanked its colliders. Opening ⇒ that pose is shut, which is the one pose
-                // that says where the doorway is; closing ⇒ it is parked open and worth nothing, so
-                // only ask on the way out. Once the clip starts there is nothing readable for the
-                // rest of the animation, which is precisely the window the sound has to be right in.
-                //
-                // This is also the ONLY capture that fires for a door opened from a distance. The
-                // listener's own cell learns its plane by standing in it, which is no use at all
-                // when the complaint is running through one that somebody already opened.
-                if (da.Opening) RememberLeaf(bed, parent, da.Type);
-                if (minNt >= 0.95f)   // no clip has begun (stale end-of-previous) → hold at start, keep waiting
+                if (minNt >= 0.95f)
                 {
+                    // NO CLIP OF THIS SWING HAS BEGUN, which is the only moment the leaf is
+                    // provably still at its pre-toggle pose. Opening => that pose is SHUT, and a
+                    // shut leaf is the one pose that says where the doorway is.
+                    //
+                    // This capture used to sit ABOVE this test, so a first tick that already saw a
+                    // running clip recorded a MID-SWING pose as the shut one -- and the aperture,
+                    // and every travel reading taken from it, was wrong for the life of the door.
+                    if (da.Opening) RememberLeaf(bed, parent, da.Type);
                     da.Openness = da.Opening ? 0f : 1f;
                     return da.Ticks < 12;   // give up after ~a few seconds if no clip ever plays
                 }
                 da.Started = true;
             }
-            if (swingLen < 0f) { swingNt = minNt; swingLen = 0f; }   // no fresh clip this tick — fall back
+            if (swingLen < 0f) { swingNt = minNt; swingLen = 0f; }   // no fresh clip this tick
 
-            float t = Mathf.Clamp01(swingNt);
+            float nt = Mathf.Clamp01(swingNt);
+            float aDoorFallback = Mathf.Max(1f, da.Span * Mathf.Max(1f, da.SpanB));
 
-            // ── LEAD THE DOOR BY THE PIPELINE'S OWN LATENCY ─────────────────────────────────
-            // Everything downstream describes the door as it was when this line ran, and takes
-            // time to arrive: the geometry re-read, the flood, the emitter tick and the native
-            // glide. Measured end to end on a block change, which travels the same road, that is
-            // ~110-200 ms. Nothing compensated for it -- CloseLeadSeconds is a 0.15 s special case
-            // at the very end of a close, not a general lead -- so the sound has always described
-            // the door as it was a fifth of a second ago.
-            //
-            // That is a fixed TIME against swings of wildly different DURATION, which is why no
-            // threshold could ever settle it:
-            //
-            //   interior door  0.53 s swing  ->  200 ms is 38% of it
-            //   cellar door    2.60 s swing  ->  200 ms is  8% of it
-            //
-            // A fast door runs nearly half a swing behind while a slow one is barely late, and a
-            // threshold moves the curve WITHIN the swing -- it cannot reach a lag measured in
-            // seconds. Three rounds of tuning thresholds could not have worked.
-            //
-            // So sample where the door WILL BE. Dividing the lead by this door's own clip length
-            // makes the correction large on a fast swing and small on a slow one automatically,
-            // which is exactly the asymmetry that needs cancelling.
-            float lead = Mathf.Max(0f, da.LeadMs) * 0.001f;   // per-type if the override gave one
-            if (lead > 0f && swingLen > 0.05f)
-                t = Mathf.Clamp01(t + lead / swingLen);
-
-            // ── PREFER THE LEAF'S REAL TRAVEL OVER THE CLIP CLOCK ───────────────────────────
-            // See LeafTravelAngle. The clip clock is linear; the leaf is not, and on the two doors
-            // still reported wrong it is dramatically not. Learn the largest angle this type
-            // reaches and read travel as a fraction of it. The lead still applies, projected onto
-            // the same axis by the same clip fraction, because the pipeline delay is unchanged.
-            //
-            // Falls back silently whenever the angle cannot be read or the type's range is not yet
-            // known, which is every door's FIRST swing -- so nothing that behaves today can be
-            // made worse by this, only later swings improved.
-            if (CMMConfig.WorldEmitterDoorUseLeafAngle
-                && LeafTravel(parent, da.Type, out float ang, out float shift))
+            // ---- HOW OPEN IS IT, IN SQUARE METRES ----------------------------------------
+            float travel, aOpen, aDoor;
+            int src;
+            if (CMMConfig.WorldEmitterDoorMeasureLeaf
+                && LeafOpenArea(parent, da.Type, da.Src == 3 ? 0 : da.Src, out aOpen, out aDoor, out src)
+                && aDoor > 0.01f)
             {
-                float bestA, bestS;
-                _doorMaxAngle.TryGetValue(da.Type, out bestA);
-                _doorMaxShift.TryGetValue(da.Type, out bestS);
-                if (ang   > bestA) { bestA = ang;   _doorMaxAngle[da.Type] = bestA; }
-                if (shift > bestS) { bestS = shift; _doorMaxShift[da.Type] = bestS; }
-
-                // Each axis needs a real range before its fraction means anything: a leaf barely
-                // off its stop has an angle and a displacement, neither of which is a fraction.
-                // A hinged door only ever qualifies on angle, a sliding one only on distance.
-                bool useA = bestA > 5f;          // degrees
-                bool useS = bestS > 0.20f;       // metres
-                if (useA || useS)
-                {
-                    float fa = useA ? Mathf.Clamp01(ang   / bestA) : 0f;
-                    float fs = useS ? Mathf.Clamp01(shift / bestS) : 0f;
-                    float travel = Mathf.Max(fa, fs);
-                    // The lead, expressed in this door's own clip, carried onto the travel axis.
-                    if (lead > 0f && swingLen > 0.05f)
-                        travel = Mathf.Clamp01(travel + lead / swingLen);
-                    t = da.Opening ? travel : 1f - travel;
-                }
+                da.Src = src;
+                travel = Mathf.Clamp01(aOpen / aDoor);
+            }
+            else
+            {
+                // THE CLIP CLOCK, WITH THE EASE TAKEN OUT. Every hand-authored door clip in this
+                // game eases in, so normalizedTime OVERSTATES how far the leaf has actually gone
+                // early in the swing -- a smoothstep is about 3*nt*nt near zero. An exponent
+                // between 1 and 2 is the right shape and 1.5 is the conservative middle. This is a
+                // first-class route, not a scrap: it is where a door goes whose leaf genuinely
+                // cannot be read, and it must still produce square metres like the others.
+                da.Src = 3;
+                // The ease describes how far the LEAF has got, so it applies to the clip fraction
+                // itself -- and the direction is applied after. Easing the already-inverted value
+                // would make a closing door read as further shut than it is, which is the exact
+                // "occludes too early on close" complaint, manufactured.
+                float ease = Mathf.Clamp(CMMConfig.WorldEmitterDoorClipEase, 0.5f, 3f);
+                float prog = Mathf.Clamp01(nt);
+                if (Mathf.Abs(ease - 1f) > 0.01f) prog = Mathf.Pow(prog, ease);
+                travel = da.Opening ? prog : 1f - prog;
+                aDoor = ApertureArea(parent, da.Type);
+                if (aDoor <= 0.01f) aDoor = aDoorFallback;
+                aOpen = travel * aDoor;
             }
 
-            float physical = da.Opening ? t : 1f - t;
-            da.Openness = DoorAcoustic(physical, ref da);
-            // Mute a hair BEFORE the leaf finishes closing — its end-of-swing bounce shouldn't still be
-            // audible. Time-based so it self-scales: a big lead on a fast swing (~0.5 s clip), negligible on
-            // a slow garage (0.15 s of a 6-7 s close ⇒ invisible, garage feel untouched).
-            if (!da.Opening && swingLen > 0f && (1f - t) * swingLen < CloseLeadSeconds) da.Openness = 0f;
+            // ---- LEAD THE DOOR BY THE PIPELINE'S OWN LATENCY -----------------------------
+            // Everything downstream describes the door as it was when this line ran, and takes
+            // time to arrive: the geometry re-read, the flood, the emitter tick and the native
+            // glide. Measured end to end, that is ~165-200 ms.
+            //
+            // The lead used to be a fixed time DIVIDED BY THE ANIMATOR CLIP LENGTH. Two doors in
+            // the test set report a clip length of 0.00 s -- steelGarageDoor4x3 closing and
+            // ironDoorGrey -- and the divide was guarded, so on those the lead silently did not
+            // apply AT ALL and they ran the full pipeline latency late. That is "Grey Steel Garage
+            // Door 4x3 is late" with no acoustics involved.
+            //
+            // So take the derivative of the thing that actually matters instead. How fast is the
+            // opening growing, in square metres per second, right now -- and where will it be when
+            // this reaches the ear. It needs no clip length, so it cannot be skipped, and it
+            // self-scales: a fast door is moving fast and gets a big correction, a slow one small.
+            float now = Time.realtimeSinceStartup;
+            float leadS = Mathf.Max(0f, CMMConfig.WorldEmitterDoorLeadMs) * 0.001f;
+            float rawOpen = aOpen;
+            if (leadS > 0f && da.PrevOpen >= 0f)
+            {
+                float dt = now - da.PrevAt;
+                if (dt > 0.001f && dt < 1f)
+                {
+                    float rate = (rawOpen - da.PrevOpen) / dt;
+                    aOpen = Mathf.Clamp(rawOpen + rate * leadS, 0f, aDoor);
+                    travel = Mathf.Clamp01(aOpen / Mathf.Max(0.01f, aDoor));
+                }
+            }
+            da.PrevOpen = rawOpen;   // the RAW reading, never the led one, or the lead compounds
+            da.PrevAt = now;
 
-            // DOOR REFERENCE TRACE: one line per frame of the swing. This is the tuned behaviour
-            // captured as data — the gap-in-metres mapping, the open/close threshold asymmetry, the
-            // per-type overrides and the close lead all land in `open`, and the matching [CMM] Occl
-            // line (unthrottled during a swing) carries the resulting dB. Any change to the acoustic
-            // model must reproduce these two series together.
+            da.ADoor = aDoor; da.AOpen = aOpen;
+            da.Openness = DoorAcoustic(aOpen, aDoor, travel);
+            // Mute a hair BEFORE the leaf finishes closing - its end-of-swing bounce shouldn't
+            // still be audible. Time-based so it self-scales, and skipped when the clip length is
+            // unreadable rather than guessed.
+            if (!da.Opening && swingLen > 0f && (1f - nt) * swingLen < CloseLeadSeconds) da.Openness = 0f;
+
+            // DOOR REFERENCE TRACE: one line per frame of the swing. src says which route read the
+            // leaf (xform / rend / clip), which is the first thing to check when a door feels
+            // wrong -- a door on "clip" is being estimated, not measured.
             if (CMMConfig.DebugLogging)
             {
                 Block dbb = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
-                LeafTravel(parent, da.Type, out float dbgAng, out float dbgShift);
-                float dbgMax, dbgMaxS;
-                _doorMaxAngle.TryGetValue(da.Type, out dbgMax);
-                _doorMaxShift.TryGetValue(da.Type, out dbgMaxS);
-                CMMConfig.D($"[CMM] DoorTrace {(da.Opening ? "OPEN " : "CLOSE")} {(dbb != null ? dbb.GetBlockName() : "?")} " +
-                            $"ang={dbgAng:0.0}/{dbgMax:0.0} shift={dbgShift:0.00}/{dbgMaxS:0.00} " +
-                            $"t={Time.realtimeSinceStartup - da.StartedAt:0.000}s nt={t:0.000} len={swingLen:0.00}s " +
-                            $"span={da.Span:0.##}m gap={physical * Mathf.Max(1f, da.Span):0.00}m " +
-                            $"thresh={(da.Opening ? da.GapFullOpen : da.GapFull):0.00}/{da.GapClosed:0.00} open={da.Openness:0.000} " +
-                            $"at {parent} cells={_doorCellsBlendedPrev}");
+                string ss = da.Src == 1 ? "xform" : (da.Src == 2 ? "rend " : "clip ");
+                CMMConfig.D("[CMM] DoorTrace " + (da.Opening ? "OPEN  " : "CLOSE ")
+                            + (dbb != null ? dbb.GetBlockName() : "?")
+                            + " src=" + ss
+                            + " t=" + (Time.realtimeSinceStartup - da.StartedAt).ToString("0.000") + "s"
+                            + " nt=" + nt.ToString("0.000")
+                            + " len=" + swingLen.ToString("0.00") + "s"
+                            + " area=" + aOpen.ToString("0.00") + "/" + aDoor.ToString("0.00") + "m2"
+                            + " travel=" + travel.ToString("0.000")
+                            + " open=" + da.Openness.ToString("0.000")
+                            + " at " + parent + " cells=" + _doorCellsBlendedPrev);
             }
             return swingNt < 1f;   // still animating until the swing clip completes
         }

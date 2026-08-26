@@ -467,16 +467,15 @@ namespace CMM
         // 1 restores tracking the whole swing exactly; 0 snaps at the latch and ignores the
         // animation entirely.
         // DEFAULT 1 = INERT, and it should stay that way. This scales da.Openness, and Openness is
-        // not a raw animation fraction: it is already the output of the GAP MODEL below -- physical
-        // opening in metres, per-door-type overrides, different thresholds for opening than for
-        // closing, hand-tuned in game per door type. Scaling that squashes all of it with one
-        // blunt global number, which is what I did before noticing it existed.
+        // not a raw animation fraction: it is already the output of the OPEN-AREA model -- the
+        // measured square metres of doorway currently unblocked, through a soft knee. Scaling that
+        // squashes all of it with one blunt global number, which is what I did before noticing it
+        // existed.
         //
-        // If a door's shut lands too late, the right knob is WorldEmitterDoorGapClosed -- the
-        // opening at or below which a door counts as sealed. Raising it seals earlier, while the
-        // leaf is still visibly moving, and it can be set PER DOOR TYPE through
-        // WorldEmitterDoorGapOverrides. That is the control that already knows a 3 m garage door
-        // half open is a huge aperture and a vault leaf half open is a crack.
+        // If a door's shut lands too late, the knob is WorldEmitterDoorHalfArea -- the size of hole
+        // that gets you halfway to hearing through. Lowering it seals earlier, while the leaf is
+        // still visibly moving, and it is absolute, so it means the same thing on a closet door and
+        // on a seven-metre roll-up.
         //
         // Kept only as a blunt override for someone who wants the animation ignored outright
         // (0 = snap at the latch). Measured latch-to-published-field is 33-79 ms, so nothing here
@@ -630,27 +629,23 @@ namespace CMM
         // How far AHEAD of the door's real pose to compute its sound, in milliseconds, to cancel
         // the pipeline's own delay (geometry read + flood + emitter tick + glide). 0 disables it.
         public static float  WorldEmitterDoorLeadMs      = 180f;
-        // Shape of the door's openness ramp. 1 = straight line. Above 1 holds the muffle longer
-        // and releases later; below 1 opens up sooner. Per-type via the override's 5th field.
-        public static float  WorldEmitterDoorCurve       = 1f;
+        // HOW BIG A HOLE GETS YOU HALFWAY TO HEARING THROUGH, in square metres. This is the one
+        // number that decides when a door stops muffling, and it is ABSOLUTE, not a fraction of
+        // the door: half a metre of daylight sounds like half a metre of daylight whether it is a
+        // closet door or a seven-metre roll-up. Raise it if doors sound open before they look
+        // open; lower it if you can see through a door and still hear nothing.
+        public static float  WorldEmitterDoorHalfArea    = 0.35f;
+        // How abrupt the transition is. 1 = the plain soft knee. Above 1 the door holds its muffle
+        // and then lets go all at once; below 1 smears the transition across more of the swing.
+        public static float  WorldEmitterDoorKnee        = 1f;
+        // Only touches doors whose leaf cannot be measured at all (src=clip in the DoorTrace log).
+        // Every hand-authored door clip eases in, so clip time overstates early travel; this takes
+        // that out. 1 disables it.
+        public static float  WorldEmitterDoorClipEase    = 1.5f;
+        // false = ignore the measured leaf entirely and drive every door from its animation clip.
+        // A kill switch for the area measurement, not a tuning knob.
+        public static bool   WorldEmitterDoorMeasureLeaf = true;
 
-        // true = read a door's openness from how far its LEAF has actually rotated, instead of how
-        // far through the animation CLIP it is. Clip time is linear; an eased or bouncing animation
-        // is not. Falls back to clip time on any door whose leaf cannot be read.
-        public static bool   WorldEmitterDoorUseLeafAngle = true;
-
-        // ALL THREE ARE FRACTIONS OF THE SWING (0-1), not metres. See DoorAcoustic.
-        public static float  WorldEmitterDoorGapFull     = 0.70f;  // CLOSING: fade begins once the door is this far open
-        public static float  WorldEmitterDoorGapFullOpen = 0.50f;  // OPENING: fully open to the ear at this much travel
-        public static float  WorldEmitterDoorGapClosed   = 0.15f;  // acoustically shut below this much travel
-        // Per-door-type overrides of the three gap thresholds: "match=full/fullOpen/closed;match=…" —
-        // match is a case-insensitive SUBSTRING of the block name ("garageDoor" catches wooden/steel/
-        // iron variants), "-" inherits the global, first match wins. Lets one door type be retuned
-        // (e.g. a garage's open ramp slowed to its long lift) without touching every other door.
-        // NOTE the big POI roll-up is named rollUpDoor5x4*, NOT *garageDoor* — both entries are needed.
-        // Defaults are the hand-tuned in-game values (2026-07-08): heavy hatches fade through the whole
-        // close but snap alive on open; the vault hatch swings light because its slam is the seal below.
-        public static string WorldEmitterDoorGapOverrides = "drawBridge=0.85/0.70/0.14;garageDoor=0.55/0.35/0.12;rollUp=0.70/0.55/0.08/0/2.0;cellarDoor=0.70/0.40/0.15;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10";
         // DoorSealTypes: comma-separated block-name PREFIXES of doors that are AIRTIGHT when fully shut
         // and undamaged — a closed vault door is a pressure seal, not a metal panel's worth of muffle.
         // Sealed doors read as gate-class solid (true silence via the hard-stop), and because the seal
