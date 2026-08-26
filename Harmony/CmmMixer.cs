@@ -97,6 +97,10 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_occl_tone(int enable, float fullDb);
 
+        // v51 — the one occlusion/tone smoothing time constant, milliseconds.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_slew(float occlMs);
+
         // v21 — live spatial-curve tuning (plateau, range, falloff steepness, distance-muffle), pushed
         // from config each tick so it can be dialled in-game without a rebuild.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -445,6 +449,14 @@ namespace CMM
         public void SetEmitterTuning(float minDist, float maxDist, float falloffExp, float muffle, float stereoWidth)
         {
             NativeMix.cmm_mix_set_emitter_tuning(minDist, maxDist, falloffExp, muffle, stereoWidth);
+        }
+
+        // v51: the ONE occlusion/tone smoothing time constant, milliseconds. The door model leads
+        // the pipeline by a fixed time to cancel this lag, so it has to BE a fixed time -- what it
+        // replaced varied with the door's speed, the listener's distance and the audio buffer size.
+        public void SetEmitterSlew(float occlMs)
+        {
+            NativeMix.cmm_mix_set_emitter_slew(occlMs);
         }
 
         // v42: tone from occlusion instead of virtual distance. Follows the acoustic model, since it

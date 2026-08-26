@@ -556,6 +556,12 @@ namespace CMM
         // fast, precise response is tuned separately), and occlusion DROPS are never capped — sound
         // ARRIVING should track the event. 0 disables the cap (old behavior).
         public static float  WorldEmitterOcclusionFadeRate      = 50f;
+        // THE ONE SMOOTHING TIME CONSTANT, milliseconds, at the very bottom of the chain. Every
+        // occlusion change -- doors, blocks, walking behind a wall -- eases in over this, and so
+        // does the muffle that rides on it. Constant by design: the door model leads the pipeline
+        // by a fixed time to cancel it, and a fixed lead can only cancel a fixed lag. Raise it to
+        // make ALL occlusion changes glide more; lower it to make them snap.
+        public static float  WorldEmitterOcclusionSlewMs         = 50f;
         // How often the occlusion decision and the speaker point-set are refreshed, in Hz. The
         // listener basis is pushed every frame regardless -- this is only how fast WALLS catch up.
         public static float  WorldEmitterTickHz                  = 10f;
@@ -628,7 +634,7 @@ namespace CMM
         // heavy doors read as a slam). Both hot-reload.
         // How far AHEAD of the door's real pose to compute its sound, in milliseconds, to cancel
         // the pipeline's own delay (geometry read + flood + emitter tick + glide). 0 disables it.
-        public static float  WorldEmitterDoorLeadMs      = 350f;   // MEASURED door -> mixer gain
+        public static float  WorldEmitterDoorLeadMs      = 225f;   // MEASURED pipeline + the 50 ms slew
         // HOW BIG A HOLE GETS YOU HALFWAY TO HEARING THROUGH, in square metres. This is the one
         // number that decides when a door stops muffling, and it is ABSOLUTE, not a fraction of
         // the door: half a metre of daylight sounds like half a metre of daylight whether it is a

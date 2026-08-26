@@ -147,6 +147,9 @@ struct cmm_out {
     volatile float emFalloffExp;   /* plateau→range fade steepness (live tuning) */
     volatile float emMuffle;       /* distance low-pass strength 0..1 (live tuning) */
     volatile float emStereoWidth;  /* pan width 0..1: 1 = full hard pan, <1 keeps the far ear alive */
+    volatile float emOcclTau;      /* seconds: the ONE occlusion/tone smoothing time constant. The
+                                    * door model's lead can only cancel a CONSTANT lag, so this must
+                                    * not depend on the signal's shape or on the audio buffer size. */
     volatile int emAcousticReset; /* producer-raised: clear ALL emitter render state (reverb tails, LPF,
                                  * pan/mix slews, slot smooth state) before the next block. Serviced on
                                  * the callback thread, which owns that state. Set when a NEW station
@@ -239,7 +242,8 @@ struct cmm_out {
  * ptFlags bit0) since each class renders an independently colored signal. `domClass` returns the
  * class of the single loudest point (the carry reverb feeds that class's signal — "the sound
  * you're mostly hearing"); wet level/pan stay slot-level (the room doesn't care which class). */
-static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2], float gR[2], float bright[2], float* wet, float* wetPan, int* domClass)
+static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, ma_uint32 frameCount,
+                              float gL[2], float gR[2], float bright[2], float* wet, float* wetPan, int* domClass)
 {
     /* ENERGY, not amplitude. Two speakers playing the SAME track were summed as amplitudes:
      *
@@ -274,6 +278,18 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2],
     float bestContrib[2] = { -1.0f, -1.0f }, bestBright[2] = { 1.0f, 1.0f };
     float bestContribAll = -1.0f, bestWetAtt = 0.0f, bestWetPan = 0.0f;
     int   dom = 0;
+
+    /* One-pole coefficient for THIS block, from a time constant in seconds. dt is the block, so
+     * the smoothing is identical on a 10 ms and a 20 ms audio endpoint -- which the per-callback
+     * constants it replaces were not. Shared by the occlusion distance and the tone below, so
+     * level and brightness arrive together instead of the tone trailing by ~90 ms. */
+    float occlCoef, dtBlk = (o->sampleRate > 0) ? (float)frameCount / (float)o->sampleRate : 0.01f;
+    {
+        float tau = o->emOcclTau;
+        if (tau < 0.001f) tau = 0.001f;
+        occlCoef = 1.0f - expf(-dtBlk / tau);
+        if (occlCoef > 1.0f) occlCoef = 1.0f; else if (occlCoef < 0.0f) occlCoef = 0.0f;
+    }
     for (p = 0; p < count; p++) {
         /* Slew this speaker's WORLD position toward the relayed target, then pan/attenuate from the SLEWED
          * position — so a redirected bearing (directional occlusion routing the sound around a corner) EASES
@@ -305,21 +321,41 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, float gL[2],
         /* OCCLUSION AS VIRTUAL DISTANCE: emGains[p] now carries not a gain but the extra blocks of
          * "distance" the walls / the go-around add (0 = clear line). Folding it into the distance means
          * a wall makes the radio sound FARTHER (quieter AND duller on the same smooth curve) instead of
-         * applying a separate multiplicative cliff — which is what made it feel all-or-nothing. Slewed
-         * at audio rate (exponential) so the change glides as you move, never pops. */
+         * applying a separate multiplicative cliff -- which is what made it feel all-or-nothing.
+         *
+         * ONE TIME CONSTANT, IN SECONDS, THE SAME FOR EVERY DOOR AND EVERY LISTENER POSITION.
+         *
+         * What was here before was an ADAPTIVE per-callback coefficient: glide = 0.03 + 0.20*gg,
+         * where gg ramped in on how far the smoothed value had fallen behind the target (4 blocks
+         * -> 16 blocks). It cost twelve hours of tuning that could never converge, for three
+         * reasons, all of them invisible from the managed side:
+         *
+         *   1. THE COEFFICIENT WAS PER CALLBACK, NOT PER SECOND. At miniaudio's default 10 ms
+         *      low-latency period, 0.03 is a time constant of 328 ms and 756 ms to reach 90%.
+         *      Nobody chose 328 ms; it fell out of the buffer size, and it would have been 657 ms
+         *      on a 20 ms endpoint. The correct form is twenty lines below this one, at the
+         *      revSendSm slew, which divides by the sample rate.
+         *
+         *   2. IT WAS ADAPTIVE ON THE SIGNAL'S OWN SHAPE, so the lag was a function of whatever
+         *      curve the door model happened to publish. Simulated over the shipping chain, every
+         *      OPENING swing in the test POI sat at glide 0.030-0.037 (lag ~330 ms) while every
+         *      CLOSING swing escaped to 0.079-0.230 (lag 10-200 ms) -- because the ease exponent
+         *      puts the acoustically decisive part of the ramp at the START of an open, where the
+         *      curve is flattest, and at the END of a close, where it is steepest. That asymmetry
+         *      is "late open, closing is fine", reported in three separate test rounds against
+         *      three different door models. Any change to the model reshuffled it.
+         *
+         *   3. THE 4-BLOCK KNEE WAS DISTANCE-DEPENDENT. The published extra is scaled by
+         *      (Range - d), so the same physical door produced a 5.6-block gap at 3 m and 2.1 at
+         *      40 m: snappier up close than across a room, for no acoustic reason, and the door
+         *      model has no way to know where the listener is standing.
+         *
+         * A one-pole can only ever LAG. It has no anticipation, so it can never be early -- which
+         * is why five successive door models all produced "late" and none produced "early". The
+         * lead that cancels it lives in the door model, and a lead can only cancel a CONSTANT lag.
+         * So make it constant: one tau, in seconds, non-adaptive, config-tunable. */
         float target = sl->gains[p], cur = sl->gainsSmooth[p];
-        /* ADAPTIVE glide: rate scales with the SIZE of the pending change. A small nudge (walking near an
-         * occluder) glides slow & smooth at the tuned 0.03 — no movement stepping. A LARGE jump — a swing
-         * door snapping open/shut, a block breaking, crossing a threshold — glides fast so the sound tracks
-         * the event instead of mushing in over ~1 s ("real sound doesn't fade in slowly"). The gap shrinks
-         * as cur catches up, so it eases out naturally (no click). A slow garage door ramps its occlusion in
-         * small per-tick steps ⇒ it stays in the slow regime ⇒ still gradual (unchanged). */
-        float gap = target - cur; if (gap < 0.0f) gap = -gap;
-        float gg = (gap - 4.0f) * (1.0f / 12.0f);   /* 4 blocks → 16 blocks maps to 0..1 */
-        if (gg < 0.0f) gg = 0.0f; else if (gg > 1.0f) gg = 1.0f;
-        gg = gg * gg * (3.0f - 2.0f * gg);           /* smoothstep */
-        float glide = 0.03f + 0.20f * gg;            /* 0.03 (smooth) → 0.23 (snappy) */
-        cur += (target - cur) * glide;
+        cur += (target - cur) * occlCoef;
         sl->gainsSmooth[p] = cur;
         float dEff = d + cur;                /* effective (acoustic) distance */
 
@@ -578,7 +614,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
             struct cmm_emit_slot* sl = &o->emSlots[s];
             float bright[2], attWet, wetPan;
-            cmm_emitter_gains(o, sl, gL[s], gR[s], bright, &attWet, &wetPan, &domCls[s]);
+            cmm_emitter_gains(o, sl, frameCount, gL[s], gR[s], bright, &attWet, &wetPan, &domCls[s]);
             clsAud[s][0] = (sl->ptCount > 0) && (gL[s][0] != 0.0f || gR[s][0] != 0.0f);
             clsAud[s][1] = (sl->ptCount > 0) && (gL[s][1] != 0.0f || gR[s][1] != 0.0f);
             audible[s] = clsAud[s][0] || clsAud[s][1];
@@ -613,13 +649,19 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
              * floor keeps a little air even fully occluded so it never goes to pure DC. */
             {
                 int c;
+                float tauT = o->emOcclTau; if (tauT < 0.001f) tauT = 0.001f;
+                float dtB = (o->sampleRate > 0) ? (float)frameCount / (float)o->sampleRate : 0.01f;
+                float kT = 1.0f - expf(-dtB / tauT);
+                if (kT > 1.0f) kT = 1.0f; else if (kT < 0.0f) kT = 0.0f;
                 for (c = 0; c < 2; c++) {
                     float bb = bright[c] * bright[c];
                     float ct = 0.03f + 0.97f * bb;
                     float cc = sl->lpfCoef[c];
-                    float dc = ct - cc;
-                    if (dc > 0.05f) dc = 0.05f; else if (dc < -0.05f) dc = -0.05f;
-                    coef[s][c] = cc + dc;
+                    /* Was a flat +/-0.05 PER CALLBACK, i.e. a rate limiter whose speed depended on
+                     * the audio buffer size and which took ~90 ms for a door-sized swing -- in
+                     * SERIES after the occlusion smoother, so the muffle always arrived after the
+                     * level. Same time constant now, so they land together. */
+                    coef[s][c] = cc + (ct - cc) * kT;
                 }
             }
         }
@@ -945,6 +987,7 @@ static cmm_out* cmm_out_alloc_ring(int sampleRate, int channels, int ringFrames,
     o->emMinDist = 1.0f; o->emMaxDist = 2.0f;
     o->emFalloffExp = 1.5f; o->emMuffle = 0.7f;   /* sane curve until config is relayed */
     o->emStereoWidth = 0.85f;                     /* nearly full pan until config is relayed */
+    o->emOcclTau = 0.05f;                         /* 50 ms until config is relayed */
     o->emRevRoom = 0.5f; o->emRevDamp = 0.5f;     /* reverb off (sends 0) until the room probe relays */
     o->emRevRangeMult = 1.0f;   /* reverb range == dry range until config relays */
     o->emRevPan = 0.0f; o->emRevPanSmooth = 0.0f;   /* diffuse reverb until config relays */
@@ -1261,6 +1304,14 @@ void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, con
     for (k = 0; k < count;     k++) sl->gains[k]  = gains ? gains[k] : 1.0f;
     for (k = 0; k < count;     k++) sl->ptFlags[k] = flags ? flags[k] : 0;
     sl->ptCount = count;   /* publish count LAST so the callback never reads points for a larger count */
+}
+
+/* The one occlusion/tone smoothing time constant, in seconds. Lock-free; relayed every publish. */
+void cmm_out_set_emitter_slew(cmm_out* o, float occlSec)
+{
+    if (!o) return;
+    if (occlSec < 0.001f) occlSec = 0.001f; else if (occlSec > 2.0f) occlSec = 2.0f;
+    o->emOcclTau = occlSec;
 }
 
 /* v23/v31 — relay the live reverb (room reflection) parameters from the managed room probe.

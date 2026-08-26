@@ -301,6 +301,10 @@ static volatile float g_emMaxDist     = 40.0f;
 static volatile float g_emFalloffExp  = 1.5f;
 static volatile float g_emMuffle      = 0.7f;
 static volatile float g_emStereoWidth = 0.85f;
+/* v51: the ONE occlusion/tone smoothing time constant, seconds. Was a per-callback coefficient
+ * buried in cmm_out.c whose real time constant (328 ms at a 10 ms buffer) nobody chose and nobody
+ * could see; the door model's lead is what cancels it, and a lead can only cancel a constant. */
+static volatile float g_emOcclSlew = 0.05f;
 /* v42: tone from occlusion rather than from virtual distance. Off by default so the shipped
  * occlusion model -- whose door behaviour is the most carefully tuned thing in the emitter
  * system -- is bit-identical; the native acoustic model turns it on. */
@@ -1195,6 +1199,7 @@ static void pump_body(void) {
                         /* min/max come from the LIVE tuning globals (not the voice's baked-in values)
                          * so range + plateau are hot-tunable; falloff + muffle likewise. */
                         cmm_out_set_emitter_occl_tone(dev, g_emOcclTone, g_emOcclFullDb);
+                        cmm_out_set_emitter_slew(dev, g_emOcclSlew);
                         cmm_out_set_emitter_spatial(dev, s, lp, lr, em->emitPts, em->emitPtGain,
                                                     em->emitPtFlags, em->emitPtCount,
                                                     g_emMinDist, g_emMaxDist,
@@ -1619,6 +1624,14 @@ CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float fall
     g_emMinDist = minDist; g_emMaxDist = maxDist;
     g_emFalloffExp = falloffExp; g_emMuffle = muffle;
     g_emStereoWidth = stereoWidth;
+}
+
+/* v51 -- the occlusion/tone smoothing time constant, in MILLISECONDS. One number, applied to every
+ * speaker point and to the muffle that rides on it, independent of the door, the listener's
+ * distance and the audio device's buffer size. Lock-free; call whenever config changes. */
+CMM_API void cmm_mix_set_emitter_slew(float occlMs) {
+    if (occlMs < 1.0f) occlMs = 1.0f; else if (occlMs > 2000.0f) occlMs = 2000.0f;
+    g_emOcclSlew = occlMs * 0.001f;
 }
 
 /* Live emitter reverb params from the managed room probe (see EmitterAcoustics.ProbeRoom).

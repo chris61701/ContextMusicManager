@@ -219,7 +219,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        be answered by starting the game and loading a world, several minutes a go, and judging
  *        by ear. With this a station change renders to a WAV in seconds and can be diffed against
  *        the reference render directly. */
-#define CMM_DECODER_ABI 50
+#define CMM_DECODER_ABI 51
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -495,6 +495,8 @@ int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames);
  * count 0 = this slot inaudible this block (residual mono discarded).
  * The listener basis + curve tuning are GLOBAL (shared by every slot). Lock-free. */
 void cmm_out_set_emitter_occl_tone(cmm_out* o, int enable, float fullDb);
+/* v51 - one occlusion/tone smoothing time constant, SECONDS. See cmm_mix_set_emitter_slew. */
+void cmm_out_set_emitter_slew(cmm_out* o, float occlSec);
 void cmm_out_set_emitter_spatial(cmm_out* o, int slot, const float* lisPos3, const float* lisRight3,
                                  const float* pts, const float* gains, const int* flags, int count,
                                  float minDist, float maxDist, float falloffExp, float muffle,
@@ -648,6 +650,14 @@ CMM_API void cmm_mix_set_emitter_points(long long id, const float* xyz, const fl
  * changes (cheap to call every tick). Applies to the single shared station. */
 CMM_API void cmm_mix_set_emitter_tuning(float minDist, float maxDist, float falloffExp, float muffle,
                                         float stereoWidth);
+
+/* v51 - the ONE occlusion smoothing time constant, in milliseconds (default 50). Replaces an
+ * adaptive per-callback coefficient whose effective time constant was 328 ms at a 10 ms audio
+ * buffer, varied with the audio endpoint, varied with how fast the door happened to be moving and
+ * varied with the listener's distance from the speaker. The door model leads the pipeline by a
+ * fixed time to cancel this lag, and a fixed lead can only cancel a fixed lag. Also governs the
+ * muffle's slew, so tone and level arrive together. Lock-free. */
+CMM_API void cmm_mix_set_emitter_slew(float occlMs);
 
 /* v23 — set the LIVE emitter reverb params from the managed room probe. wet = master wet level
  * (0 = off), room = size→decay/tail, damp = HF damping (dead room = darker/shorter). All 0..1.

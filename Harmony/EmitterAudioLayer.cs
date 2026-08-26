@@ -1382,6 +1382,7 @@ namespace CMM
             // reading it as distance dulled a speaker the listener was standing on.
             CmmMixer.Instance?.SetEmitterOcclTone(CMMConfig.WorldEmitterNativeAcoustics,
                                                   CMMConfig.WorldEmitterOcclusionFullDb);
+            CmmMixer.Instance?.SetEmitterSlew(CMMConfig.WorldEmitterOcclusionSlewMs);
             CmmMixer.Instance?.SetEmitterTuning(CMMConfig.WorldEmitterMinDistance,
                                                 CMMConfig.WorldEmitterRange,
                                                 CMMConfig.WorldEmitterFalloff,

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 34;
+        internal const int CurrentSchema = 35;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -642,6 +642,17 @@ MOVEMENT, so walking out a doorway / behind a thick wall fades the radio out (~a
 of hard-cutting it the tick the route flips to blocked. Door open/close events bypass the cap
 (their timing is tuned separately) and occlusion DROPS are never capped — sound arriving tracks
 the event. 0 = no cap (old instant behavior). Hot-reloads."),
+            Cmt(@"THE ONE SMOOTHING TIME CONSTANT, in milliseconds, at the very bottom of the audio chain.
+Every occlusion change -- a door, a block placed or broken, walking behind a wall -- eases in over
+this, and so does the muffle that rides on it, so tone and level now arrive together.
+It replaced an adaptive coefficient applied PER AUDIO BUFFER rather than per second: its real time
+constant was 328 ms on a 10 ms audio device and 657 ms on a 20 ms one, it ran 3-7x faster on a
+closing door than an opening one, and faster when you stood near a speaker than far from it. The
+door model cancels this lag with a fixed lead, and a fixed lead can only cancel a fixed lag -- so
+this one is constant by construction.
+Raise it to make ALL occlusion changes glide more; lower it to make them snap. If you change it,
+move WorldEmitterDoorLeadMs by the same amount or every door drifts late or early together."),
+            F("WorldEmitterOcclusionSlewMs",         "CMMConfig.WorldEmitterOcclusionSlewMs",       50f, since: 35),
             F("WorldEmitterOcclusionFadeRate",       "CMMConfig.WorldEmitterOcclusionFadeRate",     50f),
             Cmt(@"How often the occlusion decision and the speaker point-set refresh, in Hz (1-30). Your
 listener position is pushed every FRAME regardless, so distance and panning always track
@@ -691,8 +702,8 @@ OVERSTATES how far the leaf has gone early in the swing; this takes that out. 1 
 A kill switch for the open-area measurement, not a tuning knob."),
             B("WorldEmitterDoorMeasureLeaf",          "CMMConfig.WorldEmitterDoorMeasureLeaf",       false,
               since: 32, changedIn: 34, was: true),
-            F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            350f,
-              since: 29, changedIn: 34, was: new object[] { 180f }),
+            F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            225f,
+              since: 29, changedIn: 35, was: new object[] { 180f, 350f, 450f }),
             Cmt(@"Doors that are structurally WALLS rather than hinged leaves, exempt from
 WorldEmitterDoorMaxLoss and charged their own material in full. A raised drawbridge
 is a slab of timber and iron standing in a gateway; capped, it published 6 dB to a
