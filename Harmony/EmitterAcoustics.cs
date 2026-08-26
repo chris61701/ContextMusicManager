@@ -2042,6 +2042,58 @@ namespace CMM
             return false;
         }
 
+        // ---- PER-DOOR: HOW MUCH OF THE CLIP THE APERTURE ACTUALLY USES --------------------
+        // Some rigs keep animating after the leaf has finished moving. The wood cellar door
+        // overshoots and bounces before it settles; the vault hatch runs a 3.1 s open clip. The
+        // clip clock keeps climbing through all of that, so the sound goes on opening after the
+        // doorway has stopped -- reported as "too slow to open" on exactly those doors while every
+        // other door was called almost perfect.
+        //
+        // One number per door type: the FRACTION OF THE CLIP over which the aperture completes.
+        // 1 (the default, and every door not listed) is the whole clip and changes nothing. 0.5
+        // means the doorway is fully open half way through the animation and the rest is settle.
+        //
+        // This is deliberately NOT the old override table. That one carried five fields per door,
+        // in units nobody could check, and existed because the base model could not fit any door.
+        // The base model now fits eleven of thirteen; this is a per-rig fact about an animation,
+        // it is one number, and you can verify it by watching the door and counting.
+        private static string _spanCfgCache;
+        private static string[] _spanKeys = System.Array.Empty<string>();
+        private static float[] _spanVals = System.Array.Empty<float>();
+        private static readonly Dictionary<int, float> _spanByType = new Dictionary<int, float>();
+        private static float DoorSwingSpan(int type)
+        {
+            string cfg = CMMConfig.WorldEmitterDoorSwingSpans ?? "";
+            if (!ReferenceEquals(cfg, _spanCfgCache))
+            {
+                _spanCfgCache = cfg;
+                _spanByType.Clear();
+                var keys = new List<string>(); var vals = new List<float>();
+                foreach (string entry in cfg.Split(new[] { ';', ',' }, System.StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int eq = entry.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = entry.Substring(0, eq).Trim();
+                    if (k.Length == 0) continue;
+                    if (!float.TryParse(entry.Substring(eq + 1).Trim(), System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out float v)) continue;
+                    keys.Add(k); vals.Add(Mathf.Clamp(v, 0.05f, 1f));
+                }
+                _spanKeys = keys.ToArray(); _spanVals = vals.ToArray();
+            }
+            if (_spanKeys.Length == 0) return 1f;
+            if (_spanByType.TryGetValue(type, out float cached)) return cached;
+            float found = 1f;
+            Block b = (type > 0 && type < Block.list.Length) ? Block.list[type] : null;
+            string bn = b != null ? (b.GetBlockName() ?? "") : "";
+            for (int i = 0; i < _spanKeys.Length; i++)
+                if (bn.IndexOf(_spanKeys[i], System.StringComparison.OrdinalIgnoreCase) >= 0)
+                { found = _spanVals[i]; break; }
+            _spanByType[type] = found;
+            if (found < 0.999f) CMMConfig.D("[CMM] DoorSwingSpan " + bn + " = " + found.ToString("0.00"));
+            return found;
+        }
+
         // ---- OPENNESS FROM OPEN AREA ------------------------------------------------------
         // Openness is not a fraction of the swing and no longer has thresholds. It is a soft knee
         // on the doorway's ACTUAL OPEN AREA in square metres, plus a residual term that guarantees
@@ -2400,7 +2452,12 @@ namespace CMM
                 float ease = Mathf.Clamp(CMMConfig.WorldEmitterDoorClipEase, 0.5f, 3f);
                 float ntLed = nt;
                 if (leadS > 0f && swingLen > 0.05f)
-                { ntLed = Mathf.Clamp01(nt + leadS / swingLen); leadApplied = true; }
+                { ntLed = nt + leadS / swingLen; leadApplied = true; }
+                // The aperture may finish before the clip does. Dividing here rather than scaling
+                // the lead separately is the same thing: (nt + lead/len) / span.
+                float swSpan = DoorSwingSpan(da.Type);
+                if (swSpan < 0.999f) ntLed /= swSpan;
+                ntLed = Mathf.Clamp01(ntLed);
                 // THE EASE BELONGS ON THE CLOSE ONLY, and the reason is which end of the clip
                 // the acoustically decisive part of the ramp sits at.
                 //

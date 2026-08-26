@@ -653,6 +653,12 @@ namespace CMM
         // end of the clip, where this exponent bites. On an OPEN the decisive stretch is at the
         // start, and easing it there simply made every long door open too slowly. 1 disables it.
         public static float  WorldEmitterDoorClipEase    = 1.5f;
+        // Per-door-type: the FRACTION OF THE ANIMATION CLIP over which the doorway actually
+        // finishes opening. Some rigs keep animating after the leaf has stopped -- the cellar door
+        // overshoots and settles, the vault hatch runs a 3.1 s clip -- so the sound goes on opening
+        // after the doorway is already open. "match=fraction;..." , match is a case-insensitive
+        // SUBSTRING of the block name, first match wins, unlisted doors use the whole clip.
+        public static string WorldEmitterDoorSwingSpans = "cellarDoor=0.55;vaultHatch=0.6";
         // false = ignore the measured leaf's MOTION and drive every door's openness from its
         // animation clip. Default false, on evidence: of fourteen door types only the steel garage
         // 4x3 tracks its leaf honestly, and it is the one door whose occlusion reads jittery. The

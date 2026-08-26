@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 35;
+        internal const int CurrentSchema = 36;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -700,6 +700,17 @@ decisive stretch (the last small aperture, where nearly all the audible change h
 of the clip, which is where this exponent bites. An OPEN has that stretch at the START, and easing
 it there made every long door ""open up too slowly"". Raise it to hold the muffle later into a
 close; 1 disables it."),
+            Cmt(@"Per-door-type: the FRACTION OF THE ANIMATION CLIP over which the doorway actually finishes
+opening. Some rigs keep animating long after the leaf has stopped -- the wood cellar door overshoots
+and bounces before it settles, the vault hatch runs a 3.1 second open clip -- so the clip clock goes
+on climbing after the doorway is already open, and the sound goes on opening with it. That is ""too
+slow to open"" on those doors while every other door is right.
+Format ""match=fraction;..."" -- match is a case-insensitive SUBSTRING of the block name, first match
+wins, and any door not listed uses the whole clip (1.0, no change). 0.55 means the doorway is fully
+open a little over half way through the animation and the rest is settle. LOWER it if that door
+still opens too slowly; raise it toward 1 if it now opens before the door has visibly moved. You can
+check the number by eye: watch when the leaf stops, against the length of the animation."),
+            Str("WorldEmitterDoorSwingSpans",         "CMMConfig.WorldEmitterDoorSwingSpans",        @"cellarDoor=0.55;vaultHatch=0.6", since: 36),
             F("WorldEmitterDoorClipEase",             "CMMConfig.WorldEmitterDoorClipEase",          1.5f, since: 32),
             Cmt(@"false = ignore the measured leaf entirely and drive every door from its animation clip.
 A kill switch for the open-area measurement, not a tuning knob."),
