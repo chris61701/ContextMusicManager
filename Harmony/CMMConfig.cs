@@ -423,7 +423,7 @@ namespace CMM
         //
         // Open air is unaffected at any value: excess is material + (pathLength - straightLine) x
         // this, and the straight-line term cancels against the free-space reference.
-        public static float  WorldEmitterFieldDetourDb  = 1.5f;
+        public static float  WorldEmitterFieldDetourDb  = 3f;    // tuned by ear 2026-08-25; 1.5 leaked, 6 was overzealous
         // HOW FAST OCCLUSION IS ALLOWED TO CHANGE, in dB per second, per speaker point.
         //
         // The field re-floods a few times a second and each flood is an independent answer, so

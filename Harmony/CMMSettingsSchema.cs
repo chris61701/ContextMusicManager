@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 37;
+        internal const int CurrentSchema = 38;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -789,7 +789,8 @@ it is quiet-but-correct close to you while it does, because unread space counts 
 DetourDb is what one block of going-the-long-way costs. It is the only tuning constant the
 model has beyond the shared material curve - everything else comes from the blocks."),
             B("WorldEmitterFieldOcclusion",          "CMMConfig.WorldEmitterFieldOcclusion",        true),
-            F("WorldEmitterFieldDetourDb",           "CMMConfig.WorldEmitterFieldDetourDb",         1.5f),
+            F("WorldEmitterFieldDetourDb",           "CMMConfig.WorldEmitterFieldDetourDb",         3f,
+              since: 1, changedIn: 38, was: 1.5f),
 
             Gap(),
             Cmt(@"What one block of material is worth to the field model: dB = WallDb * loss^WallPow, where
