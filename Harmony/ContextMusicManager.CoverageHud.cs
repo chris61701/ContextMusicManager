@@ -257,8 +257,12 @@ namespace CMM
         {
             if (_covBgTex == null)
             {
+                // DENSER THAN THE CONTEXT HUD'S 0.62. This panel is a wall of small
+                // monospaced text with five colours doing real work in it, and at 0.62 a
+                // bright scene bleeds through enough to make blue and violet hard to tell
+                // apart. The context HUD is a dozen wide rows and gets away with it.
                 _covBgTex = new Texture2D(1, 1);
-                _covBgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.62f));
+                _covBgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.88f));
                 _covBgTex.Apply();
             }
             // A MONOSPACE FACE, because every column in this panel is aligned by padding
@@ -298,19 +302,22 @@ namespace CMM
             }
             if (_covCols.Length == 0) return;
 
-            const float padX = 12f, headerH = 22f, legendH = 18f;
+            const float padX = 12f, headerH = 22f, legendH = 18f, padBottom = 12f;
             float colW = 78 * 7.3f;
-            float lineH = _covBodyStyle.lineHeight > 0 ? _covBodyStyle.lineHeight : 15f;
-            int maxLines = 0;
+
+            // ASK THE STYLE, DO NOT MULTIPLY BY lineHeight. A dynamic OS font reports a
+            // lineHeight smaller than the spacing GUI.Label actually renders at, so counting
+            // newlines and multiplying came out short and clipped the last row or two off the
+            // bottom. CalcHeight measures the block the label will really draw.
+            float bodyH = 0f;
             for (int c = 0; c < _covCols.Length; c++)
             {
-                int n = 0; string s = _covCols[c];
-                for (int i = 0; i < s.Length; i++) if (s[i] == '\n') n++;
-                if (n > maxLines) maxLines = n;
+                float ch = _covBodyStyle.CalcHeight(new GUIContent(_covCols[c]), colW);
+                if (ch > bodyH) bodyH = ch;
             }
-            float bodyH = Mathf.Max(lineH, maxLines * lineH);
+            if (bodyH <= 0f) bodyH = 15f;
             float w = padX * 2f + colW * _covCols.Length;
-            float h = headerH + legendH + bodyH + 14f;
+            float h = headerH + legendH + bodyH + padBottom;
             float x = 10f;
             float y = 10f + (OverlayOnScreen ? OverlayClearanceHeight : 0f);
             if (_hudMode != 0 && _hudBottomY > y) y = _hudBottomY + 8f;   // stack under the context HUD
