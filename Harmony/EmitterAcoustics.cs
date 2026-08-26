@@ -1638,7 +1638,7 @@ namespace CMM
         private struct DoorAnim
         {
             public bool Opening; public float Openness; public bool Started; public int Ticks; public float Span;
-            public float GapFull, GapFullOpen, GapClosed, LeadMs;   // per-door thresholds + lead (globals + type overrides), resolved at registration
+            public float GapFull, GapFullOpen, GapClosed, LeadMs, Curve;   // per-door thresholds + lead (globals + type overrides), resolved at registration
             public int Type;                                // block type — names the door in the DoorTrace log
             public float StartedAt;                         // realtime the swing was registered (trace time base)
         }
@@ -1727,7 +1727,23 @@ namespace CMM
             // sooner. That reasoning was right and it produced a table nobody could tune.
             float full = Mathf.Clamp(da.Opening ? da.GapFullOpen : da.GapFull, 0.02f, 0.98f);
             float shut = Mathf.Clamp(da.GapClosed, 0f, full - 0.01f);
-            return Mathf.Clamp01((physical - shut) / (full - shut));
+            float o = Mathf.Clamp01((physical - shut) / (full - shut));
+
+            // ── THE SHAPE, NOT THE TIMING ───────────────────────────────────────────────────
+            // Openness is linear in travel, and the loss it drives is shutLoss x (1 - openness).
+            // That is linear in an AMPLITUDE multiplier, so the first half of the ramp spends
+            // most of the decibels: by the time a door is half open, most of what there was to
+            // hear has already arrived. That is the roll-up report exactly -- "less about timing
+            // and more about how much occlusion is applied early on; it goes from occlusion to no
+            // occlusion way too quickly".
+            //
+            // The curve exponent reshapes it without moving either end. Above 1 the early travel
+            // yields less openness, so the door holds its muffle and releases later; below 1 it
+            // opens up sooner. 1 is a straight line and is exactly the previous behaviour, which
+            // is why it is the default and why every door not carrying an override is untouched.
+            float g = da.Curve;
+            if (g > 0.01f && Mathf.Abs(g - 1f) > 0.01f) o = Mathf.Pow(o, g);
+            return o;
         }
 
         // ── Per-door-type gap overrides ──────────────────────────────────────────────────────────────
@@ -1738,16 +1754,18 @@ namespace CMM
         // the global. A door can need a different lead from every other door because the lead
         // cancels a pipeline delay that is a different fraction of every swing -- and the roll-up
         // 3x3, alone in the set, wanted about 200 ms less of it ("occlusion goes too quickly").
-        private struct GapOvr { public string Match; public float Full, FullOpen, Closed, LeadMs; }
+        // Fifth optional field is the CURVE: match=full/fullOpen/closed/leadMs/curve.
+        private struct GapOvr { public string Match; public float Full, FullOpen, Closed, LeadMs, Curve; }
         private static string _ovrCfgCache;
         private static GapOvr[] _gapOvrs = System.Array.Empty<GapOvr>();
         private static readonly Dictionary<int, int> _gapOvrByType = new Dictionary<int, int>();
-        private static void ResolveDoorGaps(int type, out float full, out float fullOpen, out float closed, out float leadMs)
+        private static void ResolveDoorGaps(int type, out float full, out float fullOpen, out float closed, out float leadMs, out float curve)
         {
             full = CMMConfig.WorldEmitterDoorGapFull;
             fullOpen = CMMConfig.WorldEmitterDoorGapFullOpen;
             closed = CMMConfig.WorldEmitterDoorGapClosed;
             leadMs = CMMConfig.WorldEmitterDoorLeadMs;
+            curve = CMMConfig.WorldEmitterDoorCurve;
             string cfg = CMMConfig.WorldEmitterDoorGapOverrides ?? "";
             if (!ReferenceEquals(cfg, _ovrCfgCache))   // config hot-reload swaps the string instance
             {
@@ -1759,11 +1777,12 @@ namespace CMM
                     int eq = entry.IndexOf('=');
                     if (eq <= 0) continue;
                     string[] v = entry.Substring(eq + 1).Split('/');
-                    GapOvr o = new GapOvr { Match = entry.Substring(0, eq).Trim(), Full = float.NaN, FullOpen = float.NaN, Closed = float.NaN, LeadMs = float.NaN };
+                    GapOvr o = new GapOvr { Match = entry.Substring(0, eq).Trim(), Full = float.NaN, FullOpen = float.NaN, Closed = float.NaN, LeadMs = float.NaN, Curve = float.NaN };
                     if (v.Length > 0 && ParseOvr(v[0], out float f0)) o.Full = f0;
                     if (v.Length > 1 && ParseOvr(v[1], out float f1)) o.FullOpen = f1;
                     if (v.Length > 2 && ParseOvr(v[2], out float f2)) o.Closed = f2;
                     if (v.Length > 3 && ParseOvr(v[3], out float f3)) o.LeadMs = f3;
+                    if (v.Length > 4 && ParseOvr(v[4], out float f4)) o.Curve = f4;
                     if (o.Match.Length > 0) list.Add(o);
                 }
                 _gapOvrs = list.ToArray();
@@ -1785,6 +1804,7 @@ namespace CMM
             if (!float.IsNaN(ov.FullOpen)) fullOpen = ov.FullOpen;
             if (!float.IsNaN(ov.Closed)) closed = ov.Closed;
             if (!float.IsNaN(ov.LeadMs)) leadMs = ov.LeadMs;
+            if (!float.IsNaN(ov.Curve)) curve = ov.Curve;
         }
         private static bool ParseOvr(string s, out float v)
         {
@@ -1943,9 +1963,9 @@ namespace CMM
                         Vector3i dim = db.multiBlockPos.dim;
                         span = Mathf.Max(1, Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z)));
                     }
-                    ResolveDoorGaps(p.Type, out float gFull, out float gFullOpen, out float gClosed, out float gLead);
+                    ResolveDoorGaps(p.Type, out float gFull, out float gFullOpen, out float gClosed, out float gLead, out float gCurve);
                     _doors[p.Pos] = new DoorAnim { Opening = p.Opening, Openness = p.Opening ? 0f : 1f, Started = false, Ticks = 0,
-                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed, LeadMs = gLead,
+                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed, LeadMs = gLead, Curve = gCurve,
                                                    Type = p.Type, StartedAt = Time.realtimeSinceStartup };
                     // The latch's invalidation, moved here so it happens on the main thread.
                     // BeginDoorWait arms the stopwatch: from here the reader has to consume these

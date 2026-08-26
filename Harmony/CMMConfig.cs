@@ -630,6 +630,9 @@ namespace CMM
         // How far AHEAD of the door's real pose to compute its sound, in milliseconds, to cancel
         // the pipeline's own delay (geometry read + flood + emitter tick + glide). 0 disables it.
         public static float  WorldEmitterDoorLeadMs      = 180f;
+        // Shape of the door's openness ramp. 1 = straight line. Above 1 holds the muffle longer
+        // and releases later; below 1 opens up sooner. Per-type via the override's 5th field.
+        public static float  WorldEmitterDoorCurve       = 1f;
 
         // true = read a door's openness from how far its LEAF has actually rotated, instead of how
         // far through the animation CLIP it is. Clip time is linear; an eased or bouncing animation
@@ -637,9 +640,9 @@ namespace CMM
         public static bool   WorldEmitterDoorUseLeafAngle = true;
 
         // ALL THREE ARE FRACTIONS OF THE SWING (0-1), not metres. See DoorAcoustic.
-        public static float  WorldEmitterDoorGapFull     = 0.60f;  // CLOSING: fade begins once the door is this far open
-        public static float  WorldEmitterDoorGapFullOpen = 0.45f;  // OPENING: fully open to the ear at this much travel
-        public static float  WorldEmitterDoorGapClosed   = 0.08f;  // acoustically shut below this much travel
+        public static float  WorldEmitterDoorGapFull     = 0.70f;  // CLOSING: fade begins once the door is this far open
+        public static float  WorldEmitterDoorGapFullOpen = 0.50f;  // OPENING: fully open to the ear at this much travel
+        public static float  WorldEmitterDoorGapClosed   = 0.15f;  // acoustically shut below this much travel
         // Per-door-type overrides of the three gap thresholds: "match=full/fullOpen/closed;match=…" —
         // match is a case-insensitive SUBSTRING of the block name ("garageDoor" catches wooden/steel/
         // iron variants), "-" inherits the global, first match wins. Lets one door type be retuned
@@ -647,7 +650,7 @@ namespace CMM
         // NOTE the big POI roll-up is named rollUpDoor5x4*, NOT *garageDoor* — both entries are needed.
         // Defaults are the hand-tuned in-game values (2026-07-08): heavy hatches fade through the whole
         // close but snap alive on open; the vault hatch swings light because its slam is the seal below.
-        public static string WorldEmitterDoorGapOverrides = "drawBridge=0.85/0.70/0.14;garageDoor=0.75/0.50/0.12;rollUp=0.45/0.30/0.08;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10";
+        public static string WorldEmitterDoorGapOverrides = "drawBridge=0.85/0.70/0.14;garageDoor=0.55/0.35/0.12;rollUp=0.70/0.55/0.08/0/2.0;cellarDoor=0.70/0.40/0.15;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10";
         // DoorSealTypes: comma-separated block-name PREFIXES of doors that are AIRTIGHT when fully shut
         // and undamaged — a closed vault door is a pressure seal, not a metal panel's worth of muffle.
         // Sealed doors read as gate-class solid (true silence via the hard-stop), and because the seal

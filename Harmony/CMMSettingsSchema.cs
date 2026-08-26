@@ -673,16 +673,26 @@ door at all. Doors with plain linear swings are unaffected either way.
 Each door type learns its own range on the way through, and any door whose leaf
 cannot be read falls back to clip time, so nothing can behave worse than before."),
             B("WorldEmitterDoorUseLeafAngle",         "CMMConfig.WorldEmitterDoorUseLeafAngle",      true, since: 30),
+            Cmt(@"Shape of a door's openness ramp. 1 = a straight line, which is what it has always
+been. The loss a door applies is proportional to (1 - openness), so a straight line
+spends most of its decibels in the FIRST half of the travel -- a door half open has
+already given up most of what there was to hear. Above 1 holds the muffle longer and
+releases later; below 1 opens up sooner. Per door type via the 5th override field."),
+            F("WorldEmitterDoorCurve",                "CMMConfig.WorldEmitterDoorCurve",             1f, since: 31),
             F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            180f, since: 29),
-            F("WorldEmitterDoorGapFull",             "CMMConfig.WorldEmitterDoorGapFull",           1.25f),
-            Cmt(@"GapFullOpen: the OPENING direction's full-sound threshold (metres of gap). Kept separate from
+            F("WorldEmitterDoorGapFull",              "CMMConfig.WorldEmitterDoorGapFull",           0.70f,
+              since: 1, changedIn: 31, was: new object[] { 1.25f, 0.60f }),
+            Cmt(@"GapFullOpen: the OPENING direction's full-sound threshold, as a FRACTION of the swing. Kept separate from
 GapFull because the two directions want different feels: closing is tuned for when the shut lands
 (fade begins early), but sound should FLOOD IN the moment an opening door has a real gap — sharing
 one threshold made a close-tuned door slow to come alive on open. Hot-reloads."),
-            F("WorldEmitterDoorGapFullOpen",         "CMMConfig.WorldEmitterDoorGapFullOpen",       0.7f),
-            F("WorldEmitterDoorGapClosed",           "CMMConfig.WorldEmitterDoorGapClosed",         0.15f),
+            F("WorldEmitterDoorGapFullOpen",          "CMMConfig.WorldEmitterDoorGapFullOpen",       0.50f,
+              since: 1, changedIn: 31, was: new object[] { 0.7f, 0.45f }),
+            F("WorldEmitterDoorGapClosed",            "CMMConfig.WorldEmitterDoorGapClosed",         0.15f,
+              since: 1, changedIn: 31, was: 0.08f),
             Cmt(@"DoorGapOverrides: per-door-type overrides of the three gap thresholds, without touching the rest.
-Format: ""match=full/fullOpen/closed;match=..."" — match is a case-insensitive SUBSTRING of the
+Format: ""match=full/fullOpen/closed[/leadMs[/curve]];..."" — the last two are optional and
+inherit the global when omitted. match is a case-insensitive SUBSTRING of the
 block name (""garageDoor"" catches wooden/steel/iron variants), ""-"" inherits the global, first match
 wins. Default slows the garage/roll-up OPEN ramp to suit their long lift. Hot-reloads."),
             Cmt(@"Doors that are structurally WALLS rather than hinged leaves, exempt from
@@ -691,7 +701,7 @@ is a slab of timber and iron standing in a gateway; capped, it published 6 dB to
 speaker four metres away. Case-insensitive SUBSTRING of the block name, comma
 separated. Leave empty to cap every door."),
             Str("WorldEmitterDoorFullLossTypes",      "CMMConfig.WorldEmitterDoorFullLossTypes",     @"drawBridge", since: 26),
-            Str("WorldEmitterDoorGapOverrides",        "CMMConfig.WorldEmitterDoorGapOverrides",      @"drawBridge=0.85/0.70/0.14;garageDoor=0.75/0.50/0.12;rollUp=0.45/0.30/0.08;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10",
+            Str("WorldEmitterDoorGapOverrides",        "CMMConfig.WorldEmitterDoorGapOverrides",      @"drawBridge=0.85/0.70/0.14;garageDoor=0.55/0.35/0.12;rollUp=0.70/0.55/0.08/0/2.0;cellarDoor=0.70/0.40/0.15;vaultHatch=0.50/0.30/0.10;ironHatch=0.95/0.10/0.09;manholeHatch=0.95/0.10/0.09;woodHatch=0.50/0.10/0.10",
               since: 1, changedIn: 28, was: new object[] { @"drawBridge=6/5/1;garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1", @"garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1" }),
             Cmt(@"DoorSealTypes: comma-separated block-name prefixes of doors that are AIRTIGHT when fully shut and
 undamaged. A closed vault door is a pressure seal — TRUE SILENCE via the hard-stop, landing while
