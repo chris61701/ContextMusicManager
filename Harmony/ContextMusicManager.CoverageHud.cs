@@ -131,10 +131,15 @@ namespace CMM
             {
                 if (ctx.IsPlaylist)
                 {
+                    // A ROOTED playlist path is the same file whichever music root we are
+                    // looking from, so it is read once. A relative one is per-root: an add-on
+                    // pack can ship its own copy alongside the primary and both play.
+                    bool rooted = Path.IsPathRooted(ctx.Source);
                     foreach (MusicRoot r in MusicRoots.All)
                     {
-                        string p = MusicRoots.Combine(r.Path, ctx.Source);
-                        if (!File.Exists(p)) continue;
+                        string p = rooted ? MusicRoots.Normalize(ctx.Source)
+                                          : MusicRoots.Combine(r.Path, ctx.Source);
+                        if (!File.Exists(p)) { if (rooted) break; continue; }
                         int cached;
                         string key = p + "|" + new FileInfo(p).LastWriteTimeUtc.Ticks;
                         if (!_covPlCache.TryGetValue(key, out cached))
@@ -147,6 +152,7 @@ namespace CMM
                             _covPlCache[key] = cached;
                         }
                         total += cached;
+                        if (rooted) break;
                     }
                     return total;
                 }
@@ -171,9 +177,15 @@ namespace CMM
             return total;
         }
 
+        // A SCANNED ZERO IS A REAL ZERO. Falling through to ContextHasFiles when our own
+        // count came back 0 meant emptying a folder changed the NUMBER on screen but not the
+        // colour or the chain: the engine's _contextsWithFiles still said yes, so the row
+        // stayed green and nothing downstream re-resolved. Adding files worked, removing them
+        // did not. If the scan has an entry for this context -- even a zero -- it is the truth.
         private static bool CovPlayable(string name)
         {
-            if (CovCount(name) > 0) return true;
+            int n;
+            if (_covCount.TryGetValue(name, out n)) return n > 0;
             try { return ContextHasFiles(name); } catch { return false; }
         }
 
@@ -232,6 +244,7 @@ namespace CMM
             // driven by the world-emitter layer, which does not tick on the main menu -- so
             // without this the station list was simply empty there, which is exactly what it
             // looked like. It is self-throttled, so calling it here is free once warm.
+            _covCount.Clear();   // so a renamed or deleted context leaves nothing behind
             for (int i = 0; i < _covCtx.Count; i++)
                 _covCount[_covCtx[i].Context] = CovScan(_covCtx[i]);
             try { RadioStationCatalog.EnsureCatalog(); } catch { }
