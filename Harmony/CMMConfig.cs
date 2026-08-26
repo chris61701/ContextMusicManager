@@ -865,8 +865,12 @@ namespace CMM
         // Shows/hides the persistent Now Playing overlay (top-left track + context
         // readout). NowPlayingEnabled below picks the state at launch.
         public static KeyCode KeyNowPlaying       = KeyCode.Keypad7;
-        public static KeyCode KeyContextHud      = KeyCode.Keypad8;
-        public static KeyCode KeyContextHudReset = KeyCode.Keypad9;
+        // Numpad8 is the COVERAGE panel (off -> everything -> gaps only -> off): which
+        // contexts have music and what happens when they do not. It is the one people
+        // reach for, so it gets the key the context HUD used to have.
+        public static KeyCode KeyCoverageHud     = KeyCode.Keypad8;
+        public static KeyCode KeyContextHud      = KeyCode.Keypad9;   // was Keypad8
+        public static KeyCode KeyContextHudReset = KeyCode.Keypad6;   // was Keypad9
         // Testing aid: dump the acoustic column from wherever you are standing, without opening
         // the console -- which would mean letting go of the movement keys.
         public static KeyCode KeyAcousticsDump    = KeyCode.Keypad5;

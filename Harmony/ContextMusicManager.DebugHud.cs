@@ -365,7 +365,13 @@ namespace CMM
                 $"CMM • Context ({(_hudMode == 2 ? "expanded" : "compact")})  [Num8 cycle • Num9 reset GC]",
                 _hudHeaderStyle);
             GUI.Label(new Rect(x + padX, y + 6f + headerH, w - padX * 2f, bodyH), bodyContent, _hudBodyStyle);
+            _hudBottomY = y + h;   // the coverage panel stacks under this, not over it
         }
+
+        // Bottom edge of the context HUD as last drawn, or 0 while it is hidden. Both panels
+        // own the top-left, and Numpad8 and Numpad9 are independent now, so they have to be
+        // able to share the corner instead of covering each other.
+        internal static float _hudBottomY;
 
         // "label" + padding so the values start at a consistent column. The font is
         // proportional so alignment is approximate — fine for a diagnostic overlay.

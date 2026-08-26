@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 38;
+        internal const int CurrentSchema = 39;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -326,8 +326,16 @@ They render through CMM's native mixer, which does not pass through the game's
 listener, so this separates the two. Intended for judging emitter behaviour by ear
 against loud nearby sound effects; leave it false for normal play."),
             B("DebugMuteGameAudio",                   "CMMConfig.DebugMuteGameAudio",                false, since: 23),
-            E("KeyContextHud",                       "CMMConfig.KeyContextHud",                     @"Keypad8", since: 22),
-            E("KeyContextHudReset",                  "CMMConfig.KeyContextHudReset",                @"Keypad9", since: 22),
+            Cmt(@"COVERAGE PANEL. Cycles off -> everything -> gaps only -> off. One row per context: whether it
+has music of its own, how many tracks, and — when it has none — the fallback chain it walks, with the
+context that will actually be heard marked at the end. Radio stations are listed individually; one with
+no tracks is dead air. Everything is read live, so editing contexts.xml or context.lua, dropping files
+into a folder or deleting a station all show up within a second without reopening the panel."),
+            E("KeyCoverageHud",                      "CMMConfig.KeyCoverageHud",                    @"Keypad8", since: 39),
+            E("KeyContextHud",                       "CMMConfig.KeyContextHud",                     @"Keypad9",
+              since: 22, changedIn: 39, was: @"Keypad8"),
+            E("KeyContextHudReset",                  "CMMConfig.KeyContextHudReset",                @"Keypad6",
+              since: 22, changedIn: 39, was: @"Keypad9"),
             Cmt(@"TESTING AID. Dumps the acoustic column -- every block between your ear and the
 speaker, with its loss, openness, material and whether it blocks movement -- to the
 log, from wherever you are standing. Same report as the console's `cmm ac col`, but
