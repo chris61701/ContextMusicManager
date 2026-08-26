@@ -2,6 +2,7 @@
 #if CMM_DEBUG_HUD
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using UnityEngine;
 
@@ -82,9 +83,10 @@ namespace CMM
         {
             _covMode = (_covMode + 1) % 3;
             _covNextAt = 0f;                      // redraw with fresh data immediately
-            ShowNotice(_covMode == 0 ? "Coverage: off"
-                     : _covMode == 1 ? "Coverage: everything"
-                                     : "Coverage: gaps only");
+            // Deliberately NO ShowNotice. The notice box owns the same corner and pushes
+            // this panel down for its lifetime, so the thing you just summoned jumps as it
+            // appears and again when the notice expires. The context HUD is silent for the
+            // same reason; the header says which mode it is in.
         }
 
         // One row of the panel, already coloured.
@@ -93,17 +95,78 @@ namespace CMM
         // Playable track count for a context: the enumerated snapshot, which already has
         // playlists expanded into their entries (that is the same array PickNextFile draws
         // from), so a .m3u station counts its tracks rather than counting as one file.
+        // COUNT IT OURSELVES. directorySnapshot is the PLAYBACK engine's view, filled by the
+        // crawler and the file watch -- neither of which has run on the main menu, so every row
+        // read "-" there and nothing ever changed. This panel is a coverage tool, not a cache
+        // viewer: it enumerates the source folders on its own cadence so the numbers are true
+        // the moment it opens, and follow a file being dropped in without waiting for playback.
+        // The engine's snapshot is still preferred when it exists -- it is authoritative about
+        // what will actually be picked, including banned-track pruning.
+        private static readonly Dictionary<string, int> _covCount =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, int> _covPlCache =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         private static int CovCount(string name)
         {
             ContextCache c;
-            if (!cacheMap.TryGetValue(name, out c) || c == null) return 0;
-            string[] snap = c.directorySnapshot;
-            return snap != null ? snap.Length : 0;
+            if (cacheMap.TryGetValue(name, out c) && c != null && c.directorySnapshot != null)
+                return c.directorySnapshot.Length;
+            int n;
+            return _covCount.TryGetValue(name, out n) ? n : 0;
+        }
+
+        // One context's playable entries, straight off disk. Playlists are expanded, which is
+        // the difference between a station reading 1 and reading its real track count.
+        private static int CovScan(Contexts ctx)
+        {
+            int total = 0;
+            try
+            {
+                if (ctx.IsPlaylist)
+                {
+                    foreach (MusicRoot r in MusicRoots.All)
+                    {
+                        string p = MusicRoots.Combine(r.Path, ctx.Source);
+                        if (!File.Exists(p)) continue;
+                        int cached;
+                        string key = p + "|" + new FileInfo(p).LastWriteTimeUtc.Ticks;
+                        if (!_covPlCache.TryGetValue(key, out cached))
+                        {
+                            string[] tr = PlaylistSource.ReadTracks(p);
+                            cached = tr != null ? tr.Length : 0;
+                            _covPlCache[key] = cached;
+                            if (_covPlCache.Count > 256) { }   // bounded by playlist count in practice
+                        }
+                        total += cached;
+                    }
+                    return total;
+                }
+                foreach (string dir in MusicRoots.DirsFor(ctx))
+                {
+                    if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                    string[] files = Directory.GetFiles(dir);
+                    for (int i = 0; i < files.Length; i++)
+                    {
+                        string ext = Path.GetExtension(files[i]);
+                        if (AudioDecoder.IsSupported(files[i])) total++;
+                        else if (string.Equals(ext, ".m3u", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(ext, ".m3u8", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string[] tr = PlaylistSource.ReadTracks(files[i]);
+                            if (tr != null) total += tr.Length;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return total;
         }
 
         private static bool CovPlayable(string name)
         {
-            try { return ContextHasFiles(name); } catch { return CovCount(name) > 0; }
+            try { if (ContextHasFiles(name)) return true; } catch { }
+            return CovCount(name) > 0;
         }
 
         private static string Pad(string s, int w)
@@ -156,6 +219,14 @@ namespace CMM
             // panel must not turn into a dead frame.
             _covCtx.Clear();
             foreach (Contexts c in contexts.Values) if (c != null) _covCtx.Add(c);
+
+            // Our own disk counts, and the station catalogue. EnsureCatalog is normally only
+            // driven by the world-emitter layer, which does not tick on the main menu -- so
+            // without this the station list was simply empty there, which is exactly what it
+            // looked like. It is self-throttled, so calling it here is free once warm.
+            for (int i = 0; i < _covCtx.Count; i++)
+                _covCount[_covCtx[i].Context] = CovScan(_covCtx[i]);
+            try { RadioStationCatalog.EnsureCatalog(); } catch { }
             _covCtx.Sort(delegate (Contexts a, Contexts b)
             {
                 int p = b.Priority.CompareTo(a.Priority);
@@ -205,7 +276,7 @@ namespace CMM
                     {
                         for (int h = 0; h < _covHops.Count - 1; h++)
                             sb.Append(Col(CovDim, _covHops[h] + " \u2192 "));
-                        sb.Append(Col(CovGreen, "\u25cf " + termName + " " + CovCount(termName)));
+                        sb.Append(Col(CovGreen, "\u25cf " + termName + " (" + CovCount(termName) + ")"));   // brackets: names carry digits (POI_T3)
                     }
                     else
                     {
