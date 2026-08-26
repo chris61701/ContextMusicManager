@@ -2435,8 +2435,13 @@ namespace CMM
                 float dt = now - da.PrevAt;
                 if (dt > 0.001f && dt < 1f)
                 {
+                    // AND ONLY EVER FORWARD. A lead is an anticipation of where the door is
+                    // GOING; letting it run backwards means a closing door can be published as
+                    // more open than it measures, which is a door that bleeds while it shuts.
                     float rate = (rawOpen - da.PrevOpen) / dt;
-                    aOpen = Mathf.Clamp(rawOpen + rate * leadS, 0f, aDoor);
+                    float led = rawOpen + rate * leadS;
+                    led = da.Opening ? Mathf.Max(led, rawOpen) : Mathf.Min(led, rawOpen);
+                    aOpen = Mathf.Clamp(led, 0f, aDoor);
                     travel = Mathf.Clamp01(aOpen / Mathf.Max(0.01f, aDoor));
                 }
             }
@@ -2444,7 +2449,27 @@ namespace CMM
             da.PrevAt = now;
 
             da.ADoor = aDoor; da.AOpen = aOpen;
-            da.Openness = DoorAcoustic(aOpen, aDoor, travel);
+            float o = DoorAcoustic(aOpen, aDoor, travel);
+
+            // A SWING GOES ONE WAY. Openness may not move against the door within a swing, and
+            // the tail of a close is where that stops being pedantry:
+            //
+            //   nt=0.942 len=4.57 open=0.000
+            //   nt=0.956 len=0.00 open=0.909   <- one tick, on a door 96% shut
+            //   nt=0.967 len=0.00 open=0.000
+            //
+            // which is "audio bleeds through right after it shuts for a brief moment" exactly.
+            // Once the swing clip finishes, swingLen falls back to 0 and swingNt to minNt, so the
+            // clock jumps around among whatever stale clips the rig still has running; on the
+            // steel garage 4x3 that briefly read 0.78 m2 of opening, and the derivative lead --
+            // the only one left once swingLen is 0 -- extrapolated it 450 ms forward into 6.8 m2.
+            //
+            // Both halves are now fixed at the source, but the invariant is worth stating outright
+            // rather than trusting every clip in every rig to be well behaved: a door that is
+            // closing can only get more shut.
+            if (da.Started && da.Ticks > 1)
+                o = da.Opening ? Mathf.Max(o, da.Openness) : Mathf.Min(o, da.Openness);
+            da.Openness = o;
             // Mute a hair BEFORE the leaf finishes closing - its end-of-swing bounce shouldn't
             // still be audible. Time-based so it self-scales, and skipped when the clip length is
             // unreadable rather than guessed.
