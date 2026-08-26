@@ -1231,6 +1231,7 @@ namespace CMM
             public int Type; public LeafBox[] Boxes;
             public Transform Owner;         // the animated child at the SHUT pose
             public Quaternion ShutRot;      // its local rotation there
+            public Vector3 ShutPos;         // and its local position
         }
 
         // ── THE LEAF'S REAL MOTION, NOT THE CLIP'S CLOCK ────────────────────────────────────
@@ -1251,16 +1252,32 @@ namespace CMM
         // pose. The travel is normalised by the largest angle that door type has been seen to
         // reach, learned on the way through; until that is known the clip clock is used, so a
         // door type behaves exactly as before on its first swing and can never be made worse.
+        // A LEAF DOES NOT ALWAYS TURN. Reading travel as rotation alone was right for the hinged
+        // doors -- the cellar door went from the worst in the set to "perfect" on it -- and wrong
+        // for every door that SLIDES. A garage door's panels and a roll-up's curtain translate;
+        // their rotation is near zero, so the fraction was noise divided by noise and both went
+        // "completely broken" in the same test that fixed the hinged one.
+        //
+        // So measure both and take whichever this door actually does. Each is normalised by its
+        // own learned range, so a hinged door scores on angle, a sliding one on distance, and a
+        // door that does some of each still reaches 1 at full travel.
         private static readonly Dictionary<int, float> _doorMaxAngle = new Dictionary<int, float>();
+        private static readonly Dictionary<int, float> _doorMaxShift = new Dictionary<int, float>();
 
-        // Angle travelled from the shut pose, or -1 when it cannot be read.
-        private static float LeafTravelAngle(Vector3i parent, int type)
+        // Travel from the shut pose as (degrees, metres), or (-1, -1) when it cannot be read.
+        private static bool LeafTravel(Vector3i parent, int type, out float ang, out float shift)
         {
-            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Type != type) return -1f;
+            ang = -1f; shift = -1f;
+            if (!_leafPlanes.TryGetValue(parent, out LeafPlane p) || p.Type != type) return false;
             Transform o = p.Owner;
-            if (o == null) return -1f;                  // prefab recycled, or never captured
-            try { return Quaternion.Angle(p.ShutRot, o.localRotation); }
-            catch { return -1f; }
+            if (o == null) return false;                // prefab recycled, or never captured
+            try
+            {
+                ang = Quaternion.Angle(p.ShutRot, o.localRotation);
+                shift = Vector3.Distance(p.ShutPos, o.localPosition);
+                return true;
+            }
+            catch { ang = -1f; shift = -1f; return false; }
         }
         private static readonly Dictionary<Vector3i, LeafPlane> _leafPlanes = new Dictionary<Vector3i, LeafPlane>();
 
@@ -1302,7 +1319,8 @@ namespace CMM
             _leafPlanes[parent] = new LeafPlane
             {
                 Type = type, Boxes = lbs, Owner = owner,
-                ShutRot = owner != null ? owner.localRotation : Quaternion.identity
+                ShutRot = owner != null ? owner.localRotation : Quaternion.identity,
+                ShutPos = owner != null ? owner.localPosition : Vector3.zero
             };
             if (isNew && CMMConfig.DebugLogging)
             {
@@ -2038,24 +2056,29 @@ namespace CMM
             // Falls back silently whenever the angle cannot be read or the type's range is not yet
             // known, which is every door's FIRST swing -- so nothing that behaves today can be
             // made worse by this, only later swings improved.
-            if (CMMConfig.WorldEmitterDoorUseLeafAngle)
+            if (CMMConfig.WorldEmitterDoorUseLeafAngle
+                && LeafTravel(parent, da.Type, out float ang, out float shift))
             {
-                float ang = LeafTravelAngle(parent, da.Type);
-                if (ang >= 0f)
+                float bestA, bestS;
+                _doorMaxAngle.TryGetValue(da.Type, out bestA);
+                _doorMaxShift.TryGetValue(da.Type, out bestS);
+                if (ang   > bestA) { bestA = ang;   _doorMaxAngle[da.Type] = bestA; }
+                if (shift > bestS) { bestS = shift; _doorMaxShift[da.Type] = bestS; }
+
+                // Each axis needs a real range before its fraction means anything: a leaf barely
+                // off its stop has an angle and a displacement, neither of which is a fraction.
+                // A hinged door only ever qualifies on angle, a sliding one only on distance.
+                bool useA = bestA > 5f;          // degrees
+                bool useS = bestS > 0.20f;       // metres
+                if (useA || useS)
                 {
-                    float best;
-                    _doorMaxAngle.TryGetValue(da.Type, out best);
-                    if (ang > best) { best = ang; _doorMaxAngle[da.Type] = best; }
-                    // Needs a real range before it can mean anything: a door barely off its stop
-                    // has an angle, not a fraction.
-                    if (best > 5f)
-                    {
-                        float travel = Mathf.Clamp01(ang / best);
-                        // The lead, expressed in this door's own clip, carried onto the angle axis.
-                        if (lead > 0f && swingLen > 0.05f)
-                            travel = Mathf.Clamp01(travel + lead / swingLen);
-                        t = da.Opening ? travel : 1f - travel;
-                    }
+                    float fa = useA ? Mathf.Clamp01(ang   / bestA) : 0f;
+                    float fs = useS ? Mathf.Clamp01(shift / bestS) : 0f;
+                    float travel = Mathf.Max(fa, fs);
+                    // The lead, expressed in this door's own clip, carried onto the travel axis.
+                    if (lead > 0f && swingLen > 0.05f)
+                        travel = Mathf.Clamp01(travel + lead / swingLen);
+                    t = da.Opening ? travel : 1f - travel;
                 }
             }
 
@@ -2074,10 +2097,12 @@ namespace CMM
             if (CMMConfig.DebugLogging)
             {
                 Block dbb = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
-                float dbgAng = LeafTravelAngle(parent, da.Type);
-                float dbgMax; _doorMaxAngle.TryGetValue(da.Type, out dbgMax);
+                LeafTravel(parent, da.Type, out float dbgAng, out float dbgShift);
+                float dbgMax, dbgMaxS;
+                _doorMaxAngle.TryGetValue(da.Type, out dbgMax);
+                _doorMaxShift.TryGetValue(da.Type, out dbgMaxS);
                 CMMConfig.D($"[CMM] DoorTrace {(da.Opening ? "OPEN " : "CLOSE")} {(dbb != null ? dbb.GetBlockName() : "?")} " +
-                            $"ang={dbgAng:0.0}/{dbgMax:0.0} " +
+                            $"ang={dbgAng:0.0}/{dbgMax:0.0} shift={dbgShift:0.00}/{dbgMaxS:0.00} " +
                             $"t={Time.realtimeSinceStartup - da.StartedAt:0.000}s nt={t:0.000} len={swingLen:0.00}s " +
                             $"span={da.Span:0.##}m gap={physical * Mathf.Max(1f, da.Span):0.00}m " +
                             $"thresh={(da.Opening ? da.GapFullOpen : da.GapFull):0.00}/{da.GapClosed:0.00} open={da.Openness:0.000} " +
