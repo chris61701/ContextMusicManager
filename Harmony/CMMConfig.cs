@@ -648,9 +648,10 @@ namespace CMM
         // How abrupt the transition is. 1 = the plain soft knee. Above 1 the door holds its muffle
         // and then lets go all at once; below 1 smears the transition across more of the swing.
         public static float  WorldEmitterDoorKnee        = 1f;
-        // Only touches doors whose leaf cannot be measured at all (src=clip in the DoorTrace log).
-        // Every hand-authored door clip eases in, so clip time overstates early travel; this takes
-        // that out. 1 disables it.
+        // CLOSING swings only. The animation eases, so clip time misdescribes the leaf's travel --
+        // but only the CLOSE has its acoustically decisive stretch (the last small aperture) at the
+        // end of the clip, where this exponent bites. On an OPEN the decisive stretch is at the
+        // start, and easing it there simply made every long door open too slowly. 1 disables it.
         public static float  WorldEmitterDoorClipEase    = 1.5f;
         // false = ignore the measured leaf's MOTION and drive every door's openness from its
         // animation clip. Default false, on evidence: of fourteen door types only the steel garage

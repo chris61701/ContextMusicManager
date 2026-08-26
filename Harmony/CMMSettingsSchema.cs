@@ -694,9 +694,12 @@ the crossover sits near a 2.3 m2 doorway at the default, so small doors are unto
             Cmt(@"How abrupt a door's transition is. 1 = the plain soft knee. Above 1 the door holds its
 muffle and then lets go all at once; below 1 smears the transition across more of the swing."),
             F("WorldEmitterDoorKnee",                 "CMMConfig.WorldEmitterDoorKnee",              1f, since: 32),
-            Cmt(@"Only touches doors whose leaf cannot be measured at all -- they read src=clip in the
-DoorTrace log. Every hand-authored door clip in this game eases in, so the clip clock
-OVERSTATES how far the leaf has gone early in the swing; this takes that out. 1 disables it."),
+            Cmt(@"CLOSING swings only, and only doors driven by the clip clock (src=clip in the DoorTrace log).
+The animation eases, so clip time misdescribes the leaf -- but only a CLOSE has its acoustically
+decisive stretch (the last small aperture, where nearly all the audible change happens) at the END
+of the clip, which is where this exponent bites. An OPEN has that stretch at the START, and easing
+it there made every long door ""open up too slowly"". Raise it to hold the muffle later into a
+close; 1 disables it."),
             F("WorldEmitterDoorClipEase",             "CMMConfig.WorldEmitterDoorClipEase",          1.5f, since: 32),
             Cmt(@"false = ignore the measured leaf entirely and drive every door from its animation clip.
 A kill switch for the open-area measurement, not a tuning knob."),

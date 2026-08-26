@@ -2401,9 +2401,29 @@ namespace CMM
                 float ntLed = nt;
                 if (leadS > 0f && swingLen > 0.05f)
                 { ntLed = Mathf.Clamp01(nt + leadS / swingLen); leadApplied = true; }
+                // THE EASE BELONGS ON THE CLOSE ONLY, and the reason is which end of the clip
+                // the acoustically decisive part of the ramp sits at.
+                //
+                // The knee puts almost all the audible change in the first ~30% of TRAVEL -- small
+                // apertures. On an OPEN that region is at the START of the clip, and pow(nt, 1.5)
+                // halves it: a quarter through the animation the model calls the door 12% open
+                // instead of 25%. Reported, on every long door, as "the audio opens up too
+                // slowly". On a CLOSE the same region is at the END, where 1 - pow(nt, 1.5) is
+                // steep, and that is why closes came back right -- including the roll-up 5x4,
+                // which Chris calls perfect. So do not touch the close.
+                //
+                // This asymmetry is not arbitrary. The old symmetric form made the decisive
+                // segment about 2.1x longer on an open than on a close, and while the native
+                // smoother was adaptive that difference got amplified sevenfold. The smoother is
+                // constant now, so what is left is just the model's own bias -- and it only ever
+                // pointed one way.
                 float prog = Mathf.Clamp01(ntLed);
-                if (Mathf.Abs(ease - 1f) > 0.01f) prog = Mathf.Pow(prog, ease);
-                travel = da.Opening ? prog : 1f - prog;
+                if (da.Opening) travel = prog;
+                else
+                {
+                    if (Mathf.Abs(ease - 1f) > 0.01f) prog = Mathf.Pow(prog, ease);
+                    travel = 1f - prog;
+                }
                 aDoor = ApertureArea(parent, da.Type);
                 if (aDoor <= 0.01f) aDoor = aDoorFallback;
                 aOpen = travel * aDoor;
