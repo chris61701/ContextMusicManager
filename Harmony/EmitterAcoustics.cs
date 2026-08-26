@@ -1569,9 +1569,22 @@ namespace CMM
                     if (Vector3.Distance(rb.center, lr.RendShutCtr) > 0.05f
                         || Vector3.Distance(rb.size, lr.RendShutSize) > 0.05f) mr = true;
                 }
-                // This plate follows its own transform when that transform is what is moving, and
-                // its renderer only when the transform is standing still and the visual is not.
-                _useRend[i] = (!mx && mr);
+                // THE RENDERER IS WHAT THE PLAYER SEES, AND ON MOST DOOR RIGS THE COLLIDER LIES.
+                // The log settles this. Of fourteen door types, the only ones whose collider
+                // transform tracks the visible leaf are the garage doors and the drawbridge.
+                // Every hinged door does one of two wrong things instead: the closet doors, iron
+                // door and iron hatch FREEZE their collider at the shut pose for the whole swing
+                // (aperture reads 100% covered from end to end -- a sealed door standing visibly
+                // open), while vaultDoor01, vaultHatch01 and the cellar door SNAP theirs to the
+                // target pose the moment the latch flips (aperture reads fully open at nt=0.1 and
+                // stays there). Both look like motion to a "did this transform move" test, which
+                // is why preferring the transform could never have worked.
+                //
+                // So prefer the renderer whenever it is moving. It is the thing being animated,
+                // it is what the door looks like, and the player is judging by eye and ear. The
+                // collider transform is the fallback for rigs with no renderer of their own --
+                // the garage doors and the drawbridge, which are exactly the ones it reads right.
+                _useRend[i] = mr;
                 xformMoved |= mx; rendMoved |= mr;
                 _plateSb.Append(mx ? 'x' : (mr ? 'r' : '.'));
             }
