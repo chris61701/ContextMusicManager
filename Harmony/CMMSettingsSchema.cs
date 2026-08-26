@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 39;
+        internal const int CurrentSchema = 40;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -290,6 +290,12 @@ chat input, and none sit on letters — the game binds letters (D = strafe,
 F = flashlight) and they'd fire while playing. Ctrl is NOT used because
 it's the game's crouch toggle. Set the Require flags as you like for other
 bindings."),
+            Cmt(@"Centre-screen banner — the wide announcement that appears when combat/tension music is
+muted or unmuted. It holds at full strength for BannerHoldSeconds and then fades out over
+BannerFadeSeconds, so it is on screen for the two added together. Drawn with a drop shadow rather
+than a backing box so it never covers the scene. 0 hold = fade begins immediately."),
+            F("BannerHoldSeconds",                   "CMMConfig.BannerHoldSeconds",                 1f, since: 40),
+            F("BannerFadeSeconds",                   "CMMConfig.BannerFadeSeconds",                 1f, since: 40),
             B("KeybindsEnabled",                     "CMMConfig.KeybindsEnabled",                   true),
             B("KeybindRequireCtrl",                  "CMMConfig.KeybindRequireCtrl",                false),
             B("KeybindRequireAlt",                   "CMMConfig.KeybindRequireAlt",                 true),

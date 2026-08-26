@@ -821,6 +821,12 @@ namespace CMM
         // Gated behind Alt by default so they don't collide with game/chat input.
         // Ctrl is avoided because it's the game's crouch toggle; Alt is unbound in
         // 7D2D. Set RequireCtrl/clear RequireAlt or both for other bindings.
+        // Centre-screen banner (the combat/tension mute announcement): how long it holds at
+        // full strength, and how long it then takes to fade out. Held time first, then the
+        // fade, so total time on screen is the two added together.
+        public static float BannerHoldSeconds = 1f;
+        public static float BannerFadeSeconds = 1f;
+
         public static bool KeybindsEnabled = true;
         public static bool KeybindRequireCtrl = false;
         public static bool KeybindRequireAlt = true;

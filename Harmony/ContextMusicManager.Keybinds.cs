@@ -61,6 +61,68 @@ namespace CMM
         // line 2 updates live, so there's nothing to say, only something to show).
         // fallbackTitle fills line 1 only when no track is audible at draw time (a
         // ban that emptied its folder, a combat toggle during the vanilla handoff).
+
+        // ── CENTRE-SCREEN BANNER ─────────────────────────────────────────────────────────
+        // The corner notice is right for small confirmations, and wrong for a change that
+        // alters what music the game will play at all. Combat/tension muting is a mode
+        // switch: it deserves to be read without hunting for it, and then to get out of the
+        // way. Wide text across the middle of the screen, held briefly, then faded out.
+        //
+        // Drawn with a drop shadow rather than a backing box, so it never covers the scene
+        // and stays legible on a bright one.
+        private static string _bannerText;
+        private static float _bannerAt = -999f;
+        private static GUIStyle _bannerStyle;
+
+        private static float BannerHold => Mathf.Max(0f, CMMConfig.BannerHoldSeconds);
+        private static float BannerFade => Mathf.Max(0.01f, CMMConfig.BannerFadeSeconds);
+
+        internal static void ShowBanner(string message)
+        {
+            _bannerText = message;
+            _bannerAt = Time.realtimeSinceStartup;
+        }
+
+        private static void DrawBanner()
+        {
+            if (string.IsNullOrEmpty(_bannerText)) return;
+            float age = Time.realtimeSinceStartup - _bannerAt;
+            float hold = BannerHold, fade = BannerFade;
+            if (age >= hold + fade) { _bannerText = null; return; }
+
+            // Solid for the hold, then a linear fade to nothing.
+            float a = age <= hold ? 1f : 1f - (age - hold) / fade;
+            if (a <= 0f) { _bannerText = null; return; }
+
+            if (_bannerStyle == null)
+            {
+                _bannerStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 30,
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleCenter,
+                    wordWrap = false,
+                    richText = false
+                };
+            }
+            // Scale with the window so it reads the same on a 4K screen as on a 1080p one,
+            // and never grows wider than the screen it is centred on.
+            _bannerStyle.fontSize = Mathf.Clamp(Mathf.RoundToInt(Screen.height * 0.030f), 18, 46);
+
+            var content = new GUIContent(_bannerText);
+            float w = Screen.width * 0.92f;
+            float h = _bannerStyle.CalcHeight(content, w) + 6f;
+            float x = (Screen.width - w) * 0.5f;
+            float y = Screen.height * 0.42f - h * 0.5f;
+
+            Color prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, a * 0.75f);          // drop shadow
+            GUI.Label(new Rect(x + 2f, y + 2f, w, h), content, _bannerStyle);
+            GUI.color = new Color(1f, 0.93f, 0.72f, a);            // the warm off-white the overlay uses
+            GUI.Label(new Rect(x, y, w, h), content, _bannerStyle);
+            GUI.color = prev;
+        }
+
         private static void ShowNotice(string message = null, string fallbackTitle = null)
         {
             _noticeText = message != null ? new GUIContent(message) : null;
@@ -98,6 +160,7 @@ namespace CMM
             // the pause gate above never fires) — same draw-time-only hide while it's open.
             if (ConsoleIsOpen()) return;
             DrawOverlayBox();
+            DrawBanner();
 #if CMM_DEBUG_HUD
             DrawDebugHud();
             DrawCoverageHud();
@@ -450,8 +513,7 @@ namespace CMM
             Log.Out($"[CMM] Combat music {(combat ? "OFF" : "ON")}, tension {(tension ? "OFF" : "ON")} " +
                     $"({CombatContextCount} combat, {TensionContextCount} tension context(s) covered)"
                     + (saved ? " — saved to settings.xml" : " — NOT saved (this session only)"));
-            ShowNotice(notice + (saved ? "" : " (this session only)"),
-                       fallbackTitle: "Combat music");
+            ShowBanner(notice + (saved ? "" : " (this session only)"));
             ReResolveNow();
         }
 
