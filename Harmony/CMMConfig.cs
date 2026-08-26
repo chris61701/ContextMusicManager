@@ -628,7 +628,7 @@ namespace CMM
         // heavy doors read as a slam). Both hot-reload.
         // How far AHEAD of the door's real pose to compute its sound, in milliseconds, to cancel
         // the pipeline's own delay (geometry read + flood + emitter tick + glide). 0 disables it.
-        public static float  WorldEmitterDoorLeadMs      = 180f;
+        public static float  WorldEmitterDoorLeadMs      = 350f;   // MEASURED door -> mixer gain
         // HOW BIG A HOLE GETS YOU HALFWAY TO HEARING THROUGH, in square metres. This is the one
         // number that decides when a door stops muffling, and it is ABSOLUTE, not a fraction of
         // the door: half a metre of daylight sounds like half a metre of daylight whether it is a
@@ -646,9 +646,12 @@ namespace CMM
         // Every hand-authored door clip eases in, so clip time overstates early travel; this takes
         // that out. 1 disables it.
         public static float  WorldEmitterDoorClipEase    = 1.5f;
-        // false = ignore the measured leaf entirely and drive every door from its animation clip.
-        // A kill switch for the area measurement, not a tuning knob.
-        public static bool   WorldEmitterDoorMeasureLeaf = true;
+        // false = ignore the measured leaf's MOTION and drive every door's openness from its
+        // animation clip. Default false, on evidence: of fourteen door types only the steel garage
+        // 4x3 tracks its leaf honestly, and it is the one door whose occlusion reads jittery. The
+        // aperture is still MEASURED -- its area is what scales the knee -- only the moment-to-
+        // moment travel comes from the clock. True re-enables leaf tracking.
+        public static bool   WorldEmitterDoorMeasureLeaf = false;
 
         // DoorSealTypes: comma-separated block-name PREFIXES of doors that are AIRTIGHT when fully shut
         // and undamaged — a closed vault door is a pressure seal, not a metal panel's worth of muffle.

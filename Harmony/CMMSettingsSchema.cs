@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 33;
+        internal const int CurrentSchema = 34;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -689,8 +689,10 @@ OVERSTATES how far the leaf has gone early in the swing; this takes that out. 1 
             F("WorldEmitterDoorClipEase",             "CMMConfig.WorldEmitterDoorClipEase",          1.5f, since: 32),
             Cmt(@"false = ignore the measured leaf entirely and drive every door from its animation clip.
 A kill switch for the open-area measurement, not a tuning knob."),
-            B("WorldEmitterDoorMeasureLeaf",          "CMMConfig.WorldEmitterDoorMeasureLeaf",       true, since: 32),
-            F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            180f, since: 29),
+            B("WorldEmitterDoorMeasureLeaf",          "CMMConfig.WorldEmitterDoorMeasureLeaf",       false,
+              since: 32, changedIn: 34, was: true),
+            F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            350f,
+              since: 29, changedIn: 34, was: new object[] { 180f }),
             Cmt(@"Doors that are structurally WALLS rather than hinged leaves, exempt from
 WorldEmitterDoorMaxLoss and charged their own material in full. A raised drawbridge
 is a slab of timber and iron standing in a gateway; capped, it published 6 dB to a

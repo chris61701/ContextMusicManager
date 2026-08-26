@@ -2337,6 +2337,8 @@ namespace CMM
             float aDoorFallback = Mathf.Max(1f, da.Span * Mathf.Max(1f, da.SpanB));
 
             // ---- HOW OPEN IS IT, IN SQUARE METRES ----------------------------------------
+            float leadS = Mathf.Max(0f, CMMConfig.WorldEmitterDoorLeadMs) * 0.001f;
+            bool leadApplied = false;
             float travel, aOpen, aDoor;
             int src;
             if (CMMConfig.WorldEmitterDoorMeasureLeaf && !da.DeadMeasure && !_deadMeasure.ContainsKey(parent)
@@ -2379,8 +2381,27 @@ namespace CMM
                 // itself -- and the direction is applied after. Easing the already-inverted value
                 // would make a closing door read as further shut than it is, which is the exact
                 // "occludes too early on close" complaint, manufactured.
+                // THE LEAD GOES ON THE CLOCK, NOT ON THE AREA'S DERIVATIVE. Taking the
+                // derivative was wrong at precisely the moments that matter, and Chris's table is
+                // the proof. d(nt^1.5)/dt is ZERO AT nt=0 -- so on an OPENING door the lead
+                // contributed nothing for the first part of the swing, which is exactly when the
+                // door is opening and exactly what "opens late" means. It is largest at the END of
+                // the swing, which is why the same doors' CLOSES came back fine.
+                //
+                // And a derivative needs a previous sample, so the first tick of every swing got
+                // no lead at all. On a 0.33 s close that is a third of the whole animation, and
+                // with a 350 ms pipeline the swing is over before the second tick's sound lands.
+                // No value of LeadMs could fix a door that short; the lead has to apply from the
+                // FIRST tick, and only the clock can do that.
+                //
+                // Advancing nt by leadS/swingLen is exact for a linear clock and self-scales:
+                // 450 ms is 67% of a 0.67 s hatch and 6% of a 7.3 s roll-up, which is the
+                // difference between the doors that complain and the ones that never did.
                 float ease = Mathf.Clamp(CMMConfig.WorldEmitterDoorClipEase, 0.5f, 3f);
-                float prog = Mathf.Clamp01(nt);
+                float ntLed = nt;
+                if (leadS > 0f && swingLen > 0.05f)
+                { ntLed = Mathf.Clamp01(nt + leadS / swingLen); leadApplied = true; }
+                float prog = Mathf.Clamp01(ntLed);
                 if (Mathf.Abs(ease - 1f) > 0.01f) prog = Mathf.Pow(prog, ease);
                 travel = da.Opening ? prog : 1f - prog;
                 aDoor = ApertureArea(parent, da.Type);
@@ -2404,10 +2425,12 @@ namespace CMM
             // this reaches the ear. It needs no clip length, so it cannot be skipped, and it
             // self-scales: a fast door is moving fast and gets a big correction, a slow one small.
             float now = Time.realtimeSinceStartup;
-            float leadS = Mathf.Max(0f, CMMConfig.WorldEmitterDoorLeadMs) * 0.001f;
             float rawOpen = aOpen;
             if (da.Src != da.LastSrc) { da.PrevOpen = -1f; da.LastSrc = da.Src; }   // routes are not comparable
-            if (leadS > 0f && da.PrevOpen >= 0f)
+            // Fallback only: the measured-leaf route, and any swing whose clip length is
+            // unreadable (two doors in this POI report 0.00 s). Same failure modes as above, so it
+            // is never preferred -- but a bad lead beats none on a door with no clock at all.
+            if (!leadApplied && leadS > 0f && da.PrevOpen >= 0f)
             {
                 float dt = now - da.PrevAt;
                 if (dt > 0.001f && dt < 1f)
