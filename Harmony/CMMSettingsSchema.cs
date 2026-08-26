@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 28;
+        internal const int CurrentSchema = 29;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -656,6 +656,15 @@ still to go is a huge aperture (full sound); a vault leaf the same fraction open
 crack (nearly shut). DoorGapFull = opening (m) at/above which sound is fully open — big doors come
 alive almost immediately on open. DoorGapClosed = opening (m) at/below which it's acoustically
 shut — the final sliver of crack is ignored, so heavy doors read as a slam. Hot-reloads."),
+            Cmt(@"Milliseconds to LEAD the door by, cancelling the delay between deciding what a
+door should sound like and that reaching your ears -- the geometry re-read, the
+flood, the emitter tick and the output glide, measured end to end at roughly
+110-200 ms. The door's sound is computed for where it WILL be this far ahead.
+Because the lead is divided by each door's own swing length, a fast door gets a
+large correction and a slow one a small one, which is the difference that made
+doors of different speeds impossible to reconcile by threshold alone.
+Raise it if doors still sound late; lower it if they now sound early. 0 disables."),
+            F("WorldEmitterDoorLeadMs",               "CMMConfig.WorldEmitterDoorLeadMs",            180f, since: 29),
             F("WorldEmitterDoorGapFull",             "CMMConfig.WorldEmitterDoorGapFull",           1.25f),
             Cmt(@"GapFullOpen: the OPENING direction's full-sound threshold (metres of gap). Kept separate from
 GapFull because the two directions want different feels: closing is tuned for when the shut lands

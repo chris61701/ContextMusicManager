@@ -627,6 +627,10 @@ namespace CMM
         // hand-width crack. DoorGapFull = opening (m) at/above which sound is acoustically fully open;
         // DoorGapClosed = opening (m) at/below which it's fully shut (a sliver of crack is ignored —
         // heavy doors read as a slam). Both hot-reload.
+        // How far AHEAD of the door's real pose to compute its sound, in milliseconds, to cancel
+        // the pipeline's own delay (geometry read + flood + emitter tick + glide). 0 disables it.
+        public static float  WorldEmitterDoorLeadMs      = 180f;
+
         // ALL THREE ARE FRACTIONS OF THE SWING (0-1), not metres. See DoorAcoustic.
         public static float  WorldEmitterDoorGapFull     = 0.60f;  // CLOSING: fade begins once the door is this far open
         public static float  WorldEmitterDoorGapFullOpen = 0.45f;  // OPENING: fully open to the ear at this much travel

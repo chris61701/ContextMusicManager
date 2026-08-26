@@ -1960,6 +1960,32 @@ namespace CMM
             if (swingLen < 0f) { swingNt = minNt; swingLen = 0f; }   // no fresh clip this tick — fall back
 
             float t = Mathf.Clamp01(swingNt);
+
+            // ── LEAD THE DOOR BY THE PIPELINE'S OWN LATENCY ─────────────────────────────────
+            // Everything downstream describes the door as it was when this line ran, and takes
+            // time to arrive: the geometry re-read, the flood, the emitter tick and the native
+            // glide. Measured end to end on a block change, which travels the same road, that is
+            // ~110-200 ms. Nothing compensated for it -- CloseLeadSeconds is a 0.15 s special case
+            // at the very end of a close, not a general lead -- so the sound has always described
+            // the door as it was a fifth of a second ago.
+            //
+            // That is a fixed TIME against swings of wildly different DURATION, which is why no
+            // threshold could ever settle it:
+            //
+            //   interior door  0.53 s swing  ->  200 ms is 38% of it
+            //   cellar door    2.60 s swing  ->  200 ms is  8% of it
+            //
+            // A fast door runs nearly half a swing behind while a slow one is barely late, and a
+            // threshold moves the curve WITHIN the swing -- it cannot reach a lag measured in
+            // seconds. Three rounds of tuning thresholds could not have worked.
+            //
+            // So sample where the door WILL BE. Dividing the lead by this door's own clip length
+            // makes the correction large on a fast swing and small on a slow one automatically,
+            // which is exactly the asymmetry that needs cancelling.
+            float lead = Mathf.Max(0f, CMMConfig.WorldEmitterDoorLeadMs) * 0.001f;
+            if (lead > 0f && swingLen > 0.05f)
+                t = Mathf.Clamp01(t + lead / swingLen);
+
             float physical = da.Opening ? t : 1f - t;
             da.Openness = DoorAcoustic(physical, ref da);
             // Mute a hair BEFORE the leaf finishes closing — its end-of-swing bounce shouldn't still be
