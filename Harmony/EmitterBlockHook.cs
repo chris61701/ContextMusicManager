@@ -150,13 +150,27 @@ namespace CMM
         private static float _watchAt = -999f, _watchFieldAt = -999f, _watchTickAt = -999f;
         private static int _watchTicks;   // emitter ticks that ran before the gain moved
         private static Vector3i _watchPos;
+        private static bool _watchIsDoor;
+
+        // A DOOR IS THE SAME JOURNEY AND HAS NEVER BEEN TIMED TO THE END. The existing door
+        // stopwatch (FieldOcclusion.DoorReadAt) stops at the PUBLISHED FIELD -- ~180 ms, which is
+        // the number WorldEmitterDoorLeadMs was set to cancel. But the field is barely half the
+        // road: the same stage that a block change measures at 400-700 ms sits after it, and for
+        // doors nobody has ever put a clock on it. So arm the same three-stamp timer from the door
+        // latch and let it run all the way to the mixer gain.
+        internal static void ArmDoor(Vector3i pos)
+        {
+            if (_watchAt > 0f && CmmClock.Now - _watchAt < 5f) return;
+            Arm(pos);
+            _watchIsDoor = true;
+        }
 
         private static void Arm(Vector3i pos)
         {
             // Only one in flight: a wall goes up as many changes and the first is the one to time.
             if (_watchAt > 0f && CmmClock.Now - _watchAt < 5f) return;
             _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchTickAt = -999f;
-            _watchTicks = 0; _watchPos = pos;
+            _watchTicks = 0; _watchPos = pos; _watchIsDoor = false;
         }
 
         // A BLOCK IS AS URGENT AS A DOOR. The flood is gated to one every FloodSec (0.30 s)
@@ -203,7 +217,7 @@ namespace CMM
             if (total > 5000f) { _watchAt = -999f; return; }          // stale: nothing moved
             float tickWait = _watchTickAt >= _watchFieldAt ? (_watchTickAt - _watchFieldAt) * 1000f : -1f;
             float inTick   = _watchTickAt >= _watchFieldAt ? (now - _watchTickAt) * 1000f : -1f;
-            CMMConfig.D($"[CMM] block -> sound: {total:0} ms "
+            CMMConfig.D($"[CMM] {(_watchIsDoor ? "door" : "block")} -> sound: {total:0} ms "
                       + $"(field {(_watchFieldAt - _watchAt) * 1000f:0} "
                       + $"+ tickwait {tickWait:0} + intick {inTick:0} over {_watchTicks} tick(s), "
                       + $"gain moved {delta:0.00} at {_watchPos})");

@@ -2259,6 +2259,7 @@ namespace CMM
                     // BeginDoorWait arms the stopwatch: from here the reader has to consume these
                     // exact cells before any flood can claim to have carried this door.
                     FieldOcclusion.BeginDoorWait();
+                    EmitterBlockHook.ArmDoor(p.Pos);   // ...and the same clock, run to the mixer
                     if (!InvalidateLeafCells(p.Pos, p.Type, await: true))
                         InvalidateBoxAwaited(p.Pos, MinDoorInvalidateRadius);
                 }
