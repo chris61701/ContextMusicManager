@@ -1638,7 +1638,7 @@ namespace CMM
         private struct DoorAnim
         {
             public bool Opening; public float Openness; public bool Started; public int Ticks; public float Span;
-            public float GapFull, GapFullOpen, GapClosed;   // per-door thresholds (globals + type overrides), resolved at registration
+            public float GapFull, GapFullOpen, GapClosed, LeadMs;   // per-door thresholds + lead (globals + type overrides), resolved at registration
             public int Type;                                // block type — names the door in the DoorTrace log
             public float StartedAt;                         // realtime the swing was registered (trace time base)
         }
@@ -1734,15 +1734,20 @@ namespace CMM
         // Config WorldEmitterDoorGapOverrides: "match=full/fullOpen/closed;match=..." — match is a
         // case-insensitive SUBSTRING of the block name (catches wooden/steel/ironGarageDoor with one
         // "garageDoor" entry); "-" inherits the global. First matching entry wins. Cached per type.
-        private struct GapOvr { public string Match; public float Full, FullOpen, Closed; }
+        // Lead is an OPTIONAL fourth field: "match=full/fullOpen/closed/leadMs". NaN = inherit
+        // the global. A door can need a different lead from every other door because the lead
+        // cancels a pipeline delay that is a different fraction of every swing -- and the roll-up
+        // 3x3, alone in the set, wanted about 200 ms less of it ("occlusion goes too quickly").
+        private struct GapOvr { public string Match; public float Full, FullOpen, Closed, LeadMs; }
         private static string _ovrCfgCache;
         private static GapOvr[] _gapOvrs = System.Array.Empty<GapOvr>();
         private static readonly Dictionary<int, int> _gapOvrByType = new Dictionary<int, int>();
-        private static void ResolveDoorGaps(int type, out float full, out float fullOpen, out float closed)
+        private static void ResolveDoorGaps(int type, out float full, out float fullOpen, out float closed, out float leadMs)
         {
             full = CMMConfig.WorldEmitterDoorGapFull;
             fullOpen = CMMConfig.WorldEmitterDoorGapFullOpen;
             closed = CMMConfig.WorldEmitterDoorGapClosed;
+            leadMs = CMMConfig.WorldEmitterDoorLeadMs;
             string cfg = CMMConfig.WorldEmitterDoorGapOverrides ?? "";
             if (!ReferenceEquals(cfg, _ovrCfgCache))   // config hot-reload swaps the string instance
             {
@@ -1754,10 +1759,11 @@ namespace CMM
                     int eq = entry.IndexOf('=');
                     if (eq <= 0) continue;
                     string[] v = entry.Substring(eq + 1).Split('/');
-                    GapOvr o = new GapOvr { Match = entry.Substring(0, eq).Trim(), Full = float.NaN, FullOpen = float.NaN, Closed = float.NaN };
+                    GapOvr o = new GapOvr { Match = entry.Substring(0, eq).Trim(), Full = float.NaN, FullOpen = float.NaN, Closed = float.NaN, LeadMs = float.NaN };
                     if (v.Length > 0 && ParseOvr(v[0], out float f0)) o.Full = f0;
                     if (v.Length > 1 && ParseOvr(v[1], out float f1)) o.FullOpen = f1;
                     if (v.Length > 2 && ParseOvr(v[2], out float f2)) o.Closed = f2;
+                    if (v.Length > 3 && ParseOvr(v[3], out float f3)) o.LeadMs = f3;
                     if (o.Match.Length > 0) list.Add(o);
                 }
                 _gapOvrs = list.ToArray();
@@ -1778,6 +1784,7 @@ namespace CMM
             if (!float.IsNaN(ov.Full)) full = ov.Full;
             if (!float.IsNaN(ov.FullOpen)) fullOpen = ov.FullOpen;
             if (!float.IsNaN(ov.Closed)) closed = ov.Closed;
+            if (!float.IsNaN(ov.LeadMs)) leadMs = ov.LeadMs;
         }
         private static bool ParseOvr(string s, out float v)
         {
@@ -1936,9 +1943,9 @@ namespace CMM
                         Vector3i dim = db.multiBlockPos.dim;
                         span = Mathf.Max(1, Mathf.Max(dim.x, Mathf.Max(dim.y, dim.z)));
                     }
-                    ResolveDoorGaps(p.Type, out float gFull, out float gFullOpen, out float gClosed);
+                    ResolveDoorGaps(p.Type, out float gFull, out float gFullOpen, out float gClosed, out float gLead);
                     _doors[p.Pos] = new DoorAnim { Opening = p.Opening, Openness = p.Opening ? 0f : 1f, Started = false, Ticks = 0,
-                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed,
+                                                   Span = span, GapFull = gFull, GapFullOpen = gFullOpen, GapClosed = gClosed, LeadMs = gLead,
                                                    Type = p.Type, StartedAt = Time.realtimeSinceStartup };
                     // The latch's invalidation, moved here so it happens on the main thread.
                     // BeginDoorWait arms the stopwatch: from here the reader has to consume these
@@ -1996,7 +2003,24 @@ namespace CMM
                     if (si.normalizedTime < 0.95f && si.length > swingLen) { swingLen = si.length; swingNt = si.normalizedTime; }
                 }
             }
-            if (!anyEnabled) return false;   // every animator disabled ⇒ door at rest
+            if (!anyEnabled)
+            {
+                // AT REST, AND THEREFORE AUTHORITATIVE. The range was being learned as the LARGEST
+                // travel seen during the swing, which on a door that overshoots and bounces before
+                // it settles is the BOUNCE, not the open pose. Every later swing then reads as
+                // less than full travel, the curve stretches, and the door goes slightly late --
+                // which is what happened to the wood cellar door the moment its bounce had been
+                // seen once ("did you do something with Wood Cellar Door? It's slightly delayed").
+                //
+                // The settled pose is the truth. Take it on the way out and REPLACE the range
+                // rather than maxing into it, so an overshoot can never become the denominator.
+                if (da.Opening && LeafTravel(parent, da.Type, out float rAng, out float rShift))
+                {
+                    if (rAng   > 5f)    _doorMaxAngle[da.Type] = rAng;
+                    if (rShift > 0.20f) _doorMaxShift[da.Type] = rShift;
+                }
+                return false;   // every animator disabled ⇒ door at rest
+            }
 
             if (!da.Started)
             {
@@ -2043,7 +2067,7 @@ namespace CMM
             // So sample where the door WILL BE. Dividing the lead by this door's own clip length
             // makes the correction large on a fast swing and small on a slow one automatically,
             // which is exactly the asymmetry that needs cancelling.
-            float lead = Mathf.Max(0f, CMMConfig.WorldEmitterDoorLeadMs) * 0.001f;
+            float lead = Mathf.Max(0f, da.LeadMs) * 0.001f;   // per-type if the override gave one
             if (lead > 0f && swingLen > 0.05f)
                 t = Mathf.Clamp01(t + lead / swingLen);
 
