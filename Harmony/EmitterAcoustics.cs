@@ -1442,7 +1442,7 @@ namespace CMM
                     lr.OwnShutRot = ow.localRotation;
                 }
                 else { lr.RelPos = cRender; lr.RelRot = r; lr.OwnShutRot = Quaternion.identity; }
-                lr.Rend = FindLeafRenderer(ow, bed != null ? bed.transform : null);
+                lr.Rend = FindLeafRenderer(bed != null ? bed.transform : null, cRender, h);
                 if (lr.Rend != null)
                 {
                     Bounds rb = lr.Rend.bounds;
@@ -1464,7 +1464,7 @@ namespace CMM
                 if (rel[i].Owner != null) shutSrc = 1;
                 else if (rel[i].Rend != null) shutSrc = 2;
             }
-            lp.AShutOpen = shutSrc == 0 ? 0f : Mathf.Min(RasterOpen(ref lp, shutSrc), lp.ADoor * 0.5f);
+            lp.AShutOpen = shutSrc == 0 ? 0f : Mathf.Min(RasterOpen(ref lp, false), lp.ADoor * 0.5f);
         }
 
         private static float Mid3(Vector3 e)
@@ -1474,32 +1474,41 @@ namespace CMM
             return e.x + e.y + e.z - big - small;
         }
 
-        // A CURTAIN IS NOT ITS COLLIDER. Three roll-ups and the grey iron door read a leaf travel
-        // of exactly zero on every swing -- not because they do not move, but because the animator
-        // drives an ANCESTOR of the collider node (or deforms a skinned mesh), so that node's own
-        // local pose never changes. The renderer does move, always, because the door is visibly
-        // moving. Preferring the collider's own node keeps every door that already works on its
-        // existing route; this is only consulted when that route reads dead still.
-        private static Renderer FindLeafRenderer(Transform t, Transform stopAt)
+        // A CURTAIN IS NOT ITS COLLIDER, AND IT IS NOT ITS COLLIDER'S ANCESTOR EITHER. Walking up
+        // from the collider node found renderers on the closet doors and NONE on the garage doors
+        // or any roll-up -- the very doors that need one, because their collider node does not
+        // move. Their visuals live in a sibling subtree, so search the whole prefab and match each
+        // plate to the renderer that is actually sitting on it.
+        private static readonly List<Renderer> _rendScratch = new List<Renderer>(32);
+        private static Renderer FindLeafRenderer(Transform root, Vector3 centreRender, Vector3 half)
         {
-            try
+            if (root == null) return null;
+            _rendScratch.Clear();
+            try { root.GetComponentsInChildren<Renderer>(true, _rendScratch); }
+            catch { return null; }
+            float plateVol = Mathf.Max(0.001f, 8f * half.x * half.y * half.z);
+            Renderer best = null; float bestD = float.MaxValue;
+            for (int i = 0; i < _rendScratch.Count; i++)
             {
-                for (Transform c = t; c != null; c = c.parent)
-                {
-                    Renderer r0 = c.GetComponent<Renderer>();
-                    if (r0 != null) return r0;
-                    if (c == stopAt) break;
-                }
-                if (t != null)
-                {
-                    Renderer r1 = t.GetComponentInChildren<Renderer>(true);
-                    if (r1 != null) return r1;
-                }
+                Renderer r = _rendScratch[i];
+                if (r == null) continue;
+                Bounds b;
+                try { b = r.bounds; } catch { continue; }
+                Vector3 e = b.size;
+                if (e.sqrMagnitude <= 1e-6f) continue;
+                // Not the whole building, and not a bolt. A leaf's own visual is the same order of
+                // size as the leaf; anything eight times its volume is the frame or the prefab.
+                float vol = Mathf.Max(0.001f, e.x * e.y * e.z);
+                if (vol > plateVol * 8f) continue;
+                float d = Vector3.Distance(b.center, centreRender);
+                if (d < bestD && d < 2f) { bestD = d; best = r; }
             }
-            catch { }
-            return null;
+            return best;
         }
 
+        internal static string LastPlateTag = "";
+        private static readonly System.Text.StringBuilder _plateSb = new System.Text.StringBuilder(16);
+        private static bool[] _useRend;
         private static Vector3[] _poseC, _poseH;
         private static Quaternion[] _poseR;
         private static bool[] _poseOk;
@@ -1532,31 +1541,47 @@ namespace CMM
                 || !p.HasAp || p.Rel == null || p.Rel.Length == 0) return false;
             aDoor = p.ADoor;
 
+            // PER PLATE, NOT PER DOOR. A rig can have one child that jitters and another that
+            // carries the actual leaf, and choosing one route for the whole door then let the
+            // jittering one decide -- which is how both closet doors came to report src=xform and
+            // an aperture that never opened: the route said "the transforms are live", and the
+            // plates that cover the doorway sat still at their shut pose for the entire swing.
+            int nrel = p.Rel.Length;
+            if (_useRend == null || _useRend.Length < nrel) _useRend = new bool[nrel];
+            _plateSb.Length = 0;
             bool xformMoved = false, rendMoved = false, haveX = false, haveR = false;
-            for (int i = 0; i < p.Rel.Length; i++)
+            for (int i = 0; i < nrel; i++)
             {
                 LeafRel lr = p.Rel[i];
+                bool mx = false, mr = false;
                 if (lr.Owner != null)
                 {
                     haveX = true;
                     if (Vector3.Distance(lr.Owner.localPosition, lr.OwnShutPos) > 0.02f
-                        || Quaternion.Angle(lr.Owner.localRotation, lr.OwnShutRot) > 1.0f) xformMoved = true;
+                        || Quaternion.Angle(lr.Owner.localRotation, lr.OwnShutRot) > 1.0f) mx = true;
                 }
                 if (lr.Rend != null)
                 {
                     haveR = true;
                     Bounds rb;
-                    try { rb = lr.Rend.bounds; } catch { continue; }
+                    try { rb = lr.Rend.bounds; }
+                    catch { _useRend[i] = false; xformMoved |= mx; continue; }
                     if (Vector3.Distance(rb.center, lr.RendShutCtr) > 0.05f
-                        || Vector3.Distance(rb.size, lr.RendShutSize) > 0.05f) rendMoved = true;
+                        || Vector3.Distance(rb.size, lr.RendShutSize) > 0.05f) mr = true;
                 }
+                // This plate follows its own transform when that transform is what is moving, and
+                // its renderer only when the transform is standing still and the visual is not.
+                _useRend[i] = (!mx && mr);
+                xformMoved |= mx; rendMoved |= mr;
+                _plateSb.Append(mx ? 'x' : (mr ? 'r' : '.'));
             }
+            LastPlateTag = _plateSb.ToString();
             if (prefer == 1 && haveX) src = 1;
             else if (prefer == 2 && haveR) src = 2;
             else src = xformMoved ? 1 : (rendMoved ? 2 : 0);
             if (src == 0) return false;
 
-            float raw = RasterOpen(ref p, src);
+            float raw = RasterOpen(ref p, true);
             float span = Mathf.Max(0.01f, aDoor - p.AShutOpen);
             aOpen = Mathf.Clamp(raw - p.AShutOpen, 0f, span);
             aDoor = span;               // report the range the door can actually travel over
@@ -1564,7 +1589,7 @@ namespace CMM
         }
 
         // The rasteriser: how many square metres of the aperture no plate is currently standing in.
-        private static float RasterOpen(ref LeafPlane p, int src)
+        private static float RasterOpen(ref LeafPlane p, bool perPlate)
         {
             // Pose the plates as they are RIGHT NOW, in render space (where transforms live).
             int nb = p.Rel.Length;
@@ -1579,21 +1604,27 @@ namespace CMM
                 _poseOk[i] = false;
                 try
                 {
-                    if (src == 1)
+                    bool viaRend = perPlate && _useRend != null && i < _useRend.Length && _useRend[i];
+                    if (!viaRend && lr.Owner != null)
                     {
                         Transform ow = lr.Owner;
-                        if (ow == null) continue;
                         _poseC[i] = ow.TransformPoint(lr.RelPos);
                         _poseR[i] = ow.rotation * lr.RelRot;
                         _poseH[i] = ThickenThin(lr.Half);
                     }
-                    else
+                    else if (lr.Rend != null)
                     {
-                        if (lr.Rend == null) continue;
                         Bounds rb = lr.Rend.bounds;
                         _poseC[i] = rb.center;
                         _poseR[i] = Quaternion.identity;
                         _poseH[i] = ThickenThin(rb.extents);
+                    }
+                    else
+                    {
+                        // No owner and no renderer: it can only be where it was measured.
+                        _poseC[i] = lr.RelPos;
+                        _poseR[i] = lr.RelRot;
+                        _poseH[i] = ThickenThin(lr.Half);
                     }
                     _poseOk[i] = true;
                 }
@@ -1936,9 +1967,15 @@ namespace CMM
             // halfway through one. PrevOpen/PrevAt are the per-tick derivative the lead rides on,
             // which is what replaced dividing a fixed lead by an animator clip length that was
             // observed to read 0.00 on real doors.
-            public int Src;
+            public int Src, LastSrc;
             public float ADoor, AOpen;
             public float PrevOpen, PrevAt;
+            // A DOOR THAT NEVER MOVES ITS OWN APERTURE IS NOT A SHUT DOOR, IT IS A BAD READING.
+            // Both closet doors reported a live transform and an aperture that stayed 100% covered
+            // for the whole swing, which as a published number means "sealed" -- a hard regression
+            // on a door you can see standing open. Watch the spread; if the measurement never
+            // moves while the clip plainly does, it is dead and the clip clock takes over.
+            public float MinOpen, MaxOpen; public bool DeadMeasure;
         }
         private static readonly Dictionary<Vector3i, DoorAnim> _doors = new Dictionary<Vector3i, DoorAnim>();
         private static readonly HashSet<int> _doorTypes = new HashSet<int>();   // block types the hook has seen animate
@@ -2270,12 +2307,31 @@ namespace CMM
             // ---- HOW OPEN IS IT, IN SQUARE METRES ----------------------------------------
             float travel, aOpen, aDoor;
             int src;
-            if (CMMConfig.WorldEmitterDoorMeasureLeaf
+            if (CMMConfig.WorldEmitterDoorMeasureLeaf && !da.DeadMeasure
                 && LeafOpenArea(parent, da.Type, da.Src == 3 ? 0 : da.Src, out aOpen, out aDoor, out src)
                 && aDoor > 0.01f)
             {
                 da.Src = src;
                 travel = Mathf.Clamp01(aOpen / aDoor);
+                // Watch the spread. A real swing moves the aperture; a dead reading does not.
+                if (da.MaxOpen <= 0f && da.MinOpen <= 0f) { da.MinOpen = aOpen; da.MaxOpen = aOpen; }
+                else { if (aOpen < da.MinOpen) da.MinOpen = aOpen; if (aOpen > da.MaxOpen) da.MaxOpen = aOpen; }
+                if (nt > 0.5f && (da.MaxOpen - da.MinOpen) < 0.05f * aDoor)
+                {
+                    // Half the clip has played and the doorway has not changed by a twentieth.
+                    // Whatever this rig does, we are not reading it. Say so once, out loud, and
+                    // hand the rest of the swing to the clip clock rather than publishing a
+                    // sealed door that is visibly open.
+                    da.DeadMeasure = true;
+                    if (CMMConfig.DebugLogging)
+                    {
+                        Block bb = (da.Type > 0 && da.Type < Block.list.Length) ? Block.list[da.Type] : null;
+                        CMMConfig.D("[CMM] DoorMeasureDead " + (bb != null ? bb.GetBlockName() : "?")
+                                    + " at " + parent + " plates=" + LastPlateTag
+                                    + " spread=" + (da.MaxOpen - da.MinOpen).ToString("0.00")
+                                    + "m2 of " + aDoor.ToString("0.00") + " -- falling back to clip time");
+                    }
+                }
             }
             else
             {
@@ -2317,6 +2373,7 @@ namespace CMM
             float now = Time.realtimeSinceStartup;
             float leadS = Mathf.Max(0f, CMMConfig.WorldEmitterDoorLeadMs) * 0.001f;
             float rawOpen = aOpen;
+            if (da.Src != da.LastSrc) { da.PrevOpen = -1f; da.LastSrc = da.Src; }   // routes are not comparable
             if (leadS > 0f && da.PrevOpen >= 0f)
             {
                 float dt = now - da.PrevAt;
@@ -2346,7 +2403,7 @@ namespace CMM
                 string ss = da.Src == 1 ? "xform" : (da.Src == 2 ? "rend " : "clip ");
                 CMMConfig.D("[CMM] DoorTrace " + (da.Opening ? "OPEN  " : "CLOSE ")
                             + (dbb != null ? dbb.GetBlockName() : "?")
-                            + " src=" + ss
+                            + " src=" + ss + " plates=" + (da.Src == 3 ? "-" : LastPlateTag)
                             + " t=" + (Time.realtimeSinceStartup - da.StartedAt).ToString("0.000") + "s"
                             + " nt=" + nt.ToString("0.000")
                             + " len=" + swingLen.ToString("0.00") + "s"
