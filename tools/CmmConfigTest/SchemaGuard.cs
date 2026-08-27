@@ -51,6 +51,10 @@ namespace CMM
             var sb = new StringBuilder();
             sb.Append("# CMM settings baseline — the last released schema.").Append('\n');
             sb.Append("# Regenerate with: dotnet run -- --accept   (only after a real CurrentSchema bump)").Append('\n');
+            sb.Append("# REBUILD THIS TOOL FIRST. It COMPILES CMMSettingsSchema.cs directly (see the csproj), so a").Append('\n');
+            sb.Append("# stale binary silently checks a stale schema. This file sat at 5 while the code was at 42,").Append('\n');
+            sb.Append("# and the guard reported 33 failures against a CurrentSchema of 17 baked in weeks earlier.").Append('\n');
+            sb.Append("# Copying a fresh ContextMusicManager.dll beside the exe does nothing - it is not read.").Append('\n');
             sb.Append("schema=").Append(schema).Append('\n');
             foreach (var kv in rows.OrderBy(k => k.Key, StringComparer.Ordinal))
                 sb.Append(kv.Key).Append('|').Append(kv.Value.Kind).Append('|').Append(kv.Value.Default).Append('\n');

@@ -1,7 +1,13 @@
 # CMM settings baseline — the last released schema.
 # Regenerate with: dotnet run -- --accept   (only after a real CurrentSchema bump)
-schema=5
+# REBUILD THIS TOOL FIRST. It COMPILES CMMSettingsSchema.cs directly (see the csproj), so a
+# stale binary silently checks a stale schema. This file sat at 5 while the code was at 42,
+# and the guard reported 33 failures against a CurrentSchema of 17 baked in weeks earlier.
+# Copying a fresh ContextMusicManager.dll beside the exe does nothing - it is not read.
+schema=42
 AddonMusicScanEnabled|Bool|true
+BannerFadeSeconds|Float|1.0
+BannerHoldSeconds|Float|1.0
 CombatCooldown|Float|10.0
 CombatExitDelay|Float|2.0
 CombatHighEnemyThreshold|Int|4
@@ -13,11 +19,16 @@ ContextScanCooldown|Float|0.1
 CrossFadeDuration|Float|2.0
 CrossfadeEnabled|Bool|true
 DebugLogging|Bool|false
+DebugMuteGameAudio|Bool|false
 EnemyDetectRange|Float|30.0
 FavouriteWeight|Float|3.0
 GlobalTrackOrder|Enum|RandomNoRepeat
 HomeDetectRange|Float|70.0
+KeyAcousticsDump|Enum|Keypad5
 KeyBanTrack|Enum|Delete
+KeyContextHud|Enum|Keypad9
+KeyContextHudReset|Enum|Keypad6
+KeyCoverageHud|Enum|Keypad8
 KeyFavouriteTrack|Enum|Insert
 KeyNextTrack|Enum|RightArrow
 KeyNowPlaying|Enum|Keypad7
@@ -34,7 +45,9 @@ KeybindsEnabled|Bool|true
 LoudnessMaxBoostDb|Float|12.0
 LoudnessMeasureAhead|Int|3
 LoudnessNormalizationEnabled|Bool|true
+LoudnessStartHoldMs|Int|3000
 LoudnessTargetLufs|Float|-18.0
+LoudnessUnmeasuredDb|Float|-5.0
 ManualSkipFadeDuration|Float|0.25
 MusicPath|String|Music
 NativeOutputMaxRingMs|Int|15000
@@ -73,14 +86,45 @@ RadioClickOnVolume|Float|-1.0
 RadioClickSampleJitterHz|Float|2000.0
 RadioClickSamples|Bool|true
 RadioClickVary|Float|0.5
+RadioRecvClickRate|Float|180.0
+RadioRecvClicks|Float|0.18
+RadioRecvDeemphHz|Float|2122.0
+RadioRecvDrive|Float|0.15
+RadioRecvFloorDb|Float|5.0
+RadioRecvFlutter|Float|0.3
+RadioRecvFlutterHz|Float|14.0
+RadioRecvHiFloorHz|Float|1800.0
+RadioRecvHighCutHz|Float|2600.0
+RadioRecvKnee|Float|0.9
+RadioRecvKneeWidth|Float|0.22
+RadioRecvLockAt|Float|0.52
+RadioRecvLockMs|Float|9.0
+RadioRecvLowCutHz|Float|400.0
+RadioRecvMakeupDb|Float|9.0
+RadioRecvMangle|Float|1.0
+RadioRecvMuteWidth|Float|5.0
+RadioRecvNoise|Float|0.15
+RadioRecvNoiseFloor|Float|0.06
+RadioRecvNoiseHold|Float|1.0
+RadioRecvWander|Float|0.55
+RadioRecvWindowA|Float|0.28
+RadioRecvWindowB|Float|0.912
 RadioSfxEnabled|Bool|true
 RadioSfxVolume|Float|0.5
 RadioStaticCrackle|Float|0.8
-RadioStaticHighHz|Float|2000.0
-RadioStaticLowHz|Float|350.0
+RadioStaticHighHz|Float|2100.0
+RadioStaticLowHz|Float|50.0
 RadioStaticVolume|Float|-1.0
+RadioTuneArriveMs|Float|1000.0
+RadioTuneDullness|Float|0.85
+RadioTuneGainPow|Float|0.3
+RadioTuneGiveUpMs|Float|10000.0
+RadioTuneLeaveMs|Float|700.0
+RadioTuneMinStaticMs|Float|100.0
+RadioTuneMononess|Float|1.0
 ReverseFadeReclaim|Bool|true
 StalenessCheckInterval|Float|5.0
+TensionMusicMuted|Bool|false
 TrackEndPollInterval|Float|0.25
 TrackNoRepeatMemory|Int|-1
 TrackTransitionFadeDuration|Float|5.0
@@ -89,13 +133,18 @@ VolumeModifier|Float|0.5
 WorldEmitterBirthFade|Float|0.0
 WorldEmitterColorDrive|Float|0.0
 WorldEmitterColorStatic|Float|0.0
-WorldEmitterColorVoice|Float|0.0
-WorldEmitterDoorGapClosed|Float|0.15
-WorldEmitterDoorGapFull|Float|1.25
-WorldEmitterDoorGapFullOpen|Float|0.7
-WorldEmitterDoorGapOverrides|String|garageDoor=3/2/0.5;rollUp=2/2/0.5;vaultHatch=0.5/0.3/0.1;ironHatch=1/0.1/0.35;manholeHatch=1/0.1/0.35;woodHatch=0.5/0.1/0.1
+WorldEmitterColorVoice|Float|0.5
+WorldEmitterDoorClipEase|Float|1.5
+WorldEmitterDoorFullLossTypes|String|drawBridge
+WorldEmitterDoorHalfArea|Float|0.35
+WorldEmitterDoorHalfAreaFrac|Float|0.15
+WorldEmitterDoorKnee|Float|1.0
+WorldEmitterDoorLeadMs|Float|225.0
+WorldEmitterDoorMaxLoss|Float|0.6
+WorldEmitterDoorMeasureLeaf|Bool|false
 WorldEmitterDoorSealTypes|String|vaultDoor,vaultHatch
 WorldEmitterDoorSwingFrac|Float|1.0
+WorldEmitterDoorSwingSpans|String|cellarDoor=0.4;vaultHatch=0.6;vaultDoor=0.6
 WorldEmitterEnabled|Bool|true
 WorldEmitterFade|Float|1.0
 WorldEmitterFalloff|Float|2.5
@@ -114,7 +163,7 @@ WorldEmitterFieldWallPow|Float|1.56
 WorldEmitterFloodRadius|Int|32
 WorldEmitterHamColorDrive|Float|0.3
 WorldEmitterHamColorStatic|Float|0.04
-WorldEmitterHamColorVoice|Float|0.65
+WorldEmitterHamColorVoice|Float|0.9
 WorldEmitterMinDistance|Float|1.0
 WorldEmitterMuffle|Float|0.9
 WorldEmitterNativeAcoustics|Bool|false
@@ -124,6 +173,7 @@ WorldEmitterOcclusionFadeRate|Float|50.0
 WorldEmitterOcclusionFullDb|Float|8.0
 WorldEmitterOcclusionHardStop|Float|68.0
 WorldEmitterOcclusionMaxDistance|Float|30.0
+WorldEmitterOcclusionSlewMs|Float|50.0
 WorldEmitterOcclusionWallDistance|Float|35.0
 WorldEmitterPathRouting|Bool|true
 WorldEmitterRange|Float|60.0
@@ -138,4 +188,5 @@ WorldEmitterReverbRangeMult|Float|1.5
 WorldEmitterReverbWet|Float|0.6
 WorldEmitterSource|String|Radio
 WorldEmitterStereoWidth|Float|0.8
+WorldEmitterTickHz|Float|10.0
 WorldEmitterVolume|Float|1.0
