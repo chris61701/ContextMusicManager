@@ -247,6 +247,35 @@ verification — emitters are excluded there anyway.
   Round 2: 3.0 saves the world synchronously on the pause edge (~2.5 s stall) — clock
   intervals are now attributed to their START pause-state so the stall counts, and
   sub-second pauses accumulate resync debt. Play-tested 2026-07-11: sync confirmed good.
+- [ ] **Speakers near the spawn point can stay silent for a whole session** — *(reported
+  2026-08-27, not diagnosed.)* Loaded in at (460, 38, -453); some speakers close by never
+  played. Reloading the world fixed it completely.
+  - From the log (`10-15-08`, after the 13:31 spawn): only TWO stations were ever registered,
+    Enclave Radio and Continue FM. No third station appeared in the six minutes that followed,
+    and the listener stayed within ~30 blocks of spawn throughout. So the speakers were never
+    DETECTED — this is EmitterRegistry, not voicing.
+  - Ruled out: slot exhaustion (slot 2 sat empty, `s2=0/0`); the 8-point cap (3 and 2 points in
+    play); selection; a station with no tracks (Chris confirms all valid); the chunks-not-loaded
+    race (`IsChunkAreaLoaded` guards the scan); POI distance (`DistanceToBox` uses the real box,
+    not the corner); oversized POIs (only two `rwg_tile_*` road tiles were skipped, neither of
+    which holds shelf speakers).
+  - Left: the blocks were not one of the three `TargetNames`, or that POI was absent from
+    `GetWorldPrefabs` at the moment we looked and nothing brought it back. The 8 s
+    `RescanInterval` only rescans POIs already in the near set, so a POI that never entered it
+    is never reconsidered.
+  - NOTE the target set is matched BY NAME (`radioHam`,
+    `cntStoreShelfElectronicsSingleBottomSpeaker`, `cntStoreElectronicsBookShelfSpeaker`) and we
+    have just moved to 3.2. A renamed or added variant fails silently, with no log line and no
+    error — the same shape as the `IChunk.GetBlock` removal in 3.1. Worth checking the 3.2 block
+    table against that list regardless of this bug.
+  - Next occurrence: stand next to a silent one and run `cmm ac ray speaker`. "no speaker in
+    range" means it is not in the target set. A `cmm speakers` dump of the registry snapshot +
+    which nearby POIs were scanned/cached/skipped would settle it in one line and does not exist
+    yet.
+- [ ] **A station out of range keeps its render voice** — *(found 2026-08-27, not fixed.)*
+  After the 13:31 spawn, Enclave Radio held slot 0 with its nearest speaker at 64.2 m against
+  a `WorldEmitterRange` of 60. Inaudible, and occupying one of three slots. Harmless that day
+  because slot 2 was free; with three stations nearby it costs a real one.
 - [ ] **Diegetic authenticity pass** — emitters are functional but far from satisfactory
   as in-world objects; polish the spatial/acoustic presentation until a placed radio
   reads as a real thing in the world. *(not started)*
