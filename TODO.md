@@ -276,6 +276,18 @@ verification — emitters are excluded there anyway.
   After the 13:31 spawn, Enclave Radio held slot 0 with its nearest speaker at 64.2 m against
   a `WorldEmitterRange` of 60. Inaudible, and occupying one of three slots. Harmless that day
   because slot 2 was free; with three stations nearby it costs a real one.
+- [x] **Block -> sound latency: measured, and it is fine.** *(closed 2026-08-27 by ear.)*
+  A block change reaches the ear in ~2 s (19-24 emitter ticks), and Chris's verdict placing a
+  block in a doorway against closing a door in the same doorway was "seems about the same" --
+  which is the result that matters, since the door path is the one tuned by ear.
+  - The rate limiter is NOT the pacer: only 2-3 of those 20-odd ticks are clamped. The rest is
+    the field's own answer settling as it reads more of the scene in. Worth remembering before
+    anyone blames `WorldEmitterOcclusionFadeRate` again.
+  - The old instrument could not have told us this. It fired on "the gain moved >= 1.0 in one
+    tick", so it reported a smooth two-second delivery and a one-step delivery identically, and
+    its 5 s cutoff silently discarded everything slower. Both fixed (784df3a) before this test.
+  - No `door -> sound` lines were produced during the test, so there is no instrumented door
+    reference -- only the ear's. If this is ever reopened, get one.
 - [ ] **Diegetic authenticity pass** — emitters are functional but far from satisfactory
   as in-world objects; polish the spatial/acoustic presentation until a placed radio
   reads as a real thing in the world. *(not started)*
