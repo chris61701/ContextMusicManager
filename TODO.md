@@ -57,6 +57,18 @@ verification — emitters are excluded there anyway.
 
 ## Audio engine — the remaining list (set 2026-08-21)
 
+- [ ] **39% of context transitions interrupt an in-flight crossfade.** *(measured 2026-08-27
+  in the 12 h soak: 1,525 of 3,882; 39.1% over 48 h, so it is stable, not a sampling
+  artifact.)* The stack eviction hysteresis is **1.5 s**
+  (`ContextMusicManager.cs:572` — a context must be absent that long before it is dropped)
+  while `CrossFadeDuration` defaults to **2.0 s**. So even the best case — a context appears,
+  vanishes, and is evicted as fast as the rules allow — puts the out-transition INSIDE the
+  previous fade. Worst burst measured: 3 transitions in one 2.0 s window, with the native
+  mixer pinned at its 4-voice `MAX_VOICES` cap where it drops the most-faded voice mid-fade.
+  Decide which is wrong: raise the hysteresis above the fade, or refuse a transition while a
+  fade is still running. Note the synthetic session is deliberately churny (a change every
+  11 s), so the RATE is an upper bound — the 1.5 s < 2.0 s relationship is not.
+
 - [x] **A half block or a shut door in YOUR OWN cell does not occlude you** *(reported
   2026-08-21, built 2026-08-22, NOT YET HEARD IN GAME)*.
   - **What it actually was.** Bigger than the report. A cell's material lived on its three
@@ -209,6 +221,74 @@ verification — emitters are excluded there anyway.
 
 ## Radio / world-emitter
 
+- [ ] **A speaker is never detected, and placing more does not help — for the rest of the game
+  process.** *(root-caused 2026-08-27, not fixed.)* Reported as "sometimes on loading into a
+  world a speaker is not detected as an emitter; when placing more, they don't register
+  either." One root cause explains every part of that, including the intermittency and why
+  only a full game restart clears it.
+
+  `EmitterRegistry.EnsureTargetIds()` resolves the three target block NAMES to block IDS
+  **once per process** and caches the result forever (`if (_targetIds != null) return true;`).
+  Block IDs are assigned **once per world load**. Those two lifetimes do not match, and
+  nothing in the mod ever resets the registry — there is no `ResetSession`, no
+  `_poiCache.Clear()`, and `Patch_GameEnded` (the existing world-teardown hook) does not touch
+  it. Two ways it goes wrong:
+
+  - **Empty-cache.** `Block.InitStatic()` allocates `nameToBlock` EMPTY and blocks register
+    into it one at a time afterwards. The guard only tests `Block.nameToBlock == null`, so a
+    call landing in that window passes the guard, resolves all three names to null, caches an
+    **empty dictionary**, and returns true forever. Every lookup misses from then on.
+  - **Stale-ids.** `Block.Cleanup()` nulls the table on world exit and the next load
+    reassigns every `blockID` via `assignIdsLinear`. The cached ids belong to the PREVIOUS
+    world. Proof from this machine's own logs: a single process logs `Block IDs total` up to
+    four times, and `terr` differs BETWEEN THOSE RUNS (`29` then `30, 30, 30` in the 14:33
+    session; `30, 30, 29` in the 10:15 one) — the assignment genuinely differs per load.
+    Whether the ids happen to line up is what makes this "sometimes".
+
+  Both modes kill POI speakers and newly-placed ham radios together, because the POI scan and
+  the proximity sweep read the same table — which is exactly why placing more speakers does
+  not help. Worse, `BlockIdFor()` returns **-1** on an empty table, so
+  `RebuildSnapshot`'s `world.GetBlock(...).type != BlockIdFor(...)` is always true and it
+  actively PURGES speakers that were detected before the table went bad.
+
+  Fix: (a) never cache a failed resolve — require at least one name to resolve before storing
+  `_targetIds`, otherwise return false and retry next poll; (b) re-resolve on world load
+  rather than per process — add an `EmitterRegistry.ResetSession()` (clearing `_targetIds`,
+  `_poiCache`, `_poiScanTime`, `_placedCache`, `_oversizedIds`, `_polledOnce`) and call it
+  from `Patch_GameEnded`; (c) make the failure loud — the red `no target blocks in this game
+  version` HUD line already exists but only fires when the table is empty, not when it is
+  populated with stale ids, and nothing writes it to the log.
+  - Regression test: load a world, leave to the menu, load a DIFFERENT world in the same
+    process, stand next to a known POI speaker. That is the reproduction.
+
+- [ ] **`EmitterFieldCache` is never cleared on world exit — ~43 MB held, and it can serve
+  the WRONG world's acoustics.** *(found 2026-08-27 while answering "does anything persist
+  across worlds".)* `_fields` is keyed by the speaker's `Vector3i` and evicted **only** by an
+  LRU cap of 12 entries. At the default `WorldEmitterFieldRadius = 48` each field is
+  ~3.6 MB of `short[]`, so up to **~43 MB stays resident after you quit to the menu**, and
+  keeps sitting there while you load another world (it drains one entry at a time, only as the
+  new world's fields push past the cap). `EmitterFieldCache.Clear()` already exists and its own
+  comment says it runs on "config toggle off, radius change, **game exit**" — **nothing calls
+  it, from anywhere.** Worse than the memory: if a new world has a speaker at the same
+  coordinates, `Maintain` finds the entry, refreshes `LastWanted` and leaves `Ready = true`, so
+  world A's baked occlusion field is served for world B's speaker. Only a radius/`WallDist`
+  config change invalidates. Fix alongside the `EmitterRegistry.ResetSession()` above — same
+  hook, same reason.
+- [ ] **The 12 h soak cannot see any of this: it never exits a world.** `CmmSession` runs one
+  continuous session, and its emitter port does not use `EmitterFieldCache` at all — so the
+  "managed heap is flat" result is scoped to a single session and says nothing about
+  world-exit retention, which is where the retention actually is. Add a world-teardown /
+  re-entry cycle to the harness (drive the `Patch_GameEnded` reset path N times mid-run) so
+  per-load statics are covered by the same gauge.
+
+- [ ] **A placed craftable `speaker` never registers, by design — and nothing says so.**
+  `TargetNames` covers only `radioHam` and the two store-shelf speakers; the player-craftable
+  `speaker` and the trader `loudspeaker` are deliberately excluded. This is the other half of
+  "when placing more, they don't register": placing the craftable block can never work.
+  Decide whether to include it now that emitters are real, and either way make the HUD say
+  "not an emitter block" when you look at one, instead of staying silent.
+
+
 - [ ] **In-game item/mod to play radio stations** — a placeable/equippable radio the player
   can use to tune stations. *(conceptualizing; will be disabled in multiplayer)*
 - [ ] **Multiple radio stations from `/Music/radio` subfolders** — each subfolder under
@@ -291,6 +371,33 @@ verification — emitters are excluded there anyway.
 - [ ] **Diegetic authenticity pass** — emitters are functional but far from satisfactory
   as in-world objects; polish the spatial/acoustic presentation until a placed radio
   reads as a real thing in the world. *(not started)*
+
+## Diagnostics / test harness
+
+Set 2026-08-27 from the 12 h virtualized-session leak hunt (`tools/CmmSession`).
+
+- [x] **The leak gauge was measuring itself.** `EmitterSim` held three `List<double>` taking
+  one entry per acoustics run (79,498 runs over 12 h, ~4 MB) while the drift gauge measures
+  managed-heap growth from a post-warmup baseline — so the harness reported its own telemetry
+  as an addon leak. Every emitters-ON run said "STILL CLIMBING — leak suspect"; every
+  emitters-OFF run of the same addon code said "PLATEAUED". Fixed with a fixed-capacity
+  pre-allocated `Reservoir` (exact Count/Sum/Max, Vitter-R sampled percentiles) built in the
+  constructor, before the baseline snapshot.
+- [x] **The leak VERDICT read one difference over four samples.** RSS bounces tens of MB
+  because Windows trims working sets on its own schedule. Now 16 checkpoints and a
+  least-squares slope over the back half, reported in MB/sim-h.
+- [ ] **Export native heap counters from `CMM_Decoder.dll` so the native side can be
+  certified.** `WorkingSet64` cannot resolve a few MB/hour: the full config run at four seeds
+  gave back-half slopes of **-1.51, +0.16, +0.67 and +2.49 MB/sim-h** for identical code — the
+  SIGN is not stable. Managed heap is provably flat (0.00 MB/sim-h everywhere, 12 h and 48 h),
+  so the native allocators are the only unverified surface, and today there is no instrument
+  that can see them. A `cmm_mix_meminfo`-style export of live malloc/free totals would make
+  the soak a real gate instead of an inconclusive one.
+- [ ] **`CmmSession` never drives `PersonalRadio`.** The soak covers resolve, select, decode,
+  the native mixer, emitters, loudness, hot-reload and MP — but never tunes a station. That is
+  the subsystem the stuck-voice bug lived in (fixed 2026-08-26, `0d6b497`), and the class of
+  fault it was — a voice id forgotten across a retune — is precisely what a long soak with
+  rapid dial changes would catch. Add a dial driver to the tick.
 
 ## UI / overlays
 

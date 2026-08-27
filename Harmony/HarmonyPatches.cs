@@ -355,6 +355,24 @@ namespace CMM
             ContextMusicManager.ResetVanillaGovernance();   // forget the governed vanilla section + warmup timer
             ScriptHost.Reset();   // clear the Lua script's cross-tick state on world-unload
             ContextResolver.ResetPoiClearState();   // forget per-world cleared-POI markers
+#if GV_V3
+            // Drop the world-emitter state whose keys the NEXT world reassigns or reuses. Nothing
+            // reset the registry before this, so both of its caches leaked across worlds:
+            //   • EmitterRegistry's block-id table was resolved once per PROCESS while the game
+            //     reassigns every blockID per world load — so on the second world of a session the
+            //     ids could point at the wrong block or nothing, and no speaker was ever detected
+            //     again (hand-placed radios included, since both scan paths read that one table).
+            //     Its POI/placed caches are keyed by PrefabInstance.id and world position, which the
+            //     next world reuses for different things.
+            //   • EmitterFieldCache holds baked per-speaker acoustic fields keyed by block position,
+            //     evicted ONLY by a 12-entry LRU cap — ~3.6 MB each at the default FieldRadius 48, so
+            //     up to ~43 MB stayed resident after quitting to the menu, and a speaker at the same
+            //     coordinates in a different world was served the OLD world's occlusion (Maintain
+            //     refreshes LastWanted and leaves Ready = true). Clear() already existed and
+            //     documented "game exit" as a caller; nothing had ever called it.
+            EmitterRegistry.ResetSession();
+            EmitterFieldCache.Clear();
+#endif
             // Fade the game music out, THEN release caches and bring up the menu music
             // (FadeOutAndCleanup ends with SendContextUpdate("Menu")), instead of the
             // old hard-cut CleanupAllCaches() + immediate Menu switch.

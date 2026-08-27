@@ -489,18 +489,111 @@ namespace CMM
             _scanActive = false;
         }
 
-        // Resolve target names → ids once the block table exists. Returns false until it's built.
+        // Resolve target names → ids for THIS WORLD. Returns false until the block table can answer.
+        //
+        // This used to resolve once per PROCESS and cache the answer forever, which was wrong twice
+        // over — and both failures presented the same way: a speaker is never detected, placing more
+        // does not help, and only quitting the game to desktop clears it.
+        //
+        //   • EMPTY-CACHE. Block.InitStatic() creates `nameToBlock` EMPTY and blocks register into
+        //     it one at a time afterwards. A call landing in that window passed the old `== null`
+        //     guard, resolved all three names to null, cached an EMPTY dictionary, and
+        //     `_targetIds != null` made that permanent. Every lookup missed from then on — and
+        //     BlockIdFor() returns -1 on an empty table, so RebuildSnapshot's
+        //     `type != BlockIdFor(...)` went always-true and actively PURGED the speakers already
+        //     found.
+        //   • STALE-IDS. Block.Cleanup() nulls the table on world exit and the next load reassigns
+        //     every blockID (assignIdsLinear). The cached ids belonged to the PREVIOUS world. Not
+        //     hypothetical: a client log here shows `Block IDs total` four times in one process with
+        //     `terr` differing between those runs (29 then 30,30,30), i.e. the assignment really
+        //     does differ per load. Whether the ids happened to line up is what made this
+        //     intermittent.
+        //
+        // The POI scan and the placed-block proximity sweep both read this table, which is why a
+        // bad resolve killed hand-placed radios too.
+        //
+        // Now: never bake in a failed or partial resolve, and ResetSession() drops the table on
+        // world exit so ids are re-read per WORLD instead of per process.
+        private const float ResolveGraceSeconds = 5f;   // let the block table finish filling before believing a miss
+        private static float _resolveFirstMissAt = -1f;
+        private static bool  _resolveFailLogged;
+
         private static bool EnsureTargetIds()
         {
             if (_targetIds != null) return true;
-            if (Block.nameToBlock == null) return false;
-            _targetIds = new Dictionary<int, string>(TargetNames.Length);
+            // Count, not just null: InitStatic() hands out an allocated-but-empty dictionary.
+            if (Block.nameToBlock == null || Block.nameToBlock.Count == 0) return false;
+
+            var ids = new Dictionary<int, string>(TargetNames.Length);
+            int missing = 0;
             foreach (string n in TargetNames)
             {
                 Block b = Block.GetBlockByName(n, true);
-                if (b != null) _targetIds[b.blockID] = n;
+                if (b != null) ids[b.blockID] = n;
+                else missing++;
             }
+
+            // A partial answer most likely means the table is still filling — retry rather than bake
+            // it in. If it is STILL partial after the grace window the blocks genuinely are not in
+            // this game version, so take what resolved and say so once.
+            if (missing > 0)
+            {
+                if (_resolveFirstMissAt < 0f) _resolveFirstMissAt = Time.realtimeSinceStartup;
+                if (Time.realtimeSinceStartup - _resolveFirstMissAt < ResolveGraceSeconds) return false;
+
+                if (ids.Count == 0)
+                {
+                    // Never cache this. Returning false keeps retrying (three dictionary lookups on
+                    // a 4 Hz poll), which is the whole point: an empty table cached forever is the
+                    // bug being fixed here.
+                    if (!_resolveFailLogged)
+                    {
+                        _resolveFailLogged = true;
+                        Log.Warning($"[CMM] World emitters: none of the {TargetNames.Length} target blocks resolved in this world — emitters are off. Retrying.");
+                    }
+                    return false;
+                }
+                Log.Warning($"[CMM] World emitters: {missing} of {TargetNames.Length} target block(s) not found in this game version; running with {ids.Count}.");
+            }
+
+            _targetIds = ids;
+            CMMConfig.D($"[CMM] World emitters: resolved {ids.Count} target block id(s) for this world.");
             return true;
+        }
+
+        // Forget everything tied to the world we are leaving. Called from the SaveAndCleanupWorld
+        // teardown (Patch_GameEnded), because every cache below is keyed by something the next world
+        // reassigns or reuses: `_targetIds` by blockID (reassigned per load — see EnsureTargetIds),
+        // `_poiCache`/`_poiScanTime`/`_oversizedIds` by PrefabInstance.id, `_placedCache` by world
+        // block position. Before this existed there was NO reset anywhere in the registry, so all of
+        // it leaked into the next world.
+        internal static void ResetSession()
+        {
+            _targetIds = null;
+            _resolveFirstMissAt = -1f;
+            _resolveFailLogged = false;
+
+            _poiCache.Clear();
+            _poiScanTime.Clear();
+            _oversizedIds.Clear();
+            _placedCache.Clear();
+
+            Snapshot.Clear();
+            _snapPos.Clear();
+            NearestName = null;
+            NearestDist = float.MaxValue;
+            NearestPos = default(Vector3i);
+
+            // Abandon any in-flight POI scan: its cursor and hits belong to the old world.
+            _scanActive = false;
+            _scanHits.Clear();
+            _scanPiId = 0;
+            _scanPolls = 0;
+
+            _polledOnce = false;
+            _nextPollTime = 0f;
+            _proxToggle = false;
+            _proxSizeLogged = false;
         }
 
         // Sweep support: is this block type one of the world-emitter target blocks? Resolves the
