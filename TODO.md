@@ -215,6 +215,28 @@ verification — emitters are excluded there anyway.
   `/Music/radio` defines a separate station, and the folder's name is the station name.
 - [x] **Radio distortion / coloration DSP** — "through a speaker" bandpass + soft-clip +
   low static (audio stage 3c). Built (ABI 26, `WorldEmitterColor*` knobs); in-game test pending.
+- [ ] **Sweep the dial past stations and hear them** — 1.0.5a. *(scoped 2026-08-27, not
+  started.)* Today one station is open at a time, so a press costs an open + seek (1.7-3 s
+  measured) and a fast spin lands nothing at all: you hear the station you left, buried under
+  the hiss, until something finally arrives. Realistic tuning means the neighbours are already
+  running so crossing one is instant and already in step with the broadcast clock.
+  - NOT all stations at once. Decode is not the constraint — real-time factors off this
+    machine's own logs are ~650x for flac, ~200x opus, ~100x m4a, i.e. 0.15-1% of a core per
+    stream — but three other things are:
+    - `MAX_VOICES_HARD` is 12, budgeted as 4 music + emit stations x 2. Fifteen stations do
+      not fit; three or four do.
+    - `cmm_mix_add` sets every OTHER music voice's target to 0. A second station cannot
+      coexist with the first today — the add is what kills it. This is the real blocker and
+      it is a rule, not a limit.
+    - The wait is the OPEN, not the decode, and it is per-station-change.
+  - So: keep the station either side of the dial position open and decoding at zero gain, and
+    warm the new neighbours in the background once the dial settles. Sweep slowly and you hear
+    each station cross; sweep fast and you outrun the warming and get static — which is what a
+    real radio does, so the failure mode is the correct one.
+  - The hard part already ships: world speakers run up to three concurrent stations in render
+    slots that coexist and sum (`emitSlot`, `CMM_MAX_EMIT_VOICES`). The personal radio is on
+    the main music bus instead, where the retire-others rule applies. Give radio voices the
+    same slot treatment and raise the voice cap.
 - [ ] **DJ system** — Fallout 3/4-style station DJ/announcer. *(idea, maybe 1.0.6)*
 - [x] **Radio sync** — world emitters and the personal radio drifted audibly apart.
   Instrumented (`[CMM SYNC]` audit lines, DebugLogging builds), root cause measured:
