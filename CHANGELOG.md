@@ -4,6 +4,10 @@ All notable changes to Context Music Manager are documented here.
 
 ## 1.0.5
 
+**Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — in progress.
+Everything in this section ships in 1.0.5; the RC line above is only there so a tester can tell
+which build they are holding. Items added after RC2 are marked *(RC3)*.
+
 Everything below is measured against **1.0.4b**. Several large features arrive whole in this
 release — world speakers, the personal radio, music packs, the overlay — and are described as
 they now behave, rather than as a history of how they got there.
@@ -24,7 +28,7 @@ they now behave, rather than as a history of how they got there.
 - **7 Days to Die 3.2.0 b9 support.** The mod compiles and ships against 3.2 with no source
   changes — nothing in the game API it touches moved between 3.1 and 3.2.
 - **The Context HUD now ships.** An on-screen readout of what is playing and *why* — press
-  Alt+Numpad8 to cycle it hidden -> compact -> expanded. It lists the context you are
+  Alt+Numpad9 to cycle it hidden -> compact -> expanded. It lists the context you are
   hearing, the context tokens the decision script resolved (in red where a context has no
   music), the fallback chain actually walked to reach the playing track, the file and folder
   it came from, and how many tracks are staged and loudness-measured. Expanded adds whether
@@ -152,10 +156,12 @@ they now behave, rather than as a history of how they got there.
   the context HUD moves to `Alt+Numpad9`, and its GC re-arm to `Alt+Numpad6`. Existing settings
   files are migrated. Both panels now read their keys from your configuration and show them in
   their own header, so a rebind is reflected on screen instead of the header naming stale keys.
-- **`WorldEmitterFieldDetourDb` now defaults to 3** (was 1.5). This is the cost of sound taking
-  the long way around rather than through a wall, and 3 is the value the acoustics were actually
-  tuned against — 1.5 leaked under a raised drawbridge. Existing configs on the old default are
-  migrated; a value you set yourself is left alone.
+- **`WorldEmitterFieldDetourDb` stays at 1.5** *(RC3 — RC2 shipped this as 3 and it was wrong)*.
+  This is the cost of sound taking the long way around rather than going through a wall. At 3, a
+  single right-angle corner cost 29 dB against a real single-edge diffraction loss of 10–15 dB,
+  and sound stopped travelling far enough through a building. The reasoning that raised it
+  compared a twenty-block detour against a single-edge loss, which are not the same measurement.
+  Existing configs on any older default are migrated; a value you set yourself is left alone.
 - **A big library now sounds like a big library: every track plays before any track repeats.**
   `RandomNoRepeat` — the default track order — has always been weaker than its name suggests.
   It excluded exactly one track, the one just playing, so on a 200-track folder a song could
@@ -243,6 +249,30 @@ they now behave, rather than as a history of how they got there.
   exactly as it was when the console closes.
 
 ### Fixed
+
+- **The radio kept playing after you switched it off** *(RC3)*. Changing station deliberately does
+  not fade the station you are leaving — it plays on, buried under the tuning static, until the
+  next station's crossfade retires it. But the release forgot the voice, so if you dialled fast
+  enough that no station ever landed and then rolled onto Off, nothing was left to retire it —
+  and switching off disarms the receiver, which removes the static that was hiding it. The
+  station was revealed at close to full level and played its whole track with the radio showing
+  Off. A released voice is now remembered and retired on every "the radio is done" path.
+- **A station could be added after the radio had already been switched off** *(RC3)*. The guard
+  before the audio hand-off checked whether the dial had moved but not whether the radio was
+  still on, leaving a window where a station that was still opening landed anyway.
+- **Two station loads could run at once and one of them was lost** *(RC3)*. The hand-off between
+  the loading thread and the game is a single slot, and a ten-second safety net allows a second
+  load to start when the first one is slow — a large FLAC on a network drive is enough. The
+  second overwrote the first, so the first station's audio was never accounted for and played on
+  unattended. It is now silenced rather than dropped.
+- **Radio music was quietly distorted** *(RC3)*. The receiver's drive stage never fully switched
+  off: at full signal it still ran the audio through a soft clipper rather than passing it
+  through, so every fully-tuned station carried 2–7% distortion depending on how hot the track
+  was. It happened before the volume control, so turning the volume down did not remove it.
+- **Tracks whose loudness had not been measured yet played at full level** *(RC3)*. "Unmeasured"
+  was treated as "already at the right level", which for a modern master is 8–12 dB too loud.
+  They now start at a conservative level and settle to the measured one the moment it lands
+  (`LoudnessUnmeasuredDb`, 0 restores the old behaviour).
 
 - **Occlusion changes arrived late, and by a different amount on every door.** The smoothing at
   the very bottom of the audio chain used a coefficient applied per audio buffer rather than per
