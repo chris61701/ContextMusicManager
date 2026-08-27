@@ -893,9 +893,27 @@ static int render_voice_add(mix_voice* v, int n) {
                 /* Damage, not just dulling: clean music behind a blanket reads as a fader however
                  * dull you make it. tanh(x*d)/d, so quiet parts pass at UNITY and only loud ones
                  * get squashed -- an earlier version compensated with a hand-picked curve
-                 * unrelated to the drive and put the station through fourteen decibels hot. */
-                float d = 1.0f + g_recvDrive * 7.0f * (1.0f - q);
-                pl = tanhf(pl * d) / d; pr = tanhf(pr * d) / d;
+                 * unrelated to the drive and put the station through fourteen decibels hot.
+                 *
+                 * WET/DRY, and it is not cosmetic. `d` falls to 1 as the station locks, and
+                 * tanh(x)/1 IS NOT A BYPASS -- it is a soft clipper with its knee at unity. So
+                 * this stage never switched off: every radio track, fully tuned, sat under a
+                 * permanent waveshaper, and the damage scaled with how hot the track was.
+                 * Measured on a brickwalled master playing unnormalised (peak 1.0): 6.7% THD and
+                 * the output peak pinned flat at tanh(1) = 0.762 in every window. It happens
+                 * BEFORE the master, so turning the volume down did not remove it -- which is
+                 * what "overdriven" sounds like as opposed to "too loud".
+                 *
+                 * Blending by the same `amt` that opens `d` makes the stage an EXACT identity at
+                 * full lock and leaves it untouched at full static (amt = 1, d = 8), so the
+                 * tuning character that was settled by ear is preserved at the end that was
+                 * being judged. */
+                float amt = 1.0f - q;
+                if (amt > 0.0005f) {
+                    float d = 1.0f + g_recvDrive * 7.0f * amt;
+                    pl += amt * (tanhf(pl * d) / d - pl);
+                    pr += amt * (tanhf(pr * d) / d - pr);
+                }
             }
             g_voiceStereo[o] = pl; g_voiceStereo[o + 1] = pr;
         }
