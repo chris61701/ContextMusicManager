@@ -148,7 +148,22 @@ namespace CMM
         // That last stage is the one no existing counter covered, and it is the one with a rate
         // cap in it (WorldEmitterOcclusionFadeRate), so it can legitimately dominate.
         private static float _watchAt = -999f, _watchFieldAt = -999f, _watchTickAt = -999f;
-        private static int _watchTicks;   // emitter ticks that ran before the gain moved
+        private static int _watchTicks;   // emitter ticks that ran before the gain arrived
+        private static float _watchStart;     // published value when we latched on
+        private static bool  _watchLatched;   // a real pending change was seen at this point
+        private static int   _watchClamped;   // ticks the rise limiter actually clamped
+
+        // ARRIVAL, NOT MOVEMENT. This used to fire on the first publish that moved the gain by
+        // >= 1.0 in a single tick, which is a different question and answers it wrong: a gentle
+        // ramp crosses 1.0/tick at an arbitrary moment, so a change that was delivered smoothly
+        // over two seconds reported as a two-second "stall" and one delivered in a single step
+        // reported as instant. Measured over a session, every long report had a `gain moved`
+        // pinned just above 1.0 -- the reporting THRESHOLD -- rather than at 5.0, the limiter's
+        // per-tick step. The instrument could not tell "arrived late" from "arrived gradually",
+        // and I read it as the former and blamed the limiter.
+        private const float ArriveMinDelta  = 1.0f;   // below this there is nothing to deliver
+        private const float ArriveTolerance = 0.5f;   // "close enough to target" floor
+        private const float GiveUpSec       = 30f;    // was 5 s, which DISCARDED the whole tail
         private static Vector3i _watchPos;
         private static bool _watchIsDoor;
 
@@ -171,6 +186,7 @@ namespace CMM
             if (_watchAt > 0f && CmmClock.Now - _watchAt < 5f) return;
             _watchAt = CmmClock.Now; _watchFieldAt = -999f; _watchTickAt = -999f;
             _watchTicks = 0; _watchPos = pos; _watchIsDoor = false;
+            _watchLatched = false; _watchClamped = 0; _watchStart = 0f;
         }
 
         // A BLOCK IS AS URGENT AS A DOOR. The flood is gated to one every FloodSec (0.30 s)
@@ -208,20 +224,47 @@ namespace CMM
             if (_watchTickAt < _watchFieldAt) _watchTickAt = CmmClock.Now;
         }
 
-        // Called from the emitter publish with the change in the value the mixer is handed.
-        internal static void NoteGainMoved(float delta)
+        // Called from the emitter publish with BOTH numbers: what the mixer is being handed, and
+        // what the model actually wants it to be. The gap between them is the thing being timed.
+        internal static void NoteGainProgress(float published, float target, bool clamped)
         {
             if (_watchAt <= 0f || _watchFieldAt < _watchAt) return;   // field has not answered yet
             float now = CmmClock.Now;
+
+            // TIME OUT LOUDLY. The old 5 s cutoff returned silently, so every report was capped at
+            // 4.9 s and anything worse simply vanished -- the distribution was censored exactly
+            // where it got interesting, and "max 4980 ms" was the instrument's ceiling, not the
+            // phenomenon's.
+            if (now - _watchAt > GiveUpSec) { Report(now, published, target, true); return; }
+
+            if (!_watchLatched)
+            {
+                float pending = Mathf.Abs(target - published);
+                if (pending < ArriveMinDelta) return;    // nothing to deliver here yet
+                _watchLatched = true; _watchStart = published; _watchClamped = 0;
+            }
+            if (clamped) _watchClamped++;
+
+            float span = Mathf.Abs(target - _watchStart);
+            float left = Mathf.Abs(target - published);
+            // Within half a block, or a tenth of the journey, whichever is looser: the last
+            // fraction of an asymptotic approach is inaudible and waiting for it would put the
+            // old late-reporting bias straight back in.
+            if (left <= Mathf.Max(ArriveTolerance, span * 0.1f)) Report(now, published, target, false);
+        }
+
+        private static void Report(float now, float published, float target, bool gaveUp)
+        {
             float total = (now - _watchAt) * 1000f;
-            if (total > 5000f) { _watchAt = -999f; return; }          // stale: nothing moved
             float tickWait = _watchTickAt >= _watchFieldAt ? (_watchTickAt - _watchFieldAt) * 1000f : -1f;
             float inTick   = _watchTickAt >= _watchFieldAt ? (now - _watchTickAt) * 1000f : -1f;
-            CMMConfig.D($"[CMM] {(_watchIsDoor ? "door" : "block")} -> sound: {total:0} ms "
-                      + $"(field {(_watchFieldAt - _watchAt) * 1000f:0} "
-                      + $"+ tickwait {tickWait:0} + intick {inTick:0} over {_watchTicks} tick(s), "
-                      + $"gain moved {delta:0.00} at {_watchPos})");
-            _watchAt = -999f;
+            CMMConfig.D($"[CMM] {(_watchIsDoor ? "door" : "block")} -> sound: {total:0} ms"
+                      + (gaveUp ? " (GAVE UP, never arrived)" : "")
+                      + $" (field {(_watchFieldAt - _watchAt) * 1000f:0}"
+                      + $" + tickwait {tickWait:0} + intick {inTick:0} over {_watchTicks} tick(s),"
+                      + $" {_watchClamped} clamped, moved {Mathf.Abs(published - _watchStart):0.00}"
+                      + $" of {Mathf.Abs(target - _watchStart):0.00} at {_watchPos})");
+            _watchAt = -999f; _watchLatched = false;
         }
     }
 }
