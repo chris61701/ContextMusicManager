@@ -86,18 +86,38 @@ namespace CMM
 
         // ── Play-time lookup ───────────────────────────────────────────────────
         // O(1), no I/O, no hashing: relPath → hash → measurement → gain. Returns a
-        // neutral 1.0 whenever normalization is off, the track is unmeasured, or the
-        // entry is from an older metric version (a re-measure will replace it).
+        // neutral 1.0 when normalization is off; when it is ON but we have no usable
+        // measurement it returns the UNMEASURED FALLBACK, not 1.0.
+        //
+        // 1.0 was the wrong default and it was wrong in the dangerous direction. It
+        // does not mean "unknown", it means "this file is already at target" — and a
+        // modern master is 8-12 dB above the -18 LUFS target, so every unmeasured
+        // track played that much hot. On the personal radio that hits the receiver's
+        // saturator (cmm_mix.c, the g_recvDrive stage) and comes out audibly
+        // distorted, before the volume slider. LoudnessStartHoldMs is supposed to keep
+        // this rare, but it expires whenever a whole file can't be decoded in 3 s,
+        // which on a large library is most joins. See CMMConfig.LoudnessUnmeasuredDb.
         public static float GetTrackGain(string absolutePath)
         {
             if (!CMMConfig.LoudnessNormalizationEnabled) return 1f;
             string key = ToRelKey(absolutePath);
-            if (key == null) return 1f;
+            if (key == null) return UnmeasuredGain();
 
-            if (!_byPath.TryGetValue(key, out PathRecord pr)) return 1f;
-            if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return 1f;
-            if (m.MetricVersion != MetricVersion) return 1f;
+            if (!_byPath.TryGetValue(key, out PathRecord pr)) return UnmeasuredGain();
+            if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return UnmeasuredGain();
+            if (m.MetricVersion != MetricVersion) return UnmeasuredGain();
             return ComputeGain(m);
+        }
+
+        // What an unmeasured track plays at. Clamped to unity at the top: this is a
+        // safety bias against starting hot, and it must never become a BOOST — a guess
+        // that makes a track louder is the failure it exists to prevent.
+        private static float UnmeasuredGain()
+        {
+            float db = CMMConfig.LoudnessUnmeasuredDb;
+            if (db >= 0f) return 1f;
+            if (db < -24f) db = -24f;
+            return (float)Math.Pow(10.0, db / 20.0);
         }
 
         // Cheap, NO-I/O "do we already hold a usable measurement for this path?" check,

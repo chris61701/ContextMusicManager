@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 40;
+        internal const int CurrentSchema = 42;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -132,6 +132,16 @@ pre-normalized so nothing decodes on-demand while playing (smoother on huge / sl
 libraries), at a little more background decoding. Default 3. Hot-reloads."),
             I("LoudnessStartHoldMs",                 "CMMConfig.LoudnessStartHoldMs",               3000, since: 17),
             I("LoudnessMeasureAhead",                "CMMConfig.LoudnessMeasureAhead",              3),
+            Cmt(@"UnmeasuredDb: what a track plays at when StartHoldMs expires and it is STILL unmeasured
+(a whole file has to be decoded to measure it, so on a large library that happens often).
+This used to be 0 -- no correction -- which is the worst available guess: a modern master sits
+8-12 dB ABOVE the -18 LUFS target, so ""no correction"" means ""up to 12 dB hot"", and on the
+personal radio that drove the receiver into audible distortion before the volume slider.
+-5 dB is roughly the median correction a real library wants, so it is the guess that is least
+wrong, and it is deliberately biased quiet: a moment too quiet is a non-event, too loud is
+distortion. The real measurement still eases in the instant it lands. 0 = the old behaviour.
+Never boosts: positive values are treated as 0. Hot-reloads."),
+            F("LoudnessUnmeasuredDb",                "CMMConfig.LoudnessUnmeasuredDb",              -5f, since: 41),
 
             Gap(),
             Cmt(@"Fade between outgoing and incoming context instead of cutting immediately"),
@@ -803,8 +813,14 @@ it is quiet-but-correct close to you while it does, because unread space counts 
 DetourDb is what one block of going-the-long-way costs. It is the only tuning constant the
 model has beyond the shared material curve - everything else comes from the blocks."),
             B("WorldEmitterFieldOcclusion",          "CMMConfig.WorldEmitterFieldOcclusion",        true),
-            F("WorldEmitterFieldDetourDb",           "CMMConfig.WorldEmitterFieldDetourDb",         3f,
-              since: 1, changedIn: 38, was: 1.5f),
+            // Back to 1.5 (see CMMConfig for the arithmetic). `was` lists EVERY former default so a
+            // file that skipped a version is still recognised -- 3 never actually reached anyone
+            // (its changedIn:38 rule could not fire, the stamp had already passed 38), so files in
+            // the wild hold 1.5 or the original 0.35. 1.5 is deliberately NOT in the list: it is
+            // the new default, so matching it would rewrite it to itself and log a migration that
+            // changed nothing.
+            F("WorldEmitterFieldDetourDb",           "CMMConfig.WorldEmitterFieldDetourDb",         1.5f,
+              since: 1, changedIn: 42, was: new object[] { 3f, 0.35f }),
 
             Gap(),
             Cmt(@"What one block of material is worth to the field model: dB = WallDb * loss^WallPow, where

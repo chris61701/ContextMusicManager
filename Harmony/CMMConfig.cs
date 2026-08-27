@@ -423,7 +423,23 @@ namespace CMM
         //
         // Open air is unaffected at any value: excess is material + (pathLength - straightLine) x
         // this, and the straight-line term cancels against the free-space reference.
-        public static float  WorldEmitterFieldDetourDb  = 3f;    // tuned by ear 2026-08-25; 1.5 leaked, 6 was overzealous
+        // BACK TO 1.5 (2026-08-26). 3 was agreed by ear on the 25th and the arithmetic does not
+        // support it: Shape runs the total through 45*tanh(total/45), so ONE right-angle corner
+        // (a 20+20 block L -- route 40, straight line 28.3, so 11.7 blocks of detour) costs
+        //     1.5 -> 16.7 dB      2.0 -> 21.5 dB      3.0 -> 29.4 dB
+        // against a real single-edge diffraction loss of 10-15 dB. At 3 the model charges about
+        // two edges for one corner, and Chris's verdict after testing was the obvious consequence:
+        // "sound doesn't travel far enough".
+        //
+        // The reasoning that raised it compared a TWENTY-BLOCK detour at 0.35 (7 dB) against a
+        // SINGLE-EDGE loss. Those are not the same measurement. 0.35 really was far too low; the
+        // size of the correction is what overshot.
+        //
+        // Detour can never silence a source -- the hard stop is material-only, deliberately -- so
+        // this knob is pure attenuation and everything it does is audible rather than binary.
+        // If sound is coming THROUGH A WALL rather than around a corner, this is the wrong knob:
+        // that is WallDb/WallPow. The diagnostic splits them ("wall X, detour Y").
+        public static float  WorldEmitterFieldDetourDb  = 1.5f;
         // HOW FAST OCCLUSION IS ALLOWED TO CHANGE, in dB per second, per speaker point.
         //
         // The field re-floods a few times a second and each flood is an independent answer, so
@@ -771,6 +787,19 @@ namespace CMM
         // Only applies when LoudnessNormalizationEnabled: with normalisation off there is nothing
         // to wait for and the hold is skipped entirely.
         public static int LoudnessStartHoldMs = 3000;
+        // ...and what it plays at when the hold expires and the track is STILL unmeasured. It
+        // used to be 1.0 -- no correction at all -- which is the worst possible guess. A modern
+        // master sits 8 to 12 dB above the -18 LUFS target, so "no correction" means "up to 12 dB
+        // hot", and on the personal radio that lands in the receiver's saturator: measured on a
+        // brickwalled track, 6.7% THD with the peak pinned flat, before the volume slider, so
+        // turning it down did not help. On a big library the 3 s hold expires often -- a whole
+        // FLAC has to be decoded to measure it.
+        //
+        // -5 dB is the median correction this machine's library actually wants, so it is the
+        // guess that is least wrong. It is a BIAS, not an estimate: too quiet for a moment is a
+        // non-event, too loud is distortion. The real measurement still lands and eases in
+        // (SettleLoudness, 0.2 s) exactly as before. 0 restores the old uncorrected start.
+        public static float LoudnessUnmeasuredDb = -5f;
 
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
