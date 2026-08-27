@@ -46,6 +46,9 @@ using CMM;
 
 internal static class Program
 {
+    // Memory-drift sample count. Enough points that the back-half slope is a fit, not a guess.
+    const int Checkpoints = 16;
+
     static int Main(string[] args)
     {
         AppDomain.MonitoringIsEnabled = true;   // precise per-AppDomain allocation tracking
@@ -227,9 +230,16 @@ internal static class Program
                 if (behind > 1) System.Threading.Thread.Sleep((int)behind);
             }
 
-            // Heap + RSS checkpoints at 25/50/75/100% (forced GC → managed-heap leak signal;
-            // WorkingSet drift → NATIVE leak signal, e.g. the mixer/decoders).
-            if (t == totalTicks / 4 || t == totalTicks / 2 || t == 3 * totalTicks / 4 || t == totalTicks - 1)
+            // Heap + RSS checkpoints (forced GC → managed-heap leak signal; WorkingSet drift →
+            // NATIVE leak signal, e.g. the mixer/decoders).
+            //
+            // Sampled at 1/CHECKPOINTS intervals, not the original four. Four points cannot tell a
+            // rising line from a noisy flat one, and RSS is noisy by nature (Windows trims a working
+            // set on its own schedule): the same seed run twice gave 28.6/39.9/62.3/66.4 and
+            // 28.6/37.4/70.8/66.6 — monotone in one, peaking mid-run in the other, same work. With
+            // enough points the drift report can fit a SLOPE over the back half instead of reading
+            // one difference and guessing.
+            if (t == totalTicks - 1 || (t > 0 && t % Math.Max(1, totalTicks / Checkpoints) == 0))
             {
                 if (mixerMode == SessionMixerMode.Headless && runner.Mixer != null)
                 {
@@ -426,24 +436,26 @@ internal static class Program
         // Appearance (registry POI block-scan when speakers stream in).
         if (em.ScanMs.Count > 0)
         {
-            var s = em.ScanMs.ToArray(); Array.Sort(s);
-            Console.WriteLine($"   appearance scan (POI block sweep): n={s.Length}  p50 {Pct(s, 50):F3}ms  p95 {Pct(s, 95):F3}ms  max {s[s.Length - 1]:F3}ms");
+            var s = em.ScanMs.Sorted();
+            Console.WriteLine($"   appearance scan (POI block sweep): n={em.ScanMs.Count:N0}  p50 {Pct(s, 50):F3}ms  p95 {Pct(s, 95):F3}ms  max {em.ScanMs.Max:F3}ms");
         }
 
         // Steady per-run spatialisation cost — the per-frame main-thread hit while in range.
         if (em.RunMs.Count > 0)
         {
-            var r = em.RunMs.ToArray(); Array.Sort(r);
-            var occ = em.OccMs.ToArray(); Array.Sort(occ);
-            var room = em.RoomMs.ToArray(); Array.Sort(room);
-            Console.WriteLine($"   per run (occ+reverb): p50 {Pct(r, 50):F4}ms  p95 {Pct(r, 95):F4}ms  p99 {Pct(r, 99):F4}ms  max {r[r.Length - 1]:F4}ms  mean {r.Average():F4}ms");
-            if (r[r.Length - 1] > 20 * Pct(r, 99))
+            var r = em.RunMs.Sorted();
+            var occ = em.OccMs.Sorted();
+            var room = em.RoomMs.Sorted();
+            // n is the retained SAMPLE when the reservoir capped; Count/Sum/Max stay exact.
+            string sn = em.RunMs.Sampled ? $" (percentiles from a {r.Length:N0}-sample reservoir of {em.RunMs.Count:N0} runs)" : "";
+            Console.WriteLine($"   per run (occ+reverb): p50 {Pct(r, 50):F4}ms  p95 {Pct(r, 95):F4}ms  p99 {Pct(r, 99):F4}ms  max {em.RunMs.Max:F4}ms  mean {em.RunMs.Average:F4}ms{sn}");
+            if (em.RunMs.Max > 20 * Pct(r, 99))
                 Console.WriteLine($"      (max ≫ p99 ⇒ a lone GC pause landed inside one timed span — p99 is the steady per-run cost)");
-            Console.WriteLine($"      occlusion : p50 {Pct(occ, 50):F4}ms  p95 {Pct(occ, 95):F4}ms  max {occ[occ.Length - 1]:F4}ms");
-            Console.WriteLine($"      room probe: p50 {Pct(room, 50):F4}ms  p95 {Pct(room, 95):F4}ms  max {room[room.Length - 1]:F4}ms");
+            Console.WriteLine($"      occlusion : p50 {Pct(occ, 50):F4}ms  p95 {Pct(occ, 95):F4}ms  max {em.OccMs.Max:F4}ms");
+            Console.WriteLine($"      room probe: p50 {Pct(room, 50):F4}ms  p95 {Pct(room, 95):F4}ms  max {em.RoomMs.Max:F4}ms");
 
             // Relative hit vs the existing per-tick decision cost (resolve + select).
-            double emPerTick = r.Average() * em.RunsPerTick;
+            double emPerTick = em.RunMs.Average * em.RunsPerTick;
             double baseline = resolveMs.Average() + selectMs.Average();
             Console.WriteLine($"   added main-thread cost: {emPerTick:F4}ms per in-POI tick  ·  resolve+select baseline {baseline:F4}ms/tick  →  +{100.0 * emPerTick / Math.Max(1e-9, baseline):F1}%");
         }
@@ -524,15 +536,24 @@ internal static class Program
 
         Console.WriteLine("\n── Memory drift (managed heap = GC leak · working set = NATIVE leak) ──");
         Console.WriteLine($"   baseline (post-warmup): heap {Mb(heapBaseline):F2} MB   ·   RSS {Mb(rssBaseline):F1} MB");
-        foreach (var (pct, h, rss, simHour) in chk)
-            Console.WriteLine($"   {pct,5:F0}%  (sim h{simHour,5:F1}) : heap {Mb(h),7:F2} MB (Δ{Mb(h - heapBaseline),6:F2})   RSS {Mb(rss),7:F1} MB (Δ{Mb(rss - rssBaseline),6:F1})");
-        if (chk.Count >= 2)
+        // 16 points are sampled; print a quarter of them so the table stays readable.
+        int every = Math.Max(1, chk.Count / 4);
+        for (int i = 0; i < chk.Count; i++)
         {
-            long hEnd = chk[chk.Count - 1].heap, rEnd = chk[chk.Count - 1].rss;
-            double heapDrift = Mb(hEnd - heapBaseline), rssDrift = Mb(rEnd - rssBaseline);
-            double heapLate = Mb(hEnd - chk[chk.Count - 2].heap), rssLate = Mb(rEnd - chk[chk.Count - 2].rss);
-            Console.WriteLine($"   heap: total Δ{Sign(heapDrift)} MB, final-quarter slope {Sign(heapLate)} MB  → {LeakVerdict(heapDrift, heapLate)}");
-            Console.WriteLine($"   RSS : total Δ{Sign(rssDrift)} MB, final-quarter slope {Sign(rssLate)} MB  → {LeakVerdict(rssDrift, rssLate)}");
+            if (i % every != 0 && i != chk.Count - 1) continue;
+            var (pct, h, rss, simHour) = chk[i];
+            Console.WriteLine($"   {pct,5:F0}%  (sim h{simHour,5:F1}) : heap {Mb(h),7:F2} MB (Δ{Mb(h - heapBaseline),6:F2})   RSS {Mb(rss),7:F1} MB (Δ{Mb(rss - rssBaseline),6:F1})");
+        }
+        if (chk.Count >= 4)
+        {
+            var simHours = chk.Select(c => c.simHour).ToList();
+            var heapD = chk.Select(c => Mb(c.heap - heapBaseline)).ToList();
+            var rssD = chk.Select(c => Mb(c.rss - rssBaseline)).ToList();
+            double heapDrift = heapD[heapD.Count - 1], rssDrift = rssD[rssD.Count - 1];
+            double heapSlope = BackHalfSlope(simHours, heapD), rssSlope = BackHalfSlope(simHours, rssD);
+            Console.WriteLine($"   heap: total Δ{Sign(heapDrift)} MB, back-half slope {Sign(heapSlope)} MB/sim-h  → {LeakVerdict(heapDrift, heapSlope)}");
+            Console.WriteLine($"   RSS : total Δ{Sign(rssDrift)} MB, back-half slope {Sign(rssSlope)} MB/sim-h  → {LeakVerdict(rssDrift, rssSlope)}");
+            Console.WriteLine($"   ({chk.Count} samples; the slope is a least-squares fit over the back half — one difference cannot separate a rise from RSS jitter)");
         }
 
         Console.WriteLine("\n── Top transition targets ────────────────────────────────────────────");
@@ -540,8 +561,26 @@ internal static class Program
             Console.WriteLine($"   {kv.Value,6:N0}  {kv.Key}");
     }
 
-    static string LeakVerdict(double drift, double lateSlope) =>
-        lateSlope > 0.5 ? "STILL CLIMBING — leak suspect, investigate"
+    // Least-squares slope of `y` against `x` over the BACK HALF of the series, in units of
+    // y-per-x (MB per sim-hour). A leak is a persistent rate, so a rate is what should be
+    // reported; the previous rule read the single last-quarter difference, which cannot tell a
+    // rising line from a noisy flat one. RSS is noisy by nature — Windows trims a working set on
+    // its own schedule — and the same seed run twice gave 28.6/39.9/62.3/66.4 and
+    // 28.6/37.4/70.8/66.6 MB above baseline for identical work. Fitting the back half over 16
+    // samples answers what one difference over 4 could only guess at.
+    static double BackHalfSlope(IReadOnlyList<double> x, IReadOnlyList<double> y)
+    {
+        int n = x.Count, from = n / 2, m = n - from;
+        if (m < 2) return 0;
+        double sx = 0, sy = 0, sxy = 0, sxx = 0;
+        for (int i = from; i < n; i++) { sx += x[i]; sy += y[i]; sxy += x[i] * y[i]; sxx += x[i] * x[i]; }
+        double den = m * sxx - sx * sx;
+        return Math.Abs(den) < 1e-9 ? 0 : (m * sxy - sx * sy) / den;
+    }
+
+    // A leak is a RATE that keeps paying out, not a one-off. Growth that stops is a cache.
+    static string LeakVerdict(double drift, double slopePerHour) =>
+        slopePerHour > 0.25 && drift > 1.0 ? "STILL CLIMBING — leak suspect, investigate"
         : drift < 1.0 ? "FLAT — no leak"
         : "grew once then PLATEAUED (buffers/caches) — no ongoing leak";
 

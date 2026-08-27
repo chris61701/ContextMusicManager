@@ -27,6 +27,64 @@ namespace CMM
     // Keep in lockstep with EmitterAcoustics.cs (see [[cmmsession-harness-drift]]).
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Reservoir — fixed-capacity, PRE-ALLOCATED sample store for the timing percentiles.
+    //
+    // Why this is not a List<double>: the whole point of this harness is the memory-drift
+    // gauge, which measures managed-heap growth between the post-warmup baseline and the
+    // end of the run and calls a rising line a leak. Anything the HARNESS allocates that
+    // grows with session length therefore forges the very signal it is reporting. Three
+    // growing Lists taking one entry per acoustics run did exactly that: ~4 MB over a 12 h
+    // soak, and every emitters-ON run printed "STILL CLIMBING — leak suspect" while every
+    // emitters-OFF run of the same code printed a flat plateau. The addon was never leaking;
+    // the instrument was. (The per-run ALLOC counter dodged this by excluding the List.Add
+    // from its window — the heap gauge had no such exclusion, and nothing tied the two.)
+    //
+    // So: allocate the buffer ONCE in the constructor, which runs before Program takes its
+    // baseline snapshot, and never grow it. Count / Sum / Max stay EXACT; percentiles come
+    // from a uniform reservoir sample (Vitter R), which is unbiased across the whole session
+    // rather than truncated to its first N events.
+    // ─────────────────────────────────────────────────────────────────────────
+    internal sealed class Reservoir
+    {
+        private readonly double[] _buf;
+        private readonly Random _rng;
+
+        public long Count;
+        public double Sum;
+        public double Max = double.NegativeInfinity;
+
+        public Reservoir(int capacity, int seed)
+        {
+            _buf = new double[Math.Max(1, capacity)];
+            _rng = new Random(seed);
+        }
+
+        public void Add(double v)
+        {
+            Count++;
+            Sum += v;
+            if (v > Max) Max = v;
+            if (Count <= _buf.Length) { _buf[Count - 1] = v; return; }
+            long j = (long)(_rng.NextDouble() * Count);       // replace with probability k/n
+            if (j < _buf.Length) _buf[(int)j] = v;
+        }
+
+        public int SampleCount => (int)Math.Min(Count, _buf.Length);
+        public bool Sampled => Count > _buf.Length;           // report n as a sample, not a total
+        public double Average => Count > 0 ? Sum / Count : 0.0;
+
+        // Sorted copy of the retained samples. Allocated at REPORT time — after the final
+        // drift checkpoint — so it can never show up as drift.
+        public double[] Sorted()
+        {
+            var a = new double[SampleCount];
+            Array.Copy(_buf, a, a.Length);
+            Array.Sort(a);
+            return a;
+        }
+    }
+
     // Headless stand-in for the 7D2D voxel world the acoustics march through: a dense block-id
     // grid over one reused region (the game indexes a chunk array the same way) + a small
     // block-property table (material / see-through / solid-cube), the fields CellLoss reads.
@@ -402,16 +460,17 @@ namespace CMM
         private float _phase;                // wander phase
 
         // ── Metrics ──
+        // Timing samples live in FIXED, PRE-ALLOCATED reservoirs, not growing Lists — see the
+        // Reservoir comment below for why that distinction decides whether the leak gauge works.
         public long TicksTotal, TicksInPoi, RunsTotal;
         public int  PoiVisits;
-        public readonly List<double> RunMs   = new List<double>();   // per acoustics run (occ+room)
-        public readonly List<double> OccMs   = new List<double>();
-        public readonly List<double> RoomMs  = new List<double>();
-        public readonly List<double> ScanMs  = new List<double>();   // per POI-appearance scan
+        public readonly Reservoir RunMs;    // per acoustics run (occ+room)
+        public readonly Reservoir OccMs;
+        public readonly Reservoir RoomMs;
+        public readonly Reservoir ScanMs;   // per POI-appearance scan
         public long AllocCompute;   // alloc strictly around the per-run compute (the feature's own churn)
         public readonly int[] PointCountHist = new int[AcousticsSim.MaxPoints + 1];
         public long PointCountSum;
-        public double MaxRunMs;
 
         public EmitterSim(int seed, float tick, int maxPerPoi, float emitterHz)
         {
@@ -420,6 +479,10 @@ namespace CMM
             _maxPerPoi = Math.Max(1, maxPerPoi);
             _runsPerTick = Math.Max(1, (int)Math.Round(emitterHz * tick));
             _ac = new AcousticsSim(_world);
+            RunMs  = new Reservoir(1 << 16, seed ^ 0x11);
+            OccMs  = new Reservoir(1 << 16, seed ^ 0x22);
+            RoomMs = new Reservoir(1 << 16, seed ^ 0x33);
+            ScanMs = new Reservoir(1 << 12, seed ^ 0x44);
         }
 
         public int RunsPerTick => _runsPerTick;
@@ -464,7 +527,6 @@ namespace CMM
                     if (count == 0) continue;
                     double total = occ + room;
                     OccMs.Add(occ); RoomMs.Add(room); RunMs.Add(total);
-                    if (total > MaxRunMs) MaxRunMs = total;
                 }
             }
             else _curPoi = null;   // left the POI → speakers unload

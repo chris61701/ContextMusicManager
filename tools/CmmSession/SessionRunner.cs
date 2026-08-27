@@ -306,7 +306,9 @@ namespace CMM
 
                                 _decodeMs.Add(ms);
                                 string ext = Path.GetExtension(file).ToLowerInvariant();
-                                if (!_decodeByExt.TryGetValue(ext, out var l)) _decodeByExt[ext] = l = new List<double>();
+                                // Capacity up front for the same reason the emitter timings use a Reservoir:
+                        // a harness structure that grows with session length forges the leak signal.
+                        if (!_decodeByExt.TryGetValue(ext, out var l)) _decodeByExt[ext] = l = new List<double>(TotalTicks / 4 + 16);
                                 l.Add(ms);
                                 DecodeCount++;
                                 outcome.Decoded = true;
