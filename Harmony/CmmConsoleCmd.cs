@@ -517,6 +517,13 @@ namespace CMM
         // position being described is the position that was actually measured.
         internal static string AcousticsColumn()
         {
+// The whole body reads 3.x-only world-emitter types (EmitterAudioLayer / FieldOcclusion /
+// EmitterAcoustics), all of which are #if GV_V3. The call was unguarded, so `cmm acoustics
+// column` alone broke the A20 / A21 / 2.6 compiles -- invisible in practice because the
+// shipped DLL is built ONCE with GV_V3 for every game version, so the per-version targets
+// are never what ships. Guard the body, not the signature, so both callers (the console verb
+// and the KeyAcousticsDump keybind) still compile everywhere.
+#if GV_V3
                 var pl = GameManager.Instance?.World?.GetPrimaryPlayer();
                 var w = GameManager.Instance?.World;
                 if (pl == null || w == null) return "no player";
@@ -572,6 +579,9 @@ namespace CMM
                               + (b.IsMovementBlocked(w, v, bv, BlockFace.None) ? "  MOVEBLOCK" : "  walkthru"));
                 }
                 return sb.ToString();
+#else
+            return "world emitters are not in this build (3.0+ only)";
+#endif
         }
 
         static void Out(string s)
