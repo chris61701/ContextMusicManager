@@ -433,6 +433,12 @@ namespace CMM
             // radio, and PersonalRadio holds its rejoin until they finish.
             if (PersonalRadio.SuppressesMusic && !ctx.PlayOnce)
             {
+                // SAY SO. This return is correct and it is also the single most confusing thing
+                // in the log: "TriggerMusic: X" with no "native: dispatched" after it, no reason
+                // given, and the context left reading current=X / nativeCtx=null / nativeBusy=
+                // False -- which is indistinguishable from a silent strand. One session was spent
+                // reading a working radio handover as a frozen music system because of it.
+                CMMConfig.D($"[CMM] native: start of {contextName} refused — the personal radio owns the music layer.");
                 ReleaseNativeVoiceForRadio(CrossFadeDuration);
                 return;
             }

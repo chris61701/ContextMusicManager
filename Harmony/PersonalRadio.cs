@@ -44,9 +44,20 @@ namespace CMM
         private const float AdvanceFade = 0.2f;    // EOF → next track (near-seamless)
         private const float SilenceFade = 0.4f;    // off-air / world-exit fade to silent
 
-        private static bool   _on;
+        private static volatile bool _on;   // volatile: the async start worker reads it (pre-Play guard)
         private static string _tunedName;          // survives the station being off air
         private static long   _voiceId;
+        // THE VOICE Tune LET GO OF, AND WHY IT HAS TO BE REMEMBERED.
+        // ReleaseVoiceStillPlaying clears _voiceId on purpose (that is what moves the state
+        // machine into "searching") and the released station carries on playing, buried under the
+        // hiss, until the NEXT station's add crossfades it out. If no next station ever arrives --
+        // dial fast enough and none of them lands, then roll onto Off -- nothing retires it, and
+        // TurnOff's FadeVoiceOut sees _voiceId == 0 and does nothing. Off then disarms the
+        // receiver, which removes the only thing hiding it: the level law cuts a zero-signal
+        // programme by RadioRecvFloorDb (5 dB) and no more, deliberately, so the station is
+        // revealed at ~56% and plays its whole track with the radio showing Off.
+        // Reported as "reach Radio Off and the music just keeps on playing".
+        private static long   _releasedVoiceId;
         private static string _track;
         private static float  _gainApplied = 1f;
         private static bool   _offAir;             // edge-detect for the "(off air)" notice
@@ -971,7 +982,14 @@ namespace CMM
                             if (System.Threading.Volatile.Read(ref _startGen) != gen) break;
                             System.Threading.Thread.Sleep(5);
                         }
-                        if (System.Threading.Volatile.Read(ref _startGen) != gen || ContextMusicManager.playerIsDead)
+                        // OFF IS ALSO A REASON NOT TO ADD. Checking only the generation left a
+                        // window: TurnOff bumps _startGen, but between this guard and the add below
+                        // the dial can reach Off and the add lands anyway. It was survivable while
+                        // commit could still find the voice; it is not once the hand-off slot has
+                        // been overwritten (see the orphan mute below), because then nothing knows
+                        // the voice exists and it plays its whole track at full gain.
+                        if (System.Threading.Volatile.Read(ref _startGen) != gen || !_on
+                            || ContextMusicManager.playerIsDead)
                         {
                             AudioDecoder.CloseNativeHandle(dec, kind);
                             dec = IntPtr.Zero;
@@ -985,12 +1003,32 @@ namespace CMM
                     }
                 }
                 catch { /* commit treats id 0 without openFailed as a no-op */ }
+                long orphan = 0;
                 lock (_startLock)
                 {
+                    // THE HAND-OFF IS ONE SLOT AND THIS OVERWRITES IT. `_startPending` is supposed
+                    // to keep a single start in flight, but its 10 s hang safety deliberately lets
+                    // a second dispatch go out when an open runs long -- a big FLAC off a network
+                    // drive does, and rapid dialling is how you get there. Both workers then reach
+                    // here, and the first one's voice id was silently dropped: CommitPendingStart
+                    // only ever sees the LAST write, so nothing muted it and it played its whole
+                    // track at full gain. Reported as "reach Radio Off and the music just keeps on
+                    // playing", which is exactly what it is.
+                    //
+                    // An un-consumed slot holding a live voice is that case. Mute it here rather
+                    // than dropping it. SetVoiceTrackGain goes through the mixer's own lock, so
+                    // it is safe from this thread, and a muted loop:false voice retires itself at
+                    // EOF -- the same disposal every other orphan in this file gets.
+                    if (_doneReady && _doneVoiceId != 0) orphan = _doneVoiceId;
                     _doneVoiceId = id; _doneFile = fileCap; _doneStation = stName;
                     _doneGain = trackGain; _doneOffset = offCap; _doneGen = gen;
                     _doneOpenFailed = openFailed;
                     _doneReady = true;
+                }
+                if (orphan != 0)
+                {
+                    CmmMixer.Instance?.SetVoiceTrackGain(orphan, 0f, 0.1f);
+                    Log.Warning($"[CMM] Radio: two starts were in flight — muted the orphaned voice {orphan}.");
                 }
             });
         }
@@ -1022,10 +1060,15 @@ namespace CMM
                 // was in flight. Mute the orphan (it retires at EOF); its add may have crossfaded
                 // a legitimate voice down, so if the radio no longer owns the bus, hand music
                 // back to the resolver once more.
+                CMMConfig.D($"[CMM] Radio: discarding a start the dial outran "
+                          + $"({(gen != _startGen ? "dial moved" : !_on ? "radio off" : "player dead")}) "
+                          + $"— muting voice {id}.");
                 CmmMixer.Instance?.SetVoiceTrackGain(id, 0f, 0.1f);
                 if (!SuppressesMusic) ContextMusicManager.ReResolveNow();
                 return;
             }
+            // The add just crossfaded the released station out for real, so it is no longer ours.
+            _releasedVoiceId = 0;
             _voiceId = id; _track = file; _gainApplied = gain;
             // ── ONLY A DIAL MOVE GETS TUNED IN ─────────────────────────────────────────────
             // Most voice starts are not the player turning a knob: the radio being restored on
@@ -1069,6 +1112,16 @@ namespace CMM
         private static void FadeVoiceOut(float fade)
         {
             _startGen++;
+            // The released station too. This is the "stop being responsible for any radio audio"
+            // path (TurnOff, ResyncToClock, world exit), and a voice Tune let go of is still ours
+            // until an incoming add retires it. Deliberately NOT done in Tune -- a retune must
+            // leave the old station playing under the static, which is the whole leave.
+            if (_releasedVoiceId != 0)
+            {
+                CmmMixer.Instance?.SetVoiceTrackGain(_releasedVoiceId, 0f, fade);
+                CMMConfig.D($"[CMM] Radio: retiring the released voice {_releasedVoiceId} (no station ever landed).");
+                _releasedVoiceId = 0;
+            }
             if (_voiceId == 0) return;
             CmmMixer.Instance?.SetVoiceTrackGain(_voiceId, 0f, fade);
             _voiceId = 0;
@@ -1089,6 +1142,15 @@ namespace CMM
         private static void ReleaseVoiceStillPlaying()
         {
             _startGen++;
+            if (_voiceId != 0)
+            {
+                // A burst of presses releases at most one real voice (the rest see _voiceId == 0),
+                // but never drop one silently if it happens twice: the second would leak exactly
+                // the way this whole field exists to stop.
+                if (_releasedVoiceId != 0 && _releasedVoiceId != _voiceId)
+                    CmmMixer.Instance?.SetVoiceTrackGain(_releasedVoiceId, 0f, 0.1f);
+                _releasedVoiceId = _voiceId;
+            }
             _voiceId = 0;
             _track = null;
         }
