@@ -266,6 +266,52 @@ internal static class Program
         }
         else Skip("no-gated-block round trip", "snapshot write failed");
 
+        Section("A file replaced in place is re-measured");
+
+        // Swap a file's CONTENT while keeping its name -- re-encode a track, drop a real one in
+        // over a placeholder -- and every play-path gate used to answer "already measured", so
+        // the new audio played at the old audio's gain. The file watcher cannot catch it: it
+        // compares the set of names in a folder, and a replacement adds and removes nothing.
+        // Real files here, actually rewritten on disk, because the whole bug is about what the
+        // filesystem says versus what the store remembers.
+        LoudnessStore.Load(sandbox);
+        string swap = Path.Combine(sandbox, "swapped.flac");
+        File.WriteAllText(swap, "original contents");
+        var fi0 = new FileInfo(swap);
+        LoudnessStore.Store(swap, fi0.Length, fi0.LastWriteTimeUtc.Ticks, "hashswap", -30.0, 0.2);
+        Check("the original is measured", LoudnessStore.IsMeasured(swap));
+        float beforeSwap = LoudnessStore.GetTrackGain(swap);
+
+        System.Threading.Thread.Sleep(20);                 // distinct mtime
+        File.WriteAllText(swap, "different contents, different length entirely");
+        Check("after replacing the file, it is NOT still 'measured'", !LoudnessStore.IsMeasured(swap));
+        Near("...so it falls back to the unmeasured guess, not the old track's gain",
+             Db(LoudnessStore.GetTrackGain(swap)), CMMConfig.LoudnessUnmeasuredDb, 0.01);
+
+        var fi1 = new FileInfo(swap);
+        LoudnessStore.Store(swap, fi1.Length, fi1.LastWriteTimeUtc.Ticks, "hashswap2", -10.0, 0.9);
+        Check("re-measuring the new content restores it", LoudnessStore.IsMeasured(swap));
+        Check("...at a different gain than the file it replaced",
+              Math.Abs(LoudnessStore.GetTrackGain(swap) - beforeSwap) > 1e-3);
+
+        // "Can't tell" must never read as "changed". A drive momentarily away, at the exact
+        // moment the file cannot be read, is when throwing away a good measurement is worst.
+        LoudnessStore.Load(sandbox);
+        string vanished = Path.Combine(sandbox, "on-a-drive-that-went-away.flac");
+        LoudnessStore.Store(vanished, 4096, mtime, "hashgone", -20.0, 0.5);
+        Check("an unreachable file keeps its measurement", LoudnessStore.IsMeasured(vanished));
+
+        // A provisional is mid-measure against the file it is stamped from, so there is nothing
+        // to re-check -- and answering false would re-arm the very hold it exists to release.
+        LoudnessStore.Load(sandbox);
+        string growing = Path.Combine(sandbox, "still-decoding.flac");
+        File.WriteAllText(growing, "partial");
+        var fi2 = new FileInfo(growing);
+        LoudnessStore.Store(growing, fi2.Length + 999, fi2.LastWriteTimeUtc.Ticks, "hashprov",
+                            -25.0, 0.4, provisional: true);
+        Check("a provisional still counts as measured even with a mismatched stamp",
+              LoudnessStore.IsMeasured(growing));
+
         Section("Settle ramp");
 
         // The ramp is what makes a correction sound like the level settling rather

@@ -142,6 +142,12 @@ namespace CMM
             pr.Used = ++_useSeq; _byPath[key] = pr;   // LRU touch: recently PLAYED outranks recently measured
             if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return UnmeasuredGain();
             if (m.MetricVersion != MetricVersion) return UnmeasuredGain();
+            // The same freshness check IsMeasured makes, and it has to be here too: that one
+            // decides whether to MEASURE, this one decides what the track actually PLAYS AT.
+            // Gating only the first leaves the window between them applying the previous
+            // content's gain, which is the whole audible symptom.
+            if (!m.Provisional && !StampUnchanged(absolutePath, pr.Size, pr.MtimeTicks))
+                return UnmeasuredGain();
             return ComputeGain(m);
         }
 
@@ -156,18 +162,57 @@ namespace CMM
             return (float)Math.Pow(10.0, db / 20.0);
         }
 
-        // Cheap, NO-I/O "do we already hold a usable measurement for this path?" check,
-        // used by the track selector's prefer-measured bias. Unlike HasCurrent it does
-        // NOT re-stat the file (no size/mtime compare) — a possibly-stale measurement is
-        // fine for *selection* (the sweep re-measures genuinely changed files), and this
-        // runs on the play hot path, so it must stay allocation- and disk-free.
+        // "Do we hold a usable measurement for this file?" — the question every play-path
+        // gate asks: the start-hold, the prewarm, the staging pass, the radio's gain wait.
+        //
+        // This used to skip the size/mtime check that HasCurrent does, on the grounds that a
+        // slightly stale reading was fine for SELECTION because "the sweep re-measures
+        // genuinely changed files". That was true when it was written and stopped being true
+        // when the whole-library sweep was retired in favour of the bounded menu prewarm plus
+        // the on-demand look-ahead. Nothing broke at the time; a guarantee was withdrawn from
+        // underneath a correct decision, and the comment went on describing it.
+        //
+        // What that cost: replace a file's CONTENT while keeping its name — re-encode a track,
+        // drop a real one in over a placeholder — and every gate here answered "already
+        // measured", so the new audio played at the old audio's gain for the rest of the
+        // session. The file watcher could not catch it either; it compares the set of names in
+        // a folder, and a replacement adds and removes nothing. Worst on a track the user had
+        // trimmed or banned, because that entry persists and is exempt from eviction, so the
+        // wrong reading survived every relaunch.
+        //
+        // So it stats now. One FileInfo on a path we are about to play is not a cost worth
+        // reasoning about, and the alternative — a third place that asks the same question at
+        // one chosen moment — is more machinery to keep in step, not less.
         public static bool IsMeasured(string absolutePath)
         {
             string key = ToRelKey(absolutePath);
             if (key == null) return false;
             if (!_byPath.TryGetValue(key, out PathRecord pr)) return false;
             if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return false;
-            return m.MetricVersion == MetricVersion;
+            if (m.MetricVersion != MetricVersion) return false;
+            // A provisional reading is mid-measure BY the file it is stamped against, so there
+            // is nothing to re-check; and answering false here would re-arm the start-hold the
+            // partial exists to release. HasCurrent still rejects it, which is what gets an
+            // abandoned one re-measured.
+            if (m.Provisional) return true;
+            return StampUnchanged(absolutePath, pr.Size, pr.MtimeTicks);
+        }
+
+        // Is the file on disk still the one this record was measured from?
+        //
+        // "Can't tell" counts as UNCHANGED — a missing file, a drive momentarily away, any IO
+        // error. Reading a hiccup as "the file changed" is the mistake b316189 and the
+        // PoisonTrack guard were both about, and here it would throw away a good measurement
+        // and re-decode, at the exact moment the file cannot be read.
+        private static bool StampUnchanged(string absolutePath, long size, long mtimeTicks)
+        {
+            try
+            {
+                var fi = new FileInfo(absolutePath);
+                if (!fi.Exists) return true;
+                return fi.Length == size && fi.LastWriteTimeUtc.Ticks == mtimeTicks;
+            }
+            catch { return true; }
         }
 
         // A measurement carrying USER DATA — a manual volume override (UserTrim differs

@@ -221,6 +221,32 @@ verification — emitters are excluded there anyway.
 
 ## Radio / world-emitter
 
+- [ ] **World emitters on 2.6.** *(noted 2026-08-28, not started.)* The emitter layer is
+  `GV_V3`-only — every call site is behind `#if GV_V3` — so on 2.6 there are no world speakers
+  at all. Work out what the 2.6 block/entity API actually offers versus 3.x and how much of
+  `EmitterRegistry` / `EmitterAudioLayer` can be shared rather than forked; see
+  [[cross-version-api-divergences]] for the member-shape splits a single unified DLL already
+  has to bridge. 2.6 is a live install in the build fan-out, so this is a real audience.
+
+- [ ] **Change a speaker's station by interacting with it.** *(noted 2026-08-28,
+  conceptualizing.)* Today a POI's station is assigned by a name-pinned hash, so it is
+  deterministic and identical for every player — nobody can choose. Let the player interact
+  with a speaker to tune it.
+
+  **The open question is where the choice is stored, and it is the whole design.** It has to
+  survive a relaunch, belong to the world rather than the install (two saves must not share
+  it), and on a multiplayer server be the SERVER's answer, not each client's — otherwise two
+  players standing at the same speaker hear different stations, which is worse than nobody
+  choosing. Candidates to weigh: per-save mod data under the save folder; a block's own
+  entity/TileEntity data if 3.x gives one that persists and replicates; or a server-authoritative
+  map pushed to clients. Note the schedule itself is already deterministic per station
+  ([[multi-station-radio-plan]]), so only the *assignment* needs storing — a station name per
+  speaker position — which is small and cheap to replicate.
+
+  Related constraints already settled: assignment is pinned by station NAME so a removed
+  folder means dead air rather than a silent retune, and [[mp-dedi-neutralization]] governs
+  what a dedicated server may touch.
+
 - [ ] **A speaker is never detected, and placing more does not help — for the rest of the game
   process.** *(root-caused 2026-08-27, not fixed.)* Reported as "sometimes on loading into a
   world a speaker is not detected as an emitter; when placing more, they don't register
