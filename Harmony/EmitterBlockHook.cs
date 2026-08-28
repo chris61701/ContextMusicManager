@@ -78,8 +78,13 @@ namespace CMM
                 Type t = AccessTools.TypeByName("BlockChangeInfo");
                 if (t == null) return null;
 
-                // A20 / A21 / 2.6
-                FieldInfo direct = AccessTools.Field(t, "pos");
+                // A20 / A21 / 2.6. Type.GetField, not AccessTools.Field: this probe is EXPECTED
+                // to miss on 3.x, and AccessTools logs a WRN on every miss -- so a check working
+                // exactly as designed put "[MODS][Harmony] Could not find field for type
+                // BlockChangeInfo and name pos" in every user's log, once per launch, right
+                // beside the real [MODS] errors. GetField returns null quietly.
+                FieldInfo direct = t.GetField("pos", BindingFlags.Public | BindingFlags.NonPublic
+                                                   | BindingFlags.Instance | BindingFlags.Static);
                 if (direct != null && direct.FieldType == typeof(Vector3i))
                     return o => (Vector3i)direct.GetValue(o);
 
