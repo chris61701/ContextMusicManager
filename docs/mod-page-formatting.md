@@ -1,22 +1,32 @@
 # Updating the mod pages
 
-Three files in `docs/` are the source for two public pages. They are **hand-maintained copies of
-the same description**, not generated from each other, so a change to one is a change nobody has
-made to the others. That is the main hazard here — see *Keeping them in sync* at the bottom.
+## The markup, first
 
-| file | where it goes | format |
-|---|---|---|
-| `nexus-description.txt` | Nexus Mods mod page | **BBCode** |
-| `7daystodiemods-description.md` | 7daystodiemods.com | **Markdown + inline HTML** |
-| `7daystodiemods-description.html` | 7daystodiemods.com | the same content as the `.md`, pre-rendered |
+Each page takes a DIFFERENT markup language, and they are not interchangeable. Paste the wrong
+one and it renders as visible tag soup rather than failing quietly.
 
-The `.md` and `.html` hold the *same* text; only the markup differs. Keep whichever one the site
-editor accepts on the day and re-render the other, rather than editing them independently.
+| file | site | markup | accepts |
+|---|---|---|---|
+| `nexus-description.txt` | Nexus Mods | **BBCode** | `[b]…[/b]` square brackets. **No Markdown. No HTML.** |
+| `7daystodiemods-description.md` | 7daystodiemods.com | **Markdown + inline HTML** | `**bold**`, and raw `<span>` where Markdown has no equivalent |
+| `7daystodiemods-description.html` | 7daystodiemods.com | **HTML fragment** | the same text as the `.md`, pre-rendered. No `<html>`/`<body>` wrapper |
+
+So: **Nexus is BBCode, 7daystodiemods is Markdown (or HTML).** Everything below is the detail of
+each.
+
+These are hand-maintained copies of the same description, not generated from each other, so a
+change to one is a change nobody has made to the others — see *Keeping them in sync* at the
+bottom. The `.md` and `.html` hold the same text; keep whichever the site editor accepts on the
+day and re-render the other rather than editing them independently.
 
 ## Nexus — BBCode
 
-Nexus does not accept Markdown or HTML. Everything is BBCode, and these are the only tags the
-page uses (matching what is already there keeps it looking consistent):
+Nexus does not accept Markdown or HTML. Everything is BBCode.
+
+This is the complete set of tags **verified in use** on the current page — counted out of
+`nexus-description.txt`, not recalled. Matching them keeps the page visually consistent. Other
+BBCode tags may well work on Nexus; nothing here has tested them, so treat anything not on this
+list as unverified and preview it before publishing.
 
 - `[b]…[/b]` bold, `[i]…[/i]` italic
 - `[size=5]…[/size]` for section headings, `[size=4]…[/size]` for a sub-heading
