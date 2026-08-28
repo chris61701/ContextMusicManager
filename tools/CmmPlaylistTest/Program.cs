@@ -121,6 +121,7 @@ namespace CMM
 
             // shared tracks referenced relatively by playlists
             Touch("musicroot/shared/s1.mp3");
+            Touch("musicroot/shared/space name.mp3");   // exercises the %20 round trip
             Touch("musicroot/shared/s2.flac");
 
             // ── Folder + in-folder playlist (union) ──
@@ -161,6 +162,14 @@ namespace CMM
             Touch("playlists/p_local.mp3");                  // sits next to the .m3u for relative tests
             WriteM3u("playlists/valid_rel.m3u", new[]{ "p_local.mp3", "../musicroot/shared/s1.mp3" });
             WriteM3u("playlists/valid_abs.m3u", new[]{ Abs(0), Abs(1), Abs(2) });
+            // file:// URI entries — what VLC exports by default, and the form that silently
+            // produced an empty station in a real library (a whole radio folder looked unnoticed).
+            WriteM3u("playlists/uri_abs.m3u", new[]{ ToFileUri(Abs(0)), ToFileUri(Abs(1)) });
+            WriteM3u("playlists/uri_spaces.m3u", new[]{ ToFileUri(SpacePath) });
+            WriteM3u("playlists/uri_mixed.m3u", new[]{ ToFileUri(Abs(0)), Abs(1) });
+            WriteM3u("playlists/uri_upper.m3u", new[]{ ToFileUri(Abs(0)).Replace("file:", "FILE:") });
+            WriteM3u("playlists/uri_http.m3u", new[]{ "http://example.com/stream.mp3", ToFileUri(Abs(0)) });
+            WriteM3u("playlists/uri_broken.m3u", new[]{ "file://///:::bad", Abs(0) });
             WriteM3u("playlists/dupes.m3u", new[]{
                 "../musicroot/shared/s1.mp3",
                 "../musicroot/shared/s1.mp3",                // exact dup
@@ -229,6 +238,12 @@ namespace CMM
                 Exp("playlists/p_local.mp3","musicroot/shared/s1.mp3"));
             CheckSet("B15 dedup across spellings (abs+rel same file)", "../playlists/spelling.m3u", false,
                 Exp("musicroot/shared/s1.mp3"));
+            CheckSet("B17 file:// URI entries resolve", "../playlists/uri_abs.m3u", false, Exp(Abs(0), Abs(1)));
+            CheckSet("B18 percent-encoded spaces decode", "../playlists/uri_spaces.m3u", false, Exp(SpaceRel));
+            CheckSet("B19 file:// and plain paths mix in one file", "../playlists/uri_mixed.m3u", false, Exp(Abs(0), Abs(1)));
+            CheckSet("B20 FILE:// uppercase scheme", "../playlists/uri_upper.m3u", false, Exp(Abs(0)));
+            CheckSet("B21 http:// entry skipped, file:// kept", "../playlists/uri_http.m3u", false, Exp(Abs(0)));
+            CheckSet("B22 malformed file:// falls through, rest kept", "../playlists/uri_broken.m3u", false, Exp(Abs(0)));
             CheckSet("B16 mixed separators + ../ traversal", "../playlists/seps.m3u", false,
                 Exp("musicroot/shared/s1.mp3","musicroot/shared/s2.flac"));
         }
@@ -472,6 +487,14 @@ namespace CMM
         // Abs(i): the i-th real track as an absolute path, or "" when none discovered
         // (Exp/WriteM3u drop empty entries so scenarios degrade gracefully without real music).
         static string Abs(int i) => i < H.Length ? H[i] : "";
+
+        // The exact form VLC writes: file:/// + forward slashes + %XX for anything non-literal.
+        static string ToFileUri(string path) => new Uri(path).AbsoluteUri;
+
+        // A track whose path contains a space, so the %20 round trip is actually exercised
+        // rather than assumed (spaces are what broke the real playlist).
+        static string SpacePath => Path.Combine(Scratch, "musicroot", "shared", "space name.mp3");
+        static string SpaceRel  => "musicroot/shared/space name.mp3";
 
         // ── Scratch corpus helpers ──────────────────────────────────────────────
         static void ResetScratch()

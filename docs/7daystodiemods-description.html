@@ -1,0 +1,403 @@
+<p>Your own music, chosen by what you're doing. CMM watches your situation — fighting, driving, swimming, standing in a trader after dark, hiding in an infested POI — and plays from the matching folder. Drop files in, they play. Nothing to restart, no playlists to build, no menus.</p>
+
+<p><strong>Music Packs by other creators that you can try out</strong></p>
+
+<ul>
+  <li><a href="https://www.nexusmods.com/7daystodie/mods/11013"><span style="color: rgb(249, 115, 22);">Stormwrought Music Overhaul</span></a> - by <a href="https://www.nexusmods.com/profile/FinFNS"><span style="color: rgb(249, 115, 22);">FinFNS</span></a></li>
+</ul>
+
+<p><strong>A music pack can be its own mod</strong> - CMM reads music from your <em>MusicPath</em> folder <strong>and</strong> the <em>Music</em> folder of every installed mod, so a pack installs like any other mod, survives updating CMM, and works with MO2/Vortex/Wabbajack. The <em>cmm roots</em> console command shows which folders are in use and which mod each came from.</p>
+
+<p>If you put your own music pack together with your own composition, or royalty-free and AI-generated content (that you are legally able to distribute), I'll link to it here</p>
+
+<p><span style="color: rgb(239, 68, 68);"><strong>Alpha 20.7, Alpha 21.2 and 2.6 have not been thoroughly tested</strong></span></p>
+
+<hr>
+
+<p><strong>Requirements</strong></p>
+
+<ul>
+  <li>EAC must be OFF</li>
+  <li><strong>7 Days to Die</strong> version 3.2.0 b9 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)</li>
+  <li>Windows. The native audio engine ships as a Windows library; Linux support is planned for 1.0.6</li>
+</ul>
+
+<hr>
+
+<p><strong>Keybinds (defaults)</strong></p>
+
+<ul>
+  <li><strong>Alt+Num7</strong> - Now Playing overlay</li>
+  <li><strong>Alt+Num8</strong> - Coverage panel: which contexts have music, how many tracks, and what plays when they're empty. Radio stations are listed individually, so an empty station shows as dead air. It reads from disk live, so adding or moving music updates it within a second — even on the main menu</li>
+  <li><strong>Alt+Num9</strong> - Context status / debug HUD</li>
+  <li><strong>Alt+Page Up / Page Down</strong> - Switch radio stations (Off → station → station → Off)</li>
+  <li><strong>Alt+Home</strong> - Cycle combat music: combat <strong>+</strong> tension off → combat off → both on (tension is combat music that hasn't started yet)</li>
+  <li><strong>Alt+Insert</strong> - Favourite the current track — it plays more often, roughly once an hour in a 50+ track folder</li>
+  <li><strong>Alt+Delete</strong> - Ban the current track in the current context (never plays there again)</li>
+  <li><strong>Alt+End</strong> - Unban the last banned track</li>
+  <li><strong>Alt+Left / Right</strong> - Previous / next track in the current context</li>
+  <li><strong>Alt+Up / Down</strong> - Adjust the saved volume trim for the playing track</li>
+</ul>
+
+<p>Both debug panels show their own keybinds, and follow yours if you rebind them.</p>
+
+<p><strong>Getting your music in</strong></p>
+
+<ul>
+  <li><strong>Drop files into the folder for the situation you want them in</strong> — see the folder map below. You don't have to fill every folder; empty ones fall back automatically, so <em>ambient</em> and <em>combat</em> alone are a perfectly good start</li>
+  <li><strong>No restart needed</strong> — add, remove or replace files while the game runs and CMM picks them up within seconds, even the track currently playing</li>
+  <li><strong>Radio stations are subfolders of Music/radio/</strong> — the folder name is the station name. Alt+PgUp / Alt+PgDn dials through them, and any speaker block in the world plays them too</li>
+  <li><strong>Your music can live anywhere</strong> — set <em>MusicPath</em> in <em>Config/settings.xml</em> to any folder, even on another drive</li>
+  <li><strong>Not sure whether CMM sees a folder?</strong> Open the coverage panel with <strong>Alt+Num8</strong> — it lists every context, its track count, and what it's falling back to</li>
+</ul>
+
+<p><strong>Folder Map</strong></p>
+
+<pre><code>Music/
+├── ambient/                         Exploration default (lowest priority)
+│   ├── _night/                      Night-only exploration tracks (generic)
+│   ├── forest/                      Pine forest (day + everyday)
+│   │   └── _night/                  Forest, night only
+│   ├── burnt_forest/
+│   │   └── _night/
+│   ├── desert/
+│   │   └── _night/
+│   ├── snow/
+│   │   └── _night/
+│   └── wasteland/
+│       └── _night/
+│
+├── radio/                           Stations for the personal radio AND world speakers
+│   ├── &lt;station name&gt;/              One subfolder per station - the folder name IS the name
+│   └── &lt;station name&gt;/
+│
+├── home/                            Near your bedroll / land claim
+│   └── night/                       Home base, night only
+│
+├── poi/                             Inside a cleared / non-infested POI
+│   ├── t0/  t1/  t2/  t3/  t4/  t5/   By POI difficulty tier
+│   └── infested/                    Inside a POI with live sleepers
+│       └── t0/ t1/ t2/ t3/ t4/ t5/  By POI difficulty tier
+│
+├── trader/                          Inside any open trader
+│   ├── joel/  jen/  rekt/  bob/  hugh/   Per-trader themes
+│
+├── vehicle/                         Riding any vehicle
+│   ├── gyrocopter/  bicycle/  minibike/  motorcycle/  4x4/
+│
+├── swimming/                        Deep enough to swim
+│
+├── tension/                         Enemies alert &amp; nearby, not yet fighting
+│
+├── combat/                          Combat — Low intensity (the combat root IS the Low tier)
+│   ├── _high/                       Combat — High intensity
+│   ├── _boss/                       Combat — Boss intensity
+│   ├── blood_moon/                  Combat during a Blood Moon night (no biome split)
+│   ├── forest/                      Pine forest — biome combat (Low)
+│   │   ├── _high/                   Forest — High
+│   │   └── _boss/                   Forest — Boss
+│   ├── burnt_forest/                Burnt forest — biome combat (Low)
+│   │   ├── _high/
+│   │   └── _boss/
+│   ├── desert/                      Desert — biome combat (Low)
+│   │   ├── _high/
+│   │   └── _boss/
+│   ├── snow/                        Snow — biome combat (Low)
+│   │   ├── _high/
+│   │   └── _boss/
+│   └── wasteland/                   Wasteland — biome combat (Low)
+│       ├── _high/
+│       └── _boss/
+│
+├── events/
+│   ├── death/                       Plays once on death
+│   ├── low_health/                  Critically low HP during combat
+│   ├── spawn/                       Plays once on spawn
+│   └── poi_cleared/                 Sting when the last sleeper dies
+│
+└── menu/                            Main menu (loops)</code></pre>
+
+<hr>
+
+<p><strong>Highlights</strong></p>
+
+<ul>
+  <li><strong>Live hot-swapping</strong> — change music mid-game, even mid-track - Add, remove, or replace music <strong>without restarting</strong>. CMM picks up changes in seconds — even the track that's currently playing. No menus, no configs to edit. Just drop files in folders.</li>
+  <li><strong>Music in the world</strong> — radios and speaker blocks play positionally, occluded by walls and doors, with room reverb</li>
+  <li><strong>A radio you carry</strong> — the same broadcast wherever you are, on every supported game version</li>
+  <li><strong>Music packs as mods</strong> — install a soundtrack like any other mod</li>
+  <li><strong>Squad-shared combat music</strong> — your music reacts to your whole team's fight, client-side only</li>
+  <li><strong>Every track plays before any track repeats</strong> — a large soundtrack finally sounds large</li>
+  <li><strong>Playlists</strong> — point a context at a .m3u/.m3u8 file instead of a folder</li>
+  <li><strong>Smart resume</strong> — leave &amp; return, the track picks up where it left off</li>
+  <li><strong>Smooth crossfades</strong> everywhere — up to four tracks overlapping, no hard cuts</li>
+  <li><strong>Loudness-matched</strong> — tracks from different albums and sources play at a consistent volume</li>
+  <li><strong>Native streaming decoder</strong> — a bundled native library handles every format with almost no garbage-collection pressure, so big libraries don't hurt FPS</li>
+  <li><strong>Plays nice with vanilla</strong> Dynamic Music, section by section (if you keep it enabled)</li>
+  <li><strong>Hot-reload config</strong> — tune volume, fades &amp; priorities while playing</li>
+</ul>
+
+<hr>
+
+<p><strong>Music in the world</strong></p>
+
+<p>In-Game radio objects emit music from tracks stored in /Music/radio (or whichever path you define) as real positional, diegetic sound layered on top of your normal soundtrack — walk toward a speaker and it gets louder, pans across your ears, muffles behind walls, and picks up room reverb. A shared "station" keeps broadcasting even while you're out of range, so you rejoin mid-song when you come back.</p>
+
+<ul>
+  <li><strong>Speaker character</strong> — the sound is squeezed into a small driver in a small box, with the boxy resonance a cheap cone actually has. Ham radios are voiced harder still. (Considering a DJ system like Fallout 3/4 — maybe in 1.0.6)</li>
+  <li><strong>Doors matter</strong> — an open door is air and a closed one is solid, damaged doors leak sound, and sliding doors muffle gradually as they travel. Occlusion follows how much of the doorway is actually open, so a garage door and a closet door behave consistently, both leaves of a double door count, and tilted doors like the wood cellar hatch are measured properly. Standing in a doorway that has swung open sounds like standing in it, not behind it. (I'm not sure how this affects doors other players control)</li>
+  <li><strong>Live tuning</strong> — the whole spatial feel (range, falloff, occlusion, reverb) is hot-tunable live from radio.xml while the game runs</li>
+  <li><strong>Volume</strong> — world speakers follow the game's <strong>Ambient</strong> slider rather than Music, with their own <em>WorldEmitterVolume</em> trim (default <strong>0.5</strong>)</li>
+</ul>
+
+<p><strong>A radio you carry</strong><br>
+<strong>Alt+PgUp / Alt+PgDn</strong> dials through Off → station → station → Off. It works on every supported game version, including the alphas that have no speaker blocks at all. Turning it on holds your place in whatever context music was playing, and turning it off drops you back exactly where you left it, however long you listened.</p>
+
+<hr>
+
+<p><strong>Squad-shared combat music (multiplayer)</strong></p>
+
+<ul>
+  <li><strong>Purely client-side - no server mod needed</strong></li>
+  <li>Your combat music reacts to your whole squad, not just the enemies on you personally. When a nearby teammate is under attack you drop into combat music too, even if their zombies are well outside your own detection range</li>
+  <li>The music scales with the size of the fight: soloing a swarm and battling shoulder-to-shoulder with a full squad are different musical moments</li>
+  <li>Works for players joining a server, not just the host — combat is detected even though the enemy AI runs server-side</li>
+  <li>Fully configurable: how close a teammate must be to share their combat (default 30 units), and whether it counts only party members and friends or any nearby player</li>
+  <li>Single-player is completely unaffected</li>
+</ul>
+
+<hr>
+
+<p><strong>The audio engine</strong></p>
+
+<p>Nearly the entire audio pipeline lives outside the game's managed (C#/Unity) environment, in a purpose-built native C library. The music doesn't compete with the game for the main thread and isn't interrupted by garbage-collection pauses — the biggest source of stutters.</p>
+
+<ul>
+  <li>Decoding, mixing and output all run in the mod's own engine (CMM_Decoder.dll) on threads the mod owns, completely outside the frame loop. CMM doesn't use Unity's audio system at all</li>
+  <li><strong>Crossfades don't get clobbered.</strong> The mixer holds up to <strong>four simultaneous voices</strong>, so a new track can start while three older ones finish fading naturally. Ambient → tension → combat in two seconds sounds like one continuous handoff instead of an abrupt cut. If transitions pile up past the limit it drops only the <em>quietest</em> voice, already nearly silent at the tail of its fade — the incoming track is never the one sacrificed</li>
+  <li><strong>Every format decoded natively</strong> — ogg, opus, flac, mp3, wav, m4a/aac, and the audio inside mp4/m4v/mkv/webm containers</li>
+  <li><strong>Per-track loudness normalization (EBU R128)</strong> — measured once per track and cached, with a manual per-track trim on a keybind</li>
+  <li><strong>Music survives loading freezes</strong> — tracks keep playing, and even advance, while the game's main thread is frozen during world load</li>
+  <li><strong>Device changes are handled</strong> — unplugging a headset or switching the default output no longer strands the music</li>
+  <li><strong>Gapless</strong> — the next track is decoded in advance</li>
+  <li>Background work — loudness scanning, pre-loading, folder and config watching — is fully off the game loop, and libraries of 100,000+ files scan without hitching</li>
+  <li>The game's <strong>Overall Volume</strong> slider is applied by hand, since CMM's audio leaves through its own output device and the master slider never reached it</li>
+</ul>
+
+<hr>
+
+<p><strong>Your config files are yours</strong><br>
+settings.xml, radio.xml and contexts.xml are created on first run instead of shipping in the download, so an update never wipes what you set — it only appends what a new version actually added.</p>
+
+<hr>
+
+<p><strong>The contexts (highest priority first)</strong><br>
+<br>
+<strong>Death</strong> (100) - plays once on death, then returns to the previous music. Interrupts everything</p>
+
+<p><strong>POI Cleared</strong> (91) - a one-shot sting when you kill the last sleeper in a POI<br>
+<br>
+<strong>Low Health Panic</strong> (90) - fires when you're badly hurt (default 30% - configurable) and in combat<br>
+<br>
+<strong>Blood Moon Combat</strong> (71) - combat during a Blood Moon night; the highest combat priority, overriding normal combat tiers</p>
+
+<p><strong>Vehicles</strong> (70 / base 69)</p>
+
+<ul>
+  <li><strong>Gyrocopter, Bicycle, Minibike, Motorcycle, 4x4</strong> each have their own music → fall back to the generic <strong>Vehicle</strong> track if their folder is empty</li>
+</ul>
+
+<p><strong>Biome Combat</strong> (62 / 61 / 60) - optional per-biome versions of each combat tier (<strong>Forest, Burnt Forest, Desert, Snow, Wasteland</strong>). When you fight in a biome that has its own combat music, it plays instead of the matching generic tier below; if that folder is empty it falls straight back to the generic tier. The biome is locked in when the fight starts — so crossing a border mid-fight won't swap the track — and re-locks if you leave combat and re-engage somewhere new (the intensity tier still resumes where it left off). Sits just above the generic combat tiers (and rides over vehicle/exploration music during a fight). Blood Moon combat stays generic.<br>
+<br>
+<strong>Combat</strong> - intensity is chosen by scoring the enemies targeting you. Three tiers, each falling back to the one below so missing folders degrade gracefully:</p>
+
+<ul>
+  <li><strong>Combat Boss</strong> (52) → <strong>Combat High</strong></li>
+  <li><strong>Combat High</strong> (51) → <strong>Combat Low</strong></li>
+  <li><strong>Combat Low</strong> (50) → vanilla combat music if the game is "panicked," otherwise back to the stack</li>
+</ul>
+
+<p>The <strong>combat/</strong> root folder is itself the Low tier; the <code>_high</code> and <code>_boss</code> subfolders hold the escalations, and each biome mirrors this under <strong>combat/&lt;biome&gt;/</strong>.<br>
+<br>
+<strong>Spawn</strong> (45) - plays once when you spawn in<br>
+<br>
+<strong>Radio</strong> - the personal radio and the world speakers both broadcast from <strong>Music/radio/</strong>. While the personal radio is on it owns the music layer; world speakers play alongside your normal soundtrack.<br>
+<br>
+<strong>Tension</strong> (30) - plays when enemies are stalking you and close by; short stand-offs are ignored thanks to warmup (2 seconds), so a quick rush straight into a fight goes directly to combat<br>
+<br>
+<strong>Traders</strong> (26 / base 25)</p>
+
+<ul>
+  <li><strong>Joel, Jen, Rekt, Bob, Hugh</strong> each get their own theme → fall back to the generic <strong>Trader</strong> track → which falls back to vanilla trader music (when the game's Dynamic Music is on)</li>
+</ul>
+
+<p><strong>Swimming</strong> (23) - plays while you're deep enough to swim; short dips are ignored thanks to warmup (5 seconds)<br>
+<br>
+<strong>Points of Interest</strong> - two layers, each tiered <strong>T0–T5</strong> by POI difficulty:</p>
+
+<ul>
+  <li><strong>Infested POIs</strong> (22 → base 20) — plays while live sleepers remain. Each tier (T5…T1) falls back to <strong>POI_Infested</strong>, <strong>POI_Infested</strong> falls back to the stack (excludes T0 which always falls back to the stack)</li>
+  <li><strong>Non-infested POIs</strong> (18 → base 16) — the ordinary tier for whichever POI you're in. <strong>As of 1.0.5 this stays on the stack even while the place is infested</strong>, sitting underneath the infested tier — so if an infested folder is empty, the music can land on the matching ordinary tier instead of dropping out of the POI layer entirely. Each tier falls back to the generic <strong>POI</strong> track (excludes T0)</li>
+</ul>
+
+<p><strong>Home base</strong> (15) - near your bedroll or land claim, and it keeps its music even when your base is inside a POI</p>
+
+<ul>
+  <li><strong>Home Night</strong> plays night-exclusive tracks → falls back to <strong>Home</strong> (your default base music).</li>
+</ul>
+
+<p><strong>Ambient / Biome</strong> (12 → base 10) — your everyday exploration music, the lowest custom layer:</p>
+
+<ul>
+  <li>Each biome (<strong>Forest, Burnt Forest, Desert, Snow, Wasteland</strong>) has a day track and an optional <code>_Night</code> variant.</li>
+  <li>A biome's night track → falls back to the generic <strong>Ambient Night</strong> → which falls back to <strong>Stack</strong> (biome's day track if it exists).</li>
+  <li>A biome's day track → falls back to <strong>Ambient</strong>.</li>
+  <li><strong>Ambient</strong> → falls back to vanilla music (when Dynamic Music is on).</li>
+</ul>
+
+<p><strong>Menu</strong> (0) - loops in the main menu; falls back to vanilla menu music.<br>
+<strong>Sentinels</strong> (built-in, don't remove) — <strong>Silence</strong> and <strong>Vanilla</strong> are the two ultimate fallbacks: hand back to the game's own music, or play nothing.</p>
+
+<hr>
+
+<p><strong>How the music is chosen</strong><br>
+CMM keeps a <strong>stack of everything currently true about your situation</strong> (in combat, in a desert, at night, near a trader…) and plays the <strong>highest-priority</strong> one that has music. Equal priorities never interrupt each other, so whatever is already playing keeps going until something genuinely more important happens.<br>
+<br>
+If a context's folder is <strong>empty</strong>, it doesn't go silent — it follows that context's <strong>fallback</strong> to the next-best choice. A few shared rules:</p>
+
+<ul>
+  <li><strong>Warmup</strong> - some contexts must stay active for a few seconds before they take over, so brief moments (a quick dip in water, ducking into a doorway) don't interrupt your music</li>
+  <li><strong>WarmGroup</strong> - a shared tag for contexts that hand off to each other (like a day/night pair); members share one warmup timer so swapping between them stays seamless instead of briefly dropping to lower-priority music while the new one warms up. Each context still keeps its own Warmup — set grouped members equal for the smoothest result. Used by Home and Home_Night, and by the infested / non-infested POI tiers</li>
+  <li><strong>Cooldown</strong> - combat/event music waits a few seconds before it can re-trigger, preventing rapid flicker</li>
+  <li><strong>Resume</strong> - most contexts pick up where they left off when you re-enter them; short events restart fresh</li>
+  <li><strong>Stale</strong> - contexts are only eligible to resume from their saved state while inactive until they time out (go stale). It can be disabled per context so a context never expires while inactive</li>
+  <li><strong>Once</strong> - event stingers play to completion, then hand back to whatever was playing before</li>
+  <li><strong>Fade length follows the context</strong> - anything that comes and goes quickly (Tension, every Combat tier, POI_Infested and its tiers, the online-player contexts) fades in fast (1.2 s) so you actually hear it before it's gone. Music tied to where you are or what time it is keeps its slow fade</li>
+</ul>
+
+<p><strong>Additional Attributes</strong> that can be customized in contexts.xml:</p>
+
+<ul>
+  <li><strong>Name</strong> - context's ID</li>
+  <li><strong>Source</strong> - context's sub-folder, or a .m3u/.m3u8 playlist file. A folder containing playlists also picks up their tracks alongside the loose files, with no duplicates, and edits to a playlist take effect within seconds — including on USB, network and other non-standard drives</li>
+  <li><strong>Subfolders</strong> - if enabled, will play all music in the context folder's subfolder</li>
+  <li><strong>Fallback</strong> - what the context falls back to if it is missing files - another context, the Stack, Vanilla, or Silence</li>
+  <li><strong>FadeInTime</strong> - how long the context takes to fade in when activated</li>
+  <li><strong>Priority</strong> - priority while on the stack</li>
+  <li><strong>Loop</strong> - one track is chosen to play and repeats (not used by any context, but the option is there) until it goes stale</li>
+  <li><strong>Bypass</strong> - circumvents the Cooldown of the track that is currently playing</li>
+</ul>
+
+<p><strong>Additional Settings</strong> in settings.xml worth mentioning:</p>
+
+<ul>
+  <li><strong>VolumeModifier</strong> - how loud CMM tracks play relative to the game's music slider (0.0–1.0, default 0.5)</li>
+  <li><strong>MusicPath</strong> - music's root folder. Relative or absolute path (can store files in folders outside of the mod directory/drive)</li>
+  <li><strong>AddonMusicScanEnabled</strong> - whether music packs installed as separate mods are read</li>
+  <li><strong>TrackNoRepeatMemory</strong> - how much of a folder must play before a track can repeat (-1 = the whole folder)</li>
+  <li><strong>FavouriteWeight</strong> - how much more often a favourited track plays</li>
+  <li><strong>DisabledVanillaSections</strong> - turn off individual vanilla Dynamic Music sections (Exploration, Suspense, Combat, Bloodmoon, Trader)</li>
+  <li><strong>EnemyDetectRange</strong> - max distance (game units) an enemy is counted toward combat/tension state</li>
+  <li><strong>HomeDetectRange</strong> - distance (game units) from your bedroll or land claim that counts as "home"</li>
+  <li><strong>PlayerHealthDangerThresholdPercent</strong> - health fraction (0.0–1.0) below which combat escalates to Low_Health_Panic</li>
+</ul>
+
+<p><strong>Additional Settings</strong> in radio.xml (the radio and world-speaker half, split out so it doesn't bury the rest):</p>
+
+<ul>
+  <li><strong>WorldEmitterEnabled / WorldEmitterVolume / WorldEmitterRange</strong> - world speakers on/off, their own volume trim (they follow the <strong>Ambient</strong> slider, not Music), and how far they carry</li>
+  <li><strong>WorldEmitterColorVoice / ColorDrive / ColorStatic</strong> - how much like a small cheap speaker they sound, with a separate set for ham radios</li>
+  <li>The rest of the acoustic model (occlusion, doors, reverb) and every knob of the station-change sound</li>
+</ul>
+
+<hr>
+
+<p><strong>FAQ &amp; Troubleshooting</strong><br>
+<br>
+<strong>Q: Do I have to fill every folder?</strong><br>
+No. Fill only the ones you care about — empty folders fall back automatically (and ultimately to the game's vanilla music). You can start with just <em>ambient</em> and <em>combat</em>.</p>
+
+<p><strong>Q: How do I set up radio stations?</strong><br>
+Make a subfolder inside <em>Music/radio/</em> for each station; the folder name is the station name. The personal radio (Alt+PgUp / Alt+PgDn) and any speaker block in the world both use them.</p>
+
+<p><strong>Q: Do I need speakers in the world to use the radio?</strong><br>
+No. The personal radio works on every supported version, including the alphas that have no speaker blocks at all.</p>
+
+<p><strong>Q: Does the addon work on MacOS or Linux?</strong><br>
+Not yet. The native audio engine currently ships as a Windows library, so Windows is the only officially supported platform. Linux support is planned for 1.0.6.</p>
+
+<p><strong>Q: What audio formats are supported?</strong><br>
+MP3, OGG (Vorbis), Opus, FLAC, WAV/AIFF, and AAC — including <em>.m4a</em> / <em>.mp4</em>, and even the audio track of an MP4/MKV/WebM video.</p>
+
+<p><br>
+<strong>Q: Can I really change music without restarting?</strong><br>
+Yes. Add, remove, or replace files while the game runs — CMM detects the change within a few seconds, even for the track currently playing.</p>
+
+<p><br>
+<strong>Q: I added a file but nothing happened.</strong></p>
+
+<ul>
+  <li>Make sure it's in the correct folder and a supported format.</li>
+  <li>That situation may not be active yet (e.g. a <em>blood_moon</em> track only plays on horde night).</li>
+  <li>A higher-priority situation may be overriding it (combat beats ambient, etc.).</li>
+  <li>Corrupt files are auto-rejected — re-export the track if it won't play.</li>
+  <li>If it's a music pack installed as its own mod, <em>cmm roots</em> will tell you whether CMM can see it.</li>
+  <li>The coverage panel (Alt+Num8) shows exactly which contexts have music and which are falling back.</li>
+</ul>
+
+<p><strong>Q: Multiple tracks in one folder - how are they picked?</strong><br>
+Every track plays before any track repeats — each context deals from a shuffled bag and reshuffles once it runs out. Favourites get extra turns; banned tracks are skipped. <strong>Next/Prev</strong> walk your play history in that context, like a music player, rather than rolling a fresh random track. You can switch to Sequential or pure Random in <em>Config/settings.xml (only shuffled-bag has been thoroughly tested)</em><br>
+<br>
+<strong>Q: It's too loud / too quiet.</strong><br>
+CMM follows your in-game Music volume slider, plus a <strong><em>VolumeModifier</em></strong> in <em>Config/settings.xml</em> (default 0.5). World speakers follow the <strong>Ambient</strong> slider instead, with their own <em>WorldEmitterVolume</em> trim (default 0.5). Raise or lower that — when you save the file, the updated settings load immediately if the game is running. Individual tracks are loudness-matched automatically, and <strong>Alt+Up/Down</strong> saves a per-track trim on top.<br>
+<br>
+<strong>Q: Does this replace the vanilla music entirely?</strong><br>
+Only where you provide tracks. Empty folders hand off to vanilla Dynamic Music, so the two coexist — and you can now disable individual vanilla sections rather than all of them.<br>
+<br>
+<strong>Q: I left an area and came back - why did the music restart / not restart?</strong><br>
+Tracks resume where you left off if you return quickly; after a context goes "stale" (configurable per situation), CMM picks a fresh track instead.<br>
+<br>
+<strong>Q: Can I store my music outside the mod folder?</strong><br>
+Yes — set <em>MusicPath</em> in <em>Config/settings.xml</em> to any folder (even on another drive). You can also install music as a separate mod entirely.<br>
+<br>
+<strong>Q: Will updating CMM wipe my settings?</strong><br>
+No. As of 1.0.5 the config files are created on first run rather than shipped in the download, so an update only appends settings that are genuinely new and leaves your choices alone.<br>
+<br>
+<strong>Q: Does it work with the game's Dynamic Music setting?</strong><br>
+Yes. Some folders fall back to vanilla only when Dynamic Music is enabled, so your choice in the options menu is respected.<br>
+<br>
+<strong>Q: Was AI used to make this mod?</strong><br>
+AI was used to help write this description page, and it amounts to ~80% of the mod's code.</p>
+
+<hr>
+
+<p><span style="color: rgb(234, 179, 8);"><strong>V1.0.6 All hands on "Deck" (planned - October likely)</strong></span></p>
+
+<ul>
+  <li><span style="color: rgb(245, 158, 11);">Linux support</span></li>
+  <li><span style="color: rgb(245, 158, 11);">UI Support for controlling the radio (and perhaps other addon settings)</span></li>
+</ul>
+
+<hr>
+
+<p><strong>Third-Party Libraries</strong></p>
+
+<p>This mod wouldn't be possible without the open-source libraries it's built on. Huge thanks to their authors:</p>
+
+<ul>
+  <li><strong>MoonSharp</strong> (BSD 3-Clause + MIT) — Marco Mastropaolo — the embedded Lua interpreter that runs the context.lua decision script. <a href="http://moonsharp.org">moonsharp.org</a>  —  <a href="https://github.com/moonsharp-devs/moonsharp">github.com/moonsharp-devs/moonsharp</a></li>
+</ul>
+
+<p>Audio is decoded and played by a small native library (CMM_Decoder.dll) bundled with the mod, which compiles in these components:</p>
+
+<ul>
+  <li><strong>libopus / libopusfile</strong> (BSD) — <a href="http://Xiph.Org">Xiph.Org</a> Foundation — Opus decoding. <a href="https://github.com/xiph/opusfile">github.com/xiph/opusfile</a></li>
+  <li><strong>libvorbis / libvorbisfile</strong> (BSD) — <a href="http://Xiph.Org">Xiph.Org</a> Foundation — OGG Vorbis decoding. <a href="https://github.com/xiph/vorbis">github.com/xiph/vorbis</a></li>
+  <li><strong>libogg</strong> (BSD) — <a href="http://Xiph.Org">Xiph.Org</a> Foundation — Ogg container framing used by Opus and Vorbis. <a href="https://github.com/xiph/ogg">github.com/xiph/ogg</a></li>
+  <li><strong>dr_flac / dr_mp3 / dr_wav</strong> (public domain) — David Reid (mackron) — FLAC, MP3, and WAV/AIFF decoding. <a href="https://github.com/mackron/dr_libs">github.com/mackron/dr_libs</a></li>
+  <li><strong>fdk-aac</strong> (Fraunhofer FDK AAC license) — Fraunhofer IIS — AAC-LC / HE-AAC decoding. <a href="https://github.com/mstorsjo/fdk-aac">github.com/mstorsjo/fdk-aac</a></li>
+  <li><strong>minimp4</strong> (CC0) — Lieff — MP4 / M4A container demuxing. <a href="https://github.com/lieff/minimp4">github.com/lieff/minimp4</a></li>
+  <li><strong>miniaudio</strong> (public domain) — David Reid (mackron) — cross-platform audio playback. <a href="https://github.com/mackron/miniaudio">github.com/mackron/miniaudio</a></li>
+</ul>
+
+<p>Full license texts are included in <em>THIRD_PARTY_NOTICES.txt</em> inside the mod download.</p>
