@@ -144,6 +144,10 @@ enum { CMM_KIND_OPUS = 0, CMM_KIND_FLAC = 1, CMM_KIND_VORBIS = 2,
        CMM_KIND_MP3 = 3, CMM_KIND_WAV = 4, CMM_KIND_AAC = 5,
        CMM_KIND_CONTAINER = 6 };
 
+/* ID3-prefixed FLAC support — defined below cmm_flac_open_file, used by the memory open above it. */
+static long long cmm_id3_prefix_len(const unsigned char* head, long long avail);
+static long long cmm_flac_start_offset(const unsigned char* head, long long headLen, long long avail);
+
 /* dr_mp3 / dr_wav init into a CALLER-allocated struct (unlike drflac_open, which
  * returns a heap handle), so we malloc one and store the pointer here. */
 struct cmm_decoder {
@@ -156,6 +160,9 @@ struct cmm_decoder {
     unsigned char* buf;    /* owned copy of source bytes (memory opens; NULL for file opens) */
     FILE*          fp;     /* owned file handle (POSIX file/streaming opens; NULL otherwise) */
     void*          fh;     /* owned Win32 HANDLE for streamed FLAC (Windows big-file path; NULL otherwise) */
+    long long      baseOff;/* bytes to skip at the head of the streamed file (an ID3 tag before
+                            * the fLaC marker). Seek/tell translate by this so dr_flac sees a
+                            * stream that starts at the marker. 0 for everything else. */
     long long      fsize;  /* cached file size for the streamed past-EOF seek check (fh path);
                             * also the buffer length for the Vorbis in-memory callback stream */
     long long      mpos;   /* read cursor for the Vorbis in-memory callback stream (buf/fsize) */
@@ -315,7 +322,8 @@ CMM_API cmm_decoder* cmm_flac_open_memory(const unsigned char* data, long long l
     if (!copy) { if (err) *err = -1; return NULL; }
     memcpy(copy, data, (size_t)len);
 
-    drflac* f = drflac_open_memory(copy, (size_t)len, NULL);
+    long long moff = cmm_flac_start_offset(copy, len, len);   /* skip an ID3 tag, if present */
+    drflac* f = drflac_open_memory(copy + moff, (size_t)(len - moff), NULL);
     if (!f) { free(copy); if (err) *err = -1; return NULL; }
 
     cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
@@ -669,6 +677,10 @@ static drflac_bool32 cmm_drf_seek_h(void* ud, int offset, drflac_seek_origin ori
     DWORD method = (origin == DRFLAC_SEEK_CUR) ? FILE_CURRENT
                  : (origin == DRFLAC_SEEK_END) ? FILE_END
                  : FILE_BEGIN;
+    /* dr_flac addresses a stream that begins at the fLaC marker; the file may begin with an
+     * ID3 tag before it. Only an absolute seek needs translating -- CUR is already relative and
+     * END is the same end either way. */
+    if (method == FILE_BEGIN) dist.QuadPart += d->baseOff;
     LARGE_INTEGER newpos;
     if (!SetFilePointerEx((HANDLE)d->fh, dist, &newpos, method)) return DRFLAC_FALSE;
     /* dr_flac REQUIRES a seek past the end of the stream to be reported as failure
@@ -684,7 +696,7 @@ static drflac_bool32 cmm_drf_tell_h(void* ud, drflac_int64* cursor)
     LARGE_INTEGER pos;
     if (!SetFilePointerEx((HANDLE)((cmm_decoder*)ud)->fh, zero, &pos, FILE_CURRENT))
         return DRFLAC_FALSE;
-    *cursor = (drflac_int64)pos.QuadPart;
+    *cursor = (drflac_int64)(pos.QuadPart - ((cmm_decoder*)ud)->baseOff);   /* logical, not file, position */
     return DRFLAC_TRUE;
 }
 #endif /* _WIN32 */
@@ -745,6 +757,51 @@ static unsigned char* cmm_read_whole_file(const wchar_t* path, long long maxByte
 #endif
 }
 
+/* ── ID3-PREFIXED FLAC ────────────────────────────────────────────────────
+ * A FLAC stream is supposed to begin with "fLaC". Plenty of taggers in the wild write an
+ * ID3v2 tag in front of one anyway, and the result plays fine in ffmpeg, foobar, VLC --
+ * but dr_flac looks for the marker at offset 0, finds "ID3", and refuses to open. The file
+ * is not corrupt; the decoder is just starting in the wrong place.
+ *
+ * That silently cost 146 of 9,839 FLACs (1.5%) in one real library -- entire albums, since
+ * whatever wrote the tags did a whole rip at a time. The only sign was one
+ * `Loudness OPEN FAILED ... err=-2` line per attempt, which reads like a broken file.
+ *
+ * ID3v2 header: "ID3", 2 version bytes, 1 flags byte, then 4 SYNCSAFE size bytes (7 bits
+ * each, high bit always clear so the pattern can never look like an MPEG sync word). The
+ * size counts the tag body only, so audio starts at 10 + size. Flag bit 4 adds a 10-byte
+ * footer. Returns the offset to start decoding at, or 0 when there is no tag.
+ *
+ * Every caller must still verify "fLaC" is actually there: a plausible-looking header on a
+ * genuinely corrupt file must not send us seeking into the middle of nowhere. */
+static long long cmm_id3_prefix_len(const unsigned char* head, long long avail)
+{
+    if (!head || avail < 10) return 0;
+    if (head[0] != 'I' || head[1] != 'D' || head[2] != '3') return 0;
+    if (head[3] == 0xFF || head[4] == 0xFF) return 0;             /* invalid version */
+    /* Syncsafe: any high bit set means this is not a real ID3v2 size. */
+    if ((head[6] | head[7] | head[8] | head[9]) & 0x80) return 0;
+    long long size = ((long long)head[6] << 21) | ((long long)head[7] << 14)
+                   | ((long long)head[8] <<  7) | ((long long)head[9]);
+    long long off = 10 + size;
+    if (head[5] & 0x10) off += 10;                                /* footer present */
+    if (off < 0 || (avail > 0 && off >= avail)) return 0;         /* nonsense: leave it alone */
+    return off;
+}
+
+/* The offset a FLAC decode should start at: past any ID3 tag, and only if "fLaC" is really
+ * there. `avail` is the whole file length when known, or 0 for a stream we cannot bound. */
+static long long cmm_flac_start_offset(const unsigned char* head, long long headLen, long long avail)
+{
+    long long off = cmm_id3_prefix_len(head, avail ? avail : headLen);
+    if (off <= 0) return 0;
+    if (headLen >= off + 4) {   /* we can confirm from the buffer we already hold */
+        const unsigned char* m = head + off;
+        if (!(m[0] == 'f' && m[1] == 'L' && m[2] == 'a' && m[3] == 'C')) return 0;
+    }
+    return off;
+}
+
 CMM_API cmm_decoder* cmm_flac_open_file(const wchar_t* path, int* channels,
                                         int* sampleRate, long long* totalFrames, int* err)
 {
@@ -762,7 +819,10 @@ CMM_API cmm_decoder* cmm_flac_open_file(const wchar_t* path, int* channels,
     unsigned char* buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
     if (buf)
     {
-        drflac* f = drflac_open_memory(buf, (size_t)len, NULL);
+        /* Start past an ID3 tag if one is in front of the marker. drflac keeps referencing the
+         * buffer, so hand it buf+off while d->buf keeps the BASE pointer that must be freed. */
+        long long off = cmm_flac_start_offset(buf, len, len);
+        drflac* f = drflac_open_memory(buf + off, (size_t)(len - off), NULL);
         if (!f) { free(buf); if (err) *err = -2; return NULL; }   /* corrupt: don't retry via stream */
 
         cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
@@ -796,6 +856,18 @@ CMM_API cmm_decoder* cmm_flac_open_file(const wchar_t* path, int* channels,
     cmm_decoder* ds = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
     if (!ds) { CloseHandle(h); if (err) *err = -3; return NULL; }
     ds->fh = (void*)h; ds->fsize = sz.QuadPart;   /* set BEFORE drflac_open — it reads via the callbacks */
+
+    /* Sniff for an ID3 tag in front of the fLaC marker (see cmm_flac_start_offset). The 14-byte
+     * read covers the 10-byte ID3 header; the marker itself sits past the tag body, too far to
+     * confirm from here, so pass headLen = 10 and let the offset stand on the header alone -- a
+     * wrong guess simply fails the open below exactly as it does today. */
+    {
+        unsigned char head[14]; DWORD got = 0;
+        if (ReadFile(h, head, sizeof(head), &got, NULL) && got >= 10)
+            ds->baseOff = cmm_flac_start_offset(head, 10, ds->fsize);
+        LARGE_INTEGER start; start.QuadPart = ds->baseOff;
+        SetFilePointerEx(h, start, NULL, FILE_BEGIN);
+    }
 
     drflac* fs = drflac_open(cmm_drf_read_h, cmm_drf_seek_h, cmm_drf_tell_h, ds, NULL);
     if (!fs) { CloseHandle(h); free(ds); if (err) *err = -2; return NULL; }
