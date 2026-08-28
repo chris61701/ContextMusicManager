@@ -366,6 +366,38 @@ namespace CMM
             return false;
         }
 
+        // Un-pause the resume clocks of the contexts we are STILL IN, after an interval in which
+        // the music layer was owned by something else (the personal radio), by pushing each one
+        // forward by how long that lasted.
+        //
+        // TimeUntilContextStale asks "how long has this context been GONE". For a context still on
+        // the stack the answer through a broadcast is "it hasn't" -- you are standing in the same
+        // POI doing the same thing, and the radio only borrowed the speaker. Without this, capturing
+        // the playhead at the takeover only helped for a listen SHORTER than the stale window (120 s
+        // for Ambient/Home, 30 s for Tension), so a normal listen still came back on a fresh track
+        // and the capture would have looked like it never worked.
+        //
+        // SCOPED TO THE STACK, and both halves of that matter:
+        //   • not just the context playing at dial-off -- turn the radio on in a POI, have a zombie
+        //     turn up mid-broadcast, dial off while combat is still live, and the POI is still one
+        //     you are standing in even though combat outranks it. Its clock should not have run.
+        //   • not every cached context either -- one you genuinely walked out of ten minutes ago is
+        //     off the stack, and it really did go stale. The radio does not undo having left.
+        internal static void HoldResumeClocks(float heldSeconds)
+        {
+            if (heldSeconds <= 0f || _contextStack == null) return;
+            int n = 0;
+            foreach (ActiveContext ac in _contextStack)
+            {
+                if (ac?.ContextName == null) continue;
+                if (!cacheMap.TryGetValue(ac.ContextName, out ContextCache c)) continue;
+                if (!ResumePolicy.ShouldHold(true, c.lastLeftTime, c.resumePosition)) continue;
+                c.lastLeftTime += heldSeconds;
+                n++;
+            }
+            if (n > 0) CMMConfig.D($"[CMM] resume clocks held {heldSeconds:F1}s across the broadcast ({n} context(s) still on the stack).");
+        }
+
         // The context-start entry point. SYNCHRONOUS and MAIN-THREAD: it does every
         // Unity-touching step inline (file pick, loudness gain, resume calc, cache bookkeeping,
         // volume) and then hands the reader-open + CmmMixer.Play to the background start worker
@@ -486,21 +518,16 @@ namespace CMM
             // multi-track context and inherit the old track's position (random track starting
             // mid-way — the reported bug). Single-track contexts only ever had one file to land
             // on, which is why they looked fine.
-            float startSeconds = 0f;
-            string resumeFile = null;
-            if (!isSameContextSwitchingToNextTrack && forcedFile == null
-                && ctx.CanBeResumed && cache.resumePosition > 0f
-                && !string.IsNullOrEmpty(cache.lastPlayedFile)
-                && !_invalidFiles.Contains(cache.lastPlayedFile))
-            {
-                float elapsed = Time.realtimeSinceStartup - cache.lastLeftTime;
-                if (elapsed < ctx.TimeUntilContextStale && File.Exists(cache.lastPlayedFile))
-                {
-                    resumeFile   = cache.lastPlayedFile;   // replay the exact track the position belongs to
-                    startSeconds = cache.resumePosition;
-                }
-                else cache.resumePosition = 0f;            // stale (or file gone) → fresh pick from 0
-            }
+            // The rule itself lives in ResumePolicy (no UnityEngine, so tools/CmmResumeTest can
+            // link and drive it); this site supplies the clock and the file check.
+            ResumePolicy.Decision rd = ResumePolicy.Decide(
+                ctx.CanBeResumed, cache.resumePosition, cache.lastPlayedFile, cache.lastLeftTime,
+                Time.realtimeSinceStartup, ctx.TimeUntilContextStale,
+                isSameContextSwitchingToNextTrack, forcedFile != null,
+                f => !_invalidFiles.Contains(f) && File.Exists(f));
+            float startSeconds = rd.StartSeconds;
+            string resumeFile  = rd.ResumeFile;            // replay the exact track the position belongs to
+            if (rd.ClearPosition) cache.resumePosition = 0f;   // stale (or file gone) → fresh pick from 0
 
             // ── Select the file ──
             string file = forcedFile ?? resumeFile;

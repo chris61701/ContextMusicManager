@@ -136,8 +136,9 @@ internal static class Program
         long allocResolve = 0, allocSelect = 0, allocDecode = 0;
         int g0 = GC.CollectionCount(0), g1 = GC.CollectionCount(1), g2 = GC.CollectionCount(2);
         long heapBaseline = GC.GetTotalMemory(true);
+        NativeOpus.TryGetNativeMemory(out long natBaseline, out _, out _, out _, out _);
         long rssBaseline = WorkingSet(proc);
-        var heapCheckpoints = new List<(double pct, long heap, long rss, double simHour)>();
+        var heapCheckpoints = new List<(double pct, long heap, long rss, long nat, double simHour)>();
         int transitions = 0;
         long allocStart = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;
         var wall = Stopwatch.StartNew();
@@ -248,13 +249,24 @@ internal static class Program
                     mixUnderruns = under;   // cumulative (artifact in headless — see report)
                 }
                 proc.Refresh();
-                heapCheckpoints.Add(((t + 1) * 100.0 / totalTicks, GC.GetTotalMemory(true), WorkingSet(proc), SimClock.Now / 3600.0));
+                NativeOpus.TryGetNativeMemory(out long natLive, out _, out _, out _, out _);
+                heapCheckpoints.Add(((t + 1) * 100.0 / totalTicks, GC.GetTotalMemory(true), WorkingSet(proc), natLive, SimClock.Now / 3600.0));
             }
         }
 
         // Final track's play duration.
         AccountPlay(playStats, ref curFile, ref curFileStart, null, SimClock.Now);
+        // Native-heap QUIESCENT reading. The per-checkpoint `live` figure is dominated by
+        // in-flight decoder handles -- one FLAC handle peaks near 9.6 MB -- so whether the sample
+        // lands with 0, 1 or 2 voices open swings it by more than any plausible leak, and its
+        // back-half slope wanders the same way RSS does (+0.23 / +2.29 / -0.11 / -1.94 MB/sim-h
+        // over four seeds of identical code). With every voice stopped and every handle closed
+        // there is nothing legitimate left to hold, so THIS is the number that convicts: whatever
+        // is still allocated here was leaked.
+        NativeOpus.TryGetNativeMemory(out long natPre, out _, out long natAllocsPre, out long natFreesPre, out _);
         runner.Stop();
+        System.Threading.Thread.Sleep(250);   // let the producer thread finish releasing
+        NativeOpus.TryGetNativeMemory(out long natFinal, out long natPeak, out long natAllocs, out long natFrees, out long natChurn);
         wall.Stop();
 
         long allocTotal = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize - allocStart;
@@ -263,7 +275,7 @@ internal static class Program
                resolveMs, selectMs, runner.DecodeMs, runner.DecodeByExt,
                allocResolve, allocSelect, allocDecode, allocTotal,
                GC.CollectionCount(0) - g0, GC.CollectionCount(1) - g1, GC.CollectionCount(2) - g2,
-               heapBaseline, rssBaseline, heapCheckpoints);
+               heapBaseline, rssBaseline, natBaseline, natFinal, natPeak, natAllocs, natFrees, natChurn, heapCheckpoints);
 
         PrintLoadHistogram(runner.DecodeMs, runner.DecodeErrByExt);
         PrintPlayAccounting(playStats, hours);
@@ -505,8 +517,9 @@ internal static class Program
         int transitions, int decodes, int decodeErrors, Dictionary<string, int> byTop,
         double[] resolveMs, double[] selectMs, IReadOnlyList<double> decodeMs, IReadOnlyDictionary<string, List<double>> decodeByExt,
         long allocResolve, long allocSelect, long allocDecode, long allocTotal,
-        int g0, int g1, int g2, long heapBaseline, long rssBaseline,
-        List<(double pct, long heap, long rss, double simHour)> chk)
+        int g0, int g1, int g2, long heapBaseline, long rssBaseline, long natBaseline,
+        long natFinal, long natPeak, long natAllocs, long natFrees, long natChurn,
+        List<(double pct, long heap, long rss, long nat, double simHour)> chk)
     {
         double simMinutes = hours * 60.0;
         Console.WriteLine("══════════════════════════════════════════════════════════════════════");
@@ -534,26 +547,52 @@ internal static class Program
         Console.WriteLine($"   alloc rate      : {Mb(allocTotal) / simMinutes:F2} MB / sim-minute   ({Mb(allocTotal):F0} MB total managed alloc)");
         Console.WriteLine($"   GC collections  : gen0 {g0}   gen1 {g1}   gen2 {g2}   ({g0 / simMinutes:F1} gen0/sim-min)");
 
-        Console.WriteLine("\n── Memory drift (managed heap = GC leak · working set = NATIVE leak) ──");
-        Console.WriteLine($"   baseline (post-warmup): heap {Mb(heapBaseline):F2} MB   ·   RSS {Mb(rssBaseline):F1} MB");
+        Console.WriteLine("\n── Memory drift (managed heap · native heap · working set) ───────────");
+        Console.WriteLine($"   baseline (post-warmup): heap {Mb(heapBaseline):F2} MB   ·   native {Mb(natBaseline):F2} MB   ·   RSS {Mb(rssBaseline):F1} MB");
         // 16 points are sampled; print a quarter of them so the table stays readable.
         int every = Math.Max(1, chk.Count / 4);
         for (int i = 0; i < chk.Count; i++)
         {
             if (i % every != 0 && i != chk.Count - 1) continue;
-            var (pct, h, rss, simHour) = chk[i];
-            Console.WriteLine($"   {pct,5:F0}%  (sim h{simHour,5:F1}) : heap {Mb(h),7:F2} MB (Δ{Mb(h - heapBaseline),6:F2})   RSS {Mb(rss),7:F1} MB (Δ{Mb(rss - rssBaseline),6:F1})");
+            var (pct, h, rss, nat, simHour) = chk[i];
+            Console.WriteLine($"   {pct,5:F0}%  (sim h{simHour,5:F1}) : heap {Mb(h),7:F2} (Δ{Mb(h - heapBaseline),6:F2})   native {Mb(nat),7:F2} (Δ{Mb(nat - natBaseline),6:F2})   RSS {Mb(rss),7:F1} (Δ{Mb(rss - rssBaseline),6:F1})");
         }
         if (chk.Count >= 4)
         {
             var simHours = chk.Select(c => c.simHour).ToList();
             var heapD = chk.Select(c => Mb(c.heap - heapBaseline)).ToList();
             var rssD = chk.Select(c => Mb(c.rss - rssBaseline)).ToList();
+            var natD = chk.Select(c => Mb(c.nat - natBaseline)).ToList();
             double heapDrift = heapD[heapD.Count - 1], rssDrift = rssD[rssD.Count - 1];
             double heapSlope = BackHalfSlope(simHours, heapD), rssSlope = BackHalfSlope(simHours, rssD);
             Console.WriteLine($"   heap: total Δ{Sign(heapDrift)} MB, back-half slope {Sign(heapSlope)} MB/sim-h  → {LeakVerdict(heapDrift, heapSlope)}");
+            // The NATIVE line is the one that can actually convict: it counts real malloc/free
+            // inside CMM_Decoder.dll (ABI 52) rather than inferring from the working set, which
+            // on this workload swings by tens of MB for identical code.
+            double natDrift = natD[natD.Count - 1];
+            double natSlope = BackHalfSlope(simHours, natD);
+            bool natInstrumented = natBaseline > 0 || natD.Exists(v => v != 0);
+            Console.WriteLine(natInstrumented
+                ? $"   native: total Δ{Sign(natDrift)} MB, back-half slope {Sign(natSlope)} MB/sim-h  → {LeakVerdict(natDrift, natSlope)}"
+                : "   native: not instrumented (CMM_Decoder.dll predates ABI 52 — rebuild it to measure the native heap)");
             Console.WriteLine($"   RSS : total Δ{Sign(rssDrift)} MB, back-half slope {Sign(rssSlope)} MB/sim-h  → {LeakVerdict(rssDrift, rssSlope)}");
             Console.WriteLine($"   ({chk.Count} samples; the slope is a least-squares fit over the back half — one difference cannot separate a rise from RSS jitter)");
+
+            if (natInstrumented)
+            {
+                Console.WriteLine($"   native QUIESCENT (all voices stopped, all handles closed): {Mb(natFinal):F2} MB held, "
+                                + $"{natAllocs - natFrees:N0} block(s) outstanding");
+                // A single run CANNOT tell a leak from a fixture, so do not claim it does. A leak
+                // grows with the work done; one-time state does not. Measured here: 14.10 MB in 12
+                // blocks after teardown, IDENTICAL at 3 h and 48 h (16x the work, 670k+ allocations,
+                // 9 GB churned) and identical across four seeds -- that is the mixer/output holding
+                // its persistent buffers until a full close, not a leak. Report the residue and the
+                // discriminator; let two runs settle it.
+                double held = Mb(natFinal - natBaseline);
+                Console.WriteLine($"      → {Sign(held)} MB vs baseline; peak {Mb(natPeak):F1} MB, "
+                                + $"{natChurn / 1048576.0:N0} MB churned through {natAllocs:N0} allocations");
+                Console.WriteLine("      → a LEAK grows with session length: re-run at a different --hours and compare");
+                Console.WriteLine("        this line. Identical residue = one-time native state, not a leak.");            }
         }
 
         Console.WriteLine("\n── Top transition targets ────────────────────────────────────────────");

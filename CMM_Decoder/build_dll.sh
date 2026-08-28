@@ -10,6 +10,12 @@
 #       that SEGVs on Windows x64; must be off. -mstackrealign keeps SSE happy.
 #   -static : DLL needs only KERNEL32/ADVAPI32/msvcrt (no libgcc/ssp to ship).
 #   -DOP_DISABLE_HTTP : opusfile without the HTTP/SSL stack.
+#   -Wl,--wrap=malloc,free,realloc,calloc : routes EVERY allocation in this link --
+#       ours and the static libs' (fdk-aac, vorbis, opus, ogg, libstdc++'s operator
+#       new) -- through cmm_mem.c's counters, so cmm_meminfo() can answer whether the
+#       NATIVE heap is leaking. Working set could never resolve that: four seeds of
+#       identical code gave RSS slopes from -1.51 to +2.49 MB/sim-h. Drop these flags
+#       and cmm_meminfo silently reports zero rather than failing to link.
 #   -DNDEBUG : MANDATORY. Compiles out assert(). dr_flac alone has 134 DRFLAC_ASSERTs
 #       (→ assert()); without NDEBUG a real-world file that trips ANY of them calls
 #       _wassert → abort() → the game hard-crashes (STATUS_FATAL_APP_EXIT 0x40000015,
@@ -54,6 +60,7 @@ SRC=(
   cmm_loudness.c               # cmm_loudness_* native EBU R128 analyzer (GC-immune sweep)
   cmm_acoustics.c              # cmm_ac_* world-emitter acoustic model (own arena, GC-immune)
   cmm_field.c                  # cmm_fld_* ONE listener-anchored occlusion field, read by every source
+  cmm_mem.c                    # native heap accounting behind the --wrap flags below
   third_party/opusfile/src/info.c
   third_party/opusfile/src/internal.c
   third_party/opusfile/src/opusfile.c
@@ -71,6 +78,7 @@ mkdir -p "$(dirname "$OUT")"
   "${INC[@]}" \
   "${SRC[@]}" \
   build/fdk-aac/libfdk-aac.a build/vorbis/libvorbis.a build/opus/libopus.a build/ogg/libogg.a \
+  -Wl,--wrap=malloc,--wrap=free,--wrap=realloc,--wrap=calloc \
   -lm -lstdc++ -static -fno-stack-protector -mstackrealign
 
 echo "built: $OUT"

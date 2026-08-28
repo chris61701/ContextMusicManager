@@ -218,8 +218,16 @@ typedef struct cmm_decoder cmm_decoder;
  *        no way to return audio; that meant every question about how the radio SOUNDS could only
  *        be answered by starting the game and loading a world, several minutes a go, and judging
  *        by ear. With this a station change renders to a WAV in seconds and can be diffed against
- *        the reference render directly. */
-#define CMM_DECODER_ABI 51
+ *        the reference render directly. *
+ *   v52: cmm_meminfo / cmm_meminfo_reset_peak -- NATIVE heap accounting. Every memory
+ *        instrument the mod had watched the MANAGED heap (the HUD's Heap/GC rows, CMMPerf's
+ *        per-phase _allocB, the CmmSession soak's forced-GC drift); decode and mix are C, so
+ *        the only thing aimed at them was the process working set, which cannot resolve a few
+ *        MB/hour -- four seeds of identical code gave RSS slopes from -1.51 to +2.49 MB/sim-h,
+ *        not even a stable sign. The DLL is one gcc link, so -Wl,--wrap on malloc/free/realloc/
+ *        calloc routes our allocations AND the static libs' (fdk-aac, vorbis, opus, ogg,
+ *        libstdc++'s operator new) through cmm_mem.c's counters. */
+#define CMM_DECODER_ABI 52
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -229,6 +237,15 @@ typedef struct cmm_decoder cmm_decoder;
  * managed layer voices only the K nearest audible stations, each pinned to one slot here. */
 #define CMM_MAX_EMIT_VOICES 3
 CMM_API int CMM_Decoder_abi(void);
+
+/* ── Native heap accounting (see cmm_mem.c) ───────────────────────────────
+ * `live` is the leak-hunt number: flat across hours of play is a clean bill of health for
+ * the native side, rising is the leak the working set could never resolve. Any pointer may
+ * be NULL. reset_peak re-arms the high-water mark to the current live figure so a soak can
+ * measure one phase instead of everything since load; it never touches `live`. */
+CMM_API void cmm_meminfo(long long *live, long long *peak,
+                         long long *allocs, long long *frees, long long *bytesTotal);
+CMM_API void cmm_meminfo_reset_peak(void);
 
 /* ── File-based opens (large-file path) ───────────────────────────────────
  * The *_open_memory functions copy the whole file into RAM; for files too big

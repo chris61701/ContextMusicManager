@@ -44,7 +44,10 @@ namespace CMM
         private const float AdvanceFade = 0.2f;    // EOF → next track (near-seamless)
         private const float SilenceFade = 0.4f;    // off-air / world-exit fade to silent
 
-        private static volatile bool _on;   // volatile: the async start worker reads it (pre-Play guard)
+        private static volatile bool _on;          // volatile: the async start worker reads it (pre-Play guard)
+        // When the radio took the speaker, so TurnOff can push every resume clock forward by the
+        // length of the broadcast (see ContextMusicManager.HoldResumeClocks). -1 = not suppressing.
+        private static float _suppressedAt = -1f;
         private static string _tunedName;          // survives the station being off air
         private static long   _voiceId;
         // THE VOICE Tune LET GO OF, AND WHY IT HAS TO BE REMEMBERED.
@@ -325,6 +328,15 @@ namespace CMM
             FadeVoiceOut(CMMConfig.ManualSkipFadeDuration);
             Sfx(CmmMixer.SfxClickOff);   // the power-down clunk (manual dial AND the all-stations-deleted auto-off)
             Notify(player, notice);
+            // The broadcast borrowed the speaker; it did not move you out of any context. Un-pause
+            // the resume clocks BEFORE re-resolving, or the restart below reads a lastLeftTime
+            // stamped back at the takeover and throws a perfectly good resume away as stale.
+            if (_suppressedAt >= 0f)
+            {
+                ContextMusicManager.HoldResumeClocks(Time.realtimeSinceStartup - _suppressedAt);
+                _suppressedAt = -1f;
+            }
+
             // Hand music back: the resolver restarts whatever context should be playing.
             ContextMusicManager.ReResolveNow();
         }
@@ -578,6 +590,18 @@ namespace CMM
 
             if (!wasOn)
             {
+                // SAVE THE PLAYHEAD FIRST. StopNativeIfActive tears the voice down without
+                // capturing where it had got to -- it nulls _nativeActiveContext and zeroes
+                // _nativeVoiceId, and CaptureNativeResume needs BOTH of those to read the
+                // mixer position. Every other way of leaving a context goes through
+                // SendContextUpdate, which captures before it switches; the radio takeover was
+                // the one path that did not, so dialing the radio off dropped you back into a
+                // resumable context at the start of a DIFFERENT track instead of where you left
+                // it. Capture is self-guarding (no-op unless the context is resumable and is the
+                // one actually on the mixer), so this is safe regardless of what was playing.
+                ContextMusicManager.CaptureNativeResume(ContextMusicManager.currentContext);
+                _suppressedAt = Time.realtimeSinceStartup;
+
                 // Take the music layer over: tear the context voice down properly (auto-advance,
                 // transition bookkeeping). The radio's own Play would crossfade it anyway, but the
                 // context system must KNOW its voice is gone.
