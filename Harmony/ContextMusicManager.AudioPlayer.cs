@@ -565,7 +565,12 @@ namespace CMM
             //
             // The RADIO has done this since it was written (StartFromClock's gain wait); this is
             // the same idea, and now the same knob.
-            if (CMMConfig.LoudnessNormalizationEnabled && !skipLoudnessHold
+            // PlayOnce stingers are EXEMPT. A stinger is a reaction -- you died, the area went
+            // clear -- and a reaction that arrives three seconds late has not been normalized,
+            // it has been ruined. They are also the files most likely to trip the hold: under
+            // 400 ms of audio yields no gated R128 block at all, so a short sting can never
+            // become measured and would hold for the full timeout on every single death.
+            if (CMMConfig.LoudnessNormalizationEnabled && !skipLoudnessHold && !ctx.PlayOnce
                 && !LoudnessStore.IsMeasured(file) && CMMConfig.LoudnessStartHoldMs > 0)
             {
                 CMM_CoRoutines.StartCoroutine(HoldForLoudness(contextName, isSameContextSwitchingToNextTrack,
@@ -812,7 +817,7 @@ namespace CMM
                 // and settle it into the voice once the worker commits it.
                 if (CMMConfig.LoudnessNormalizationEnabled)
                     CMM_CoRoutines.StartCoroutine(
-                        Instance.SettlePreStagedGain(ps.NextFile, ps.TransitionId));
+                        Instance.SettlePreStagedGain(ps.NextFile, ps.TransitionId, ps.Req.TrackGain));
                 // Re-arm + pre-stage the next-next track (also clears _advancePending).
                 Instance.ArmNativeAutoAdvance(ps.Context, ps.TransitionId, true, ps.NextFile);
             }
@@ -829,7 +834,13 @@ namespace CMM
         // between pre-stage and advance is now applied). Bails if a real context switch supersedes
         // (transition id bumped) or the worker never commits (open failed). A same-context
         // auto-advance keeps the same transition id, so the guard only trips on a genuine change.
-        private IEnumerator SettlePreStagedGain(string file, int transitionId)
+        // `bakedGain` is what the voice is actually playing at -- the gain read at PRE-stage
+        // time and handed to the worker. It is what makes the ramp scalable here: the size of
+        // the correction is (current stored gain / baked gain), and on this path that is
+        // routinely the whole unmeasured-guess-to-measured delta, up to 17 dB. Settling that
+        // over the default 0.2 s is the lurch, and this is the path it happens on most, since
+        // a freshly-picked next track is almost never measured when the gain is baked.
+        private IEnumerator SettlePreStagedGain(string file, int transitionId, float bakedGain)
         {
             float waited = 0f;
             while (Interlocked.Read(ref _nativeVoiceId) == 0)
@@ -839,7 +850,8 @@ namespace CMM
                 waited += Time.unscaledDeltaTime;
             }
             if (transitionId != _transitionId) yield break;
-            SettleTrackGainIntoLiveVoice(file);
+            SettleTrackGainIntoLiveVoice(
+                file, LoudnessStore.SettleRampSeconds(bakedGain, LoudnessStore.GetTrackGain(file)));
         }
 
         // Off-frame-loop auto-advance: the scheduler twin of NativeTrackLoop. Runs on

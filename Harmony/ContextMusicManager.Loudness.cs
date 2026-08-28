@@ -41,6 +41,62 @@ namespace CMM
         private static readonly object _measureGate = new object();
         private static readonly Dictionary<string, MeasureHandle> _loudnessInFlight =
             new Dictionary<string, MeasureHandle>(StringComparer.OrdinalIgnoreCase);
+
+        // ── Failed measurements: back off, do not hammer ──────────────────────
+        // A measurement that fails leaves nothing in the store, so IsMeasured stays false --
+        // and every in-game request path (RequestPrewarm, StageNextFile, the block-before-play
+        // hold) gates on exactly that. So the maintenance tick re-requested the same file every
+        // LoudnessSweepInGameInterval, i.e. once a second, for the rest of the session: a whole
+        // file re-hashed and re-opened each time, ~86,000 times over a long session. (The menu
+        // prescan was never affected -- it has _loudnessProcessed, which the in-game paths do
+        // not consult.) This is the 295-times bug's shape with a different root cause.
+        //
+        // A flat blacklist is the wrong fix and this codebase has the scar to prove it: a
+        // transient drive hiccup once marked radio tracks dead for the whole process. So this
+        // BACKS OFF rather than gives up -- an unreadable file costs one decode every half hour
+        // instead of 1,800, and a file that comes back is picked up on the next attempt. The
+        // size/mtime stamp resets it immediately when the file itself changes, which is the
+        // case where waiting would be actively wrong.
+        private struct MeasureFailure
+        {
+            public int   Attempts;
+            public float RetryAt;        // CmmClock seconds
+            public long  Size, Mtime;    // what failed; a change resets the backoff
+        }
+        private static readonly Dictionary<string, MeasureFailure> _measureFailures =
+            new Dictionary<string, MeasureFailure>(StringComparer.OrdinalIgnoreCase);
+
+        // 5 s, 30 s, 5 min, then 30 min. The early retries cover a blip; the cap is what stops
+        // a permanently-unreadable file from costing anything measurable over a long session.
+        private static readonly float[] MeasureBackoffSeconds = { 5f, 30f, 300f, 1800f };
+
+        // True when `file` failed recently enough that trying again now is just noise.
+        private static bool MeasureBackedOff(string file, long size, long mtime)
+        {
+            if (!_measureFailures.TryGetValue(file, out MeasureFailure f)) return false;
+            if (f.Size != size || f.Mtime != mtime) { _measureFailures.Remove(file); return false; }
+            if (CmmClock.Now >= f.RetryAt) return false;
+            return true;
+        }
+
+        private static void NoteMeasureFailure(string file, long size, long mtime)
+        {
+            _measureFailures.TryGetValue(file, out MeasureFailure f);
+            if (f.Size != size || f.Mtime != mtime) f.Attempts = 0;
+            int i = Math.Min(f.Attempts, MeasureBackoffSeconds.Length - 1);
+            f.Attempts++;
+            f.Size = size; f.Mtime = mtime;
+            f.RetryAt = CmmClock.Now + MeasureBackoffSeconds[i];
+            _measureFailures[file] = f;
+            CMMConfig.D($"[CMM] Loudness: {Path.GetFileName(file)} failed to measure " +
+                        $"(attempt {f.Attempts}) — next try in {MeasureBackoffSeconds[i]:F0}s.");
+        }
+
+        // A measurement landed, so whatever was wrong no longer is.
+        private static void ClearMeasureFailure(string file)
+        {
+            if (_measureFailures.Count > 0) _measureFailures.Remove(file);
+        }
         // One-shot: on the menu most context snapshots aren't built yet (ContextScanLoop
         // is in-game only), so the pre-warm sweep has nothing to queue. The first time the
         // queue comes up empty we ask PresenceScanLoop to enumerate every context folder
@@ -228,6 +284,7 @@ namespace CMM
             catch { ok = false; }
             if (!ok) yield break;
             if (LoudnessStore.HasCurrent(filePath, size, mtime)) yield break;
+            if (MeasureBackedOff(filePath, size, mtime)) yield break;
 
             MeasureHandle h = StartMeasure(filePath);
             // A long file answers in SLICES (AudioDecoder's progressive measurement), so the wait
@@ -253,8 +310,11 @@ namespace CMM
             _loudnessProcessed.Add(filePath);
             if (res.Ok)
             {
+                ClearMeasureFailure(filePath);
                 PublishMeasurement(filePath, mtime, res, provisional: false);
-                CMMConfig.D($"[CMM] Loudness (block) {Path.GetFileName(filePath)}: {res.Lufs:F1} LUFS");
+                CMMConfig.D(res.NoIntegrated
+                    ? $"[CMM] Loudness (block) {Path.GetFileName(filePath)}: no gated block — no correction"
+                    : $"[CMM] Loudness (block) {Path.GetFileName(filePath)}: {res.Lufs:F1} LUFS");
             }
             else if (published > 0)
             {
@@ -264,9 +324,11 @@ namespace CMM
                 // (nothing treats it as done) while IsMeasured accepts one (nothing asks again),
                 // so the track would play at a part-file gain for the rest of the session.
                 LoudnessStore.ForgetProvisional(filePath);
+                NoteMeasureFailure(filePath, size, mtime);
                 CMMConfig.D($"[CMM] Loudness incomplete for {Path.GetFileName(filePath)} after " +
                             $"{published} partial reading(s) — dropped, will re-measure.");
             }
+            else NoteMeasureFailure(filePath, size, mtime);
         }
 
         // Commit a reading (final or partial) and ease whatever voice is airing that file onto the
@@ -282,7 +344,8 @@ namespace CMM
             bool hadReading = LoudnessStore.IsMeasured(filePath);
             float before = LoudnessStore.GetTrackGain(filePath);
 
-            LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak, provisional);
+            LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak,
+                                provisional, res.NoIntegrated);
 
             float after = LoudnessStore.GetTrackGain(filePath);
             if (Mathf.Abs(after - before) < 1e-4f) return;   // nothing moved; no voice to disturb

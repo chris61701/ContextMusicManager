@@ -444,6 +444,16 @@ namespace CMM
         internal static void PoisonTrack(string file)
         {
             if (string.IsNullOrEmpty(file)) return;
+            // Same guard, and for the same reason, as ProbeLength's. A play-time open failure
+            // does not tell you WHY it failed, and the two causes want opposite responses: a
+            // genuinely undecodable file should leave the schedule (poison it), while a drive
+            // that is momentarily away should change nothing at all. Poisoning on the second
+            // is how one blip took a whole station off the air for the rest of the process --
+            // the emitter layer poisons up to five tracks per tick and the personal radio one
+            // per 4 Hz tick, each immediately re-resolving onto the next track and poisoning
+            // that too. Recovery needs ForgetDeadLengths, which needs a catalog rebuild, which
+            // a returning drive does not trigger, because the station folder never changed.
+            if (!RootReachable(file)) return;
             lock (_lenLock) { _lenFrames[file] = 0; _lenRate[file] = 0; }
         }
 

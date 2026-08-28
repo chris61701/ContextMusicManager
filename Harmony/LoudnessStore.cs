@@ -78,6 +78,13 @@ namespace CMM
             // never satisfies HasCurrent or reaches disk, so an abandoned one is re-measured
             // rather than mistaken for a finished answer.
             public bool Provisional;
+            // True when the file was decoded successfully but yielded NO gated 400 ms block, so
+            // it has no defined integrated loudness. EBU R128 integrates over gated blocks; a
+            // 200 ms stinger produces zero of them, and no amount of re-decoding will change
+            // that. Treated as a finished measurement carrying a neutral correction, so such a
+            // file is measured once and then behaves like any other measured track -- rather
+            // than failing forever, holding up every play and being re-decoded each attempt.
+            public bool NoIntegrated;
         }
 
         private struct PathRecord
@@ -194,6 +201,17 @@ namespace CMM
             // too loud is distortion. So the cut is taken in full and the boost is capped until the
             // reading is final. On real music the cap is nearly never reached -- across 27 files at
             // a 5-minute slice the worst first-answer error was 0.82 dB.
+            // No gated block means no answer, and no answer means no correction. Not the -5 dB
+            // unmeasured bias either: that guards against an UNKNOWN track being hot, whereas
+            // this is a known-short authored asset (a stinger) whose level the author chose.
+            if (m.NoIntegrated)
+            {
+                double neutral = m.UserTrim;
+                if (neutral < 0) neutral = 0;
+                if (neutral > MaxLinearGain) neutral = MaxLinearGain;
+                return (float)neutral;
+            }
+
             double boostCap = CMMConfig.LoudnessMaxBoostDb;
             if (m.Provisional && CMMConfig.LoudnessProvisionalMaxBoostDb < boostCap)
                 boostCap = CMMConfig.LoudnessProvisionalMaxBoostDb;
@@ -305,7 +323,8 @@ namespace CMM
         // the measurement. An existing entry's UserTrim is preserved (we only update
         // the measured values + version), so re-measuring never clobbers a manual trim.
         public static void Store(string absolutePath, long size, long mtimeTicks,
-            string hash, double lufs, double peak, bool provisional = false)
+            string hash, double lufs, double peak, bool provisional = false,
+            bool noIntegrated = false)
         {
             string key = ToRelKey(absolutePath);
             if (key == null || hash == null) return;
@@ -328,12 +347,13 @@ namespace CMM
                 m.Peak = peak;
                 m.MetricVersion = MetricVersion;
                 m.Provisional = provisional;
+                m.NoIntegrated = noIntegrated;
                 // UserTrim left as-is.
             }
             else
             {
                 m = new Measurement { Lufs = lufs, Peak = peak, MetricVersion = MetricVersion,
-                                      Provisional = provisional };
+                                      Provisional = provisional, NoIntegrated = noIntegrated };
                 _byHash[hash] = m;
             }
 
@@ -698,6 +718,7 @@ namespace CMM
                         float trim = (float)ReadDouble(el, "trim", 1.0);
                         bool ban = el.GetAttribute("ban") == "1";
                         bool fav = el.GetAttribute("fav") == "1";
+                        bool noint = el.GetAttribute("noint") == "1";
                         // Stale algorithm → drop and re-measure, UNLESS the entry carries
                         // user data (trim / ban / favourite): those load with their stale
                         // version intact — the sweep re-measures the loudness (Store keeps
@@ -712,6 +733,7 @@ namespace CMM
                             UserTrim = trim,
                             Banned = ban,
                             Favourite = fav,
+                            NoIntegrated = noint,
                         };
                     }
                     else if (el.Name == "Path")
@@ -767,7 +789,7 @@ namespace CMM
             public readonly List<TrackLine> Tracks = new List<TrackLine>();
             public readonly List<PathLine> Paths = new List<PathLine>();
 
-            public struct TrackLine { public string Hash; public double Lufs, Peak; public int Metric; public float Trim; public bool Banned, Favourite; }
+            public struct TrackLine { public string Hash; public double Lufs, Peak; public int Metric; public float Trim; public bool Banned, Favourite, NoIntegrated; }
             public struct PathLine  { public string Rel, Hash; public long Size, Mtime; }
         }
 
@@ -790,22 +812,29 @@ namespace CMM
             // that a rejoin no longer waits for a whole-file measurement -- the progressive measure
             // publishes a usable gain within about a second and converges from there.
             var snap = new SaveSnapshot { FilePath = _filePath };
+            var persisted = new HashSet<string>(StringComparer.Ordinal);
             foreach (var kv in _byHash)
             {
                 Measurement m = kv.Value;
                 if (!IsPersistWorthy(m)) continue;
+                persisted.Add(kv.Key);
                 snap.Tracks.Add(new SaveSnapshot.TrackLine
                 {
                     Hash = kv.Key, Lufs = m.Lufs, Peak = m.Peak,
                     Metric = m.MetricVersion, Trim = m.UserTrim,
                     Banned = m.Banned, Favourite = m.Favourite,
+                    NoIntegrated = m.NoIntegrated,
                 });
             }
             foreach (var kv in _byPath)
             {
                 PathRecord pr = kv.Value;
-                // The file must never reference a hash that isn't in it.
-                if (!_byHash.ContainsKey(pr.Hash))
+                // The file must never reference a hash that isn't in it. Test against what is
+                // being WRITTEN, not against what is in memory: when only user data persists,
+                // most live hashes are not in the file, and testing the live dictionary wrote a
+                // path line for every measured track -- an orphan on load, and precisely the
+                // library-sized cache file this policy exists to stop leaving behind.
+                if (!persisted.Contains(pr.Hash))
                     continue;
                 snap.Paths.Add(new SaveSnapshot.PathLine
                 {
@@ -852,8 +881,11 @@ namespace CMM
                         w.WriteAttributeString("peak", t.Peak.ToString("F5", CultureInfo.InvariantCulture));
                         w.WriteAttributeString("metric", t.Metric.ToString(CultureInfo.InvariantCulture));
                         w.WriteAttributeString("trim", t.Trim.ToString("F3", CultureInfo.InvariantCulture));
-                        if (t.Banned)    w.WriteAttributeString("ban", "1");
-                        if (t.Favourite) w.WriteAttributeString("fav", "1");
+                        if (t.Banned)       w.WriteAttributeString("ban", "1");
+                        if (t.Favourite)    w.WriteAttributeString("fav", "1");
+                        // Without this the flag is lost on reload and the entry's lufs=0 is taken
+                        // literally -- a stinger would come back asking for an 18 dB CUT.
+                        if (t.NoIntegrated) w.WriteAttributeString("noint", "1");
                         w.WriteEndElement();
                     }
 

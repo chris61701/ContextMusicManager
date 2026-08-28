@@ -204,6 +204,68 @@ internal static class Program
         Check("dropping one path leaves the other copy measured", LoudnessStore.IsMeasured(other));
         Check("...and the dropped one is gone", !LoudnessStore.IsMeasured(track));
 
+        Section("Only user data reaches disk (regression: the path index)");
+
+        // The Track filter was added when persistence became session-scoped; the Path filter
+        // was not, and it tested the LIVE hash table -- so every measured track still wrote a
+        // <Path> line pointing at a hash the file did not contain. loudness.xml went on being
+        // the library index the policy existed to retire, and every one of those lines was an
+        // orphan on load.
+        LoudnessStore.Load(sandbox);
+        for (int i = 0; i < 50; i++)
+            LoudnessStore.Store(Path.Combine(sandbox, $"plain{i}.flac"), size, mtime,
+                                $"hash{i:D4}", -20.0 - i * 0.1, 0.5);
+        string kept = Path.Combine(sandbox, "trimmed.flac");
+        LoudnessStore.Store(kept, size, mtime, "hashkeep", -20.0, 0.5);
+        LoudnessStore.AdjustUserTrim(kept, -0.1f);
+
+        var big = LoudnessStore.SnapshotForSave();
+        Check("50 plain measurements write ONE track line (the trimmed one)",
+              big != null && big.Tracks.Count == 1, big == null ? "null" : $"{big.Tracks.Count}");
+        Check("...and ONE path line, not 51",
+              big != null && big.Paths.Count == 1, big == null ? "null" : $"{big.Paths.Count}");
+        bool everyPathResolves = true;
+        if (big != null)
+        {
+            var written = new System.Collections.Generic.HashSet<string>();
+            foreach (var t in big.Tracks) written.Add(t.Hash);
+            foreach (var pl in big.Paths) if (!written.Contains(pl.Hash)) everyPathResolves = false;
+        }
+        Check("every path line resolves to a track line in the same file", everyPathResolves);
+
+        Section("A file with no gated block is answered, not retried forever");
+
+        // EBU R128 integrates over gated 400 ms blocks, so a 200 ms stinger yields zero of them
+        // and has no defined integrated loudness. That is a FINISHED answer -- re-decoding will
+        // never produce a different one -- but it used to read as a failed measurement, which
+        // meant a 3 s start-hold before every death sting and a fresh decode on every attempt.
+        LoudnessStore.Load(sandbox);
+        string sting = Path.Combine(sandbox, "death-sting.wav");
+        LoudnessStore.Store(sting, size, mtime, "hashsting", 0, 0.8, provisional: false,
+                            noIntegrated: true);
+        Check("a no-gated-block file counts as measured", LoudnessStore.IsMeasured(sting));
+        Check("...and as current, so nothing re-measures it",
+              LoudnessStore.HasCurrent(sting, size, mtime));
+        Near("...and plays at no correction, not at the stored lufs of 0",
+             LoudnessStore.GetTrackGain(sting), 1.0, 1e-4);
+        Near("...but a user trim still applies to it",
+             LoudnessStore.AdjustUserTrim(sting, -0.1f), 0.9, 1e-4);
+        Near("...and the trim is what the gain becomes",
+             LoudnessStore.GetTrackGain(sting), 0.9, 1e-4);
+
+        // The flag has to survive the file, or lufs=0 is taken literally on reload and an
+        // 18 dB cut is applied to a stinger.
+        var stingSnap = LoudnessStore.SnapshotForSave();
+        Check("the no-gated-block flag is captured for persistence",
+              stingSnap != null && stingSnap.Tracks.Count == 1 && stingSnap.Tracks[0].NoIntegrated);
+        if (stingSnap != null && LoudnessStore.WriteSnapshot(stingSnap))
+        {
+            LoudnessStore.Load(sandbox);
+            Near("...and survives a save/load round trip (not an 18 dB cut)",
+                 LoudnessStore.GetTrackGain(sting), 0.9, 1e-4);
+        }
+        else Skip("no-gated-block round trip", "snapshot write failed");
+
         Section("Settle ramp");
 
         // The ramp is what makes a correction sound like the level settling rather
@@ -312,6 +374,8 @@ internal static class Program
         Check("slicing off publishes nothing at all", whole == measured, firstFailure);
         Check("partials are flagged partial, the final one final", flagsOk);
 
+        TruncationCases(corpus);
+
         if (sliced == 0)
         {
             Skip("multi-slice behaviour", "no file in the corpus is longer than one slice");
@@ -321,6 +385,59 @@ internal static class Program
         Check("every partial is a plausible loudness", boundsOk);
         Check($"the first partial beats the unmeasured fallback on every long file " +
               $"(worst first-slice error {worstFirstDelta:F2} dB)", firstBeatsFallbackOk, firstFailure);
+    }
+
+    // ── A decode that stops early must not become a measurement ──────────────
+    // Every decoder in the read table reports EOF as "0 frames", and dr_flac / dr_mp3 report
+    // an IO FAILURE the same way -- so at the read call a drive going away is indistinguishable
+    // from reaching the end of the file. Left alone that produces a plausible measurement of
+    // the first fraction of the file, committed as final and authoritative, which nothing will
+    // ever revisit because HasCurrent then reports it as current.
+    //
+    // A physically truncated file reproduces this exactly: the header still declares the full
+    // duration, and the decoder stops early with the same "0 frames" the real fault produces.
+    static void TruncationCases(List<string> corpus)
+    {
+        // FLAC and MP3 are the formats whose readers conflate the two, and between them they
+        // are 82% of this library.
+        string src = null;
+        foreach (string f in corpus)
+        {
+            string e = Path.GetExtension(f).ToLowerInvariant();
+            if (e == ".flac" || e == ".mp3") { src = f; break; }
+        }
+        if (src == null) { Skip("truncated decode is rejected", "no .flac/.mp3 in the corpus"); return; }
+
+        string cut = Path.Combine(Path.GetTempPath(),
+                                  "cmm_trunc_" + Guid.NewGuid().ToString("N").Substring(0, 8) +
+                                  Path.GetExtension(src));
+        try
+        {
+            byte[] all = File.ReadAllBytes(src);
+            if (all.Length < 4096) { Skip("truncated decode is rejected", "source too small"); return; }
+            // Half the file: far beyond any encoder-padding tolerance, and the shape a drive
+            // disappearing mid-decode actually produces.
+            File.WriteAllBytes(cut, Sub(all, all.Length / 2));
+
+            TrackLoudness whole = AudioDecoder.MeasureLoudness(src, CMMConfig.LoudnessChunkSeconds, null);
+            TrackLoudness half  = AudioDecoder.MeasureLoudness(cut, CMMConfig.LoudnessChunkSeconds, null);
+
+            Check("a file that stops decoding half way is NOT accepted as measured",
+                  !half.Ok,
+                  half.Ok ? $"accepted: {half.Lufs:F2} LUFS over {half.SecondsMeasured:F1}s " +
+                            $"(intact file: {whole.Lufs:F2} over {whole.SecondsMeasured:F1}s)"
+                          : null);
+            Check("...while the intact file still measures fine", whole.Ok);
+        }
+        catch (Exception ex) { Skip("truncated decode is rejected", ex.Message); }
+        finally { try { File.Delete(cut); } catch { } }
+    }
+
+    static byte[] Sub(byte[] src, int len)
+    {
+        var d = new byte[len];
+        Array.Copy(src, d, len);
+        return d;
     }
 
     // ── Corpus ───────────────────────────────────────────────────────────────

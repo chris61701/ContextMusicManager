@@ -23,6 +23,11 @@ namespace CMM
         // reading is real and gated the same way; it just has less of the file behind it,
         // so the caller treats it as provisional and lets the final one supersede it.
         public bool Final;
+        // True when the decode reached EOF but produced NO gated block, so the file has no
+        // defined integrated loudness (under 400 ms, or entirely below the -70 LUFS gate).
+        // Ok is still true: this is a finished answer, not a failure. See LoudnessStore's
+        // Measurement.NoIntegrated for why that distinction is worth carrying.
+        public bool NoIntegrated;
         // Seconds of audio behind this reading. Only meaningful on a partial; it is what
         // makes "how much do I trust this?" answerable at the call site.
         public double SecondsMeasured;
@@ -48,6 +53,12 @@ namespace CMM
                 // the native container reader (NativeContainerReader / cmm_container_*).
                 ".mkv", ".webm",
             };
+
+        // How much of a file's header-reported duration must actually decode before the
+        // result is trusted as a whole-file measurement. Deliberately loose: it is separating
+        // "a few frames of encoder padding" from "the drive vanished", and those differ by
+        // three orders of magnitude, so precision here would only create false alarms.
+        private const double TruncationTolerance = 0.90;
 
         public static bool IsSupported(string filePath)
         {
@@ -326,15 +337,60 @@ namespace CMM
                 finally { NativeLoudness.cmm_lprog_free(prog); }
 
                 analyzeMs = ElapsedMs(tAnalyze);
+
+                // ── Did we actually read the file, or did the read just stop? ──────────
+                // Every decoder in the read table reports EOF as "0 frames", and dr_flac /
+                // dr_mp3 report an IO FAILURE the same way — so a drive going away mid-decode
+                // is indistinguishable, at the read call, from reaching the end. Left alone
+                // that produces a plausible measurement of the first fraction of the file,
+                // committed as final and authoritative: a 37-minute podcast cut off at 40
+                // seconds gets the intro's loudness, uncapped, for the rest of the session,
+                // and HasCurrent then reports it as current so nothing ever re-measures it.
+                // 13 of 16 stations here live on a removable drive, so this is a Tuesday.
+                //
+                // The header knows how long the file is, so compare. Encoder delay/padding
+                // moves this by milliseconds; a truncation moves it by minutes, so a coarse
+                // threshold separates them cleanly without a per-format table. Unknown length
+                // (raw ADTS reports 0) means no check is possible — measure and accept, which
+                // is what we did before this existed.
+                double headerSeconds = (total > 0 && sampleRate > 0) ? (double)total / sampleRate : 0;
+                if (headerSeconds > 0 && secs < headerSeconds * TruncationTolerance)
+                {
+                    Log.Warning($"[CMM] Loudness: {Path.GetFileName(filePath)} stopped decoding at " +
+                                $"{secs:F1}s of {headerSeconds:F1}s — treating as a failed read, not a " +
+                                "measurement (drive or file went away mid-decode).");
+                    return fail;
+                }
+
                 if (valid == 0)
                 {
-                    // DIAG: open SUCCEEDED but analyze produced no gated result — either the
-                    // decoder read 0 frames or the track gated out (too short/quiet). ch/rate/
-                    // total let us tell a bad open (0/0/0) from a genuine gating result.
-                    Log.Warning($"[CMM DIAG] Loudness ANALYZE=0 {Path.GetFileName(filePath)} " +
-                                $"({ext}) kind={kind} ch={channels} rate={sampleRate} " +
-                                $"total={total} analyzeMs={analyzeMs:F1}");
-                    return fail;
+                    // No gated block. Two very different reasons, and they must not share an
+                    // outcome: reading NOTHING is a failure to retry, while reading the whole
+                    // file and finding no gated block is a finished answer that will never
+                    // change however many times it is re-decoded (EBU R128 integrates over
+                    // gated 400 ms blocks, so anything shorter yields zero of them).
+                    if (secs <= 0)
+                    {
+                        Log.Warning($"[CMM DIAG] Loudness read 0 frames {Path.GetFileName(filePath)} " +
+                                    $"({ext}) kind={kind} ch={channels} rate={sampleRate} " +
+                                    $"total={total} analyzeMs={analyzeMs:F1}");
+                        return fail;
+                    }
+
+                    CMMConfig.D($"[CMM] Loudness: {Path.GetFileName(filePath)} has no gated block " +
+                                $"({secs:F2}s decoded) — no defined integrated loudness; " +
+                                "recorded as measured, no correction.");
+                    return new TrackLoudness
+                    {
+                        Ok              = true,
+                        Hash            = hash,
+                        Size            = size,
+                        Lufs            = 0,
+                        Peak            = peak,
+                        Final           = true,
+                        NoIntegrated    = true,
+                        SecondsMeasured = secs,
+                    };
                 }
 
                 return new TrackLoudness
