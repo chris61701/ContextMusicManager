@@ -151,8 +151,24 @@ namespace CMM
         // opened twice per session. Guarded by _lenLock: walks probe on a ThreadPool worker while
         // the main thread resolves. frames == 0 ⇒ known-dead file (open failed / poisoned) — walks
         // treat it as a zero-second skip, deterministically.
-        private static readonly Dictionary<string, long> _lenFrames = new Dictionary<string, long>();
-        private static readonly Dictionary<string, int>  _lenRate   = new Dictionary<string, int>();
+        // One cached track length, plus the stamp of the file it was measured FROM.
+        //
+        // The stamp is the whole point. Stations play on a shared clock: every client works out
+        // what is on air by adding up track lengths from a fixed anchor, so agreement depends
+        // entirely on everyone holding the same lengths. This cache used to be keyed by path
+        // alone and never rechecked -- the comment said good lengths "do not go stale" -- so
+        // replacing a file with a different-length version left the sum wrong from that track
+        // onward: the station starts songs part way in, or cuts them off. And on a server, a
+        // player who joined after the change measures the new length while one already playing
+        // keeps the old, and the two of them hear different songs on the same station with
+        // nothing to reconcile them.
+        private struct LenEntry
+        {
+            public long Frames;
+            public int  Rate;
+            public long Size, Mtime;   // of the file this was measured from; 0/0 = unstamped
+        }
+        private static readonly Dictionary<string, LenEntry> _len = new Dictionary<string, LenEntry>();
         private static readonly object _lenLock = new object();
 
         // Hard bound on any chain walk (resolve or probe): a window is RadioAnchorSeconds long, so
@@ -269,9 +285,12 @@ namespace CMM
                 for (int step = 0; step < WalkCap; step++)
                 {
                     string f = st.Order[i];
-                    if (!_lenFrames.TryGetValue(f, out long fr)) { needWalk = true; break; }
-                    int rt = _lenRate[f];
-                    double len = (fr > 0 && rt > 0) ? (double)fr / rt : 0;   // 0 ⇒ dead file: skip, no airtime
+                    if (!_len.TryGetValue(f, out LenEntry e)) { needWalk = true; break; }
+                    // Cache-only, deliberately: no stat here. This walk runs under the lock,
+                    // several times a second, once per track in the chain. Stamps are checked on
+                    // the walk's cold path instead (ProbeLength), which re-probes every entry in
+                    // the chain -- so a changed file is caught by the next window walk.
+                    double len = (e.Frames > 0 && e.Rate > 0) ? (double)e.Frames / e.Rate : 0;   // 0 ⇒ dead file: skip, no airtime
                     if (len > 0)
                     {
                         if (rem < len) { file = f; idx = i; offset = rem; return true; }
@@ -387,24 +406,68 @@ namespace CMM
         //   • the file could not be opened JUST NOW — a drive hiccup, a network share blinking.
         //     Client-specific and temporary; caching it is wrong
         //
-        // Caching the second was a silent, permanent, whole-library failure. `_lenFrames` has no
+        // Caching the second was a silent, permanent, whole-library failure. The cache has no
         // expiry and is never cleared, and the process outlives a world reload, so one blip during
         // one walk marked every file it touched as dead air for the rest of the RUN — the drive
         // came back and nothing recovered. 13 of the 16 stations here live on an external drive.
         //
         // So: cache 0 only when the file is genuinely reachable-and-unusable. If its ROOT is not
         // reachable, cache nothing and leave it unknown, so a later walk retries it.
+        //
+        // This is also where a cached length is REVALIDATED, because it is the cold path: the
+        // window walk calls it for every file in the chain, cached or not, so one stat per track
+        // per window boundary re-checks the whole schedule. ResolveAt deliberately does not,
+        // being a lock-held cache-only walk that runs several times a second.
         private static double ProbeLength(string file)
         {
+            FileStamp now = StampOf(file);
             lock (_lenLock)
-                if (_lenFrames.TryGetValue(file, out long fr))
-                    return (fr > 0 && _lenRate[file] > 0) ? (double)fr / _lenRate[file] : 0;
+                if (_len.TryGetValue(file, out LenEntry e))
+                {
+                    if (StampUnchanged(e, now))
+                        return (e.Frames > 0 && e.Rate > 0) ? (double)e.Frames / e.Rate : 0;
+                    // A different file wears this name now. Drop the length and measure again;
+                    // the schedule is only as good as the numbers it adds up.
+                    CMMConfig.D($"[CMM] Radio: {Path.GetFileName(file)} changed on disk — " +
+                                "re-measuring its length (the schedule depends on it).");
+                    _len.Remove(file);
+                }
             long frames = 0; int rate = 0;
             IntPtr dec = AudioDecoder.OpenNativeHandle(file, out int kind, out _, out int r, out long total);
             if (dec != IntPtr.Zero) { frames = total; rate = r; AudioDecoder.CloseNativeHandle(dec, kind); }
             if (frames <= 0 && !RootReachable(file)) return 0;   // transient — do not poison
-            lock (_lenLock) { _lenFrames[file] = frames; _lenRate[file] = rate; }
+            // Stamp with what the file looked like when opened, NOT re-statted after: a file being
+            // written while we read it would otherwise be recorded against a stamp it no longer
+            // has, and the mismatch would never resolve.
+            lock (_lenLock)
+                _len[file] = new LenEntry { Frames = frames, Rate = rate,
+                                            Size = now.Size, Mtime = now.Mtime };
             return (frames > 0 && rate > 0) ? (double)frames / rate : 0;
+        }
+
+        // What a file looks like right now. `Known` false means we could not tell — it is missing,
+        // its drive is away, the read threw. That is NOT a change: treating a hiccup as one would
+        // discard good lengths for a whole station at the exact moment none of them can be
+        // re-probed, which is the failure ProbeLength's RootReachable guard already exists to
+        // prevent. Same stance as the loudness store's stamp check.
+        private struct FileStamp { public long Size, Mtime; public bool Known; }
+
+        private static FileStamp StampOf(string file)
+        {
+            try
+            {
+                var fi = new FileInfo(file);
+                if (!fi.Exists) return default(FileStamp);
+                return new FileStamp { Size = fi.Length, Mtime = fi.LastWriteTimeUtc.Ticks, Known = true };
+            }
+            catch { return default(FileStamp); }
+        }
+
+        private static bool StampUnchanged(LenEntry e, FileStamp now)
+        {
+            if (!now.Known) return true;             // can't tell ⇒ keep what we have
+            if (e.Size == 0 && e.Mtime == 0) return true;   // pre-stamp entry ⇒ nothing to compare
+            return e.Size == now.Size && e.Mtime == now.Mtime;
         }
 
         // Is the volume this file lives on actually there? Distinguishes "undecodable" from
@@ -427,10 +490,10 @@ namespace CMM
         {
             lock (_lenLock)
             {
-                if (_lenFrames.Count == 0) return;
+                if (_len.Count == 0) return;
                 _deadScratch.Clear();
-                foreach (var kv in _lenFrames) if (kv.Value <= 0) _deadScratch.Add(kv.Key);
-                foreach (string f in _deadScratch) { _lenFrames.Remove(f); _lenRate.Remove(f); }
+                foreach (var kv in _len) if (kv.Value.Frames <= 0) _deadScratch.Add(kv.Key);
+                foreach (string f in _deadScratch) _len.Remove(f);
                 if (_deadScratch.Count > 0)
                     CMMConfig.D($"[CMM] Radio: re-probing {_deadScratch.Count} track(s) previously seen as dead.");
                 _deadScratch.Clear();
@@ -454,7 +517,12 @@ namespace CMM
             // that too. Recovery needs ForgetDeadLengths, which needs a catalog rebuild, which
             // a returning drive does not trigger, because the station folder never changed.
             if (!RootReachable(file)) return;
-            lock (_lenLock) { _lenFrames[file] = 0; _lenRate[file] = 0; }
+            // Stat OUTSIDE the lock: _lenLock is held by ResolveAt's chain walk on the main
+            // thread several times a second, and a blocking file stat inside it would park that
+            // walk on IO -- on a removable drive, for as long as the drive takes to answer.
+            FileStamp now = StampOf(file);
+            lock (_lenLock)
+                _len[file] = new LenEntry { Frames = 0, Rate = 0, Size = now.Size, Mtime = now.Mtime };
         }
 
         // File.Exists, treating a transient IO error as "present" so a hiccup doesn't needlessly

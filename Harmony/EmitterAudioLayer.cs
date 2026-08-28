@@ -1363,10 +1363,38 @@ namespace CMM
             foreach (var kv in old)
             {
                 Station prev = kv.Value;
+                // The SLOT is released whether or not a voice was ever started on it. Holding a
+                // slot with no voice is a real state, not a contradiction: SelectAndVoice claims
+                // the slot and StartStation then returns early whenever the window walk has not
+                // landed yet -- which, right after a pause resync hands every station a fresh
+                // window, is the common case rather than the exotic one. Skipping the release for
+                // those (the old `if (prev.VoiceId == 0) continue;` sat above this line) left
+                // _slotOwner pointing at a station object that no longer exists in any catalog,
+                // and nothing ever cleared it. There are CMM_MAX_EMIT_VOICES slots. Three such
+                // rebuilds and every slot is owned by a dead station, FreeSlot returns -1 for
+                // ever, and no speaker in the world plays again for the rest of the session --
+                // silently, because a station that cannot get a slot simply returns.
+                if (prev.Slot >= 0 && _slotOwner[prev.Slot] == prev)
+                {
+                    _slotOwner[prev.Slot] = null;
+                    prev.Slot = -1;
+                }
                 if (prev.VoiceId == 0) continue;
-                if (prev.Slot >= 0 && _slotOwner[prev.Slot] == prev) _slotOwner[prev.Slot] = null;
                 CmmMixer.Instance?.RemoveEmitter(prev.VoiceId, StopFade);
                 CMMConfig.D($"[CMM] Station '{prev.Name}' removed by catalog rebuild — voice released.");
+            }
+
+            // Backstop. The loop above releases what the rebuild knows about; this catches a slot
+            // owned by anything that is no longer a live station for any other reason. It is three
+            // comparisons on a rebuild, and the failure it guards against is total and silent, so
+            // it earns its place. If it ever fires, the log line is the bug report.
+            for (int s = 0; s < _slotOwner.Length; s++)
+            {
+                Station owner = _slotOwner[s];
+                if (owner == null || _stations.Contains(owner)) continue;
+                Log.Warning($"[CMM] Emitter slot {s} was still held by stale station " +
+                            $"'{owner.Name}' after a catalog rebuild — reclaimed.");
+                _slotOwner[s] = null;
             }
         }
 
