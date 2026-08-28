@@ -34,6 +34,26 @@ namespace CMM
             // Defaults:
             // fallback="Stack", resume=true, stale=120, loop=false, cool=5, fadeintime=5, bypass=false,
             // once=false, warmup=0.  fadeintime = fade-in seconds; warmup = dwell seconds before viable.
+            //
+            // FADE-IN vs THE 1.5 s EVICTION HYSTERESIS. A context absent for 1.5 s is dropped from
+            // the stack (the RemoveAll in ContextMusicManager.cs), so any fade LONGER than that is
+            // cut off part-way whenever its trigger flickers -- and the contexts that flicker most
+            // had the LONGEST fades. Tension at 5 s fired 970 times in a 12 h simulated session and
+            // was audible for the first 30% of its fade before being pulled; 39% of all transitions
+            // interrupted a fade in flight.
+            //
+            // The rule: if a context is driven by something that can VANISH IN SECONDS (enemies,
+            // nearby players, POI state) its fade must finish inside the hysteresis -- 1.2 s, with a
+            // little margin. If it is driven by WHERE YOU ARE or WHAT TIME IT IS (Ambient_*, Home_*,
+            // Trader, Menu) it cannot flicker and a long 5 s fade is right.
+            //
+            // Moving the hysteresis instead is wrong in BOTH directions: shortening it cuts fades
+            // even earlier AND turns blips it used to absorb into real transitions; lengthening it
+            // past 5 s leaves combat music hanging around after the fight.
+            //
+            // NOTE: this only reaches a FRESH install. Config/contexts.xml is written once and then
+            // owned by the user, so an existing install keeps its old fade times -- see the
+            // config-defaults-don't-reach-installs trap.
             void Add(string name, string path, string fallback = "Stack",
                      bool resume = true, int stale = 120, bool loop = false,
                      int cool = 5, float fadeintime = 5f, bool bypass = false,
@@ -65,31 +85,31 @@ namespace CMM
             // _boss subfolders hold the escalations (underscore-prefixed so the top-level
             // directory scan never confuses them with the per-biome subfolders). Low bridges
             // to vanilla via VanillaIfPanicked. Mirrors contexts.xml.
-            Add("Combat_Boss",         "combat/_boss",          "Combat_High",       stale:20, cool:3, fadeintime:3, bypass:true, priority:52);
-            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, cool:3, fadeintime:3, bypass:true, priority:51, link:"Combat");
-            Add("Combat_Low",          "combat",                "VanillaIfPanicked", stale:20, cool:3, fadeintime:3, bypass:true, priority:50);
+            Add("Combat_Boss",         "combat/_boss",          "Combat_High",       stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:52);
+            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:51, link:"Combat");
+            Add("Combat_Low",          "combat",                "VanillaIfPanicked", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:50);
             // Biome-specific combat tiers (mirror contexts.xml). Each biome's combat/<biome>
             // folder mirrors the generic layout (root = Low, _high / _boss = escalations).
             // Each variant outranks its generic counterpart so biome combat music wins when
             // its folder has tracks, else falls back to the matching generic tier. The resolver
             // only stacks the variant for the one active tier, so the 60–62 band never inverts.
-            Add("Combat_Boss_Burnt_Forest", "combat/burnt_forest/_boss", "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
-            Add("Combat_High_Burnt_Forest", "combat/burnt_forest/_high", "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
-            Add("Combat_Low_Burnt_Forest",  "combat/burnt_forest",       "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
-            Add("Combat_Boss_Desert",       "combat/desert/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
-            Add("Combat_High_Desert",       "combat/desert/_high",       "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
-            Add("Combat_Low_Desert",        "combat/desert",             "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
-            Add("Combat_Boss_Forest",       "combat/forest/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
-            Add("Combat_High_Forest",       "combat/forest/_high",       "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
-            Add("Combat_Low_Forest",        "combat/forest",             "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
-            Add("Combat_Boss_Snow",         "combat/snow/_boss",         "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
-            Add("Combat_High_Snow",         "combat/snow/_high",         "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
-            Add("Combat_Low_Snow",          "combat/snow",               "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
-            Add("Combat_Boss_Wasteland",    "combat/wasteland/_boss",    "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:62);
-            Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, cool:3, fadeintime:3, bypass:true, priority:61);
-            Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:3, bypass:true, priority:60);
+            Add("Combat_Boss_Burnt_Forest", "combat/burnt_forest/_boss", "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Burnt_Forest", "combat/burnt_forest/_high", "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Burnt_Forest",  "combat/burnt_forest",       "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Desert",       "combat/desert/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Desert",       "combat/desert/_high",       "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Desert",        "combat/desert",             "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Forest",       "combat/forest/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Forest",       "combat/forest/_high",       "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Forest",        "combat/forest",             "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Snow",         "combat/snow/_boss",         "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Snow",         "combat/snow/_high",         "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Snow",          "combat/snow",               "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Wasteland",    "combat/wasteland/_boss",    "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
             Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:0.1f, bypass:true, priority:45, once:true);
-            Add("Tension",             "tension",               stale:30,                                      priority:30, warmup:2, link:"Suspense");
+            Add("Tension",             "tension",               stale:30,                                      priority:30, fadeintime:1.2f, warmup:2, link:"Suspense");
             Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, link:"TraderJoel");
             Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, link:"TraderJen");
             Add("Trader_Rekt",         "trader/rekt",           "Trader",                                      priority:26, link:"TraderRekt");
@@ -108,13 +128,13 @@ namespace CMM
             // Briefly (d9d1283) these pointed at POI_Tn directly. That was the wrong lever: it
             // reached the same music by hard-wiring one context to another, where letting both be
             // active gets there through the stack that already exists.
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, warmup:10, warmgroup:"poi");
-            Add("POI_Infested",        "poi/infested",          priority:20, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested",        "poi/infested",          priority:20, fadeintime:1.2f, warmup:10, warmgroup:"poi");
             // WARMUP 10, MATCHING THE INFESTED TIERS. Both are on the stack together now, so a
             // 5-vs-10 split meant the plain tier became eligible five seconds before the infested
             // one covering the same POI -- the lower-priority context arriving FIRST and then
@@ -142,8 +162,8 @@ namespace CMM
             // Multiplayer presence. Detection is relationship-only and ignores the server's
             // PvP mode; the warmup dwell keeps someone merely passing through from
             // interrupting. A stranger outranks ambient/home/trader exploration music.
-            Add("Online_Stranger",           "testing/online/stranger",    stale:30, priority:29, warmup:3);
-            Add("Online_Friend",             "testing/online/friendly",    stale:30, priority:14, warmup:3);
+            Add("Online_Stranger",           "testing/online/stranger",    stale:30, priority:29, fadeintime:1.2f, warmup:3);
+            Add("Online_Friend",             "testing/online/friendly",    stale:30, priority:14, fadeintime:1.2f, warmup:3);
 
             // The world-emitter / personal-radio source. Nothing auto-activates it: no vanilla
             // link and no detection wires it to a game state, so the resolver never puts it on

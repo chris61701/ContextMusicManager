@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 42;
+        internal const int CurrentSchema = 43;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -475,13 +475,14 @@ in your head want different levels. Hot-reloads — edit and save while the game
 NOTE Ambient defaults to 100% where Music defaults to 60%, so at 0.5 the speakers are
 ~4.4 dB louder than they used to be; 0.3 reproduces the old level exactly.
 
-RAISED FROM 0.5 TO 1.0. Occlusion used to leak: a route could pass diagonally between two
-blocks meeting at a corner and pay nothing, so walls were quietly under-charged everywhere
-there was geometry. 0.5 was settled by ear against that leak. With the leak closed the same
-speakers are correctly quieter, and 0.5 is no longer the level it was chosen to be. If you
-had already changed this setting your value is kept."),
-            F("WorldEmitterVolume",                  "CMMConfig.WorldEmitterVolume",                1f,
-              since: 1, changedIn: 5, was: 0.5f),
+BACK TO 0.5. This went 0.5 -> 1.0 in schema 5 to compensate for an occlusion leak (a route
+could pass diagonally between two blocks meeting at a corner and pay nothing, so walls were
+under-charged wherever there was geometry). That leak is long fixed, and the occlusion model
+has been rebuilt twice since -- half-voxel cells, then the single listener-anchored field --
+so the compensation is now double-counted and 1.0 is simply too loud. Settled by ear at 0.5.
+If you had already changed this setting your value is kept."),
+            F("WorldEmitterVolume",                  "CMMConfig.WorldEmitterVolume",                0.5f,
+              since: 1, changedIn: 43, was: new object[] { 1f, 0.5f }),
             F("WorldEmitterFade",                    "CMMConfig.WorldEmitterFade",                  1f),
             Cmt(@"Placement (""birth"") fade, seconds: how long a just-placed speaker takes to fade in — both
 when it joins a station that's already playing (per-speaker ramp) and when placing it is
