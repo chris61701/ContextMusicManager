@@ -315,9 +315,10 @@ namespace CMM
                         if (step >= n && sum <= 0) break;   // whole pool dead — stop probing
                         i = (i + 1) % n;
                     }
+                    st.WalkWindow = k;   // reached only on a walk that RAN to completion
                 }
-                catch { /* a failed walk resolves as dead air; the next window retries */ }
-                finally { st.WalkWindow = k; st.WalkPending = false; }
+                catch { /* threw: leave WalkWindow alone so the next resolve retries this window */ }
+                finally { st.WalkPending = false; }
             });
         }
 
@@ -375,7 +376,24 @@ namespace CMM
 
         // Measure a track's length in seconds (header open), session-cached; called on the walk
         // worker. The disk open runs OUTSIDE the lock so main-thread resolves never wait on IO.
-        // 0 ⇒ dead file (open failed) — cached too, so it's skipped deterministically everywhere.
+        //
+        // 0 ⇒ dead file, skipped deterministically everywhere. Caching that is DELIBERATE: the
+        // broadcast schedule only works if every client computes the same chain, so a file one
+        // client skips must be skipped by all of them. But it used to cache 0 for ANY open
+        // failure, and that conflates two different things:
+        //
+        //   • the file is there and cannot be decoded — deterministic, every client agrees,
+        //     cache it forever
+        //   • the file could not be opened JUST NOW — a drive hiccup, a network share blinking.
+        //     Client-specific and temporary; caching it is wrong
+        //
+        // Caching the second was a silent, permanent, whole-library failure. `_lenFrames` has no
+        // expiry and is never cleared, and the process outlives a world reload, so one blip during
+        // one walk marked every file it touched as dead air for the rest of the RUN — the drive
+        // came back and nothing recovered. 13 of the 16 stations here live on an external drive.
+        //
+        // So: cache 0 only when the file is genuinely reachable-and-unusable. If its ROOT is not
+        // reachable, cache nothing and leave it unknown, so a later walk retries it.
         private static double ProbeLength(string file)
         {
             lock (_lenLock)
@@ -384,9 +402,41 @@ namespace CMM
             long frames = 0; int rate = 0;
             IntPtr dec = AudioDecoder.OpenNativeHandle(file, out int kind, out _, out int r, out long total);
             if (dec != IntPtr.Zero) { frames = total; rate = r; AudioDecoder.CloseNativeHandle(dec, kind); }
+            if (frames <= 0 && !RootReachable(file)) return 0;   // transient — do not poison
             lock (_lenLock) { _lenFrames[file] = frames; _lenRate[file] = rate; }
             return (frames > 0 && rate > 0) ? (double)frames / rate : 0;
         }
+
+        // Is the volume this file lives on actually there? Distinguishes "undecodable" from
+        // "unreachable". Deliberately NOT SafeExists, which reports an IO error as PRESENT — right
+        // for keeping playback alive, exactly backwards for deciding what to cache.
+        private static bool RootReachable(string file)
+        {
+            try
+            {
+                string root = Path.GetPathRoot(file);
+                return string.IsNullOrEmpty(root) || Directory.Exists(root);
+            }
+            catch { return false; }   // malformed path ⇒ treat as unreachable, i.e. don't cache
+        }
+
+        // Drop the DEAD entries (length 0) so they are probed again. Good lengths are kept — they
+        // are the expensive ones and they do not go stale. Called when the catalog is rebuilt,
+        // which is the moment the pool has demonstrably changed, and on world entry.
+        internal static void ForgetDeadLengths()
+        {
+            lock (_lenLock)
+            {
+                if (_lenFrames.Count == 0) return;
+                _deadScratch.Clear();
+                foreach (var kv in _lenFrames) if (kv.Value <= 0) _deadScratch.Add(kv.Key);
+                foreach (string f in _deadScratch) { _lenFrames.Remove(f); _lenRate.Remove(f); }
+                if (_deadScratch.Count > 0)
+                    CMMConfig.D($"[CMM] Radio: re-probing {_deadScratch.Count} track(s) previously seen as dead.");
+                _deadScratch.Clear();
+            }
+        }
+        private static readonly List<string> _deadScratch = new List<string>();
 
         // A track failed to open AT PLAY time (vanished since its walk probe): mark it dead in the
         // length cache so every chain walk skips it — schedules shift identically for everyone who
@@ -493,6 +543,11 @@ namespace CMM
 
         private static void RebuildCatalog(string src)
         {
+            // Give previously-dead tracks another chance. A rebuild means the pool demonstrably
+            // changed, so this is the natural moment to re-probe anything a transient failure (or
+            // a genuinely missing file that has since returned) left marked as zero-length.
+            ForgetDeadLengths();
+
             // Snapshot the old stations so the emitter consumer can migrate live voices by name.
             var old = new Dictionary<string, RadioStation>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < Stations.Count; i++) old[Stations[i].Name] = Stations[i];
