@@ -33,6 +33,21 @@ namespace CMM
     // This file was factored OUT of the GV_V3 EmitterAudioLayer so the personal radio works on
     // A20/A21/2.6 too: everything here binds only version-neutral surfaces (IO, decoder, mixer,
     // UnityEngine, and GamePrefs via GamePrefsCompat). Main-thread only (decoder opens).
+    // Why a resolve found nothing on air. The caller used to get a bare `false` for all of
+    // these and reported every one as "none decodable" -- which is true of exactly one. A log
+    // line telling you to check the file format when the real answer is "the background chain
+    // walk has not finished yet, ask again in a second" sends you hunting a problem that is not
+    // there, and it fired in a normal session (14:35 log: the warning at 142.4 s, the same
+    // station playing happily at 144.2 s).
+    internal enum ResolveMiss
+    {
+        None,            // resolved: something is on air
+        NotReady,        // no pool yet (catalog still enumerating, or the folder is empty)
+        WalkPending,     // lengths not cached yet; the background walk is running -- TRANSIENT
+        ChainTooLong,    // hit WalkCap before covering the pool; inconclusive, not a verdict
+        NoUsableTracks,  // walked the WHOLE pool and every track was dead -- the real complaint
+    }
+
     internal sealed class RadioStation
     {
         // Max speaker positions fed to one emitter voice (matches native CMM_MAX_EMIT_PTS).
@@ -46,6 +61,7 @@ namespace CMM
         // complaint arrived three or four times a second -- ~700 lines in one session
         // from a single mislabelled file. Throttled per station; the condition is real
         // and worth reporting, just not that often.
+        public ResolveMiss LastMiss = ResolveMiss.None;   // why the last resolve found nothing
         public float NoTracksLoggedAt = -999f;                // FNV-1a of the lowercased name (PRE-shuffle) — anchor mixing
         public bool Ready => Order != null && Order.Length > 0;   // instant — no probing gate
 
@@ -232,10 +248,15 @@ namespace CMM
         // CACHE-ONLY: walks cached lengths from the window's anchor; the first uncached length
         // kicks the background window walk and returns false — callers already treat false /
         // OnAir == null as "not yet", and the walk lands within ~a second.
+        // Existing 4-out callers keep working; they do not care WHY, only whether.
         internal static bool ResolveAt(RadioStation st, double B, out string file, out int idx, out double offset)
+            => ResolveAt(st, B, out file, out idx, out offset, out _);
+
+        internal static bool ResolveAt(RadioStation st, double B, out string file, out int idx, out double offset,
+                                       out ResolveMiss why)
         {
-            file = null; idx = 0; offset = 0;
-            if (!st.Ready) return false;
+            file = null; idx = 0; offset = 0; why = ResolveMiss.None;
+            if (!st.Ready) { why = ResolveMiss.NotReady; return false; }
             double A = CMMConfig.RadioAnchorSeconds;
             long k = WindowIndex(B);
             double rem = B - k * A;
@@ -259,8 +280,11 @@ namespace CMM
                     i = (i + 1) % n;
                 }
             }
-            if (needWalk) EnsureWindowWalk(st, k);
-            return false;   // walk pending, or the whole chain is dead (WalkCap) — dead air
+            if (needWalk) { EnsureWindowWalk(st, k); why = ResolveMiss.WalkPending; return false; }
+            // Fell out of the loop with every visited entry dead. That is only a verdict on the
+            // POOL if the walk actually covered it: with n > WalkCap we merely sampled a prefix.
+            why = n <= WalkCap ? ResolveMiss.NoUsableTracks : ResolveMiss.ChainTooLong;
+            return false;   // dead air
         }
 
         // Probe window k's chain on a ThreadPool worker: header-open each not-yet-cached file from
@@ -328,9 +352,9 @@ namespace CMM
         // Fills the station's shared OnAir/OnAirIdx/OnAirOffset scratch (emitter-layer consumer).
         internal static void ResolveOnAir(RadioStation st, double B)
         {
-            if (ResolveAt(st, B, out string file, out int idx, out double off))
-            { st.OnAir = file; st.OnAirIdx = idx; st.OnAirOffset = off; }
-            else st.OnAir = null;
+            if (ResolveAt(st, B, out string file, out int idx, out double off, out ResolveMiss why))
+            { st.OnAir = file; st.OnAirIdx = idx; st.OnAirOffset = off; st.LastMiss = ResolveMiss.None; }
+            else { st.OnAir = null; st.LastMiss = why; }
         }
 
         // A track ENDED (decoder EOF): re-sync to the schedule. Pause-drift guard: worldTime freezes

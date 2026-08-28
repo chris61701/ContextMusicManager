@@ -1188,15 +1188,27 @@ namespace CMM
             if (st.OnAir == null) ResolveOnAir(st, BroadcastSeconds());
             if (st.OnAir == null)
             {
-                // Throttled: this path is retried every tick for as long as a speaker is in
-                // range, so an undecodable pool used to flood the log. One line every 30 s
-                // still says what is wrong without burying everything else.
-                if (CmmClock.Now - st.NoTracksLoggedAt > 30f)
+                // WARN ONLY WHEN THE POOL IS ACTUALLY THE PROBLEM. This used to warn on every
+                // failed resolve, but a resolve fails for several reasons and only one of them is
+                // "none decodable": most of the time at startup the background chain walk simply
+                // has not cached the track lengths yet. That is transient and self-correcting, and
+                // telling the player to go and check their file formats over it sends them after a
+                // problem that does not exist -- observed in a normal session, the warning at
+                // 142.4 s and the same station playing happily at 144.2 s.
+                //
+                // Throttled either way: this path retries every tick while a speaker is in range,
+                // so an genuinely dead pool used to put ~700 lines in one session.
+                if (st.LastMiss == ResolveMiss.NoUsableTracks
+                    && CmmClock.Now - st.NoTracksLoggedAt > 30f)
                 {
                     st.NoTracksLoggedAt = CmmClock.Now;
                     Log.Warning($"[CMM] Station '{st.Name}': no playable tracks "
                               + $"({st.Order?.Length ?? 0} file(s) in the pool, none decodable). "
                               + "Check the format, or `cmm roots` for where they came from.");
+                }
+                else if (st.LastMiss != ResolveMiss.NoUsableTracks)
+                {
+                    CMMConfig.D($"[CMM] Station '{st.Name}': nothing on air yet ({st.LastMiss}).");
                 }
                 return;
             }
