@@ -72,7 +72,22 @@ namespace CMM
             public string Hash;
             public long Size;
             public long MtimeTicks;       // file last-write UTC ticks (exact round-trip)
+            public long Used;             // monotonic stamp, for the LRU bound below
         }
+
+        // Monotonic counter behind PathRecord.Used. Not a clock: it only has to order accesses.
+        private static long _useSeq;
+
+        // How many measured paths to keep in MEMORY for the session. The store used to be bounded
+        // by RELEVANCE -- RetainOnly dropped anything not playing, staged or on-air right now,
+        // about a second after it stopped being any of those. That made a measurement good for a
+        // moment rather than for the session: re-enter a context or re-tune to a station and every
+        // track was measured again from scratch, so coverage never accumulated no matter how long
+        // you played. Bounding by SIZE instead is what makes "measured once this session" true.
+        //
+        // 8192 x ~230 B/track is under 2 MB against a multi-GB heap, and covers this library
+        // (3,528 radio tracks) several times over, so the cap is a backstop rather than a policy.
+        private const int MaxRetainedPaths = 8192;
 
         private static readonly Dictionary<string, Measurement> _byHash =
             new Dictionary<string, Measurement>(StringComparer.Ordinal);
@@ -104,6 +119,7 @@ namespace CMM
             if (key == null) return UnmeasuredGain();
 
             if (!_byPath.TryGetValue(key, out PathRecord pr)) return UnmeasuredGain();
+            pr.Used = ++_useSeq; _byPath[key] = pr;   // LRU touch: recently PLAYED outranks recently measured
             if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return UnmeasuredGain();
             if (m.MetricVersion != MetricVersion) return UnmeasuredGain();
             return ComputeGain(m);
@@ -200,7 +216,7 @@ namespace CMM
                 _byHash[hash] = m;
             }
 
-            _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks };
+            _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks, Used = ++_useSeq };
             MirrorFlagsForPath(absolutePath, m);
             _dirty = true;   // every measurement persists (see PERSISTENCE POLICY)
         }
@@ -211,7 +227,7 @@ namespace CMM
         {
             string key = ToRelKey(absolutePath);
             if (key == null || hash == null || !_byHash.TryGetValue(hash, out Measurement m)) return;
-            _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks };
+            _byPath[key] = new PathRecord { Hash = hash, Size = size, MtimeTicks = mtimeTicks, Used = ++_useSeq };
             MirrorFlagsForPath(absolutePath, m);
             _dirty = true;   // the rebound path must reach disk with its measurement
         }
@@ -365,8 +381,18 @@ namespace CMM
         private static readonly HashSet<string> _retainKeep = new HashSet<string>(StringComparer.Ordinal);
         private static readonly HashSet<string> _retainLiveHashes = new HashSet<string>(StringComparer.Ordinal);
         private static readonly List<string> _retainDrop = new List<string>();
+        // Bound the store. The keep-set no longer decides what SURVIVES -- only what is protected
+        // from the size bound -- because bounding by relevance meant a measurement lasted about a
+        // second past the moment it was needed, and coverage could never accumulate over a session.
+        // See MaxRetainedPaths.
+        //
+        // Eviction is least-recently-used among entries that are neither in the keep-set nor
+        // user-flagged, and it only runs when the cap is actually exceeded. On this library it
+        // never fires; it exists so an enormous library cannot grow the store without limit.
         public static void RetainOnly(ICollection<string> keepAbsolutePaths)
         {
+            if (_byPath.Count <= MaxRetainedPaths) { PruneOrphanHashes(); return; }
+
             _retainKeep.Clear();
             foreach (string p in keepAbsolutePaths)
             {
@@ -374,7 +400,7 @@ namespace CMM
                 if (k != null) _retainKeep.Add(k);
             }
 
-            // Remove path records not in the keep set (trimmed ones are always kept).
+            // Candidates: not protected, not user data. Ordered by last use, oldest first.
             _retainDrop.Clear();
             foreach (var kv in _byPath)
             {
@@ -382,9 +408,18 @@ namespace CMM
                 if (_byHash.TryGetValue(kv.Value.Hash, out Measurement m) && IsPersistWorthy(m)) continue;
                 _retainDrop.Add(kv.Key);
             }
-            foreach (string k in _retainDrop) _byPath.Remove(k);
+            _retainDrop.Sort((a, b) => _byPath[a].Used.CompareTo(_byPath[b].Used));
 
-            // GC any hash no surviving path references and that carries no manual trim.
+            int over = _byPath.Count - MaxRetainedPaths;
+            for (int i = 0; i < _retainDrop.Count && over > 0; i++, over--)
+                _byPath.Remove(_retainDrop[i]);
+
+            PruneOrphanHashes();
+        }
+
+        // Drop any measurement no surviving path references and that carries no user data.
+        private static void PruneOrphanHashes()
+        {
             _retainLiveHashes.Clear();
             foreach (var kv in _byPath) _retainLiveHashes.Add(kv.Value.Hash);
             _retainDrop.Clear();
@@ -623,10 +658,21 @@ namespace CMM
         {
             if (_filePath == null) return null;
 
+            // ONLY USER DATA IS PERSISTED. A plain measurement is cheap to redo and belongs to the
+            // session; a trim, ban or favourite is something the player chose and could not
+            // reproduce by re-measuring. So loudness.xml holds what the user did, not what the mod
+            // computed -- it stays a handful of lines instead of growing into a library index.
+            //
+            // This is deliberately the trim-only policy that was abandoned on 2026-07-10, when it
+            // made the radio start hot at every launch: the world clock freezes offline, so a
+            // relaunch rejoins the same track and had to re-measure it. What makes it viable now is
+            // that a rejoin no longer waits for a whole-file measurement -- the progressive measure
+            // publishes a usable gain within about a second and converges from there.
             var snap = new SaveSnapshot { FilePath = _filePath };
             foreach (var kv in _byHash)
             {
                 Measurement m = kv.Value;
+                if (!IsPersistWorthy(m)) continue;
                 snap.Tracks.Add(new SaveSnapshot.TrackLine
                 {
                     Hash = kv.Key, Lufs = m.Lufs, Peak = m.Peak,

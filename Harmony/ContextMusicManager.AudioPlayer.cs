@@ -751,9 +751,18 @@ namespace CMM
             if (extra > 0 && CMMConfig.LoudnessNormalizationEnabled
                 && cache.directorySnapshot != null && cache.directorySnapshot.Length > 1)
             {
+                // Skip tracks that can never be picked. `directorySnapshot` is the raw folder
+                // listing -- bans are applied later, at selection time -- so this used to spend
+                // measurements on banned tracks. Worse than wasted: a banned measurement is
+                // persist-worthy, so it was written to loudness.xml permanently, filling the file
+                // with music the player has explicitly said they never want to hear.
                 string[] snap = cache.directorySnapshot;
                 for (int k = 0; k < extra; k++)
-                    RequestPrewarm(snap[UnityEngine.Random.Range(0, snap.Length)]);
+                {
+                    string pick = snap[UnityEngine.Random.Range(0, snap.Length)];
+                    if (LoudnessStore.IsBannedPath(pick) || _invalidFiles.Contains(pick)) continue;
+                    RequestPrewarm(pick);
+                }
             }
 
             var ps = new PreStagedAdvance
