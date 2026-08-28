@@ -4,7 +4,7 @@ All notable changes to Context Music Manager are documented here.
 
 ## 1.0.5
 
-**Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — in progress.
+**Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — 2026-08-27.
 Everything in this section ships in 1.0.5; the RC line above is only there so a tester can tell
 which build they are holding. Items added after RC2 are marked *(RC3)*.
 
@@ -152,6 +152,11 @@ they now behave, rather than as a history of how they got there.
 
 ### Changed
 
+- **World speakers default to half volume** *(RC3)*. They were set to full to compensate for an
+  occlusion bug that has since been fixed twice over, so the compensation was being counted
+  twice and they were too loud. If you had already chosen your own value it is kept
+  (`WorldEmitterVolume`).
+
 - **Debug keybinds moved** to make room for the coverage panel: `Alt+Numpad8` is now coverage,
   the context HUD moves to `Alt+Numpad9`, and its GC re-arm to `Alt+Numpad6`. Existing settings
   files are migrated. Both panels now read their keys from your configuration and show them in
@@ -249,6 +254,34 @@ they now behave, rather than as a history of how they got there.
   exactly as it was when the console closes.
 
 ### Fixed
+
+- **FLAC files with an ID3 tag would not play at all** *(RC3)*. A FLAC is supposed to begin with
+  a `fLaC` marker, but plenty of tagging programs write an ID3 tag in front of one anyway. Those
+  files play everywhere else and were silently skipped here — never played, never loudness-
+  measured, with nothing to tell you why. In one 9,839-file library 146 of them were affected,
+  and because tagging tools work an album at a time they arrive in whole albums. The tag is now
+  stepped over.
+- **Speakers stopped being detected, sometimes for the rest of the session** *(RC3)*. Placing more
+  speakers did not help and only restarting the game fixed it. The mod looked up the game's
+  internal ids for speaker blocks once per session, but the game reassigns those ids every time a
+  world loads — so on the second world of a session they could point at the wrong block, or at
+  nothing, and every speaker in the world went silent at once. Ids are now re-read per world.
+- **Leaving a world kept its acoustics in memory** *(RC3)*. The per-speaker sound maps were never
+  released when you returned to the menu — up to ~43 MB held indefinitely — and a speaker at the
+  same coordinates in a different world could be handed the old world's map.
+- **The radio no longer loses your place** *(RC3)*. Switching the radio on took over the music
+  layer without noting where the track had got to, so switching it off restarted the context on a
+  different track from the beginning. It now resumes exactly where you left it, however long you
+  listened — a broadcast no longer counts as time away from the context you are standing in.
+- **Music that came and went was cut off before it had finished arriving** *(RC3)*. Contexts
+  driven by things that vanish in seconds — enemies, nearby players, POI state — had 3–5 second
+  fade-ins, but a context is dropped 1.5 seconds after its trigger disappears, so a flicker
+  cancelled the fade about a third of the way up and you never really heard it. Those contexts
+  now fade in inside that window; music tied to where you are or what time it is keeps its slow
+  fade.
+- **A misleading "none decodable" warning** *(RC3)*. A station that was simply still preparing
+  reported that its files could not be decoded and told you to check their format. It now says
+  that only when the whole station really is unplayable.
 
 - **The radio kept playing after you switched it off** *(RC3)*. Changing station deliberately does
   not fade the station you are leaving — it plays on, buried under the tuning static, until the
