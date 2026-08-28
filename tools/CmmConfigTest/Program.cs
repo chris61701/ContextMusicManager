@@ -40,6 +40,7 @@ namespace CMM
 
             Console.WriteLine();
             _fail += ContextTests.Run(repo);
+            _fail += UpgradeMatrix.Run(repo);
 
             Console.WriteLine();
             _fail += XmlHealth.Run(repo);
