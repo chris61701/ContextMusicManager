@@ -132,11 +132,10 @@ namespace CMM
                                     + $"changedIn: {cur}, was: {b.Default} — otherwise this change reaches "
                                     + "nobody who already has a config file.");
                 }
-                else if (s.WasDefault == null || !SameParsed(s, CMMSettingsIO.Format(s, s.WasDefault), b.Default))
+                else if (!AnyFormerDefaultMatches(s, b.Default))
                 {
                     fail++;
-                    Console.WriteLine($"  FAIL  {name}: was: is "
-                                    + $"'{(s.WasDefault == null ? "null" : CMMSettingsIO.Format(s, s.WasDefault))}' "
+                    Console.WriteLine($"  FAIL  {name}: was: is '{DescribeWas(s)}' "
                                     + $"but the released default was '{b.Default}'. Users sitting on "
                                     + $"'{b.Default}' will not be migrated.");
                 }
@@ -181,5 +180,33 @@ namespace CMM
                 return CMMSettingsIO.SameValue(s, pa, pb);
             return string.Equals(a, b, StringComparison.Ordinal);
         }
-    }
+    
+        // `was:` may carry EVERY default a setting has ever had, not just the previous one —
+        // CMMSettingsIO.MatchesAnyFormerDefault takes an object[] for exactly that. The guard
+        // formatted s.WasDefault as a single scalar, so the first setting to use the array form
+        // AND actually differ from the baseline crashed it with an InvalidCastException instead
+        // of reporting anything (WorldEmitterVolume, schema 43). The two had drifted because the
+        // array form only ever appeared on settings whose baseline already agreed, which never
+        // reached this branch.
+        static IEnumerable<object> FormerDefaults(SettingDef s)
+        {
+            if (s.WasDefault == null) yield break;
+            if (s.WasDefault is object[] arr) { foreach (object o in arr) yield return o; }
+            else yield return s.WasDefault;
+        }
+
+        static bool AnyFormerDefaultMatches(SettingDef s, string baselineDefault)
+        {
+            foreach (object o in FormerDefaults(s))
+                if (SameParsed(s, CMMSettingsIO.Format(s, o), baselineDefault)) return true;
+            return false;
+        }
+
+        static string DescribeWas(SettingDef s)
+        {
+            var parts = new List<string>();
+            foreach (object o in FormerDefaults(s)) parts.Add(CMMSettingsIO.Format(s, o));
+            return parts.Count == 0 ? "null" : string.Join(" / ", parts);
+        }
+}
 }

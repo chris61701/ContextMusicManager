@@ -4,7 +4,7 @@
 # stale binary silently checks a stale schema. This file sat at 5 while the code was at 42,
 # and the guard reported 33 failures against a CurrentSchema of 17 baked in weeks earlier.
 # Copying a fresh ContextMusicManager.dll beside the exe does nothing - it is not read.
-schema=42
+schema=43
 AddonMusicScanEnabled|Bool|true
 BannerFadeSeconds|Float|1.0
 BannerHoldSeconds|Float|1.0
@@ -189,4 +189,4 @@ WorldEmitterReverbWet|Float|0.6
 WorldEmitterSource|String|Radio
 WorldEmitterStereoWidth|Float|0.8
 WorldEmitterTickHz|Float|10.0
-WorldEmitterVolume|Float|1.0
+WorldEmitterVolume|Float|0.5
