@@ -176,6 +176,11 @@ struct cmm_decoder {
      * buffer, which the file open reads whole since ADTS music files are small). */
     HANDLE_AACDECODER aac;        /* fdk-aac handle */
     MP4D_demux_t*     mp4;        /* minimp4 demux (MP4 container; NULL for raw ADTS) */
+    /* FRAGMENTED-MP4 sample index. minimp4 reads sample tables out of 'moov' ('stsz'/'stco'),
+     * which a fragmented file does not have -- its samples live in 'trun' boxes inside each
+     * 'moof'. Then we build the table ourselves and this stands in for MP4D_frame_offset.
+     * NULL for ordinary MP4s. */
+    struct cmm_frag_s { long long off; unsigned size; }* frag;
     long long         srclen;     /* length of buf (memory open) for cmm_mp4_read bounds */
     unsigned          aac_track;  /* index of the chosen audio track (MP4) */
     unsigned          aac_sample; /* next MP4 sample (access unit) index to decode */
@@ -1362,6 +1367,164 @@ static void cmm_mp4_prime_moov(cmm_decoder* d, long long filesize)
     }
 }
 
+/* ── Fragmented MP4 (fMP4 / DASH) ─────────────────────────────────────────────
+ * A fragmented file carries a nearly empty 'moov' -- track metadata and the decoder config,
+ * but NO sample tables -- and then repeats 'moof'+'mdat' pairs, each 'moof' describing the
+ * samples in the 'mdat' that follows. minimp4 knows those box types only for WRITING; its
+ * demuxer parses 'stbl' alone, so it reports the track with sample_count 0, cmm_aac_init's
+ * first decode returns EOF immediately, and the open fails with no useful error.
+ *
+ * That is not an exotic shape. It is what NotebookLM "Audio Overview" exports and what most
+ * podcast / DASH-derived tooling produces -- nine files in one user's station, none playable.
+ *
+ * MP4D_open still succeeds and still hands us the decoder config (verified: a 16-byte DSI that
+ * fdk-aac accepts), so the ONLY missing piece is the sample table. Walk the fragments once at
+ * open and build it: for every 'moof', find its 'traf', read 'tfhd' for the base offset and the
+ * defaults, then each 'trun' for the per-sample sizes, accumulating offsets within a run.
+ *
+ * Seeking needs no special case: cmm_aac_seek already works in sample INDICES, so once
+ * aac_count and this array are populated it behaves exactly as for an ordinary MP4.
+ * ────────────────────────────────────────────────────────────────────────── */
+static unsigned cmm_rd32(const unsigned char* p)
+{ return ((unsigned)p[0]<<24)|((unsigned)p[1]<<16)|((unsigned)p[2]<<8)|(unsigned)p[3]; }
+static long long cmm_rd64(const unsigned char* p)
+{ return ((long long)cmm_rd32(p)<<32) | (long long)(unsigned)cmm_rd32(p+4); }
+
+/* Append one sample; grows geometrically. 0 on success. */
+static int cmm_frag_push(cmm_decoder* d, long long* cap, long long off, unsigned size)
+{
+    if ((long long)d->aac_count >= *cap) {
+        long long nc = *cap ? *cap * 2 : 4096;
+        void* nb = realloc(d->frag, (size_t)nc * sizeof(*d->frag));
+        if (!nb) return -1;
+        d->frag = nb; *cap = nc;
+    }
+    d->frag[d->aac_count].off  = off;
+    d->frag[d->aac_count].size = size;
+    d->aac_count++;
+    return 0;
+}
+
+/* Parse one 'traf' at [off, off+len) and append its samples. */
+static int cmm_frag_traf(cmm_decoder* d, long long off, long long len, long long moofOff, long long* cap)
+{
+    unsigned char b[16];
+    long long p = off, end = off + len;
+    long long baseOff = moofOff;      /* default-base-is-moof, and the spec default too */
+    unsigned defSize = 0;
+
+    /* Pass 1: 'tfhd' -- the base offset and the per-run defaults. */
+    while (p + 8 <= end) {
+        if (cmm_mp4_read(p, b, 8, d)) return -1;
+        long long bs = (long long)cmm_rd32(b);
+        unsigned ty = cmm_rd32(b + 4);
+        long long hdr = 8;
+        if (bs == 1) { if (cmm_mp4_read(p + 8, b, 8, d)) return -1; bs = cmm_rd64(b); hdr = 16; }
+        if (bs < hdr || p + bs > end) break;
+
+        if (ty == 0x74666864u) {      /* 'tfhd' */
+            unsigned char h[8];
+            if (cmm_mp4_read(p + hdr, h, 8, d)) return -1;
+            unsigned flags = cmm_rd32(h) & 0x00FFFFFFu;   /* top byte is the version */
+            long long q = p + hdr + 8;                    /* past version/flags + track_ID */
+            if (flags & 0x000001u) {                      /* base-data-offset-present */
+                if (cmm_mp4_read(q, h, 8, d)) return -1;
+                baseOff = cmm_rd64(h); q += 8;
+            }
+            if (flags & 0x000002u) q += 4;                /* sample-description-index */
+            if (flags & 0x000008u) q += 4;                /* default-sample-duration */
+            if (flags & 0x000010u) {                      /* default-sample-size */
+                if (cmm_mp4_read(q, h, 4, d)) return -1;
+                defSize = cmm_rd32(h); q += 4;
+            }
+        }
+        p += bs;
+    }
+
+    /* Pass 2: every 'trun'. */
+    p = off;
+    while (p + 8 <= end) {
+        if (cmm_mp4_read(p, b, 8, d)) return -1;
+        long long bs = (long long)cmm_rd32(b);
+        unsigned ty = cmm_rd32(b + 4);
+        long long hdr = 8;
+        if (bs == 1) { if (cmm_mp4_read(p + 8, b, 8, d)) return -1; bs = cmm_rd64(b); hdr = 16; }
+        if (bs < hdr || p + bs > end) break;
+
+        if (ty == 0x7472756eu) {      /* 'trun' */
+            unsigned char h[8];
+            if (cmm_mp4_read(p + hdr, h, 8, d)) return -1;
+            unsigned flags = cmm_rd32(h) & 0x00FFFFFFu;
+            unsigned n     = cmm_rd32(h + 4);
+            long long q = p + hdr + 8;
+            long long dataOff = baseOff;
+            if (flags & 0x000001u) {  /* data-offset-present: SIGNED, relative to baseOff */
+                if (cmm_mp4_read(q, h, 4, d)) return -1;
+                dataOff = baseOff + (int)cmm_rd32(h); q += 4;
+            }
+            if (flags & 0x000004u) q += 4;    /* first-sample-flags */
+
+            int rec = 0;                       /* per-sample record width, from the flags */
+            if (flags & 0x000100u) rec += 4;   /* duration */
+            if (flags & 0x000200u) rec += 4;   /* size */
+            if (flags & 0x000400u) rec += 4;   /* flags */
+            if (flags & 0x000800u) rec += 4;   /* composition offset */
+
+            long long cur = dataOff;
+            for (unsigned i = 0; i < n; i++) {
+                unsigned sz = defSize;
+                if (rec) {
+                    unsigned char r[16];
+                    if (rec > (int)sizeof(r) || cmm_mp4_read(q, r, (size_t)rec, d)) return -1;
+                    int k = 0;
+                    if (flags & 0x000100u) k += 4;
+                    if (flags & 0x000200u) sz = cmm_rd32(r + k);
+                    q += rec;
+                }
+                if (sz == 0) return -1;        /* no size given anywhere: cannot index it */
+                if (cmm_frag_push(d, cap, cur, sz)) return -1;
+                cur += sz;
+            }
+        }
+        p += bs;
+    }
+    return 0;
+}
+
+/* Walk the top-level boxes and index every fragment. 0 on success. */
+static int cmm_mp4_build_fragment_index(cmm_decoder* d, long long filesize)
+{
+    unsigned char b[16];
+    long long cap = 0, p = 0;
+    d->aac_count = 0;
+    while (p + 8 <= filesize) {
+        if (cmm_mp4_read(p, b, 8, d)) break;
+        long long bs = (long long)cmm_rd32(b);
+        unsigned ty = cmm_rd32(b + 4);
+        long long hdr = 8;
+        if (bs == 1) { if (cmm_mp4_read(p + 8, b, 8, d)) break; bs = cmm_rd64(b); hdr = 16; }
+        if (bs == 0) break;                    /* runs to EOF: nothing further to index */
+        if (bs < hdr || p + bs > filesize) break;
+
+        if (ty == 0x6d6f6f66u) {               /* 'moof' -> its 'traf' children */
+            long long q = p + hdr, qend = p + bs;
+            while (q + 8 <= qend) {
+                unsigned char c[16];
+                if (cmm_mp4_read(q, c, 8, d)) return -1;
+                long long cs = (long long)cmm_rd32(c);
+                unsigned cty = cmm_rd32(c + 4);
+                long long chdr = 8;
+                if (cs == 1) { if (cmm_mp4_read(q + 8, c, 8, d)) return -1; cs = cmm_rd64(c); chdr = 16; }
+                if (cs < chdr || q + cs > qend) break;
+                if (cty == 0x74726166u && cmm_frag_traf(d, q + chdr, cs - chdr, p, &cap)) return -1;
+                q += cs;
+            }
+        }
+        p += bs;
+    }
+    return d->aac_count > 0 ? 0 : -1;
+}
+
 /* Decode exactly one access unit into d->pcm (interleaved f32). Returns the
  * number of frames (per channel) produced, 0 at end-of-stream, <0 on error. */
 static int cmm_aac_decode_one_au(cmm_decoder* d)
@@ -1373,9 +1536,14 @@ static int cmm_aac_decode_one_au(cmm_decoder* d)
     if (d->mp4) {
         /* ── MP4: one sample == one AAC access unit ── */
         if (d->aac_sample >= d->aac_count) return 0;   /* EOF */
-        unsigned fb = 0, ts = 0, dur = 0;
-        MP4D_file_offset_t ofs = MP4D_frame_offset(d->mp4, d->aac_track,
-                                                   d->aac_sample, &fb, &ts, &dur);
+        unsigned fb; MP4D_file_offset_t ofs;
+        if (d->frag) {                                 /* fragmented: our own index */
+            ofs = (MP4D_file_offset_t)d->frag[d->aac_sample].off;
+            fb  = d->frag[d->aac_sample].size;
+        } else {
+            unsigned ts = 0, dur = 0;
+            ofs = MP4D_frame_offset(d->mp4, d->aac_track, d->aac_sample, &fb, &ts, &dur);
+        }
         d->aac_sample++;
         if (fb == 0) return 0;
 
@@ -1513,6 +1681,12 @@ static int cmm_aac_init(cmm_decoder* d, long long filesize, int* channels,
         d->aac_track = (unsigned)found;
         d->aac_count = d->mp4->track[found].sample_count;
         d->aac_sample = 0;
+
+        /* No sample table in 'moov' => a FRAGMENTED file. Index its 'moof's ourselves; see
+         * cmm_mp4_build_fragment_index. Everything downstream (decode, seek, duration) then
+         * works off aac_count exactly as it does for an ordinary MP4. */
+        if (d->aac_count == 0 && cmm_mp4_build_fragment_index(d, filesize) != 0)
+            return -1;
 
         d->aac = aacDecoder_Open(TT_MP4_RAW, 1);
         if (!d->aac) return -1;
@@ -1737,6 +1911,7 @@ CMM_API void cmm_aac_close(cmm_decoder* d)
     if (!d) return;
     if (d->aac)   aacDecoder_Close(d->aac);
     if (d->mp4) { MP4D_close(d->mp4); free(d->mp4); }
+    if (d->frag)  free(d->frag);   /* fragmented-MP4 sample index */
     if (d->moov_buf) free(d->moov_buf);
     if (d->aubuf) free(d->aubuf);
     if (d->sbuf)  free(d->sbuf);   /* streaming-ADTS refill window */

@@ -46,6 +46,9 @@ $nouns      = @('Requiem','Nightfall','Horizon','Reverie','Tide','Vigil','Descen
 # ── Format assignment: always the three video containers the mixer must handle, plus two
 #    rotating audio formats so every native decoder gets exercised across the library. ──
 $audioPool = @('.ogg','.mp3','.flac','.wav','.opus','.m4a','.webm')
+# A fragmented-mp4 track carries the .m4a extension on disk (that is how such files arrive);
+# '.fmp4' is only this script's internal key for the ffmpeg flags above.
+$fragExt = '.m4a'
 
 function Get-FfmpegCodecArgs([string]$ext) {
     switch ($ext) {
@@ -54,6 +57,11 @@ function Get-FfmpegCodecArgs([string]$ext) {
         '.flac' { @('-c:a','flac') }
         '.wav'  { @('-c:a','pcm_s16le') }
         '.opus' { @('-c:a','libopus','-b:a','128k') }
+        # FRAGMENTED mp4 (moof/trun, empty moov). Not a curiosity: it is what NotebookLM
+        # "Audio Overview" and most podcast/DASH tooling export, and it silently failed to open
+        # until 2026-08-28 because minimp4's demuxer reads sample tables from 'moov' alone.
+        # One in the corpus keeps the fragment-index path exercised by every soak.
+        '.fmp4' { @('-c:a','aac','-b:a','160k','-movflags','frag_keyframe+empty_moov+default_base_moof','-f','mp4') }
         '.m4a'  { @('-c:a','aac','-b:a','160k') }
         '.mp4'  { @('-c:a','aac','-b:a','160k') }   # audio-only mp4 (video container)
         '.m4v'  { @('-c:a','aac','-b:a','160k') }   # audio-only mp4, .m4v ext (video container)
@@ -71,8 +79,11 @@ function New-SeededRandom([string]$key) {
 }
 
 [xml]$xml = Get-Content -LiteralPath $ContextsXml -Raw
+# The attribute is `source`, not `path`: contexts.xml renamed it and this script was never
+# updated, so the filter matched nothing and the generator quietly produced ZERO tracks for
+# every context -- the failure even looked like success ("Generated 0 tracks across 0 contexts").
 $contexts = $xml.Contexts.Context | Where-Object {
-    $_.path -and $_.path.Trim() -ne '' -and -not ($_.path -match '[:\\]')   # relative subfolders only
+    $_.source -and $_.source.Trim() -ne '' -and -not ($_.source -match '[:\\]')   # relative subfolders only
 }
 
 if ($Force -and (Test-Path $OutDir)) {
@@ -85,7 +96,7 @@ $totalFiles = 0
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 foreach ($ctx in $contexts) {
-    $rel      = $ctx.path -replace '/', '\'
+    $rel      = $ctx.source -replace '/', '\'
     $isOnce   = ($ctx.once -eq 'true')
     $dur      = if ($isOnce) { $StingerSeconds } else { $Minutes * 60 }
     $ctxDir   = Join-Path $OutDir $rel
@@ -94,7 +105,10 @@ foreach ($ctx in $contexts) {
     $rng   = New-SeededRandom $ctx.name
     $a1    = $audioPool[$rng.Next($audioPool.Count)]
     $a2    = $audioPool[$rng.Next($audioPool.Count)]
-    $formats = @('.mp4','.m4v','.mkv', $a1, $a2)   # video containers guaranteed + two rotating audio
+    # '.fmp4' is guaranteed in every context alongside the video containers: fragmented mp4 is
+    # its own demux path (our fragment index, not minimp4's sample tables) and went unnoticed as
+    # broken precisely because nothing in the corpus had that shape.
+    $formats = @('.mp4','.m4v','.mkv','.fmp4', $a1, $a2)   # containers guaranteed + two rotating audio
     while ($formats.Count -lt $TracksPerContext) { $formats += $audioPool[$rng.Next($audioPool.Count)] }
     $formats = $formats[0..($TracksPerContext-1)]
 
@@ -107,11 +121,14 @@ foreach ($ctx in $contexts) {
         $usedNames[$name] = $true
 
         $ext  = $formats[$i]
+        # A fragmented mp4 is written with the extension such files really carry on disk; $ext
+        # stays '.fmp4' so Get-FfmpegCodecArgs picks the fragmenting flags.
+        $diskExt = if ($ext -eq '.fmp4') { $fragExt } else { $ext }
         $freq = 180 + $rng.Next(480)                       # 180..660 Hz distinct tone
         $vol  = [math]::Round(0.15 + $rng.NextDouble() * 0.75, 3)  # 0.15..0.90 varied loudness
         # Occasionally 44.1k to exercise the resampler — but Opus only supports 48k.
         $rate = if ($ext -in @('.opus','.webm')) { 48000 } elseif ($rng.Next(4) -eq 0) { 44100 } else { 48000 }
-        $out  = Join-Path $ctxDir ($name + $ext)
+        $out  = Join-Path $ctxDir ($name + $diskExt)
 
         $codec = Get-FfmpegCodecArgs $ext
         $ffArgs = @('-hide_banner','-loglevel','error','-y',
