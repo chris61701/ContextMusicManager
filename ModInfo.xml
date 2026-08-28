@@ -15,20 +15,27 @@
      The namespace MUST be a DEFAULT namespace (xmlns=, no prefix) so the element's
      qualified name stays exactly "ModInfo" for A20; a prefixed name would not match.
 
-     Version is duplicated in both blocks — keep them in sync by hand when bumping. -->
+     Version is duplicated in both blocks — keep them in sync by hand when bumping.
+
+     KEEP IT PARSEABLE BY System.Version. The 3.x loader (Mod.cs) runs Version.TryParse on this
+     string and warns "does not define a valid Version" in every user's log when it fails, which
+     it does for anything non-numeric: 1.0.2a, 1.0.2b, 1.0.3a and 1.0.5RC1/2/3 all tripped it.
+     The game keeps the raw text separately as VersionString, so the mod list still displayed
+     them correctly — which is why it went unnoticed for months. Point releases therefore go in
+     a FOURTH numeric component (1.0.5 -> 1.0.5.1), not a letter suffix. -->
 <xml>
   <Name value="ContextMusicManager"/>
   <DisplayName value="Context Music Manager"/>
   <Author value="Velasha"/>
   <Description value="Plays custom music based on context."/>
   <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
-  <Version value="1.0.5RC3"/>
+  <Version value="1.0.5"/>
   <!-- Alpha 20 only reads this nested block (see header). Keep Version matched above. -->
   <ModInfo xmlns="urn:cmm-legacy">
     <Name value="ContextMusicManager"/>
     <Description value="Plays custom music based on context."/>
     <Author value="Velasha"/>
-    <Version value="1.0.5RC3"/>
+    <Version value="1.0.5"/>
     <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
   </ModInfo>
 </xml>
