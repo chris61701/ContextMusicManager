@@ -264,3 +264,118 @@ CMM_API int cmm_loudness_analyze(cmm_decoder* dec, int kind, int srcRate, int sr
     LD_CLOSE[kind](dec);
     return valid;
 }
+
+/* ── Progressive (chunked) measurement ─────────────────────────────────────
+ * The one-shot above has to reach EOF before it can say anything, so a 47-minute
+ * podcast plays at neutral gain for the ~15 seconds it takes to decode — and if the
+ * measurement is not persisted across launches (it is not; only the user's own trims
+ * and bans reach disk) that happens on every rejoin. This surface answers the same
+ * question incrementally: decode a bounded slice, then report the integrated loudness
+ * of everything fed SO FAR. The managed side publishes each answer and glides the live
+ * voice toward it, so the level converges over the first minute of a long track
+ * instead of arriving all at once at the end.
+ *
+ * Two properties make that sound, rather than just work:
+ *   - cmm_loudness_finish is READ-ONLY over the block list, so calling it mid-stream
+ *     costs one pass over the blocks and does not disturb the accumulating state. The
+ *     value at EOF is bit-identical to what the one-shot would have produced.
+ *   - the gating is over ALL blocks so far, not per-chunk, so successive answers are
+ *     refinements of one measurement rather than a sequence of independent ones. Errors
+ *     shrink monotonically in practice (worst observed vs. final: 2.19 dB at 60 s,
+ *     1.15 dB at 5 min, 0.60 dB at 10 min) — small enough after the first slice that
+ *     the remaining corrections are inaudible under a slow ramp.
+ *
+ * Chunking is by DECODED SECONDS, not by bytes or blocks, so a slice costs about the
+ * same wall-clock on any format (measured: ~0.09 s of CPU per minute of MP3, ~0.20 s
+ * for AAC). Takes ownership of `dec` exactly like the one-shot — free the handle and
+ * the decoder is closed with it, whether or not the stream was read to EOF.
+ */
+struct cmm_lprog {
+    cmm_decoder*  dec;
+    cmm_loudness* an;
+    float*        buf;
+    int           kind;
+    int           channels;
+    int           rate;
+    int           bufFrames;
+    int           eof;
+    long long     framesFed;
+};
+
+CMM_API cmm_lprog* cmm_lprog_begin(cmm_decoder* dec, int kind, int srcRate, int srcChannels) {
+    if (!dec) return NULL;
+    if (kind < 0 || kind >= LD_KIND_COUNT || srcChannels <= 0) {
+        if (kind >= 0 && kind < LD_KIND_COUNT) LD_CLOSE[kind](dec);
+        return NULL;
+    }
+    if (srcRate <= 0) srcRate = 48000;
+
+    cmm_lprog* p = (cmm_lprog*)calloc(1, sizeof(cmm_lprog));
+    if (!p) { LD_CLOSE[kind](dec); return NULL; }
+
+    p->bufFrames = 8192;
+    p->an  = cmm_loudness_new(srcRate, srcChannels);
+    p->buf = (float*)malloc(sizeof(float) * (size_t)p->bufFrames * srcChannels);
+    if (!p->an || !p->buf) {
+        cmm_loudness_free(p->an);
+        free(p->buf);
+        free(p);
+        LD_CLOSE[kind](dec);
+        return NULL;
+    }
+
+    p->dec      = dec;
+    p->kind     = kind;
+    p->channels = srcChannels;
+    p->rate     = srcRate;
+    return p;
+}
+
+CMM_API int cmm_lprog_step(cmm_lprog* p, double chunkSeconds,
+                           double* outLufs, double* outPeak,
+                           double* outSecondsFed, int* outEof) {
+    if (outLufs)        *outLufs = 0.0;
+    if (outPeak)        *outPeak = 0.0;
+    if (outSecondsFed)  *outSecondsFed = 0.0;
+    if (outEof)         *outEof = 1;
+    if (!p) return 0;
+
+    /* A slice ends when enough frames have been fed OR the stream runs out. Reads are
+     * whole decoder blocks, so the boundary lands a little past the target rather than
+     * exactly on it — which is fine, and cheaper than asking the decoder for a partial.
+     *
+     * want < 0 means UNLIMITED: read to eof in this one step, which is how the caller asks
+     * for the plain whole-file measurement. That has to be a real case rather than "pass a
+     * huge number", because seconds × rate overflows a long long long before a double runs
+     * out of range, and an overflowed target lands negative, clamps to 1, and turns the
+     * whole file into one frame per slice. (It did: 5868 slices on an 18-minute podcast.) */
+    long long want;
+    if (chunkSeconds <= 0.0 || chunkSeconds > 1e9) {
+        want = -1;
+    } else {
+        want = (long long)(chunkSeconds * p->rate);
+        if (want < 1) want = 1;
+    }
+
+    ld_read_fn readfn = LD_READ[p->kind];
+    long long fedThisStep = 0;
+    while (!p->eof && (want < 0 || fedThisStep < want)) {
+        int n = readfn(p->dec, p->buf, p->bufFrames);
+        if (n <= 0) { p->eof = 1; break; }
+        cmm_loudness_feed(p->an, p->buf, n * p->channels);
+        fedThisStep  += n;
+        p->framesFed += n;
+    }
+
+    if (outEof)        *outEof = p->eof;
+    if (outSecondsFed) *outSecondsFed = p->rate > 0 ? (double)p->framesFed / p->rate : 0.0;
+    return cmm_loudness_finish(p->an, outLufs, outPeak);
+}
+
+CMM_API void cmm_lprog_free(cmm_lprog* p) {
+    if (!p) return;
+    if (p->dec) LD_CLOSE[p->kind](p->dec);
+    cmm_loudness_free(p->an);
+    free(p->buf);
+    free(p);
+}

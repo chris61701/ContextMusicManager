@@ -226,8 +226,17 @@ typedef struct cmm_decoder cmm_decoder;
  *        MB/hour -- four seeds of identical code gave RSS slopes from -1.51 to +2.49 MB/sim-h,
  *        not even a stable sign. The DLL is one gcc link, so -Wl,--wrap on malloc/free/realloc/
  *        calloc routes our allocations AND the static libs' (fdk-aac, vorbis, opus, ogg,
- *        libstdc++'s operator new) through cmm_mem.c's counters. */
-#define CMM_DECODER_ABI 52
+ *        libstdc++'s operator new) through cmm_mem.c's counters.
+ *
+ *   v53: cmm_lprog_begin/_step/_free -- PROGRESSIVE loudness. Integrated loudness is a
+ *        whole-file quantity, so the analyzer could only answer after decoding to EOF;
+ *        a 47-minute podcast therefore played at neutral gain (measured ~7 dB under the
+ *        target) for the ~15 s that took, on every rejoin. The blocks are already
+ *        accumulated incrementally and cmm_loudness_finish is read-only over them, so
+ *        the whole change is a handle that keeps the decoder and analyzer alive between
+ *        bounded decode slices and gates over everything fed so far. The value at eof is
+ *        identical to the one-shot's; what is new is having a usable one before then. */
+#define CMM_DECODER_ABI 53
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -841,6 +850,44 @@ CMM_API void cmm_loudness_free(cmm_loudness* a);
  * TAKES OWNERSHIP of `dec` (closes it before returning). Same out-params/return as finish. */
 CMM_API int cmm_loudness_analyze(cmm_decoder* dec, int kind, int srcRate, int srcChannels,
                                  double* outLufs, double* outPeak);
+
+/* ── Progressive (chunked) measurement ────────────────────────────────────
+ * Same measurement as the one-shot, answered incrementally. A long file cannot be
+ * normalized until it has been decoded end to end, so a 47-minute podcast plays at
+ * neutral gain for as long as that takes; this decodes a bounded slice at a time and
+ * reports the integrated loudness of everything read SO FAR, letting the caller
+ * publish a usable gain seconds in and refine it as the decode continues.
+ *
+ * Gating is over ALL blocks fed so far (not per-slice), so successive answers are
+ * refinements of ONE measurement, and the value returned once eof is set is identical
+ * to what cmm_loudness_analyze would have produced for the same file.
+ *
+ * Ownership matches the one-shot: begin() takes the decoder, free() closes it —
+ * whether or not the stream was read to the end. */
+typedef struct cmm_lprog cmm_lprog;
+
+/* Start a progressive measurement over `dec` (opened by the caller; `kind` 0..6 as in
+ * cmm_mix). TAKES OWNERSHIP of `dec` — including on failure, where it is closed before
+ * NULL is returned. */
+CMM_API cmm_lprog* cmm_lprog_begin(cmm_decoder* dec, int kind, int srcRate, int srcChannels);
+
+/* Decode ~`chunkSeconds` more of audio (rounded up to a whole decoder read) and report
+ * the measurement so far. Returns 1 when a gated result exists (*outLufs meaningful),
+ * else 0 — a slice of silence, or under 400 ms fed, yields no gated block. *outEof is
+ * set when the stream is exhausted; the caller stops there. *outSecondsFed is the total
+ * decoded so far, for progress reporting. Any out-pointer may be NULL.
+ *
+ * chunkSeconds <= 0 (or absurdly large) means UNLIMITED: read to eof in this one step, which
+ * is the plain whole-file measurement. Ask for it that way rather than by passing a huge
+ * number of seconds -- seconds x sample rate overflows a long long long before a double runs
+ * out of range, and the overflowed target would clamp to a single frame per step. */
+CMM_API int cmm_lprog_step(cmm_lprog* p, double chunkSeconds,
+                           double* outLufs, double* outPeak,
+                           double* outSecondsFed, int* outEof);
+
+/* Free the analyzer and close the owned decoder. Safe on NULL, and at any point —
+ * abandoning a half-measured file is the normal path when its track stops mattering. */
+CMM_API void cmm_lprog_free(cmm_lprog* p);
 
 #ifdef __cplusplus
 }

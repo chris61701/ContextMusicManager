@@ -126,7 +126,7 @@ namespace CMM
         // only drives master volume), so without this the normalization never reaches the live voice
         // and the first trim keypress would apply the whole correction at once (an audible lurch).
         // No-op unless `file` is the exact track the native mixer is currently voicing.
-        private static void SettleTrackGainIntoLiveVoice(string file)
+        private static void SettleTrackGainIntoLiveVoice(string file, float rampSeconds = TrackGainSettleSeconds)
         {
             if (string.IsNullOrEmpty(file)) return;
             string active = _nativeActiveContext;
@@ -137,7 +137,7 @@ namespace CMM
             long vid = Interlocked.Read(ref _nativeVoiceId);
             if (vid != 0)
                 CmmMixer.Instance?.SetVoiceTrackGain(
-                        vid, LoudnessStore.GetTrackGain(file), TrackGainSettleSeconds);
+                        vid, LoudnessStore.GetTrackGain(file), rampSeconds);
         }
 
         private static bool _gameAudioMuted;
@@ -230,23 +230,74 @@ namespace CMM
             if (LoudnessStore.HasCurrent(filePath, size, mtime)) yield break;
 
             MeasureHandle h = StartMeasure(filePath);
-            while (!h.Done) yield return null;
+            // A long file answers in SLICES (AudioDecoder's progressive measurement), so the wait
+            // is no longer all-or-nothing: each partial reading is published as it lands and the
+            // playing track glides onto it. That is what lets the start-hold release about a
+            // second into a 37-minute podcast instead of expiring at 3 s and starting on the
+            // unmeasured guess. A short track produces no partials at all — it reaches the end of
+            // the file inside the first slice — so nothing below runs for it.
+            int published = 0;
+            while (!h.Done)
+            {
+                PartialReading part = h.Latest;
+                if (part != null && part.Seq > published)
+                {
+                    published = part.Seq;
+                    PublishMeasurement(filePath, mtime, part.Value, provisional: true);
+                }
+                yield return null;
+            }
             ClearInFlight(filePath, h);
             TrackLoudness res = h.Result;
 
             _loudnessProcessed.Add(filePath);
             if (res.Ok)
             {
-                LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak);
+                PublishMeasurement(filePath, mtime, res, provisional: false);
                 CMMConfig.D($"[CMM] Loudness (block) {Path.GetFileName(filePath)}: {res.Lufs:F1} LUFS");
-                // If this is the track already playing (started un-normalized), settle the gain in —
-                // for the main context voice AND the world-emitter voice (whichever is airing it).
-                SettleTrackGainIntoLiveVoice(filePath);
-                PersonalRadio.SettleLoudness(filePath);   // all versions — the radio's main-bus voice
-#if GV_V3
-                EmitterAudioLayer.SettleLoudness(filePath);
-#endif
             }
+            else if (published > 0)
+            {
+                // The decode failed AFTER publishing partials — a file yanked mid-measure is the
+                // realistic case, the music drive being removable. Drop the partial rather than
+                // leave it: it would be stuck otherwise, since HasCurrent rejects a provisional
+                // (nothing treats it as done) while IsMeasured accepts one (nothing asks again),
+                // so the track would play at a part-file gain for the rest of the session.
+                LoudnessStore.ForgetProvisional(filePath);
+                CMMConfig.D($"[CMM] Loudness incomplete for {Path.GetFileName(filePath)} after " +
+                            $"{published} partial reading(s) — dropped, will re-measure.");
+            }
+        }
+
+        // Commit a reading (final or partial) and ease whatever voice is airing that file onto the
+        // gain it implies. Main thread only, like every other LoudnessStore access.
+        //
+        // The ramp is chosen from what the correction actually is. The FIRST reading on a track
+        // replaces the unmeasured guess and can be a large move, so it scales with the size of it.
+        // Every reading AFTER that is a refinement — under a dB on real music — and gets a long,
+        // deliberately unhurried glide instead: those should never be heard happening, only heard
+        // having happened. A correction that is somehow large still gets at least its scaled ramp.
+        private static void PublishMeasurement(string filePath, long mtime, TrackLoudness res, bool provisional)
+        {
+            bool hadReading = LoudnessStore.IsMeasured(filePath);
+            float before = LoudnessStore.GetTrackGain(filePath);
+
+            LoudnessStore.Store(filePath, res.Size, mtime, res.Hash, res.Lufs, res.Peak, provisional);
+
+            float after = LoudnessStore.GetTrackGain(filePath);
+            if (Mathf.Abs(after - before) < 1e-4f) return;   // nothing moved; no voice to disturb
+
+            float ramp = LoudnessStore.SettleRampSeconds(before, after);
+            if (hadReading) ramp = Mathf.Max(ramp, CMMConfig.LoudnessRefineRampSeconds);
+
+            // Settle into whichever voice is airing this file — the main context voice, the
+            // personal radio's main-bus voice, or a world-emitter station's. Each is a no-op
+            // unless it is actually playing this exact track.
+            SettleTrackGainIntoLiveVoice(filePath, ramp);
+            PersonalRadio.SettleLoudness(filePath, ramp);   // all versions
+#if GV_V3
+            EmitterAudioLayer.SettleLoudness(filePath, ramp);
+#endif
         }
 
         // ── Track staging (the unit that ties selection + prewarm + normalization) ─
@@ -515,12 +566,11 @@ namespace CMM
             TrackLoudness res = slot.Handle.Result;
             if (res.Ok)
             {
-                LoudnessStore.Store(slot.Path, res.Size, slot.Mtime, res.Hash, res.Lufs, res.Peak);
+                // Same commit-and-settle the on-demand path uses. VolumeSyncLoop only drives MASTER
+                // volume on the native path — it never re-reads a voice's TrackGain — so if this
+                // measured the track already playing, the settle has to be explicit.
+                PublishMeasurement(slot.Path, slot.Mtime, res, provisional: false);
                 CMMConfig.D($"[CMM] Loudness prescanned {Path.GetFileName(slot.Path)}: {res.Lufs:F1} LUFS (peak {res.Peak:F3})");
-                // If this measured the currently-playing track, push the fresh gain to the live
-                // native voice (quick fade). VolumeSyncLoop only drives MASTER volume on the native
-                // path — it never re-reads the per-voice TrackGain — so the settle must be explicit.
-                SettleTrackGainIntoLiveVoice(slot.Path);
             }
             slot = default;
         }
@@ -600,12 +650,20 @@ namespace CMM
             // threads. The MENU prescan stays parallel — decided on the main thread NOW, not inside
             // the worker, so a world loading mid-measure can't flip the mode.
             bool serialize = GameManager.Instance?.World != null;
+            // Partial readings are handed back through the handle exactly as the final one is: the
+            // worker only ever WRITES them, the main-thread coroutine reads and commits. Each is a
+            // fresh immutable box published by a single volatile reference write, so the reader
+            // either sees the whole reading or the previous one — never half of either.
+            double chunk = CMMConfig.LoudnessChunkSeconds;
+            Action<TrackLoudness> onPartial =
+                r => h.Latest = new PartialReading { Seq = h.NextSeq(), Value = r };
+
             var t = new Thread(() =>
             {
                 try
                 {
-                    if (serialize) lock (_measureGate) { h.Result = AudioDecoder.MeasureLoudness(path); }
-                    else h.Result = AudioDecoder.MeasureLoudness(path);
+                    if (serialize) lock (_measureGate) { h.Result = AudioDecoder.MeasureLoudness(path, chunk, onPartial); }
+                    else h.Result = AudioDecoder.MeasureLoudness(path, chunk, onPartial);
                 }
                 catch { }
                 h.Done = true;
@@ -629,10 +687,25 @@ namespace CMM
                 _loudnessInFlight.Remove(path);
         }
 
+        // One partial reading, immutable once published. A class rather than a struct field so a
+        // single volatile reference write publishes it atomically: TrackLoudness is several words
+        // wide and a struct assignment across threads can tear.
+        private sealed class PartialReading
+        {
+            public int Seq;
+            public TrackLoudness Value;
+        }
+
         private sealed class MeasureHandle
         {
             public volatile bool Done;
             public TrackLoudness Result;
+            // Most recent partial reading, or null if none yet. Written by the worker, read by the
+            // main-thread coroutine, which uses Seq to tell a new one from one it has already
+            // committed (several coroutines can be joined to one handle).
+            public volatile PartialReading Latest;
+            private int _seq;
+            public int NextSeq() => Interlocked.Increment(ref _seq);
         }
 
         // Contexts whose first track the player is most likely to hear first, so the

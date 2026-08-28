@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 43;
+        internal const int CurrentSchema = 44;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -142,6 +142,23 @@ wrong, and it is deliberately biased quiet: a moment too quiet is a non-event, t
 distortion. The real measurement still eases in the instant it lands. 0 = the old behaviour.
 Never boosts: positive values are treated as 0. Hot-reloads."),
             F("LoudnessUnmeasuredDb",                "CMMConfig.LoudnessUnmeasuredDb",              -5f, since: 41),
+            Cmt(@"ChunkSeconds: measure long files in SLICES of this much audio instead of decoding the whole
+file before saying anything. Integrated loudness is a whole-file quantity, so a 37-minute podcast
+used to take ~9 s to answer -- three times StartHoldMs -- and therefore always started at the
+UnmeasuredDb guess, on every join. Sliced, the first usable answer lands in about a second and each
+later slice refines it, gliding the level rather than stepping it. Slice length trades accuracy for
+latency: across 27 real files the worst first answer was 7.88 dB out at 60 s and 0.82 dB at 300 s.
+Tracks shorter than one slice are unaffected -- they finish in the first slice and publish once,
+exactly as before. 0 = whole-file decode (the old behaviour). Hot-reloads.
+ProvisionalMaxBoostDb: boost ceiling for a partial reading, until the file has been read to the end.
+A quiet opening measures quiet and asks for a boost the rest of the track does not want; that is the
+direction that is audible as a fault. Cuts from a partial are not capped. MaxBoostDb still governs
+the final reading.
+RefineRampSeconds: how long the playing track takes to glide onto each refined reading. Long on
+purpose -- these corrections are under a dB, and should never be heard moving."),
+            F("LoudnessChunkSeconds",                "CMMConfig.LoudnessChunkSeconds",              300f, since: 44),
+            F("LoudnessProvisionalMaxBoostDb",       "CMMConfig.LoudnessProvisionalMaxBoostDb",     6f,   since: 44),
+            F("LoudnessRefineRampSeconds",           "CMMConfig.LoudnessRefineRampSeconds",         3f,   since: 44),
 
             Gap(),
             Cmt(@"Fade between outgoing and incoming context instead of cutting immediately"),

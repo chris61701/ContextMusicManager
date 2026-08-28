@@ -1516,7 +1516,11 @@ namespace CMM
 
         // A measurement for `file` just landed — if a live station voice is airing that exact track,
         // ease its loudness gain in. Called from the shared loudness pipeline. Main-thread.
-        internal static void SettleLoudness(string file)
+        // rampSeconds is chosen by the caller from the SIZE of the correction (see
+        // ContextMusicManager.SettleRamp) — a first measurement can move the level by the full
+        // boost, a progressive refinement by a fraction of a dB — rather than one fixed ease that
+        // is too short for the first and too abrupt for the rest.
+        internal static void SettleLoudness(string file, float rampSeconds = 0.2f)
         {
             if (string.IsNullOrEmpty(file)) return;
             for (int i = 0; i < _stations.Count; i++)
@@ -1527,7 +1531,7 @@ namespace CMM
                 float g = LoudnessStore.GetTrackGain(file);
                 if (Mathf.Abs(g - st.VoiceGainApplied) < 1e-4f) continue;
                 st.VoiceGainApplied = g;
-                CmmMixer.Instance?.SetVoiceTrackGain(st.VoiceId, g, 0.2f);   // short ramp = ease, no lurch
+                CmmMixer.Instance?.SetVoiceTrackGain(st.VoiceId, g, rampSeconds);
             }
         }
 

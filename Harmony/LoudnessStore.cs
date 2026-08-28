@@ -27,16 +27,21 @@ namespace CMM
     // they get the rename/move/duplicate survival for free and share the debounced
     // save. Like the trim, they can only attach once a track is measured.
     //
-    // PERSISTENCE POLICY: EVERY measurement in the store persists to loudness.xml
-    // (debounced, off-thread). The store itself stays bounded — RetainOnly keeps only
-    // the live working set (playing/staged/history per context, plus each radio
-    // station's on-air + deterministic up-next) — so the file stays small while
-    // anything measured recently starts at its normalized level next launch instead
-    // of hot-then-settling. Radio broadcasts made that audible (2026-07-10): the world
-    // clock freezes offline, so a relaunch rejoins the SAME track that was playing at
-    // quit — under the old trim-only policy it re-measured (started hot) every time.
-    // Manually-trimmed/flagged tracks are additionally EXEMPT FROM EVICTION
-    // (IsPersistWorthy): user data is never dropped, measured or not.
+    // PERSISTENCE POLICY: a measurement lives for the SESSION. Only entries carrying the
+    // user's own decisions — a manual trim, a ban, a favourite (IsPersistWorthy) — are written
+    // to loudness.xml, so the file holds what the user did and nothing the mod can work out
+    // for itself. Those entries are also exempt from eviction: user data is never dropped.
+    // Everything else is bounded in memory by SIZE (MaxRetainedPaths, LRU) rather than by
+    // relevance, which is what makes "measured once this session" true.
+    //
+    // Persisting every measurement was tried and abandoned in both directions, and why it now
+    // works is worth stating. Trim-only was the original policy; it was reversed on 2026-07-10
+    // because the radio's world clock freezes offline, so a relaunch rejoins the SAME track that
+    // was playing at quit and it re-measured -- i.e. started hot -- every time. Persisting
+    // everything fixed that and left the user a cache file full of entries they never asked for.
+    // What makes trim-only safe THIS time is progressive measurement: a rejoined track publishes
+    // a usable gain about a second in instead of after a whole-file decode, so nothing has to be
+    // remembered across launches to avoid the hot start.
     //
     // THREADING: this store is MAIN-THREAD ONLY. Background measurement threads
     // compute (hash, lufs, peak) and hand the result back to the main thread, which
@@ -65,6 +70,14 @@ namespace CMM
             public float UserTrim = 1f;   // manual trim (±UserTrimStep, default 0.1); survives re-measure
             public bool Banned;           // keybind: never pick this track again
             public bool Favourite;        // keybind: pick this track FavouriteWeight× more often
+            // True while this is a PARTIAL reading — real, and gated the same way, but taken over
+            // only the part of the file decoded so far (see AudioDecoder's progressive
+            // measurement). It is a genuine improvement on the unmeasured fallback and is used as
+            // one, with two guards: its BOOST is capped (ComputeGain), because a quiet opening
+            // reads quiet and asking for the boost that implies is how a track starts hot; and it
+            // never satisfies HasCurrent or reaches disk, so an abandoned one is re-measured
+            // rather than mistaken for a finished answer.
+            public bool Provisional;
         }
 
         private struct PathRecord
@@ -155,17 +168,65 @@ namespace CMM
         // RetainOnly eviction (the user can't reproduce them by re-measuring); plain
         // auto measurements are evicted normally but, while live, persist like any other
         // (see PERSISTENCE POLICY).
+        // A provisional is excluded even when it carries user data. The alternative is writing a
+        // part-file loudness to disk as though it were the track's real level, and the window is
+        // the few seconds between the first slice and the end of the decode -- so the only thing
+        // lost is a trim applied inside that window by a player who then quits inside it too.
         private static bool IsPersistWorthy(Measurement m)
+            => m != null && !m.Provisional && HasUserData(m);
+
+        // The user's own decisions, as opposed to anything the mod worked out for itself. The
+        // distinction that actually matters everywhere: this is what cannot be reproduced by
+        // measuring again, so it is what survives eviction, retirement and a restart.
+        private static bool HasUserData(Measurement m)
             => m != null && (Math.Abs(m.UserTrim - 1f) > 1e-4f || m.Banned || m.Favourite);
 
         private static float ComputeGain(Measurement m)
         {
             double gainDb = CMMConfig.LoudnessTargetLufs - m.Lufs;
-            if (gainDb > CMMConfig.LoudnessMaxBoostDb) gainDb = CMMConfig.LoudnessMaxBoostDb;
+            // A partial reading gets a tighter boost ceiling than a finished one, because the
+            // error in a partial is not symmetric. R128's relative gate discards quiet blocks once
+            // loud ones arrive, so a LOUD opening measures the whole track almost exactly (0.00 dB
+            // on a synthetic 5-min-loud / 15-min-quiet file) while a QUIET opening reads far too
+            // quiet and asks for a boost the rest of the file does not want (33 dB too much on the
+            // mirror-image file). Only one of those directions is audible as a fault, and it is the
+            // same one UnmeasuredGain refuses to guess in: too quiet for a moment is a non-event,
+            // too loud is distortion. So the cut is taken in full and the boost is capped until the
+            // reading is final. On real music the cap is nearly never reached -- across 27 files at
+            // a 5-minute slice the worst first-answer error was 0.82 dB.
+            double boostCap = CMMConfig.LoudnessMaxBoostDb;
+            if (m.Provisional && CMMConfig.LoudnessProvisionalMaxBoostDb < boostCap)
+                boostCap = CMMConfig.LoudnessProvisionalMaxBoostDb;
+            if (gainDb > boostCap) gainDb = boostCap;
             double linear = Math.Pow(10.0, gainDb / 20.0) * m.UserTrim;
             if (linear < 0f) linear = 0f;
             if (linear > MaxLinearGain) linear = MaxLinearGain;
             return (float)linear;
+        }
+
+        // ── Settle ramp ────────────────────────────────────────────────────────
+        // How long a live voice should take to glide from one track gain to another. There is no
+        // single right number: a manual trim keypress moves the level by 10% and wants a brief
+        // declick, while a first measurement landing can move it by the whole 12 dB boost, and
+        // 0.2 s of THAT is a lurch. So the ramp is derived from the size of the correction.
+        //
+        // Bounds matter in both directions. Below RampMinSeconds a change is a step, i.e. a click.
+        // Above RampMaxSeconds a correction stops reading as the level settling and starts reading
+        // as the track deliberately getting louder, which is worse than a quick step would have
+        // been. Callers with an additional reason to go slow (a progressive refinement, which is
+        // under a dB and should never be noticed at all) take the max of this and their own floor.
+        public const float RampMinSeconds = 0.20f;
+        public const float RampMaxSeconds = 2.5f;
+
+        public static float SettleRampSeconds(float fromGain, float toGain)
+        {
+            double a = fromGain > 1e-4f ? fromGain : 1e-4f;
+            double b = toGain   > 1e-4f ? toGain   : 1e-4f;
+            double db = Math.Abs(20.0 * Math.Log10(b / a));
+            double ramp = db * 0.2;
+            if (ramp < RampMinSeconds) ramp = RampMinSeconds;
+            if (ramp > RampMaxSeconds) ramp = RampMaxSeconds;
+            return (float)ramp;
         }
 
         // ── Freshness check (sweep / block-before-play decide whether to measure) ─
@@ -179,7 +240,53 @@ namespace CMM
             if (!_byPath.TryGetValue(key, out PathRecord pr)) return false;
             if (pr.Size != size || pr.MtimeTicks != mtimeTicks) return false;
             if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return false;
+            // A provisional reading is deliberately NOT current: the measurement that produced it
+            // is still running, and if it is abandoned (world exit, the file going away, the track
+            // ceasing to matter) the entry would otherwise sit there for the session looking like a
+            // finished answer that nothing would ever revisit. IsMeasured, which gates the start-
+            // hold and the prewarm, DOES accept it -- publishing early is the whole point of it.
+            if (m.Provisional) return false;
             return m.MetricVersion == MetricVersion;
+        }
+
+        // Drop a PROVISIONAL reading for this path so the next request measures the file from
+        // scratch. Called when the measurement that was producing partials failed before it
+        // finished — the realistic case being the music drive going away mid-decode.
+        //
+        // Without this the entry is stuck: HasCurrent rejects a provisional (so nothing treats
+        // it as done) but IsMeasured accepts one (so nothing asks for it again), and the track
+        // plays at a part-file gain for the rest of the session with no path back. Refuses to
+        // touch a FINAL reading, and refuses to touch user data.
+        public static void ForgetProvisional(string absolutePath)
+        {
+            string key = ToRelKey(absolutePath);
+            if (key == null || !_byPath.TryGetValue(key, out PathRecord pr)) return;
+            if (!_byHash.TryGetValue(pr.Hash, out Measurement m)) return;
+            if (!m.Provisional) return;
+
+            // A partial the user has already trimmed, banned or favourited cannot simply be
+            // deleted — that is their data, and they cannot get it back by re-measuring. Retire
+            // the READING instead by stamping it with a version no longer in force, which is the
+            // representation the loader already understands: a stale entry carrying user data
+            // keeps its flags and gets re-measured. (Note IsPersistWorthy is no help as a test
+            // here: it excludes provisionals by design, so it answers "no" for exactly the entry
+            // this branch exists to protect.)
+            if (HasUserData(m))
+            {
+                m.MetricVersion = 0;
+                m.Provisional = false;
+                m.Lufs = 0;
+                m.Peak = 0;
+                _dirty = true;
+                return;
+            }
+
+            _byPath.Remove(key);
+            // The hash entry goes only when no other path still points at it — the cache is
+            // content-keyed, and another copy of the same audio may be measuring happily.
+            foreach (var kv in _byPath)
+                if (string.Equals(kv.Value.Hash, pr.Hash, StringComparison.Ordinal)) return;
+            _byHash.Remove(pr.Hash);
         }
 
         // If another path already carries a measurement for this content hash (the
@@ -198,21 +305,35 @@ namespace CMM
         // the measurement. An existing entry's UserTrim is preserved (we only update
         // the measured values + version), so re-measuring never clobbers a manual trim.
         public static void Store(string absolutePath, long size, long mtimeTicks,
-            string hash, double lufs, double peak)
+            string hash, double lufs, double peak, bool provisional = false)
         {
             string key = ToRelKey(absolutePath);
             if (key == null || hash == null) return;
 
             if (_byHash.TryGetValue(hash, out Measurement m))
             {
+                // A provisional reading must never overwrite a finished one. The same content is
+                // reachable by more than one path (the cache is content-keyed precisely so that
+                // costs nothing), and one of those paths can be part-way through a progressive
+                // measure while the other already holds the whole-file answer. Taking the partial
+                // there would walk a correct gain backwards. The path record still binds.
+                if (provisional && !m.Provisional && m.MetricVersion == MetricVersion)
+                {
+                    _byPath[key] = new PathRecord { Hash = hash, Size = size,
+                                                    MtimeTicks = mtimeTicks, Used = ++_useSeq };
+                    MirrorFlagsForPath(absolutePath, m);
+                    return;
+                }
                 m.Lufs = lufs;
                 m.Peak = peak;
                 m.MetricVersion = MetricVersion;
+                m.Provisional = provisional;
                 // UserTrim left as-is.
             }
             else
             {
-                m = new Measurement { Lufs = lufs, Peak = peak, MetricVersion = MetricVersion };
+                m = new Measurement { Lufs = lufs, Peak = peak, MetricVersion = MetricVersion,
+                                      Provisional = provisional };
                 _byHash[hash] = m;
             }
 

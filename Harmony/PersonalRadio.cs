@@ -1182,14 +1182,19 @@ namespace CMM
         // ── Loudness integration (called from the shared loudness pipeline, all versions) ──────
 
         // A measurement for `file` just landed — ease it into the live radio voice if it's airing.
-        internal static void SettleLoudness(string file)
+        // rampSeconds is chosen by the caller from the SIZE of the correction (see
+        // ContextMusicManager.SettleRamp): a first measurement replacing the unmeasured guess can
+        // move the level by the full boost, while a progressive refinement moves it by a fraction
+        // of a dB and gets a long glide so it is never heard happening. The old fixed 0.2 s was
+        // right for one of those and wrong for the other.
+        internal static void SettleLoudness(string file, float rampSeconds = 0.2f)
         {
             if (_voiceId == 0 || string.IsNullOrEmpty(file)) return;
             if (!string.Equals(_track, file, StringComparison.OrdinalIgnoreCase)) return;
             float g = LoudnessStore.GetTrackGain(file);
             if (Mathf.Abs(g - _gainApplied) < 1e-4f) return;
             _gainApplied = g;
-            CmmMixer.Instance?.SetVoiceTrackGain(_voiceId, g, 0.2f);
+            CmmMixer.Instance?.SetVoiceTrackGain(_voiceId, g, rampSeconds);
         }
 
         // Protect the airing track + the tuned station's deterministic up-next from loudness

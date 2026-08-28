@@ -17,6 +17,15 @@ namespace CMM
         public long Size;
         public double Lufs;
         public double Peak;
+        // False while this is a PARTIAL reading — the integrated loudness of the part of
+        // the file decoded so far, published early so a long track can be normalized before
+        // it has been read to the end (see MeasureLoudness's progressive overload). The
+        // reading is real and gated the same way; it just has less of the file behind it,
+        // so the caller treats it as provisional and lets the final one supersede it.
+        public bool Final;
+        // Seconds of audio behind this reading. Only meaningful on a partial; it is what
+        // makes "how much do I trust this?" answerable at the call site.
+        public double SecondsMeasured;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -176,6 +185,28 @@ namespace CMM
         // Pure measurement — touches no Unity main-thread state. The caller commits the
         // TrackLoudness into LoudnessStore on the main thread.
         public static TrackLoudness MeasureLoudness(string filePath)
+            => MeasureLoudness(filePath, 0.0, null);
+
+        // Progressive overload. `chunkSeconds` > 0 decodes the file in slices of about that
+        // much AUDIO and invokes `onPartial` after each one with the integrated loudness of
+        // everything read so far (Final = false); the return value is the same whole-file
+        // measurement the one-shot produces, bit-identical, with Final = true.
+        //
+        // This exists because integrated loudness is a whole-file quantity, so until the last
+        // sample is read there is nothing to say — and a 37-minute podcast takes ~9 s to read.
+        // For that whole window the track played at the unmeasured fallback (deliberately biased
+        // 5 dB quiet), which on those files is about 12 dB from where they belong; and since
+        // measurements no longer persist across launches, that happened on every rejoin. A slice
+        // costs a fraction of a second, so the first usable answer arrives about a second in and
+        // is refined from there. Measured across 27 real files at a 5-minute slice, the first
+        // answer was within 0.82 dB of the final one, worst case.
+        //
+        // `onPartial` is called on THIS (background) thread. It must not touch main-thread state —
+        // the caller's job is to hand the reading to the main thread, exactly as it does the final
+        // one. chunkSeconds <= 0 reads the whole file in one slice, so `onPartial` never fires and
+        // the behaviour is the plain one-shot.
+        public static TrackLoudness MeasureLoudness(string filePath, double chunkSeconds,
+                                                    Action<TrackLoudness> onPartial)
         {
             var fail = new TrackLoudness { Ok = false };
 
@@ -251,8 +282,49 @@ namespace CMM
                 }
 
                 long tAnalyze = Stopwatch.GetTimestamp();
-                double lufs, peak;
-                int valid = NativeLoudness.cmm_loudness_analyze(dec, kind, sampleRate, channels, out lufs, out peak);
+
+                // The progressive handle takes ownership of `dec` — including when begin()
+                // itself fails, which is why there is no close on this path.
+                IntPtr prog = NativeLoudness.cmm_lprog_begin(dec, kind, sampleRate, channels);
+                if (prog == IntPtr.Zero)
+                {
+                    Log.Warning($"[CMM DIAG] Loudness BEGIN FAILED {Path.GetFileName(filePath)} " +
+                                $"({ext}) kind={kind} ch={channels} rate={sampleRate}");
+                    return fail;
+                }
+
+                // A slice of <= 0 is passed through as-is: native reads such a step to EOF,
+                // making it the same single pass the one-shot does. Do NOT express that as a
+                // huge number of seconds — seconds × sample rate overflows long long, and the
+                // overflowed frame target clamps to one frame per slice.
+                double slice = chunkSeconds > 0 ? chunkSeconds : 0.0;
+                double lufs = 0, peak = 0, secs = 0;
+                int valid = 0, eof = 0;
+                try
+                {
+                    while (eof == 0)
+                    {
+                        valid = NativeLoudness.cmm_lprog_step(prog, slice, out lufs, out peak,
+                                                              out secs, out eof);
+                        // Publish everything before the last slice as provisional. The final
+                        // reading is returned, not published, so the caller commits it once.
+                        if (eof == 0 && valid != 0 && onPartial != null)
+                        {
+                            onPartial(new TrackLoudness
+                            {
+                                Ok              = true,
+                                Hash            = hash,
+                                Size            = size,
+                                Lufs            = lufs,
+                                Peak            = peak,
+                                Final           = false,
+                                SecondsMeasured = secs,
+                            });
+                        }
+                    }
+                }
+                finally { NativeLoudness.cmm_lprog_free(prog); }
+
                 analyzeMs = ElapsedMs(tAnalyze);
                 if (valid == 0)
                 {
@@ -267,11 +339,13 @@ namespace CMM
 
                 return new TrackLoudness
                 {
-                    Ok = true,
-                    Hash = hash,
-                    Size = size,
-                    Lufs = lufs,
-                    Peak = peak,
+                    Ok              = true,
+                    Hash            = hash,
+                    Size            = size,
+                    Lufs            = lufs,
+                    Peak            = peak,
+                    Final           = true,
+                    SecondsMeasured = secs,
                 };
             }
             catch (Exception ex)

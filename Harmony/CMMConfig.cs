@@ -801,6 +801,37 @@ namespace CMM
         // (SettleLoudness, 0.2 s) exactly as before. 0 restores the old uncorrected start.
         public static float LoudnessUnmeasuredDb = -5f;
 
+        // ── Progressive measurement (long files) ──────────────────────────────
+        // Integrated loudness is a whole-file quantity, so nothing can be said about a track
+        // until it has been decoded end to end. On a 37-minute podcast that is ~9 s, which is
+        // three times StartHoldMs -- so those files always expired the hold and always started
+        // at the UnmeasuredDb guess, which on them is about 12 dB from where they belong. And
+        // since measurements no longer persist across launches, it happened on every rejoin.
+        //
+        // Measuring in SLICES fixes it without changing the measurement: the analyzer keeps
+        // accumulating, and after each slice we ask it what it has so far. The first answer
+        // arrives in about a second instead of nine, and each later one refines it.
+        //
+        // Slice length is a straight accuracy/latency trade and 5 minutes is where the evidence
+        // put it: over 27 real files the worst first-answer error was 7.88 dB at a 60-second
+        // slice and 0.82 dB at 300 s. Anything SHORTER than one slice is unaffected -- it
+        // reaches the end of the file in the first slice, so it publishes once, exactly as
+        // before. 0 disables slicing entirely (whole-file decode, the pre-1.0.5 behaviour).
+        public static float LoudnessChunkSeconds = 300f;
+        // Boost ceiling for a PARTIAL reading, until the whole file has been read. A quiet
+        // opening measures quiet and asks for a boost the rest of the track does not want, and
+        // that is the one direction that is audible as a fault (a hot entrance, into the radio
+        // receiver's saturator). Attenuation from a partial is NOT capped by this -- the
+        // relative gate makes the too-loud reading the reliable one. Applies only while a
+        // measurement is in progress; the final reading uses LoudnessMaxBoostDb like any other.
+        public static float LoudnessProvisionalMaxBoostDb = 6f;
+        // How long the live voice takes to glide onto a REFINED gain (each slice after the
+        // first). These corrections are small -- under 1 dB on real music -- so the ramp is long
+        // enough that the level is never heard moving, only heard being right. The FIRST
+        // correction on a track (from the unmeasured guess to a real reading) can be large, so
+        // it scales with the size of the correction instead; see LoudnessSettleRampSeconds.
+        public static float LoudnessRefineRampSeconds = 3f;
+
         public static bool CrossfadeEnabled = true;
         // When re-entering a context that is still audibly fading out on the
         // inactive channel, reverse that fade (ramp it back up from its current
