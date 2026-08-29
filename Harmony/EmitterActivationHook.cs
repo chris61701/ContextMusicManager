@@ -152,11 +152,80 @@ namespace CMM
             catch { return false; }
         }
 
-        // Icons are drawn as "ui_game_symbol_" + icon by the radial's block path, so these are
-        // names the atlas actually has — taken from what vanilla blocks already use.
-        internal const string IconStation = "electric_switch";
-        internal const string IconAuto    = "search";
-        internal const string IconSilent  = "x";
+        // Which command index carries which two-character badge, filled while the command list is
+        // built and read back by the radial postfix a moment later. Keyed by CommandIndex because
+        // that is the only identity XUiC_RadialEntry keeps.
+        private static readonly Dictionary<int, string> _badges = new Dictionary<int, string>();
+        internal static bool HasBadges { get { return _badges.Count > 0; } }
+        internal static void BeginEntries(int firstIndex) { _badges.Clear(); }
+        internal static void NoteBadge(int commandIndex, string badge)
+        {
+            if (!string.IsNullOrEmpty(badge)) _badges[commandIndex] = badge;
+        }
+        internal static string BadgeFor(int commandIndex)
+        {
+            string b;
+            return _badges.TryGetValue(commandIndex, out b) ? b : null;
+        }
+
+        // XUiC_Radial, by name. The radial is XUi, which is the part of the game that differs most
+        // between versions -- but Open/SetCurrentBlockData/CreateRadialEntry are byte-identical on
+        // 2.6 and 3.2 apart from SetCurrentBlockData's extra 2.6 clrIdx, which Harmony's by-name
+        // parameter binding absorbs. Resolved defensively all the same: badges and paging are
+        // cosmetic next to the station actually changing.
+        internal static MethodBase RadialMethod(string name)
+        {
+            try
+            {
+                Type t = AccessTools.TypeByName("XUiC_Radial");
+                if (t == null) return null;
+                MethodInfo[] all = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
+                                              | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                for (int i = 0; i < all.Length; i++)
+                    if (all[i].Name == name) return all[i];
+            }
+            catch { }
+            return null;
+        }
+
+        internal static bool SupportedRadial()
+        {
+            try { return EmitterCompat.RuntimeSupported && RadialMethod("SetCurrentBlockData") != null; }
+            catch { return false; }
+        }
+
+        // Reopen the radial on the next page. Deferred a frame: this is called from inside the
+        // radial's own command handler, while it is closing, and asking it to open from there
+        // fights its own state machine. If anything about it fails the page has still advanced, so
+        // the next hold shows it -- the cost of a failure is one extra press, not a stuck menu.
+        internal static void ReopenRadial(Vector3i pos)
+        {
+            try
+            {
+                MainThreadDispatcher.Post(() =>
+                {
+                    try
+                    {
+                        var ui = LocalPlayerUI.primaryUI;
+                        if (ui == null || ui.xui == null || ui.xui.RadialWindow == null) return;
+                        World w = GameManager.Instance != null ? GameManager.Instance.World : null;
+                        EntityPlayerLocal p = w != null ? w.GetPrimaryPlayer() : null;
+                        if (p == null) return;
+                        var radial = ui.xui.RadialWindow;
+                        MethodBase set = RadialMethod("SetCurrentBlockData");
+                        if (set == null) return;
+                        radial.Open();
+                        // 3.x (world, pos, blockValue, player); 2.6 inserts clrIdx third.
+                        object[] args = set.GetParameters().Length == 5
+                            ? new object[] { w, pos, 0, w.GetBlock(pos), p }
+                            : new object[] { w, pos, w.GetBlock(pos), p };
+                        set.Invoke(radial, args);
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+        }
     }
 
     // A speaker must ANSWER the game's "is there anything to do here" question, or no prompt and
@@ -231,12 +300,7 @@ namespace CMM
         static bool Prepare() => EmitterActivation.Supported("GetBlockActivationCommands");
         static IEnumerable<MethodBase> TargetMethods() => EmitterActivation.Targets("GetBlockActivationCommands");
 
-        // The XUi radial is 13 segments (windowRadial repeat_count="13"). Past that the entries
-        // exist but have nowhere to draw, so the list is capped and the drop is LOGGED rather than
-        // silently truncated — a station that cannot be chosen should not look like one that can.
-        private const int RadialSegments = 13;
-        private static readonly List<string> _choices = new List<string>();
-        private static bool _warnedFull;
+        private static readonly List<EmitterTuner.Choice> _choices = new List<EmitterTuner.Choice>();
 
         static void Postfix(Vector3i _blockPos, ref BlockActivationCommand[] __result)
         {
@@ -246,52 +310,89 @@ namespace CMM
                 EmitterRegistry.Emitter e;
                 if (!EmitterTuner.EmitterAt(_blockPos, out e)) return;
 
-                EmitterTuner.EnsureLoaded();
-                EmitterTuner.BuildChoices(_choices);
+                var have = __result ?? new BlockActivationCommand[0];
+                // The block's OWN commands come first and are counted against the 13 segments, so
+                // the menu shrinks to fit rather than overflowing off the ring.
+                EmitterTuner.BuildChoices(e, _choices, have.Length);
                 if (_choices.Count == 0) return;
 
-                var have = __result ?? new BlockActivationCommand[0];
-                int room = RadialSegments - have.Length;
-                if (room <= 0) return;
-                int take = Math.Min(room, _choices.Count);
-                if (take < _choices.Count && !_warnedFull)
-                {
-                    _warnedFull = true;
-                    Log.Warning($"[CMM] Emitter tuner: {_choices.Count - take} station(s) do not fit "
-                              + $"the {RadialSegments}-segment radial and are not offered here.");
-                }
-
-                string current = EmitterTuner.CurrentLabel(e);
                 // A NEW ARRAY, never an append in place: BlockCompositeTileEntity returns a CACHED
                 // field (`commands`), and growing the game's own array would leak our entries into
                 // every composite block in the world and grow it again on every look.
-                var outp = new BlockActivationCommand[have.Length + take];
+                var outp = new BlockActivationCommand[have.Length + _choices.Count];
                 Array.Copy(have, outp, have.Length);
-                for (int i = 0; i < take; i++)
+                EmitterActivation.BeginEntries(have.Length);
+                for (int i = 0; i < _choices.Count; i++)
                 {
-                    string choice = _choices[i];
-                    string text = EmitterActivation.CmdPrefix + choice;
-                    EmitterActivation.RegisterLabel(text, choice);
-                    string icon = choice == EmitterTuner.AutoLabel   ? EmitterActivation.IconAuto
-                                : choice == EmitterTuner.SilentLabel ? EmitterActivation.IconSilent
-                                :                                      EmitterActivation.IconStation;
+                    EmitterTuner.Choice c = _choices[i];
+                    string text = EmitterActivation.CmdPrefix + c.Cmd;
+                    EmitterActivation.RegisterLabel(text, c.Label);
+                    EmitterActivation.NoteBadge(have.Length + i, c.Badge);
                     // BUILT BY FIELD, NOT BY CONSTRUCTOR. BlockActivationCommand's ctor gained a
                     // fifth parameter (eventName) after A21, so `new BlockActivationCommand(a,b,c,d)`
-                    // compiles to a FIVE-argument call against 3.x that A20/A21 do not declare --
-                    // a reference this never executes but still emits, and CmmApiDiff counts
+                    // compiles to a FIVE-argument call against 3.x that A20/A21 do not declare -- a
+                    // reference this never executes but still emits, and CmmApiDiff counts
                     // references, not executions. The four fields are identical on all four
                     // versions. `highlighted` marks the one already playing, so the radial opens
                     // showing you where you are rather than making you remember.
                     var cmd = default(BlockActivationCommand);
                     cmd.text = text;
-                    cmd.icon = icon;
+                    cmd.icon = c.Icon;
                     cmd.enabled = true;
-                    cmd.highlighted = choice == current;
+                    cmd.highlighted = c.Current;
                     outp[have.Length + i] = cmd;
                 }
                 __result = outp;
             }
             catch { /* a block must never break because of us */ }
+        }
+    }
+
+    // THE SEGMENT LABELS. The radial's block path calls CreateRadialEntry with _text = "" and only
+    // a _selectionText, so vanilla block menus are icons with the name shown in the centre when you
+    // hover one. That is fine for four commands with four distinct icons and useless for ten
+    // stations that all share one -- you cannot tell them apart without sweeping over each.
+    //
+    // XUiC_RadialEntry DOES have a text label (the vanilla radial_entry template gives it a 48x48
+    // box at font size 28) and a public SetText. It is a corner badge, not a caption: two
+    // characters. So the station initials go there and the full name stays in the centre.
+    //
+    // This runs as a postfix on SetCurrentBlockData, after the game has created every entry, and
+    // writes only the entries whose CommandIndex we claimed.
+    [HarmonyPatch]
+    internal static class Patch_EmitterRadialBadges
+    {
+        static bool Prepare() => EmitterActivation.SupportedRadial();
+        static MethodBase TargetMethod() => EmitterActivation.RadialMethod("SetCurrentBlockData");
+
+        // menuItem is read REFLECTIVELY, and the reason is divergence kind five: it is a public
+        // XUiC_RadialEntry[] on 2.6/3.2 and a private List<XUiC_RadialEntry> on A20/A21. The typed
+        // access compiled and CmmApiDiff flagged the emitted field reference on both older
+        // versions -- one this never executes, since the emitter layer is off there, but the
+        // baseline is worth keeping clean. IList covers an array and a List alike.
+        private static System.Reflection.FieldInfo _menuItemField;
+
+        static void Postfix(object __instance)
+        {
+            try
+            {
+                if (!EmitterActivation.HasBadges || __instance == null) return;
+                if (_menuItemField == null)
+                {
+                    _menuItemField = AccessTools.Field(__instance.GetType(), "menuItem");
+                    if (_menuItemField == null) return;
+                }
+                var items = _menuItemField.GetValue(__instance) as System.Collections.IList;
+                if (items == null) return;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    var it = items[i] as XUiC_RadialEntry;
+                    if (it == null) continue;
+                    string badge = EmitterActivation.BadgeFor(it.CommandIndex);
+                    if (badge != null) it.SetText(badge);
+                }
+            }
+            catch { }
         }
     }
 
@@ -319,7 +420,15 @@ namespace CMM
                 EmitterRegistry.Emitter e;
                 if (!EmitterTuner.EmitterAt(_blockPos, out e)) { __result = false; return false; }
 
-                EmitterTuner.Apply(e, _commandName.Substring(EmitterActivation.CmdPrefix.Length));
+                string cmd = _commandName.Substring(EmitterActivation.CmdPrefix.Length);
+                if (EmitterTuner.IsMenuAction(cmd))
+                {
+                    // Paging is navigation, not a tuning: nothing is saved, nothing makes a sound,
+                    // and the radial comes straight back on the next page.
+                    EmitterTuner.NextPage(e);
+                    EmitterActivation.ReopenRadial(_blockPos);
+                }
+                else EmitterTuner.Apply(e, cmd);
                 __result = true;
                 return false;                                      // handled; skip the original
             }

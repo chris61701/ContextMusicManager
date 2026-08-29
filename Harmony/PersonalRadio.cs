@@ -518,6 +518,13 @@ namespace CMM
         // Fire one radio-UI one-shot (native synth; no asset files). Config-gated + hot-tunable;
         // the native side ensures the output device, so a power-on click can precede the radio
         // voice's own add, and it never touches the output gain (pause duck stays ducked).
+        // The world-emitter tuner fires the same dial sound and the same tuning static: it is the
+        // same instrument being retuned, and a second sound set would only be a second thing to
+        // keep in sync with the RadioSfx* knobs.
+        internal static void TuneSfxDial()   => Sfx(CmmMixer.SfxClickDial);
+        internal static void TuneSfxStatic() => Sfx(CmmMixer.SfxTuningStatic);
+        internal static void TuneSfxStop()   => StopStatic();
+
         private static void Sfx(int kind, float scale = 1f)
         {
             if (!CMMConfig.RadioSfxEnabled) return;

@@ -1254,6 +1254,38 @@ namespace CMM
             string file = st.OnAir;
             if (file == null) return;
 
+            // ── HOLD FOR THE LEVEL, exactly as the personal radio does ─────────────────────────
+            // Reported as "the audio goes up before it changes". An unmeasured track starts at
+            // LoudnessUnmeasuredDb (-5 dB, a deliberate bias against starting hot), and its real
+            // gain lands only when the measurement finishes -- which the log times at over a
+            // second for an m4a. Against a -18 LUFS target a quiet track then RISES by ten dB or
+            // more, a second after the station changed: exactly the audible ramp reported.
+            //
+            // The personal radio has always held its start for this (StartFromClock's gain gate);
+            // the emitter layer never did, which is the whole asymmetry. Bounded, so a track that
+            // cannot be measured starts anyway and settles as it used to, and the broadcast clock
+            // keeps running so the hold just rejoins a moment later in the song.
+            if (CMMConfig.LoudnessNormalizationEnabled && !LoudnessStore.IsMeasured(file))
+            {
+                float now = Time.realtimeSinceStartup;
+                string key = st.Name + "|" + file;
+                float until;
+                if (!_gainWaitUntil.TryGetValue(key, out until))
+                {
+                    until = now + CMMConfig.LoudnessStartHoldMs / 1000f;
+                    _gainWaitUntil.Clear();          // one station is joining at a time
+                    _gainWaitUntil[key] = until;
+                    CMMConfig.D($"[CMM] Station '{st.Name}': holding start for level ({Path.GetFileName(file)}).");
+                }
+                if (now < until)
+                {
+                    ContextMusicManager.RequestPrewarm(file);
+                    return;                           // the decision tick retries
+                }
+                CMMConfig.D($"[CMM] Station '{st.Name}': level hold expired, starting unmeasured.");
+            }
+            _gainWaitUntil.Clear();
+
             int slot = st.Slot >= 0 ? st.Slot : FreeSlot();
             if (slot < 0) return;   // shouldn't happen (SelectAndVoice frees one first)
 
@@ -1423,6 +1455,9 @@ namespace CMM
             st.VoiceGainApplied = _emDoneGain;
             st.Slot = _emDoneSlot;
             _slotOwner[_emDoneSlot] = st;
+            // The voice landed, so the tuning static has nothing left to cover. Harmless when no
+            // retune armed it -- StopSfx on an idle hash is a no-op.
+            PersonalRadio.TuneSfxStop();
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
@@ -1657,6 +1692,11 @@ namespace CMM
             Transform t = player.cameraTransform;
             return t != null ? t.position + Origin.position : player.position;
         }
+
+        // Station|track → the moment its level hold expires. Cleared on any start, so it never
+        // holds a stale deadline; one entry at a time because one station joins at a time.
+        private static readonly Dictionary<string, float> _gainWaitUntil =
+            new Dictionary<string, float>(StringComparer.Ordinal);
 
         // ── Loudness integration ────────────────────────────────────────────────────────────────
 

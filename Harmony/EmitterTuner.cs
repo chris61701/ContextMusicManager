@@ -90,35 +90,184 @@ namespace CMM
             return string.IsNullOrEmpty(station) ? "tuning" : station;
         }
 
-        // ── The choices, in radial order ────────────────────────────────────────────────────
-        // Automatic first (it is the state everything starts in, and the way back), then the
-        // stations in catalog order, then Silent. Rebuilt per open, so a station folder added or
-        // removed while playing shows up with nothing to invalidate.
-        internal static void BuildChoices(List<string> into)
+        // -- The choices, in radial order ---------------------------------------------------
+        // The radial is 13 segments (windowRadial repeat_count="13") and the catalog is 16
+        // stations, so the list has to page. The layout that falls out of that, in order:
+        //
+        //   0        Turn Off / Turn On     <- THE TAP TARGET, see below
+        //   1..10    up to ten stations     <- the current page
+        //   11       Automatic
+        //   12       More                   <- only when there is more than one page
+        //
+        // SLOT 0 IS LOAD-BEARING. XUiC_Radial.Update takes a release BEFORE displayDelay (0.25 s)
+        // -- a tap rather than a hold -- and invokes the FIRST ENABLED ENTRY. So putting the
+        // on/off toggle there makes "tap to switch it off" fall out of the game's own input
+        // handling, with no timing code of ours. It also means the shelf speaker, whose vanilla
+        // loot command sorts before all of ours, still LOOTS on a tap: nothing is stolen.
+        internal struct Choice
         {
-            into.Clear();
-            into.Add(AutoLabel);
-            var stations = RadioStationCatalog.Stations;
-            for (int i = 0; i < stations.Count; i++) into.Add(stations[i].Name);
-            into.Add(SilentLabel);
+            public string Label;    // what the centre of the radial reads
+            public string Cmd;      // what comes back through OnBlockActivated
+            public string Icon;     // atlas symbol
+            public string Badge;    // 1-2 chars drawn on the segment itself
+            public bool Current;    // highlight: this is what is playing now
         }
 
-        internal static void Apply(EmitterRegistry.Emitter e, string choice)
+        internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on", CmdMore = "@more";
+
+        // Which page each group is showing. Transient (not saved): a page is where you are in a
+        // menu, not a property of the building.
+        private static readonly Dictionary<string, int> _page =
+            new Dictionary<string, int>(StringComparer.Ordinal);
+        // What a group was tuned to before it was switched off, so "Turn On" has somewhere to go
+        // back to. Also transient -- Off itself is persisted, this is only the undo.
+        private static readonly Dictionary<string, string> _beforeOff =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+
+        internal const int RadialSegments = 13;
+        internal const int PageSize = 10;
+
+        internal static void BuildChoices(EmitterRegistry.Emitter e, List<Choice> into, int reserved)
+        {
+            into.Clear();
+            EnsureLoaded();
+            string key = GroupKey(e);
+            string current = CurrentLabel(e);
+            bool isOff = current == SilentLabel;
+
+            var stations = RadioStationCatalog.Stations;
+            int room = RadialSegments - reserved;                 // what the block's own commands left
+            if (room < 3) return;                                 // no sensible menu fits
+
+            bool paged = stations.Count > room - 2;               // 2 fixed: toggle + Automatic
+            int perPage = paged ? Math.Min(PageSize, room - 3) : room - 2;
+            if (perPage < 1) return;
+
+            int pages = paged ? (stations.Count + perPage - 1) / perPage : 1;
+            int page;
+            if (!_page.TryGetValue(key, out page) || page >= pages || page < 0) page = 0;
+            _page[key] = page;
+
+            // 0 -- the tap target.
+            into.Add(new Choice {
+                Label = isOff ? "Turn On" : "Turn Off",
+                Cmd   = isOff ? CmdOn : CmdOff,
+                Icon  = isOff ? IconOn : IconOff,
+                Badge = "",
+                Current = false });
+
+            for (int i = page * perPage; i < stations.Count && i < (page + 1) * perPage; i++)
+            {
+                string name = stations[i].Name;
+                into.Add(new Choice {
+                    Label = name, Cmd = name, Icon = IconStation,
+                    Badge = Initials(name), Current = name == current });
+            }
+
+            into.Add(new Choice {
+                Label = AutoLabel, Cmd = CmdAuto, Icon = IconAuto, Badge = "",
+                Current = !isOff && !_pins.ContainsKey(key) });
+
+            if (paged)
+                into.Add(new Choice {
+                    Label = "More (" + (page + 1) + "/" + pages + ")",
+                    Cmd = CmdMore, Icon = IconMore, Badge = "", Current = false });
+        }
+
+        // Two characters, because that is what the segment's label actually is: the vanilla
+        // radial_entry template gives it a 48x48 box at font size 28, which is a corner badge, not
+        // a caption. The full name goes to the CENTRE label, where there is room for it.
+        // Initials of the first two words beat the first two letters -- "Concrete Jungle" reads as
+        // CJ, where "Co" would collide with "Continue FM".
+        internal static string Initials(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "";
+            char a = '\0', b = '\0';
+            bool atWordStart = true;
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                if (c == ' ' || c == '_' || c == '-') { atWordStart = true; continue; }
+                if (atWordStart)
+                {
+                    if (a == '\0') a = char.ToUpperInvariant(c);
+                    else if (b == '\0') { b = char.ToUpperInvariant(c); break; }
+                    atWordStart = false;
+                }
+            }
+            if (a == '\0') return "";
+            // A one-word name has no second initial, so take its second letter instead, or every
+            // C-station would show a bare C.
+            if (b == '\0' && name.Length > 1) b = char.ToLowerInvariant(name[1]);
+            return b == '\0' ? a.ToString() : new string(new[] { a, b });
+        }
+
+        // True when the choice was a MENU action (paging) rather than a tuning, so the caller
+        // reopens the radial instead of treating it as a change.
+        internal static bool IsMenuAction(string cmd) => cmd == CmdMore;
+
+        internal static void NextPage(EmitterRegistry.Emitter e)
+        {
+            string key = GroupKey(e);
+            int page;
+            _page.TryGetValue(key, out page);
+            _page[key] = page + 1;                 // BuildChoices wraps it back to 0 past the end
+        }
+
+        internal static void Apply(EmitterRegistry.Emitter e, string cmd)
         {
             EnsureLoaded();
             string key = GroupKey(e);
-            if (choice == AutoLabel)
+            string label = cmd;
+
+            if (cmd == CmdOff)
             {
-                if (_pins.Remove(key)) Save();
+                string was = CurrentLabel(e);
+                if (was != SilentLabel && was != "tuning") _beforeOff[key] = was;
+                _pins[key] = SilentPin;
+                label = "off";
+            }
+            else if (cmd == CmdOn)
+            {
+                string back;
+                if (_beforeOff.TryGetValue(key, out back) && back != SilentLabel)
+                {
+                    _pins[key] = back; label = back;
+                }
+                else { _pins.Remove(key); label = AutoLabel; }   // nothing to go back to: automatic
+            }
+            else if (cmd == CmdAuto)
+            {
+                _pins.Remove(key);
+                label = AutoLabel;
             }
             else
             {
-                _pins[key] = choice == SilentLabel ? SilentPin : choice;
-                Save();
+                _pins[key] = cmd;
             }
-            Log.Out($"[CMM] Emitter tuner: {e.Name} at {e.Pos}"
-                  + (e.PoiId != 0 ? " (whole building)" : "") + " -> " + choice);
+            Save();
+
+            // SAY SOMETHING HAPPENED. A retune used to be silent until the new station's first
+            // track opened, which the log times at a second or more -- long enough to read as
+            // "nothing happened" and press the key again. The dial click confirms the input
+            // immediately; the tuning static then covers the gap, and StartStation's level hold
+            // sits inside it, so what used to be an audible ramp is hidden behind the noise a real
+            // receiver would make. The audio layer stops the static when the voice lands.
+            PersonalRadio.TuneSfxDial();
+            if (cmd == CmdOff || cmd == CmdAuto) PersonalRadio.TuneSfxStop();
+            else PersonalRadio.TuneSfxStatic();
+
+            Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos
+                  + (e.PoiId != 0 ? " (whole building)" : "") + " -> " + label);
         }
+
+        // Icons are drawn as "ui_game_symbol_" + name by the radial's block path, so these are all
+        // names vanilla blocks already use -- an atlas miss draws nothing at all.
+        internal const string IconStation = "electric_switch";
+        internal const string IconAuto    = "wrench";
+        internal const string IconOff     = "x";
+        internal const string IconOn      = "hand";
+        internal const string IconMore    = "map_cursor";
 
         internal static void Load(string modPath)
         {
