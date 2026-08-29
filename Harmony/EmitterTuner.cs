@@ -142,6 +142,10 @@ namespace CMM
         // station change deserves the searching noise. Not persisted: on a fresh world entry there
         // has been no retune, which is exactly the answer we want.
         internal static float LastTuneAt = -999f;
+        // ...and which speaker it was. The audio layer needs the position, not just the moment:
+        // when the station you tuned TO is already playing somewhere else, that one speaker has to
+        // be lifted out of it to be swept on its own.
+        internal static Vector3i LastTunePos;
 
         internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on";
         internal const string CmdPrev = "@prev", CmdNext = "@next";
@@ -294,6 +298,7 @@ namespace CMM
             // POI, or a nearer station stealing a slot, did the same. None of those are somebody
             // turning a knob, and a receiver only searches because somebody turned a knob.
             LastTuneAt = CmmClock.Now;
+            LastTunePos = e.Pos;
             PersonalRadio.TuneSfxDial();
 
             Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos + " -> " + label);

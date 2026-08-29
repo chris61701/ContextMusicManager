@@ -82,13 +82,19 @@ namespace CMM
         // The first slot nobody owns, or -1. `pendingSlot` is a slot an asynchronous start has
         // chosen but cannot own yet -- ownership is only real once the voice exists, and handing
         // the same slot to a second station would have both rendering into it.
-        internal static int FreeSlot(RadioStation[] slotOwner, bool startPending, int pendingSlot)
+        // borrowSlot: a slot held by no station but not free either — a single speaker is being
+        // swept on it (see EmitterAudioLayer's sweep borrow). It has no owner by design, so
+        // without naming it here the next station to start would be handed the slot out from
+        // under the hiss.
+        internal static int FreeSlot(RadioStation[] slotOwner, bool startPending, int pendingSlot,
+                                     int borrowSlot = -1)
         {
             if (slotOwner == null) return -1;
             for (int s = 0; s < slotOwner.Length; s++)
             {
                 if (slotOwner[s] != null) continue;
                 if (startPending && s == pendingSlot) continue;
+                if (s == borrowSlot) continue;
                 return s;
             }
             return -1;

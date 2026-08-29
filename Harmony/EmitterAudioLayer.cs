@@ -67,6 +67,27 @@ namespace CMM
         // A lock deferred until the sweep has run its minimum, and the ramp it will use.
         private static readonly float[] _slotLockAt = new float[MaxSlots];
         private static readonly float[] _slotLockRamp = new float[MaxSlots];
+
+        // ── THE SWEEP BORROW ────────────────────────────────────────────────────────────────
+        // Retuning a speaker to a station that is ALREADY PLAYING somewhere else used to be
+        // instant and silent, and it could not be otherwise: the receiver belongs to the slot,
+        // which means to the station, so hissing it would hiss every other speaker on that
+        // station — mid-song, for a station nobody touched.
+        //
+        // A slot is already the thing we need, though. It has its own receiver AND its own point
+        // set, and since the points moved off the voice a slot with NO VOICE renders anyway, as
+        // pure noise at its own speakers. So the retuned speaker borrows a spare slot: lifted out
+        // of its station's point set, put alone on the borrowed one with the receiver searching,
+        // and handed back when the sweep is done. Nothing else on that station is on the borrowed
+        // slot, so nothing else hears it.
+        //
+        // Costs a slot for the length of a sweep. There are three; if all are busy at that moment
+        // the fallback is the old behaviour — instant, no sweep — which is the honest failure for
+        // "three stations are already playing around you".
+        private static int _borrowSlot = -1;
+        private static Vector3i _borrowPos;
+        private static float _borrowUntil, _borrowReleaseAt;
+        private static float _handledTuneAt = -999f;
         // How long a deliberate retune stays "recent". Long enough to cover the decision tick plus
         // the registry noticing the pin moved; far short of anything the world does on its own.
         // Generous, because it is the delay between the press and the START, not between the
@@ -472,6 +493,7 @@ namespace CMM
             // it read as a glitch rather than as lost settings. Loading here costs one early-out
             // per tick once the save is open.
             EmitterTuner.EnsureLoaded();
+            MaintainSweepBorrow();   // decided BEFORE the snapshot, so the exclusion lands this tick
             GroupSnapshot();        // per-station nearest + culled point sets from the registry snapshot
             // AFTER GroupSnapshot so the landing voice is seeded from this tick's speaker
             // positions, and BEFORE the start/stop logic so a station that just landed a voice is
@@ -1053,6 +1075,11 @@ namespace CMM
             for (int i = 0; i < snap.Count; i++)
             {
                 EmitterRegistry.Emitter e = snap[i];
+                // Lifted out of its station while it is being swept on its own slot. Skipped
+                // entirely rather than muted: it must not count toward the station's nearest
+                // distance either, or a station could be kept alive by a speaker that is
+                // currently playing static instead of it.
+                if (_borrowSlot >= 0 && e.Pos.Equals(_borrowPos)) continue;
                 // The PLAYER'S choice outranks the derived one (EmitterTuner: look at a speaker,
                 // press the tune key). Deliberately NOT written into _posPins: leaving the override
                 // outside the cache means retuning a building lands on the next decision tick with
@@ -1201,7 +1228,8 @@ namespace CMM
         }
 
         // Both slot rules live in EmitterSlots so they can be tested; see the header there.
-        private static int FreeSlot() => EmitterSlots.FreeSlot(_slotOwner, _emStartPending, _emPendingSlot);
+        private static int FreeSlot() =>
+            EmitterSlots.FreeSlot(_slotOwner, _emStartPending, _emPendingSlot, _borrowSlot);
 
         // ── Pause resync ────────────────────────────────────────────────────────────────────────
         // Set from the unpause edge (OnGamePauseChanged, pauses > 1 s); consumed by the next tick.
@@ -1823,6 +1851,83 @@ namespace CMM
         private static readonly Dictionary<string, float> _gainWaitUntil =
             new Dictionary<string, float>(StringComparer.Ordinal);
 
+        // Begin, hold and end the sweep borrow. Runs before GroupSnapshot so a borrow started
+        // this tick excludes its speaker from the same tick's point sets — a tick of delay here
+        // would be most of the sweep.
+        private static void MaintainSweepBorrow()
+        {
+            float now = CmmClock.Now;
+
+            // Finish: hand the speaker back, then let the noise fall away rather than cutting it.
+            if (_borrowSlot >= 0)
+            {
+                if (_borrowReleaseAt <= 0f && now >= _borrowUntil)
+                {
+                    _borrowReleaseAt = now + ReleaseRamp;
+                    CmmMixer.Instance?.SetEmitterRecv(_borrowSlot, 1f, ReleaseRamp);
+                }
+                if (_borrowReleaseAt > 0f && now >= _borrowReleaseAt)
+                {
+                    CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
+                    CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
+                    CMMConfig.D($"[CMM] Sweep borrow on slot {_borrowSlot} ended — speaker rejoins its station.");
+                    _borrowSlot = -1; _borrowReleaseAt = 0f;
+                }
+                else return;   // one borrow at a time
+            }
+
+            // Begin: only for a retune we have not handled, and only when the station it moved to
+            // is ALREADY PLAYING — anything else gets its sweep from StartStation in the ordinary
+            // way, and borrowing as well would sweep it twice.
+            if (_handledTuneAt == EmitterTuner.LastTuneAt) return;
+            if (now - EmitterTuner.LastTuneAt > RetuneWindow) return;
+            _handledTuneAt = EmitterTuner.LastTuneAt;
+
+            Vector3i pos = EmitterTuner.LastTunePos;
+            var snap = EmitterRegistry.Snapshot;
+            EmitterRegistry.Emitter e = default(EmitterRegistry.Emitter);
+            bool found = false;
+            for (int i = 0; i < snap.Count; i++)
+                if (snap[i].Pos.Equals(pos)) { e = snap[i]; found = true; break; }
+            if (!found) return;
+
+            string want;
+            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want)) return;
+            Station target = null;
+            for (int i = 0; i < _stations.Count; i++)
+                if (string.Equals(_stations[i].Name, want, StringComparison.OrdinalIgnoreCase))
+                { target = _stations[i]; break; }
+            if (target == null || target.VoiceId == 0) return;   // not already playing: StartStation sweeps
+
+            int slot = FreeSlot();
+            if (slot < 0)
+            {
+                CMMConfig.D("[CMM] Sweep borrow: no spare slot — retune lands without a sweep.");
+                return;
+            }
+
+            _borrowSlot = slot;
+            _borrowPos = pos;
+            _borrowUntil = now + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _borrowReleaseAt = 0f;
+            // One point, clear line. The occlusion the station computes for this speaker belongs to
+            // the station's own publish, which this speaker is out of for the moment; a quarter of a
+            // second of unoccluded hiss from a radio you are standing at is not worth a second
+            // acoustics pass.
+            _borrowPts[0] = pos.x + 0.5f; _borrowPts[1] = pos.y + 0.5f; _borrowPts[2] = pos.z + 0.5f;
+            _borrowGain[0] = 0f;
+            _borrowFlags[0] = e.Name == "radioHam" ? 1 : 0;
+            CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
+            CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+            _slotArmedAt[slot] = now;
+            CMMConfig.D($"[CMM] Sweep borrow: slot {slot} sweeps {e.Name} at {pos} onto '{want}' "
+                      + "(already playing elsewhere).");
+        }
+
+        private static readonly float[] _borrowPts = new float[3];
+        private static readonly float[] _borrowGain = new float[1];
+        private static readonly int[] _borrowFlags = new int[1];
+
         // A SLOT NOTHING IS TUNED TO MUST NOT KEEP HISSING, and this is a sweep rather than a
         // release on each exit path ON PURPOSE. Reported as "sometimes the static won't stop".
         //
@@ -1851,6 +1956,7 @@ namespace CMM
                 }
 
                 if (_slotOwner[s] != null) continue;                    // a station holds it
+                if (s == _borrowSlot) continue;                         // a speaker is sweeping on it
                 if (_emStartPending && _emPendingSlot == s) continue;   // a start is on its way
                 if (_slotLastStation[s] == null) continue;              // already released
                 // AND NOT WHILE IT IS LEGITIMATELY SEARCHING. The level hold returns before the
