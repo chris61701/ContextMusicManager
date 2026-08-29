@@ -139,6 +139,9 @@ namespace CMM
             HandleMusicKeybinds();
             // Personal radio (all versions): self-throttled; no-op while dialed Off.
             PersonalRadio.Tick();
+            // Withdraw the single-player-only crafting recipes if this turned out to be
+            // multiplayer (and give them back if it stops being). Self-throttled to 5 s.
+            CraftingGate.Tick();
 #if GV_V3
             // World-emitter audio layer (experimental, 3.0 only): self-throttled; no-op unless
             // enabled + configured. Plays a diegetic station near detected in-world speakers.

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ContextMusicManager — craftable emitters.
+
+  The mod can play music through in-world speakers, but the two blocks it listens for only exist
+  where a level designer put them. These recipes let a player make their own.
+
+  SINGLE PLAYER ONLY, and the enforcement is NOT here. An XPath patch cannot ask whether the
+  session is single player: it is applied once, at load, long before the game knows. So the
+  recipes are always added and CraftingGate removes them again the moment it can tell this is
+  multiplayer — a client, a dedicated server, or a host once somebody joins. If you are reading
+  this because a recipe appeared on a server, that is the file to look at, not this one.
+
+  ALWAYS UNLOCKED and craftable in the backpack: this is a mod adding a convenience, not a
+  progression step, and hiding it behind a schematic that does not exist would make it
+  unreachable. Ingredient counts are Chris's.
+-->
+<configs>
+
+  <append xpath="/recipes">
+
+    <!-- Ham Radio: 4 Electrical Parts + 2 Mechanical Parts + 6 Scrap Polymers + 2 Duct Tape -->
+    <recipe name="radioHam" count="1" craft_time="20" always_unlocked="true" tags="CMM">
+      <ingredient name="resourceElectricParts"   count="4"/>
+      <ingredient name="resourceMechanicalParts" count="2"/>
+      <ingredient name="resourceScrapPolymers"   count="6"/>
+      <ingredient name="resourceDuctTape"        count="2"/>
+    </recipe>
+
+    <!-- Speaker: 2 Electrical Parts + 3 Scrap Polymers + 2 Wood + 1 Duct Tape.
+         cntStoreElectronicsBookShelfSpeaker despite the "cnt" prefix is plain decoration (it
+         extends decoEntityPolymerMaster), which is why it is the one made craftable. The other
+         speaker the mod listens for, cntStoreShelfElectronicsSingleBottomSpeaker, really is a
+         loot container — crafting a lootable shelf would be a strange thing to hand a player. -->
+    <recipe name="cntStoreElectronicsBookShelfSpeaker" count="1" craft_time="15" always_unlocked="true" tags="CMM">
+      <ingredient name="resourceElectricParts" count="2"/>
+      <ingredient name="resourceScrapPolymers" count="3"/>
+      <ingredient name="resourceWood"          count="2"/>
+      <ingredient name="resourceDuctTape"      count="1"/>
+    </recipe>
+
+  </append>
+
+</configs>
