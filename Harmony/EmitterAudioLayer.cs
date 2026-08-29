@@ -1297,16 +1297,31 @@ namespace CMM
                 }
                 if (cand == null) return;
 
+                // THE ONE STATION THAT MUST NOT TAKE THE BORROW'S SLOT IS THE ONE IT IS
+                // SWEEPING ONTO. Measured, five times in one log: the borrow takes the last free
+                // slot, and two milliseconds later the station it is sweeping onto reaches the
+                // yield below, finds nothing free BECAUSE the borrow has it, and takes it back.
+                // The retune then lands with no sweep at all — the whole feature defeated by its
+                // own beneficiary.
+                //
+                // And needlessly: in every one of those five the ordinary steal was available.
+                // 'Lit FM' opened on the yielded slot and then re-opened 100 ms later on a slot
+                // stolen from 'Galaxy News Radio' anyway. So the target goes to the steal FIRST
+                // and falls back to taking the borrow's slot only when no steal is possible,
+                // because a station that never opens is worse than a lost sweep.
+                bool candIsSweepTarget = _borrowSlot >= 0 && _borrowTarget != null
+                    && string.Equals(cand.Name, _borrowTarget, StringComparison.OrdinalIgnoreCase);
+
                 int free = FreeSlot();
-                if (free < 0 && _borrowSlot >= 0)
+                if (free < 0 && _borrowSlot >= 0 && !candIsSweepTarget)
                 {
                     // A SWEEP NEVER COSTS SOMEBODY THEIR MUSIC. The borrow holds a slot with no
-                    // owner, so a station starting while it is held finds nothing free and steals
-                    // from the farthest one playing — reported as the audio cutting out while
-                    // tuning another station. A quarter second of hiss is worth less than a
+                    // owner, so a THIRD station starting while it is held finds nothing free and
+                    // steals from the farthest one playing — reported as the audio cutting out
+                    // while tuning another station. A quarter second of hiss is worth less than a
                     // station somebody is listening to, so the borrow gives its slot back first
                     // and only a genuine shortage reaches the steal below.
-                    CMMConfig.D("[CMM] Sweep borrow yields its slot — a station needs it.");
+                    CMMConfig.D("[CMM] Sweep borrow yields its slot — an unrelated station needs it.");
                     EndSweepBorrowNow();
                     free = FreeSlot();
                 }
@@ -1320,9 +1335,21 @@ namespace CMM
                         if (own == null) continue;
                         if (far == null || own.NearestDist > far.NearestDist) far = own;
                     }
-                    if (far == null || cand.NearestDist + StealMargin >= far.NearestDist) return;
-                    CMMConfig.D($"[CMM] Station '{cand.Name}' ({cand.NearestDist:0.0}m) steals the slot of '{far.Name}' ({far.NearestDist:0.0}m).");
-                    StopStation(far, "slot taken by a nearer station");
+                    if (far == null || cand.NearestDist + StealMargin >= far.NearestDist)
+                    {
+                        // Nothing stealable. If this is the station the borrow is sweeping onto,
+                        // the borrow gives way after all — see above.
+                        if (!candIsSweepTarget) return;
+                        CMMConfig.D("[CMM] Sweep borrow yields its slot — its own station cannot start otherwise.");
+                        EndSweepBorrowNow();
+                        free = FreeSlot();
+                        if (free < 0) return;
+                    }
+                    else
+                    {
+                        CMMConfig.D($"[CMM] Station '{cand.Name}' ({cand.NearestDist:0.0}m) steals the slot of '{far.Name}' ({far.NearestDist:0.0}m).");
+                        StopStation(far, "slot taken by a nearer station");
+                    }
                 }
                 StartStation(cand, player, StartFade(), fresh: !HasActiveVoice);
                 if (cand.VoiceId == 0) return;   // start failed (no playable track) — don't spin
@@ -2096,6 +2123,7 @@ namespace CMM
             if (target == null) return;
 
             int slot = FreeSlot();
+            if (slot < 0) slot = TakeInaudibleSlot();
             if (slot < 0)
             {
                 CMMConfig.D("[CMM] Sweep borrow: no spare slot — retune lands without a sweep.");
@@ -2125,6 +2153,34 @@ namespace CMM
             _slotArmedAt[slot] = now;
             CMMConfig.D($"[CMM] Sweep borrow: slot {slot} sweeps {e.Name} at {pos} onto '{want}' "
                       + (target.VoiceId != 0 ? "(already playing)." : "(opening under the noise)."));
+        }
+
+        // A STATION WITH NO SPEAKERS IS NOT USING ITS SLOT. UnseenGrace keeps a station warm for
+        // twelve seconds after its last speaker goes, so walking out of a room and back does not
+        // pay for a re-decode. Ruinous at a radio you are TURNING, though: every station you pass
+        // through sits on a slot for twelve seconds and there are only three. Measured, six
+        // retunes in one log gave up with "no spare slot", and the stations holding those slots
+        // had no speakers at all.
+        //
+        // So the borrow may take one back. Nobody is listening to a station with no speakers, and
+        // the cost is a re-decode if it is rejoined later — against a retune that would otherwise
+        // land in silence. Strictly "no speakers ANYWHERE", never "none in range": a station just
+        // outside the ring is one step from being heard again and keeps its warm slot.
+        private static int TakeInaudibleSlot()
+        {
+            int best = -1;
+            for (int s = 0; s < MaxSlots; s++)
+            {
+                Station own = _slotOwner[s];
+                if (own == null) continue;
+                if (own.NearestDist != float.MaxValue) continue;
+                if (best < 0 || _slotOwner[best].LastSeenAt > own.LastSeenAt) best = s;   // coldest first
+            }
+            if (best < 0) return -1;
+            CMMConfig.D($"[CMM] Sweep borrow takes slot {best} from '{_slotOwner[best].Name}' "
+                      + "(no speakers — warm only).");
+            StopStation(_slotOwner[best], "slot taken for a retune sweep");
+            return FreeSlot();
         }
 
         // Give the slot back at once: the speaker rejoins its station on the next snapshot and
