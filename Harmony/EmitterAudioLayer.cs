@@ -1455,9 +1455,6 @@ namespace CMM
             st.VoiceGainApplied = _emDoneGain;
             st.Slot = _emDoneSlot;
             _slotOwner[_emDoneSlot] = st;
-            // The voice landed, so the tuning static has nothing left to cover. Harmless when no
-            // retune armed it -- StopSfx on an idle hash is a no-op.
-            PersonalRadio.TuneSfxStop();
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 

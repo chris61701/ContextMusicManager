@@ -47,14 +47,23 @@ namespace CMM
             new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         private static bool _loaded;
 
-        // A speaker inside a POI is identified BY THE BUILDING; one a player dropped in a field has
-        // no building, so it is identified by where it stands. StationHash is deliberately not used
-        // for this: the overlapping-prefab dedup in EmitterRegistry rewrites it, and a key that
-        // moves under a saved choice would retune a house on its own.
+        // EVERY RADIO IS SAVED ON ITS OWN, by where it stands.
+        //
+        // This was keyed by BUILDING at first, on the reasoning that a POI's speakers already
+        // shared one station, so retuning one should retune them all. That holds right up until
+        // somebody builds a base inside a POI -- which people do -- and then their own radio is
+        // welded to the derelict hospital's, and neither can be set without moving the other.
+        //
+        // The DEFAULT is untouched: the automatic assignment is still derived per POI
+        // (EmitterRegistry.StationHashFromId), so an untouched building's speakers still all play
+        // one station and still agree across multiplayer clients for free. Only a deliberate
+        // choice is per radio. The cost is that a building with five speakers takes five tunings
+        // to change wholesale -- the price of being able to change one of them at all.
+        //
+        // A position is also a better key than a PrefabInstance.id: it survives a POI reset, and
+        // it means nothing at all in a save where that spot holds a different block.
         internal static string GroupKey(EmitterRegistry.Emitter e)
-            => e.PoiId != 0
-                ? "poi:" + e.PoiId.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : "blk:" + e.Pos.x + "," + e.Pos.y + "," + e.Pos.z;
+            => "blk:" + e.Pos.x + "," + e.Pos.y + "," + e.Pos.z;
 
         // The player's choice for this speaker, if they made one. Consulted by
         // EmitterAudioLayer.GroupSnapshot BEFORE its own pin map, and deliberately not written into
@@ -254,17 +263,18 @@ namespace CMM
             // immediately; the tuning static then covers the gap, and StartStation's level hold
             // sits inside it, so what used to be an audible ramp is hidden behind the noise a real
             // receiver would make. The audio layer stops the static when the voice lands.
-            // THE CLICK ALWAYS, THE STATIC ONLY WHEN A NEW STATION HAS TO BE FOUND. Off, On and
-            // Automatic all resume something already known or stop outright, so hiss over them is
-            // noise for its own sake -- and switching a radio back on and hearing static reads as
-            // a fault, not as tuning. Only picking a DIFFERENT station has a gap worth covering.
+            // THE CLICK ONLY. The static was here to cover the gap while the new station's level
+            // was measured, and it did cover it -- but a WORLD speaker's static played on the
+            // music bus, which has no position, so it arrived inside the listener's head instead
+            // of out of the radio across the room. Giving a one-shot a position means changing the
+            // native audio library, and it is not worth that: StartStation now holds for the level
+            // (see its gain gate), so there is no ramp left to hide and a confirmation click is
+            // the whole job.
+            //
+            // The personal radio keeps ITS static, and correctly: that one IS in your head.
             PersonalRadio.TuneSfxDial();
-            bool seeking = cmd != CmdOff && cmd != CmdAuto && cmd != CmdOn;
-            if (seeking) PersonalRadio.TuneSfxStatic();
-            else PersonalRadio.TuneSfxStop();
 
-            Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos
-                  + (e.PoiId != 0 ? " (whole building)" : "") + " -> " + label);
+            Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos + " -> " + label);
         }
 
         // Icons are drawn as "ui_game_symbol_" + name by the radial's block path, so these are all
