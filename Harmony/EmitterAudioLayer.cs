@@ -98,7 +98,21 @@ namespace CMM
         // "three stations are already playing around you".
         private static int _borrowSlot = -1;
         private static Vector3i _borrowPos;
-        private static float _borrowUntil, _borrowReleaseAt;
+        private static float _borrowUntil, _borrowReleaseAt, _borrowGiveUp;
+        private static string _borrowTarget;
+        // A station that never opens must not hold a slot for ever. Comfortably past the level
+        // hold plus a decode plus a retry.
+        private const float BorrowGiveUp = 6f;
+
+        // Has the station this speaker is joining got a voice yet?
+        private static bool TargetAudible()
+        {
+            if (string.IsNullOrEmpty(_borrowTarget)) return true;
+            for (int i = 0; i < _stations.Count; i++)
+                if (string.Equals(_stations[i].Name, _borrowTarget, StringComparison.OrdinalIgnoreCase))
+                    return _stations[i].VoiceId != 0;
+            return true;   // station gone from the catalog: stop waiting for it
+        }
         private static float _handledTuneAt = -999f;
         // How long a deliberate retune stays "recent". Long enough to cover the decision tick plus
         // the registry noticing the pin moved; far short of anything the world does on its own.
@@ -1960,6 +1974,11 @@ namespace CMM
             // Finish: hand the speaker back, then let the noise fall away rather than cutting it.
             if (_borrowSlot >= 0)
             {
+                // Not until the station it is joining can actually be heard. Waiting here is the
+                // whole point: the noise covers the decode instead of the speaker sitting silent
+                // through it.
+                if (_borrowReleaseAt <= 0f && now >= _borrowUntil && now < _borrowGiveUp
+                    && !TargetAudible()) return;
                 if (_borrowReleaseAt <= 0f && now >= _borrowUntil)
                 {
                     // AN ARRIVAL, NOT A RELEASE. The station this speaker is joining is already
@@ -1993,15 +2012,42 @@ namespace CMM
                 }
             }
 
-            // Begin: only for a retune we have not handled, and only when the station it moved to
-            // is ALREADY PLAYING — anything else gets its sweep from StartStation in the ordinary
-            // way, and borrowing as well would sweep it twice.
+            // Begin: EVERY retune, not only the ones onto an already-playing station.
+            //
+            // THE MISSING HALF. The receiver was armed on the slot of the station being tuned TO,
+            // which means the station being tuned AWAY FROM got no treatment at all — it simply
+            // stopped when the speaker left it. Reported as "there's no transition out of an
+            // existing station", and it is also both of the other reports: turning the radio on
+            // from Off bled the new station in cleanly before any noise, and changing station cut
+            // to nothing before the static arrived. All three are the same hole.
+            //
+            // The personal radio does not have this problem because it has ONE receiver and the
+            // signal ramps down and then up through it; leaving and arriving are the same object.
+            // Here they are two different slots, so nothing owned the leaving.
+            //
+            // The borrow already is that object. It takes the speaker out of every station and
+            // gives it a slot of its own that renders noise — which is exactly what a receiver
+            // between stations is. Routing every retune through it makes one mechanism cover both
+            // halves, and the special case for "the target is already playing" disappears: it was
+            // never about the target, it was about the speaker having somewhere to be.
             if (_handledTuneAt == EmitterTuner.LastTuneAt) return;
             if (now - EmitterTuner.LastTuneAt > RetuneWindow) return;
             _handledTuneAt = EmitterTuner.LastTuneAt;
             // Whatever we decide below, the blanket hold ends here — from now on the speaker is
             // either excluded because the borrow owns it, or back in its station.
             EmitterTuner.ReleaseSweepHold();
+            // A RETUNED SPEAKER IS A NEW SPEAKER, as far as arriving goes. The birth ramp already
+            // fades in "a speaker that APPEARS while a station voice is already live... instead of
+            // popping" -- but a speaker being retuned never appears. It has been in the registry
+            // the whole time; only its pin changed. Turning a SILENCED radio back on is the plain
+            // case: it was pinned to a name that resolves to nothing, so it contributed to no
+            // station and made no sound, and the instant the pin became real it joined a station
+            // already at full level and arrived there with no ramp at all. That is the clear audio
+            // bleeding through before any static.
+            //
+            // Re-stamping it makes the existing ramp apply wherever it lands, whether or not the
+            // borrow below manages to give it a sweep first.
+            _speakerFirstSeen[EmitterTuner.LastTunePos] = CmmClock.Now;
 
             Vector3i pos = EmitterTuner.LastTunePos;
             var snap = EmitterRegistry.Snapshot;
@@ -2017,7 +2063,7 @@ namespace CMM
             for (int i = 0; i < _stations.Count; i++)
                 if (string.Equals(_stations[i].Name, want, StringComparison.OrdinalIgnoreCase))
                 { target = _stations[i]; break; }
-            if (target == null || target.VoiceId == 0) return;   // not already playing: StartStation sweeps
+            if (target == null) return;
 
             int slot = FreeSlot();
             if (slot < 0)
@@ -2028,7 +2074,13 @@ namespace CMM
 
             _borrowSlot = slot;
             _borrowPos = pos;
+            _borrowTarget = target.Name;
+            // At LEAST the sweep, and then for as long as the new station has nothing to hand the
+            // speaker back to. Handing it back to a station with no voice is the cut this exists to
+            // remove — the speaker would rejoin something silent and wait out the decode in the
+            // clear. Capped, because a station that never opens must not hold a slot for ever.
             _borrowUntil = now + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _borrowGiveUp = now + BorrowGiveUp;
             _borrowReleaseAt = 0f;
             // One point, clear line. The occlusion the station computes for this speaker belongs to
             // the station's own publish, which this speaker is out of for the moment; a quarter of a
