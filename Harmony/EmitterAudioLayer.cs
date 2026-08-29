@@ -50,7 +50,20 @@ namespace CMM
         // Asymmetric on purpose: losing a station is abrupt (you turned the knob), finding one is
         // not. Both are short relative to the level hold they cover.
         private const float SearchRamp = 0.12f;
+        // The LOCK, and it is a FLOOR rather than the answer. Reported as "the static will stop
+        // while the music is still fading in": a fixed 0.9 s beat any voice fade longer than that,
+        // so the noise cleared and left the station still climbing underneath — a fade with
+        // nothing over it, which is the exact failure v47 records against the personal radio. The
+        // arrival now takes at least as long as the fade it is covering, plus a tail so the hiss
+        // is still there when the music finishes arriving rather than ending with it.
         private const float ArriveRamp = 0.90f;
+        private const float ArriveTail = 0.35f;
+        private static float _emPendingFade;
+        // When each slot's receiver was last put into search, so the sweep can tell a slot that is
+        // waiting from one that is stuck. Generous by design: releasing early is an audible cut,
+        // releasing late is a second of extra hiss nobody will attribute to a bug.
+        private static readonly float[] _slotArmedAt = new float[MaxSlots];
+        private static float SearchGiveUp => CMMConfig.LoudnessStartHoldMs / 1000f + 4f;
 
         // The station list lives on the shared catalog (RadioStation class, version-neutral); this
         // layer owns the emitter-side fields on it (VoiceId/Slot/points/acoustics).
@@ -442,6 +455,7 @@ namespace CMM
             if (_clockResyncPending) { _clockResyncPending = false; ResyncVoicesToClock(player); }
             MaintainPlayingStations(player);   // airing-file-vanished interrupt + EOF advance
             SelectAndVoice(player); // K-nearest start/steal/stop
+            ReleaseIdleReceivers(); // a slot nothing is tuned to must not keep hissing
 
             // The wet reverb reaches farther than the dry (range × ReverbRangeMult), so occlusion +
             // the room probe run out to whichever is larger; past that a warm voice keeps decoding
@@ -1286,6 +1300,7 @@ namespace CMM
                 // track advancing within one station is not a dial being turned, and hiss over it
                 // would be a fault rather than a feature.
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+                _slotArmedAt[slot] = CmmClock.Now;
                 // ...and its speakers, so the noise has somewhere in the world to come from. The
                 // point set is already current — GroupSnapshot filled it earlier this tick.
                 CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
@@ -1345,6 +1360,7 @@ namespace CMM
             float fade = fadeIn;
             bool freshCap = fresh;
 
+            _emPendingFade = fade;
             _emStartPending = true;
             _emStartPendingAt = CmmClock.Now;
             _emPendingSlot = slot;
@@ -1480,7 +1496,7 @@ namespace CMM
             {
                 CmmMixer.Instance?.RemoveEmitter(id, StopFade);
                 CMMConfig.D($"[CMM] Station '{stationName}': start superseded while opening — voice dropped.");
-                return;
+                return;   // the slot's receiver is released by ReleaseIdleReceivers below
             }
 
             st.VoiceId = id;
@@ -1492,7 +1508,9 @@ namespace CMM
             // or the station is just a fade with hiss laid over it, which is the finding recorded
             // against the personal radio's v47. Harmless when the receiver was never armed — the
             // ramp simply runs from 1 to 1.
-            CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, ArriveRamp);
+            float arrive = _emPendingFade + ArriveTail;
+            if (arrive < ArriveRamp) arrive = ArriveRamp;
+            CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, arrive);
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
@@ -1738,6 +1756,49 @@ namespace CMM
         // holds a stale deadline; one entry at a time because one station joins at a time.
         private static readonly Dictionary<string, float> _gainWaitUntil =
             new Dictionary<string, float>(StringComparer.Ordinal);
+
+        // A SLOT NOTHING IS TUNED TO MUST NOT KEEP HISSING, and this is a sweep rather than a
+        // release on each exit path ON PURPOSE. Reported as "sometimes the static won't stop".
+        //
+        // Arming happens in one place; giving up on a start happens in five. The open can fail,
+        // the id can come back zero, the station can be superseded while the decoder was working
+        // (which is what rapid dialling does — every press supersedes the one before it), the
+        // station can go out of range, or it can be stopped outright while still searching. That
+        // last one could not be released by StopStation even in principle: it clears the receiver
+        // under `st.Slot >= 0`, and a station that is still searching has no slot yet — Slot is
+        // only assigned when the voice lands. So the one case most likely to happen was the one
+        // case structurally guaranteed to leak.
+        //
+        // Asking five exit paths to each remember is how the leak got here. A slot with no owner
+        // and no start in flight is not tuned to anything, whatever route it took to get there,
+        // and one sweep of three slots per decision tick closes all of them including the ones I
+        // have not thought of.
+        private static void ReleaseIdleReceivers()
+        {
+            for (int s = 0; s < MaxSlots; s++)
+            {
+                if (_slotOwner[s] != null) continue;                    // a station holds it
+                if (_emStartPending && _emPendingSlot == s) continue;   // a start is on its way
+                if (_slotLastStation[s] == null) continue;              // already released
+                // AND NOT WHILE IT IS LEGITIMATELY SEARCHING. The level hold returns before the
+                // decoder job is dispatched, so through the whole of it there is no owner AND no
+                // pending start -- the two conditions above -- and a sweep without this one would
+                // reap the slot every tick and kill the exact static the hold exists to cover.
+                // A deadline instead: the hold is bounded by LoudnessStartHoldMs, so anything
+                // still ownerless well past that is stuck rather than working.
+                if (CmmClock.Now - _slotArmedAt[s] < SearchGiveUp) continue;
+                CmmMixer.Instance?.ClearEmitterRecv(s);
+                CmmMixer.Instance?.SetSlotPoints(s, _emptyPts, _emptyGain, _emptyFlags, 0);
+                _slotLastStation[s] = null;
+                CMMConfig.D($"[CMM] Emitter slot {s} released — no station, receiver off.");
+            }
+        }
+
+        // Empty push buffers for a released slot: SetSlotPoints with count 0 ignores the arrays,
+        // but passing null across the interop boundary is not worth the argument.
+        private static readonly float[] _emptyPts   = new float[3];
+        private static readonly float[] _emptyGain  = new float[1];
+        private static readonly int[]   _emptyFlags = new int[1];
 
         // ── Loudness integration ────────────────────────────────────────────────────────────────
 
