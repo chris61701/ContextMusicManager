@@ -192,6 +192,63 @@ namespace CMM
             catch { return Solid; }
         }
 
+        // ── Can sound pass through this block? ───────────────────────────────────────────────
+        // The fourth divergence, and the same arity change as GetDensity, on a different type:
+        //
+        //   3.x   bool Block.IsSeeThrough(WorldBase w, Vector3i pos, BlockValue bv)
+        //   2.6   bool Block.IsSeeThrough(WorldBase w, int clrIdx, Vector3i pos, BlockValue bv)
+        //
+        // Virtual, so it is bound per BLOCK type rather than per world: a window and a door are
+        // different Block subclasses with their own overrides. Cached by the declaring type, which
+        // is a handful of entries for a whole world and stable for the process.
+        private static readonly Dictionary<Type, Func<object, object, Vector3i, BlockValue, bool>> _seeThrough =
+            new Dictionary<Type, Func<object, object, Vector3i, BlockValue, bool>>();
+        private static bool _seeThroughWarned;
+
+        internal static bool IsSeeThrough(Block b, object world, Vector3i pos, BlockValue bv)
+        {
+            // Solid, not transparent, when the answer cannot be had: a wrong "sound passes here"
+            // opens a hole in the occlusion, while a wrong "it does not" merely over-muffles.
+            if (b == null) return false;
+            Type t = b.GetType();
+            Func<object, object, Vector3i, BlockValue, bool> fn;
+            if (!_seeThrough.TryGetValue(t, out fn))
+            {
+                fn = BindSeeThrough(t);
+                _seeThrough[t] = fn;
+                if (fn == null && !_seeThroughWarned)
+                {
+                    _seeThroughWarned = true;
+                    Log.Warning("[CMM] World emitters: this game has no IsSeeThrough the mod can call — "
+                              + "windows and open doorways will occlude like solid walls.");
+                }
+            }
+            if (fn == null) return false;
+            try { return fn(b, world, pos, bv); }
+            catch { return false; }
+        }
+
+        static Func<object, object, Vector3i, BlockValue, bool> BindSeeThrough(Type t)
+        {
+            try
+            {
+                Type wb = AccessTools.TypeByName("WorldBase");
+                if (wb == null) return null;
+
+                var three = AccessTools.Method(t, "IsSeeThrough",
+                                               new[] { wb, typeof(Vector3i), typeof(BlockValue) });
+                if (three != null)
+                    return (blk, w, p, v) => (bool)three.Invoke(blk, new object[] { w, p, v });
+
+                var four = AccessTools.Method(t, "IsSeeThrough",
+                                              new[] { wb, typeof(int), typeof(Vector3i), typeof(BlockValue) });
+                if (four != null)
+                    return (blk, w, p, v) => (bool)four.Invoke(blk, new object[] { w, 0, p, v });
+            }
+            catch { }
+            return null;
+        }
+
         static bool Probe()
         {
             try

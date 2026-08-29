@@ -103,7 +103,9 @@ namespace CMM
             if (_phase != Phase.Idle) return "a sweep is already running (`cmm acsweep status` / `cancel`)";
 
             var prefabs = new List<PrefabInstance>();
-            deco.GetWorldPrefabs(prefabs);
+            // Through the compat shim, like the registry: 3.x fills a list, 2.6 returns one.
+            if (!EmitterCompat.GetWorldPrefabs(deco, prefabs))
+                return "this game version does not expose a world-prefab list the sweep can read";
 
             if (sub == "list")
             {
@@ -338,7 +340,7 @@ namespace CMM
                 Block b = bv.Block;
                 if (b == null) { _blockIdx[idx] = 0; _flags[idx] = FlagAir; return; }
                 if (water || (b.blockMaterial != null && b.blockMaterial.IsLiquid)) flags |= FlagWater;
-                if (b.IsSeeThrough(world, new Vector3i(x, y, z), bv)) flags |= FlagSeeThrough;
+                if (EmitterCompat.IsSeeThrough(b, world, new Vector3i(x, y, z), bv)) flags |= FlagSeeThrough;
                 if (b.shape is BlockShapeTerrain) flags |= FlagTerrain;
                 if (b.shape != null && b.shape.IsSolidCube) flags |= FlagSolidCube;
                 _blockIdx[idx] = (ushort)NameIndex(b.GetBlockName() ?? "?");

@@ -551,7 +551,7 @@ namespace CMM
                 return DoorShutLoss(b, bv, mdmg) * (1f - mdmg);
             }
 
-            if (b.IsSeeThrough(world, new Vector3i(x, y, z), bv))
+            if (EmitterCompat.IsSeeThrough(b, world, new Vector3i(x, y, z), bv))
             {
                 // CLIMBABLES (ladders, any material) are open FRAMES, not walls — and you travel THROUGH
                 // their cells, so even a small per-cell loss compounds along a ladder shaft into wall-
@@ -3022,7 +3022,7 @@ namespace CMM
                 Block b = bv.Block;
                 if (b == null) continue;
                 if (b.blockMaterial != null && b.blockMaterial.IsLiquid) { dist = t; reflect = 0.85f; return true; }
-                if (b.IsSeeThrough(world, new Vector3i(x, y, z), bv)) continue;   // window/doorway — sound passes, no reflection here
+                if (EmitterCompat.IsSeeThrough(b, world, new Vector3i(x, y, z), bv)) continue;   // window/doorway — sound passes, no reflection here
                 dist = t;
                 reflect = MaterialReflect(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null);
                 return true;
