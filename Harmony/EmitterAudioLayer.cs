@@ -1677,16 +1677,15 @@ namespace CMM
                 // silences the search running on it.
                 //
                 // The guard has to come FIRST, because clearing st.Slot is what ends the question.
-                if (_slotOwner[st.Slot] == st)
-                {
-                    // No station, no receiver: an armed slot renders its lane every block, and a
-                    // slot nothing is tuned to should cost nothing and make no sound. Its speakers
-                    // go too — the point set describes a station's speakers, and this slot no
-                    // longer has one.
-                    CmmMixer.Instance?.ClearEmitterRecv(st.Slot);
-                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
-                    _slotOwner[st.Slot] = null;
-                }
+                // THE RECEIVER IS NOT TOUCHED HERE, and that is the point. Releasing it was
+                // spread over this path, the borrow, and the idle sweep, and every one of them
+                // was a chance to silence a slot something else was using — which is every cut
+                // reported against this feature. ReleaseIdleReceivers is now the ONLY thing that
+                // releases a receiver or clears a slot's speakers. It already knows the full
+                // picture (no owner, no start in flight, no borrow, past the search deadline);
+                // this path knows only that one station is finishing, which was never enough to
+                // decide whether the slot is idle.
+                if (_slotOwner[st.Slot] == st) _slotOwner[st.Slot] = null;
                 st.Slot = -1;
             }
         }
