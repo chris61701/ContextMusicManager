@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 44;
+        internal const int CurrentSchema = 45;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -989,24 +989,24 @@ rather than a hi-fi in a wall. All hot-reload."),
             Cmt(@"How loud a world speaker's TUNING noise is, relative to the personal radio's.
 The receiver itself is tuned once and drives both; this is only the level of the hiss
 that comes out of a speaker in the world. 0 = silent, 1 = the same as the radio you carry."),
-            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            0.5f),
+            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            0.5f, since: 45),
             Cmt(@"How long (ms) a world speaker waits for a track's measured loudness before it
 starts anyway. Shorter than the personal radio's LoudnessStartHoldMs on purpose: a
 speaker across the room is background, so waiting three seconds to avoid a small level
 error is the wrong trade. 0 starts immediately and lets the level settle as it plays."),
-            I("WorldEmitterLevelHoldMs",             "CMMConfig.WorldEmitterLevelHoldMs",           500),
+            I("WorldEmitterLevelHoldMs",             "CMMConfig.WorldEmitterLevelHoldMs",           500, since: 45),
             Cmt(@"The shortest a retune can take (ms) — how far the dial travels before the station
 comes out from under the noise. A station already playing nearby opens in milliseconds,
 and without this, retuning to one produced no sweep at all. The programme still starts
 on time underneath; this only sets when it is revealed. 0 reveals it as soon as it opens."),
-            I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               250),
+            I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               250, since: 45),
             Cmt(@"How fast (ms) a station drops away into static when you turn the dial."),
-            I("WorldEmitterSearchMs",                "CMMConfig.WorldEmitterSearchMs",              120),
+            I("WorldEmitterSearchMs",                "CMMConfig.WorldEmitterSearchMs",              120, since: 45),
             Cmt(@"How long (ms) the station takes to come out from under the noise once the dial has
 settled. THE LONGEST of the retune timings and the one you are hearing when a retune
 feels slow. Also a floor: a track whose own fade-in is longer than this gets that
 instead, plus a short tail, so the hiss never clears while the music is still climbing."),
-            I("WorldEmitterArriveMs",                "CMMConfig.WorldEmitterArriveMs",              900),
+            I("WorldEmitterArriveMs",                "CMMConfig.WorldEmitterArriveMs",              900, since: 45),
             F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —

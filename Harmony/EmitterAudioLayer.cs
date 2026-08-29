@@ -102,7 +102,12 @@ namespace CMM
         private static string _borrowTarget;
         // A station that never opens must not hold a slot for ever. Comfortably past the level
         // hold plus a decode plus a retry.
-        private const float BorrowGiveUp = 6f;
+        // Long enough for the level hold plus opening a file, and no longer. Six flat seconds
+        // was chosen when the wait could never be satisfied, so it was only ever a ceiling on a
+        // hang; now that the station really does open underneath, this is a genuine deadline and
+        // an over-long one is just hiss.
+        private static float BorrowGiveUp =>
+            CMMConfig.WorldEmitterLevelHoldMs / 1000f + 2.5f;
 
         // Has the station this speaker is joining got a voice yet?
         private static bool TargetAudible()
@@ -114,6 +119,10 @@ namespace CMM
             return true;   // station gone from the catalog: stop waiting for it
         }
         private static float _handledTuneAt = -999f;
+        // The retune the borrow actually got a slot for. Distinct from _handledTuneAt, which
+        // records the ones we have LOOKED at: when no slot was spare the borrow declines, and then
+        // the station's own arm must still sweep or the retune lands silently.
+        private static float _borrowOwnsTune = -999f;
         // How long a deliberate retune stays "recent". Long enough to cover the decision tick plus
         // the registry noticing the pin moved; far short of anything the world does on its own.
         // Generous, because it is the delay between the press and the START, not between the
@@ -1138,11 +1147,26 @@ namespace CMM
             for (int i = 0; i < snap.Count; i++)
             {
                 EmitterRegistry.Emitter e = snap[i];
-                // Lifted out of its station while it is being swept on its own slot. Skipped
-                // entirely rather than muted: it must not count toward the station's nearest
-                // distance either, or a station could be kept alive by a speaker that is
-                // currently playing static instead of it.
-                if (_borrowSlot >= 0 && e.Pos.Equals(_borrowPos)) continue;
+                // Being swept on its own slot (the sweep borrow). It must not be a POINT on the
+                // station it is joining — the station's own slot would play music out of a speaker
+                // that is currently hissing — but it MUST still count as a reason for that station
+                // to exist.
+                //
+                // SKIPPING IT OUTRIGHT WAS A DEADLOCK, and it was every symptom at once. The
+                // borrow holds the speaker until the station it is joining becomes audible; a
+                // station only opens when a speaker is near it; and this was that speaker. So the
+                // borrow sat waiting for a station it was itself preventing from opening, and let
+                // go only when its give-up timer fired. The log measures it at 7.05s, 6.92s and
+                // 7.03s across three retunes — "upwards of 6000ms" — with the station's "opening"
+                // line landing one millisecond AFTER "sweep borrow ended" every time.
+                //
+                // The second arc of static came from the same line: 7s is still inside
+                // RetuneWindow, so the station finally opening was scored as a fresh retune and
+                // armed a SECOND search on its own slot. Static, out, static again, then music.
+                //
+                // It also left stations owning a slot with no speakers at all, which is the
+                // float.MaxValue in "steals the slot of 'Rust Belt Rock' (34028230000...0.0m)".
+                bool borrowed = _borrowSlot >= 0 && e.Pos.Equals(_borrowPos);
                 // ...and from the instant the dial turned, before we have decided anything.
                 if (EmitterTuner.SweepHeld(e.Pos)) continue;
                 // The PLAYER'S choice outranks the derived one (EmitterTuner: look at a speaker,
@@ -1167,7 +1191,8 @@ namespace CMM
                 // display-name string, so this compare is a reference check in practice.
                 int fl = e.Name == "radioHam" ? 1 : 0;
                 if (e.Dist < st.NearestDist) { st.NearestDist = e.Dist; st.NearestPos = e.Pos; st.NearestFlags = fl; }
-                if (e.Dist > range) continue;
+                // Out of range, or hissing on the borrowed slot: either way not a point HERE.
+                if (e.Dist > range || borrowed) continue;
                 if (st.PtCount < MaxPoints)
                 {
                     WritePoint(st, st.PtCount, e.Pos, fl); st.PtDist[st.PtCount] = e.Dist; st.PtCount++;
@@ -1435,8 +1460,13 @@ namespace CMM
             // silently excluded. World entry is already excluded by the tune stamp alone (a fresh
             // world has never had one), so the extra condition bought nothing and cost the cases
             // most likely to occur.
+            // ...and NOT when the borrow already has this one. The borrow is the sweep for the
+            // retune it took, running on its own slot at the same speaker; arming here as well
+            // put two receivers on one dial turn. Hidden until the deadlock above was fixed,
+            // because the two used to be seven seconds apart instead of simultaneous.
             bool retuned = changedStation
-                        && CmmClock.Now - EmitterTuner.LastTuneAt < RetuneWindow;
+                        && CmmClock.Now - EmitterTuner.LastTuneAt < RetuneWindow
+                        && _borrowOwnsTune != EmitterTuner.LastTuneAt;
             if (changedStation)
             {
                 // FLUSH ONLY WHEN THERE IS A STATION TO FLUSH. The ring can still hold a cushion of
@@ -2075,6 +2105,7 @@ namespace CMM
             _borrowSlot = slot;
             _borrowPos = pos;
             _borrowTarget = target.Name;
+            _borrowOwnsTune = EmitterTuner.LastTuneAt;
             // At LEAST the sweep, and then for as long as the new station has nothing to hand the
             // speaker back to. Handing it back to a station with no voice is the cut this exists to
             // remove — the speaker would rejoin something silent and wait out the decode in the
@@ -2093,7 +2124,7 @@ namespace CMM
             CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
             _slotArmedAt[slot] = now;
             CMMConfig.D($"[CMM] Sweep borrow: slot {slot} sweeps {e.Name} at {pos} onto '{want}' "
-                      + "(already playing elsewhere).");
+                      + (target.VoiceId != 0 ? "(already playing)." : "(opening under the noise)."));
         }
 
         // Give the slot back at once: the speaker rejoins its station on the next snapshot and
@@ -2105,6 +2136,10 @@ namespace CMM
             CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
             CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
             _borrowSlot = -1; _borrowReleaseAt = 0f;
+            // Handing the slot to a station mid-sweep ends the borrow's claim on this retune, so
+            // the station's own arm picks the search back up on the slot it just took. The noise
+            // continues rather than stopping dead halfway through a dial turn.
+            _borrowOwnsTune = -999f;
         }
 
         // A clear-line virtual-distance array for a slot that is searching: the noise is not the
