@@ -83,21 +83,74 @@ namespace CMM
             catch { /* a missing label is cosmetic; never break a block's activation for it */ }
         }
 
-        // Both declaring types, resolved by name. A null (a type or member this game does not have)
-        // is dropped rather than returned: Harmony aborts the WHOLE PatchAll on a null target, and
-        // taking the emitter layer's UI down with the rest of the mod would be a poor trade.
-        internal static IEnumerable<MethodBase> Targets(string name)
+        // Both declaring types, resolved by name.
+        //
+        // THIS RESOLVES BY ENUMERATION, NOT BY AccessTools.DeclaredMethod(type, name), AND THE
+        // DIFFERENCE TOOK THE WHOLE MOD DOWN ONCE. Block declares TWO OnBlockActivated overloads --
+        // (string, ...) for a named radial command and (...) without one for a plain activate --
+        // so a name-only lookup throws AmbiguousMatchException. That throw happens inside
+        // TargetMethods, which Harmony calls during PatchAll, so it does not merely skip this
+        // patch: it aborts PatchAll, and every patch in the mod with it. The log read
+        // "Failed initializing ModAPI instance on mod 'ContextMusicManager'" -- no music, no
+        // radio, no emitters, from one ambiguous name.
+        //
+        // Passing an explicit parameter-type array is not the fix either, because the arity
+        // differs between 2.6 and 3.x (the extra _clrIdx). So: enumerate the DECLARED methods,
+        // match on the name, and disambiguate on the shape that is stable across versions --
+        // whether the first parameter is the command name. That is true of the overload we want
+        // on both versions and false of the other one on both.
+        //
+        // Nothing here throws. A missing type, a renamed member, an unexpected shape: all yield
+        // an empty list, which patches nothing and leaves the rest of the mod alone. That is the
+        // whole point of the [[CmmGuard]] containment convention, and this file learned it the
+        // expensive way.
+        internal static List<MethodBase> Targets(string name)
         {
-            foreach (string typeName in new[] { "Block", "BlockCompositeTileEntity" })
+            var found = new List<MethodBase>();
+            try
             {
-                Type t = AccessTools.TypeByName(typeName);
-                MethodBase m = t == null ? null : AccessTools.DeclaredMethod(t, name);
-                if (m != null) yield return m;
+                bool wantsCommandName = name == "OnBlockActivated";
+                foreach (string typeName in new[] { "Block", "BlockCompositeTileEntity" })
+                {
+                    Type t = AccessTools.TypeByName(typeName);
+                    if (t == null) continue;
+                    MethodInfo[] all = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
+                                                  | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        MethodInfo m = all[i];
+                        if (m.Name != name) continue;
+                        ParameterInfo[] ps = m.GetParameters();
+                        bool hasCommandName = ps.Length > 0 && ps[0].ParameterType == typeof(string);
+                        if (hasCommandName != wantsCommandName) continue;
+                        found.Add(m);
+                        break;                       // one per declaring type
+                    }
+                }
+                if (found.Count == 0)
+                    Log.Warning($"[CMM] World emitters: no '{name}' to hook on this game version — "
+                              + "speakers still play, but they cannot be tuned in-world.");
             }
+            catch (Exception e)
+            {
+                Log.Warning("[CMM] World emitters: could not resolve '" + name + "' (" + e.Message
+                          + ") — in-world tuning is off, everything else is unaffected.");
+                found.Clear();
+            }
+            return found;
         }
 
         internal static bool Ready()
             => EmitterCompat.RuntimeSupported && ContextMusicManager.inGame;
+
+        // Prepare() for all four patches. Also requires the target to actually RESOLVE, so a
+        // version that has renamed one of these declines the patch here rather than handing
+        // Harmony an empty method set to interpret.
+        internal static bool Supported(string name)
+        {
+            try { return EmitterCompat.RuntimeSupported && Targets(name).Count > 0; }
+            catch { return false; }
+        }
 
         // Icons are drawn as "ui_game_symbol_" + icon by the radial's block path, so these are
         // names the atlas actually has — taken from what vanilla blocks already use.
@@ -112,7 +165,7 @@ namespace CMM
     [HarmonyPatch]
     internal static class Patch_EmitterHasCommands
     {
-        static bool Prepare() => EmitterCompat.RuntimeSupported;
+        static bool Prepare() => EmitterActivation.Supported("HasBlockActivationCommands");
         static IEnumerable<MethodBase> TargetMethods() => EmitterActivation.Targets("HasBlockActivationCommands");
 
         static void Postfix(Vector3i _blockPos, ref bool __result)
@@ -138,7 +191,7 @@ namespace CMM
     [HarmonyPatch]
     internal static class Patch_EmitterActivationText
     {
-        static bool Prepare() => EmitterCompat.RuntimeSupported;
+        static bool Prepare() => EmitterActivation.Supported("GetActivationText");
         static IEnumerable<MethodBase> TargetMethods() => EmitterActivation.Targets("GetActivationText");
 
         static void Postfix(Vector3i _blockPos, ref string __result)
@@ -175,7 +228,7 @@ namespace CMM
     [HarmonyPatch]
     internal static class Patch_EmitterCommands
     {
-        static bool Prepare() => EmitterCompat.RuntimeSupported;
+        static bool Prepare() => EmitterActivation.Supported("GetBlockActivationCommands");
         static IEnumerable<MethodBase> TargetMethods() => EmitterActivation.Targets("GetBlockActivationCommands");
 
         // The XUi radial is 13 segments (windowRadial repeat_count="13"). Past that the entries
@@ -251,7 +304,7 @@ namespace CMM
     [HarmonyPatch]
     internal static class Patch_EmitterActivated
     {
-        static bool Prepare() => EmitterCompat.RuntimeSupported;
+        static bool Prepare() => EmitterActivation.Supported("OnBlockActivated");
         static IEnumerable<MethodBase> TargetMethods() => EmitterActivation.Targets("OnBlockActivated");
 
         static bool Prefix(string _commandName, Vector3i _blockPos, ref bool __result)
