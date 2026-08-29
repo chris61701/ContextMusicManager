@@ -176,6 +176,7 @@
     <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\CMMSettingsSchema.cs" />
     <Compile Include="Harmony\ResumePolicy.cs" />
+    <Compile Include="Harmony\EmitterSlots.cs" />
     <Compile Include="Harmony\CMMSettingsIO.cs" />
     <Compile Include="Harmony\CMMSettingsWriter.cs" />
     <Compile Include="Harmony\CMMSettingsFile.cs" />

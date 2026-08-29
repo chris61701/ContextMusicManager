@@ -284,6 +284,18 @@ namespace CMM
             int n = st.Order.Length;
             int i = AnchorIndex(st, k);
             bool needWalk = false;
+            // Has this station verified THIS window's chain? A walk is what re-stats the cached
+            // lengths (ProbeLength), and the cache-only loop below cannot: it holds the lock and
+            // runs several times a second. So a chain that is fully cached would never be
+            // revalidated at all -- which is what a re-encoded track was slipping through, and
+            // exactly what an offline schedule test caught the day the stamping was written.
+            //
+            // Kick it and answer from the cache anyway. The answer may be one tick stale; the
+            // alternative is holding the schedule up on IO, which is what the cache exists to
+            // avoid. WalkWindow now means "this station has verified this window", and
+            // EnsureWindowWalk is a no-op once it has.
+            bool needVerify = st.WalkWindow != k;
+            bool resolved = false;
             lock (_lenLock)
             {
                 for (int step = 0; step < WalkCap; step++)
@@ -297,11 +309,21 @@ namespace CMM
                     double len = (e.Frames > 0 && e.Rate > 0) ? (double)e.Frames / e.Rate : 0;   // 0 ⇒ dead file: skip, no airtime
                     if (len > 0)
                     {
-                        if (rem < len) { file = f; idx = i; offset = rem; return true; }
+                        if (rem < len)
+                        {
+                            file = f; idx = i; offset = rem;
+                            resolved = true;
+                            break;
+                        }
                         rem -= len;
                     }
                     i = (i + 1) % n;
                 }
+            }
+            if (resolved)
+            {
+                if (needVerify) EnsureWindowWalk(st, k);
+                return true;
             }
             if (needWalk) { EnsureWindowWalk(st, k); why = ResolveMiss.WalkPending; return false; }
             // Fell out of the loop with every visited entry dead. That is only a verdict on the

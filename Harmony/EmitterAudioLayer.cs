@@ -1136,19 +1136,8 @@ namespace CMM
             }
         }
 
-        private static int FreeSlot()
-        {
-            for (int s = 0; s < MaxSlots; s++)
-            {
-                if (_slotOwner[s] != null) continue;
-                // A start that is mid-open has picked this slot but cannot own it yet -- ownership
-                // is only real once the voice exists. Without this exclusion the next tick would
-                // hand the same slot to a second station and both would render into it.
-                if (_emStartPending && s == _emPendingSlot) continue;
-                return s;
-            }
-            return -1;
-        }
+        // Both slot rules live in EmitterSlots so they can be tested; see the header there.
+        private static int FreeSlot() => EmitterSlots.FreeSlot(_slotOwner, _emStartPending, _emPendingSlot);
 
         // ── Pause resync ────────────────────────────────────────────────────────────────────────
         // Set from the unpause edge (OnGamePauseChanged, pauses > 1 s); consumed by the next tick.
@@ -1502,42 +1491,16 @@ namespace CMM
                 // An airing track that left the new schedule is interrupted by MaintainPlayingStations
                 // only if the FILE vanished; a pool re-shuffle alone keeps it playing to its end.
             }
-            foreach (var kv in old)
-            {
-                Station prev = kv.Value;
-                // The SLOT is released whether or not a voice was ever started on it. Holding a
-                // slot with no voice is a real state, not a contradiction: SelectAndVoice claims
-                // the slot and StartStation then returns early whenever the window walk has not
-                // landed yet -- which, right after a pause resync hands every station a fresh
-                // window, is the common case rather than the exotic one. Skipping the release for
-                // those (the old `if (prev.VoiceId == 0) continue;` sat above this line) left
-                // _slotOwner pointing at a station object that no longer exists in any catalog,
-                // and nothing ever cleared it. There are CMM_MAX_EMIT_VOICES slots. Three such
-                // rebuilds and every slot is owned by a dead station, FreeSlot returns -1 for
-                // ever, and no speaker in the world plays again for the rest of the session --
-                // silently, because a station that cannot get a slot simply returns.
-                if (prev.Slot >= 0 && _slotOwner[prev.Slot] == prev)
-                {
-                    _slotOwner[prev.Slot] = null;
-                    prev.Slot = -1;
-                }
-                if (prev.VoiceId == 0) continue;
-                CmmMixer.Instance?.RemoveEmitter(prev.VoiceId, StopFade);
-                CMMConfig.D($"[CMM] Station '{prev.Name}' removed by catalog rebuild — voice released.");
-            }
-
-            // Backstop. The loop above releases what the rebuild knows about; this catches a slot
-            // owned by anything that is no longer a live station for any other reason. It is three
-            // comparisons on a rebuild, and the failure it guards against is total and silent, so
-            // it earns its place. If it ever fires, the log line is the bug report.
-            for (int s = 0; s < _slotOwner.Length; s++)
-            {
-                Station owner = _slotOwner[s];
-                if (owner == null || _stations.Contains(owner)) continue;
-                Log.Warning($"[CMM] Emitter slot {s} was still held by stale station " +
-                            $"'{owner.Name}' after a catalog rebuild — reclaimed.");
-                _slotOwner[s] = null;
-            }
+            // The rule itself lives in EmitterSlots -- no UnityEngine, no game types -- so a test
+            // can drive it directly. It cannot be tested here: this method needs a live catalog,
+            // and the interleaving that produced the leak (a station holding a slot with no voice
+            // yet) is reached by timing, so a test against the real thing would pass by luck.
+            int reclaimed = EmitterSlots.ReleaseAfterRebuild(
+                old, _stations, _slotOwner,
+                voiceId => CmmMixer.Instance?.RemoveEmitter(voiceId, StopFade));
+            if (reclaimed > 0)
+                Log.Warning($"[CMM] {reclaimed} emitter slot(s) were still held by a station that no "
+                          + "longer exists after a catalog rebuild — reclaimed.");
         }
 
         // ── Listener / tuning / reverb pushes ───────────────────────────────────────────────────
