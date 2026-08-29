@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmSoak — a long play session, over shipped code, with the library
+       changing underneath it.
+
+       Drives a scripted gameplay loop (explore → trader → quest → POI → combat →
+       clear → leave) through the REAL decision layer (ScriptHost / context.lua),
+       the REAL track rotation, the REAL station catalog and broadcast schedule,
+       and the REAL loudness store and decoder — while a mutation schedule adds,
+       removes, renames and moves files, edits playlists and takes a station away
+       and gives it back.
+
+       The point is not the number of hours. It is that a mutation and a decision
+       land in the same tick, thousands of times, against code that cannot tell it
+       is being tested. Everything asserted here is an invariant that must hold
+       for every input, not a measurement of this library on this machine.
+
+       WHAT IS REAL: context resolution, track selection, station discovery and
+       ordering, the anchored schedule and its length cache, playlist reading,
+       loudness measurement, the gain policy, eviction, and the emitter slot rules.
+       WHAT IS NOT: the audio player's coroutines, the personal radio's state
+       machine, and emitter spatialisation — all three need Unity, and a model of
+       them here would test the model. The report says so at the bottom.
+
+         dotnet run (project tools/CmmSoak) -c Release
+       Exit code 0 = every invariant held.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmSoak</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Harmony\RadioStationCatalog.cs" Link="linked\RadioStationCatalog.cs" />
+    <Compile Include="..\..\Harmony\EmitterSlots.cs"        Link="linked\EmitterSlots.cs" />
+    <Compile Include="..\..\Harmony\PlaylistSource.cs"      Link="linked\PlaylistSource.cs" />
+    <Compile Include="..\..\Harmony\SourceScan.cs"          Link="linked\SourceScan.cs" />
+    <Compile Include="..\..\Harmony\MusicRoots.cs"          Link="linked\MusicRoots.cs" />
+    <Compile Include="..\..\Harmony\DataStructures.cs"      Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\CMMContextsSchema.cs"  Link="linked\CMMContextsSchema.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs"       Link="linked\TrackRotation.cs" />
+    <Compile Include="..\..\Harmony\AudioDecoder.cs"        Link="linked\AudioDecoder.cs" />
+    <Compile Include="..\..\Harmony\NativeAudio.cs"         Link="linked\NativeAudio.cs" />
+    <Compile Include="..\..\Harmony\LoudnessStore.cs"       Link="linked\LoudnessStore.cs" />
+    <Compile Include="..\..\Harmony\GameState.cs"           Link="linked\GameState.cs" />
+    <Compile Include="..\..\Harmony\ScriptHost.cs"          Link="linked\ScriptHost.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="MoonSharp.Interpreter">
+      <HintPath>..\..\packages\MoonSharp.2.0.0\lib\net40-client\MoonSharp.Interpreter.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <!-- The shipped decision script, under the name ScriptHost.LoadEmbedded expects. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\Config\context.lua">
+      <LogicalName>context.lua</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
