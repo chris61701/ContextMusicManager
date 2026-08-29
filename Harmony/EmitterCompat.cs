@@ -7,6 +7,7 @@
 #if GV_V3
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using HarmonyLib;
 
 namespace CMM
@@ -247,6 +248,54 @@ namespace CMM
             }
             catch { }
             return null;
+        }
+
+        // ── A block's string properties ──────────────────────────────────────────────────────
+        // The fifth divergence, and the first that is a FIELD rather than a method -- which is
+        // why the reference diff missed it and the field read failed silently behind a catch:
+        //
+        //   3.x   Dictionary<string,string>     DynamicProperties.Values
+        //   2.6   DictionarySave<string,string> DynamicProperties.Values
+        //
+        // DictionarySave is not a Dictionary subclass, it is a save-serialisable wrapper, so the
+        // field's declared TYPE differs and a typed access does not resolve. Both expose
+        // TryGetValue(string, out string), so that is what this binds to.
+        //
+        // The cost of getting this wrong was total and silent: it threw inside the occlusion
+        // field's cell reader, which catches and logs at debug level, so every cell stayed
+        // unread. The field reported "reading 0%, reached 0" and every speaker was 38 dB down --
+        // found, voiced, and inaudible.
+        private static bool _propsBound;
+        private static FieldInfo _valuesField;
+        private static MethodInfo _tryGetValue;
+
+        internal static string BlockProperty(Block b, string key)
+        {
+            try
+            {
+                object props = b?.Properties;
+                if (props == null) return null;
+
+                if (!_propsBound)
+                {
+                    _propsBound = true;
+                    _valuesField = AccessTools.Field(props.GetType(), "Values");
+                    object values = _valuesField?.GetValue(props);
+                    if (values != null)
+                        _tryGetValue = AccessTools.Method(values.GetType(), "TryGetValue",
+                                                          new[] { typeof(string), typeof(string).MakeByRefType() });
+                    if (_tryGetValue == null)
+                        Log.Warning("[CMM] World emitters: cannot read block properties on this game "
+                                  + "version — door and material detail will fall back to defaults.");
+                }
+                if (_valuesField == null || _tryGetValue == null) return null;
+
+                object dict = _valuesField.GetValue(props);
+                if (dict == null) return null;
+                var args = new object[] { key, null };
+                return (bool)_tryGetValue.Invoke(dict, args) ? args[1] as string : null;
+            }
+            catch { return null; }
         }
 
         static bool Probe()

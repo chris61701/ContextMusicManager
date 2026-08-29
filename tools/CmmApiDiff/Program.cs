@@ -96,7 +96,14 @@ internal static class Program
         foreach (MemberReferenceHandle h in md.MemberReferences)
         {
             MemberReference mr = md.GetMemberReference(h);
-            if (mr.GetKind() != MemberReferenceKind.Method) continue;
+            // METHODS AND FIELDS BOTH. Checking only methods let a field divergence through and
+            // reported PASS while it was live: DynamicProperties.Values is a Dictionary on 3.x
+            // and a DictionarySave on 2.6, so the typed field access did not resolve -- and it
+            // threw inside a cell reader that catches, so the occlusion field silently stayed
+            // empty and every speaker was inaudible. A tool that says PASS while that is true is
+            // worse than no tool.
+            MemberReferenceKind kind = mr.GetKind();
+            if (kind != MemberReferenceKind.Method && kind != MemberReferenceKind.Field) continue;
 
             string type = null, scope = null;
             if (mr.Parent.Kind == HandleKind.TypeReference)
@@ -110,16 +117,28 @@ internal static class Program
             }
             if (type == null) continue;
 
-            MethodSignature<string> sig;
-            try { sig = mr.DecodeMethodSignature(dec, null); }
-            catch { continue; }
+            string parms;
+            if (kind == MemberReferenceKind.Method)
+            {
+                MethodSignature<string> sig;
+                try { sig = mr.DecodeMethodSignature(dec, null); }
+                catch { continue; }
+                parms = string.Join(",", sig.ParameterTypes);
+            }
+            else
+            {
+                // A field's "signature" is its TYPE, which is exactly what changed on 2.6 -- so it
+                // has to be part of the key, not just the name.
+                try { parms = "field:" + mr.DecodeFieldSignature(dec, null); }
+                catch { continue; }
+            }
 
             outp.Add(new Ref
             {
                 Scope = scope ?? "?",
                 Type = type,
                 Name = md.GetString(mr.Name),
-                Params = string.Join(",", sig.ParameterTypes),
+                Params = parms,
             });
         }
         return outp;
@@ -150,6 +169,15 @@ internal static class Program
                 try { sig = mdf.DecodeSignature(dec, null); }
                 catch { continue; }
                 set.Add($"{type}.{md.GetString(mdf.Name)}({string.Join(",", sig.ParameterTypes)})");
+            }
+
+            foreach (FieldDefinitionHandle fh in td.GetFields())
+            {
+                FieldDefinition fd = md.GetFieldDefinition(fh);
+                string ft;
+                try { ft = fd.DecodeSignature(dec, null); }
+                catch { continue; }
+                set.Add($"{type}.{md.GetString(fd.Name)}(field:{ft})");
             }
         }
         return set;

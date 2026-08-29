@@ -1908,9 +1908,11 @@ namespace CMM
         private static DmgStates GetDmgStates(Block b, int type)
         {
             if (_dmgStates.TryGetValue(type, out DmgStates ds)) return ds;
-            string v = null;
-            if (b.Properties != null && b.Properties.Values != null)
-                b.Properties.Values.TryGetValue("MeshDamage", out v);
+            // Through the compat shim: the Values FIELD is a different type on 2.6, so a typed
+            // access does not resolve there -- and it threw inside the field reader, which is
+            // caught and logged at debug level, so the whole occlusion field silently stayed
+            // empty and every speaker went inaudible.
+            string v = EmitterCompat.BlockProperty(b, "MeshDamage");
             if (!string.IsNullOrEmpty(v))
             {
                 string[] a = v.Split(',');
