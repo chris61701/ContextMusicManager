@@ -45,7 +45,12 @@ namespace CMM
         // POI emitters hash their PrefabInstance.id — so EVERY speaker in one POI shares a station,
         // stable across reload and MP-consistent for free (each client computes the same); player-
         // placed emitters (no POI) hash their block position — stable per placement, move to retune.
-        internal struct Emitter { public Vector3i Pos; public string Name; public float Dist; public int StationHash; }
+        // PoiId is the PrefabInstance.id of the building this speaker stands in, or 0 for one a
+        // player placed out in the world. StationHash is derived from it, but the hash is lossy and
+        // churns (the dedup tiebreak below rewrites it), so the id is carried separately: it is what
+        // "retune this building" means, and the tuner UI needs a group identity that does not move
+        // under it. See EmitterTuner.
+        internal struct Emitter { public Vector3i Pos; public string Name; public float Dist; public int StationHash; public int PoiId; }
 
         // Knuth multiplicative hashes, masked positive. Derive, don't store: no replication, no
         // persistence, stable across sessions as long as the id/position is.
@@ -249,7 +254,11 @@ namespace CMM
                         // never flips with dictionary iteration order.
                         if (e.StationHash < Snapshot[dupIdx].StationHash)
                         {
-                            var keep = Snapshot[dupIdx]; keep.StationHash = e.StationHash;
+                            // The identity moves as a PAIR. Keeping the winning hash but leaving the
+                            // loser's PoiId behind would let the tuner group a speaker with one
+                            // building while the audio layer plays it with another.
+                            var keep = Snapshot[dupIdx];
+                            keep.StationHash = e.StationHash; keep.PoiId = e.PoiId;
                             Snapshot[dupIdx] = keep;
                         }
                         continue;
@@ -278,7 +287,8 @@ namespace CMM
                 int hash = _placedPoiId.TryGetValue(p, out int owningPoi)
                     ? StationHashFromId(owningPoi)
                     : StationHashFromPos(p);
-                Snapshot.Add(new Emitter { Pos = p, Name = kv.Value, Dist = dist, StationHash = hash });
+                Snapshot.Add(new Emitter { Pos = p, Name = kv.Value, Dist = dist, StationHash = hash,
+                                           PoiId = owningPoi });
                 if (dist < NearestDist) { NearestDist = dist; NearestName = kv.Value; NearestPos = p; }
             }
             foreach (Vector3i p in _placedDrop) { _placedCache.Remove(p); _placedPoiId.Remove(p); }
@@ -363,7 +373,7 @@ namespace CMM
                                     if (known[k].Pos.Equals(pos)) { knownHere = true; break; }
                                 if (!knownHere)
                                 {
-                                    known.Add(new Emitter { Pos = pos, Name = name,
+                                    known.Add(new Emitter { Pos = pos, Name = name, PoiId = poiId,
                                                             StationHash = StationHashFromId(poiId) });
                                     _poiScanTime[poiId] = float.MinValue;
                                 }
@@ -533,6 +543,7 @@ namespace CMM
                         if (bv.isair) continue;
                         if (_targetIds.TryGetValue(bv.type, out string name))
                             _scanHits.Add(new Emitter { Pos = new Vector3i(_scanX, y, _scanZ), Name = name,
+                                                        PoiId = _scanPiId,
                                                         StationHash = StationHashFromId(_scanPiId) });
                     }
                     _scanZ++;

@@ -250,6 +250,56 @@ namespace CMM
             return null;
         }
 
+        // ── Does this block already do something when you press the activate key? ────────────
+        // The tuner takes the activate key only where the game does not want it. The same arity
+        // split as IsSeeThrough above, from the same 2.6→3.x cleanup:
+        //
+        //   3.x   bool Block.HasBlockActivationCommands(WorldBase w, BlockValue bv, Vector3i pos, EntityAlive e)
+        //   2.6   bool Block.HasBlockActivationCommands(WorldBase w, BlockValue bv, int clrIdx, Vector3i pos, EntityAlive e)
+        //
+        // Virtual, so it is bound per BLOCK type and cached like IsSeeThrough. Of the three emitter
+        // blocks only cntStoreShelfElectronicsSingleBottomSpeaker answers true (it inherits a loot
+        // list from cntStoreShelfElectronicsSingleBottomPC); the ham radio and the bookshelf
+        // speaker are plain decoration.
+        private static readonly Dictionary<Type, Func<object, object, BlockValue, Vector3i, object, bool>> _hasUse =
+            new Dictionary<Type, Func<object, object, BlockValue, Vector3i, object, bool>>();
+
+        internal static bool HasVanillaUse(Block b, object world, BlockValue bv, Vector3i pos, object player)
+        {
+            // TRUE when the answer cannot be had: unknown means "assume the game wants this key",
+            // so an unreadable block costs the player a modifier rather than costing them a loot
+            // container they can no longer open.
+            if (b == null) return true;
+            Type t = b.GetType();
+            Func<object, object, BlockValue, Vector3i, object, bool> fn;
+            if (!_hasUse.TryGetValue(t, out fn)) _hasUse[t] = fn = BindHasUse(t);
+            if (fn == null) return true;
+            try { return fn(b, world, bv, pos, player); }
+            catch { return true; }
+        }
+
+        static Func<object, object, BlockValue, Vector3i, object, bool> BindHasUse(Type t)
+        {
+            try
+            {
+                Type wb = AccessTools.TypeByName("WorldBase");
+                Type ea = AccessTools.TypeByName("EntityAlive");
+                if (wb == null || ea == null) return null;
+
+                var four = AccessTools.Method(t, "HasBlockActivationCommands",
+                                              new[] { wb, typeof(BlockValue), typeof(Vector3i), ea });
+                if (four != null)
+                    return (blk, w, v, p, e) => (bool)four.Invoke(blk, new object[] { w, v, p, e });
+
+                var five = AccessTools.Method(t, "HasBlockActivationCommands",
+                                              new[] { wb, typeof(BlockValue), typeof(int), typeof(Vector3i), ea });
+                if (five != null)
+                    return (blk, w, v, p, e) => (bool)five.Invoke(blk, new object[] { w, v, 0, p, e });
+            }
+            catch { }
+            return null;
+        }
+
         // ── A block's string properties ──────────────────────────────────────────────────────
         // The fifth divergence, and the first that is a FIELD rather than a method -- which is
         // why the reference diff missed it and the field read failed silently behind a catch:

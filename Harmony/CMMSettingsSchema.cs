@@ -384,6 +384,11 @@ tuned station and on/off state persist across sessions (Cache/radio.xml). A stat
 whose folder is removed goes silent (""off air"") and resumes when it returns."),
             E("KeyRadioNext",                        "CMMConfig.KeyRadioNext",                      @"PageUp"),
             E("KeyRadioPrev",                        "CMMConfig.KeyRadioPrev",                      @"PageDown"),
+            Cmt(@"Tune the world speaker under the crosshair. Look at a ham radio or shelf speaker
+and press this to pick which station that BUILDING broadcasts; the choice is saved per
+save game (Cache/emitters.xml) and 'Automatic' hands it back to the derived station.
+Blocks with a use of their own (the shelf speaker is lootable) need Alt with this key."),
+            E("KeyEmitterTune",                      "CMMConfig.KeyEmitterTune",                    @"E"),
             Cmt(@"Whether the Now Playing overlay starts visible (the key toggles it live)."),
             B("NowPlayingEnabled",                   "CMMConfig.NowPlayingEnabled",                 false),
             Cmt(@"Per-press change to the current track's volume trim (linear factor)."),

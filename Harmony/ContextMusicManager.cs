@@ -146,6 +146,9 @@ namespace CMM
             CMMMusicScaffold.EnsureFolders(modPath);
             LoudnessStore.Load(modPath);
             PersonalRadio.Load(modPath);   // persisted dial state (Cache/radio.xml)
+#if GV_V3
+            EmitterTuner.Load(modPath);    // per-save speaker tuning (Cache/emitters.xml)
+#endif
             ScriptHost.Load(modPath);   // external Lua decision script (Config/context.lua)
 
             foreach (var ctx in contexts.Values)

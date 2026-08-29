@@ -140,6 +140,13 @@ namespace CMM
             // Personal radio (all versions): self-throttled; no-op while dialed Off.
             PersonalRadio.Tick();
 #if GV_V3
+            // Speaker tuner. Its own key handling lives inside, because the gesture is gated by
+            // WHAT YOU ARE LOOKING AT rather than by the modifier HandleMusicKeybinds applies --
+            // and because the panel, once open, needs the arrow keys that block never sees.
+            // It IS subject to the same two input gates: the F1 console (where typing "e" would
+            // otherwise open the panel and start eating arrow keys) and any open game window
+            // (inventory, loot, map), which own the keyboard while they are up.
+            EmitterTuner.Tick(suppressInput: ConsoleIsOpen() || GameWindowWantsKeys());
             // World-emitter audio layer (experimental, 3.0 only): self-throttled; no-op unless
             // enabled + configured. Plays a diegetic station near detected in-world speakers.
             EmitterAudioLayer.Tick();
@@ -161,6 +168,9 @@ namespace CMM
             if (ConsoleIsOpen()) return;
             DrawOverlayBox();
             DrawBanner();
+#if GV_V3
+            EmitterTuner.Draw();
+#endif
 #if CMM_DEBUG_HUD
             DrawDebugHud();
             DrawCoverageHud();
@@ -175,6 +185,16 @@ namespace CMM
         {
             var wm = LocalPlayerUI.primaryUI?.windowManager;
             return wm != null && wm.IsWindowOpen("GUIWindowConsole");
+        }
+
+        // True while an open game window wants the keyboard — inventory, loot, map, the escape
+        // menu. GUIWindowManager.IsInputActive() is the game's own answer to that question and is
+        // the same shape on A20, A21, 2.6 and 3.2, so no compat bridge is needed. Used to keep the
+        // speaker tuner's key out of windows that are already reading it.
+        private static bool GameWindowWantsKeys()
+        {
+            var wm = LocalPlayerUI.primaryUI?.windowManager;
+            return wm != null && wm.IsInputActive();
         }
 
         private void HandleMusicKeybinds()

@@ -74,6 +74,12 @@ namespace CMM
         // identical folders (the MP stance) — reviving/retuning dead stations.
         private static readonly Dictionary<Vector3i, string> _posPins = new Dictionary<Vector3i, string>();
 
+        // What the layer currently plays at a speaker position, or null if it has not pinned one
+        // yet. Read-only, for the tuner's "you are looking at X, it plays Y" line — it deliberately
+        // does NOT consult the override, so a caller can show the underlying automatic choice.
+        internal static string PinnedStationAt(Vector3i pos)
+            => _posPins.TryGetValue(pos, out string name) ? name : null;
+
         // ── Placement fade-in ("birth" ramp) ────────────────────────────────────────────────────
         // First-seen time per tracked speaker position (station-agnostic — keyed by block pos). A
         // speaker that APPEARS while a station voice is already live fades in over the start fade
@@ -996,7 +1002,14 @@ namespace CMM
             for (int i = 0; i < snap.Count; i++)
             {
                 EmitterRegistry.Emitter e = snap[i];
-                if (!_posPins.TryGetValue(e.Pos, out string pinned))
+                // The PLAYER'S choice outranks the derived one (EmitterTuner: look at a speaker,
+                // press the tune key). Deliberately NOT written into _posPins: leaving the override
+                // outside the cache means retuning a building lands on the next decision tick with
+                // nothing to invalidate, and clearing it back to Automatic exposes the pin that was
+                // always underneath rather than inventing a new one.
+                string pinned;
+                if (!EmitterTuner.TryPin(e, out pinned) &&
+                    !_posPins.TryGetValue(e.Pos, out pinned))
                 {
                     pinned = _stations[e.StationHash % n].Name;
                     _posPins[e.Pos] = pinned;
