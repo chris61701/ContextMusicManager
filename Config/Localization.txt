@@ -1,0 +1,3 @@
+Key,File,Type,UsedInMainMenu,NoTranslate,KeepLoaded,english,Context / Alternate Text
+cntStoreElectronicsBookShelfSpeaker,blocks,Container,,,,Speaker,CMM: the vanilla name is "Electronics Store Book Shelf Speaker" - too long to read in a crafting list or under a crosshair
+radioHam,blocks,Block,,,,Ham Radio,CMM: unchanged from vanilla; pinned here so the pair reads the same wherever it appears

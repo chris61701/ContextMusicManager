@@ -128,8 +128,13 @@
     <DefineConstants Condition="'$(GameVersionDefine)' != ''">$(DefineConstants);$(GameVersionDefine)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
-    <!-- Localization.txt is excluded: it was leftover template junk from another mod
-         (crosshair/weapons keys) and 7DTD auto-loads it, so it must not ship. -->
+    <!-- Localization.txt SHIPS AGAIN, and the exclusion below is gone with it. It was excluded
+         because the file was leftover template junk from another mod (crosshair/weapons keys)
+         that 7DTD auto-loads; it now holds exactly two rows, renaming the two blocks the mod
+         makes craftable so they read as "Speaker" and "Ham Radio" rather than
+         "Electronics Store Book Shelf Speaker". The reason for the original exclusion was the
+         CONTENT, not the mechanism: a file the game auto-loads is only dangerous when nobody
+         has read it. -->
     <!-- The recorded dial sounds. CopyToOutputDirectory is NOT optional here: without it
          the Content item declares the files without staging them, so Debug got them only
          because DeployConfig force-copies Sounds\ separately, and the RELEASE ZIP
@@ -145,7 +150,7 @@
          They are not in the repo either, so these Excludes match nothing today. They stay
          as a guard: dropping a settings.xml into Config/ while debugging is an easy thing
          to do, and without them the wildcard would package it silently. -->
-    <Content Include="Config\**\*" Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml;Config\contexts.xml">
+    <Content Include="Config\**\*" Exclude="Config\settings.xml;Config\radio.xml;Config\contexts.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- Embed the canonical default context.lua so a missing or corrupt on-disk copy
@@ -401,7 +406,7 @@
          is worth it. -->
     <ItemGroup>
       <_DebugCfg Include="Config\**\*"
-                 Exclude="Config\Localization.txt;Config\settings.xml;Config\radio.xml;Config\contexts.xml" />
+                 Exclude="Config\settings.xml;Config\radio.xml;Config\contexts.xml" />
       <_DebugSnd Include="Sounds\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(_DebugCfg)"

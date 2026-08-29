@@ -19,9 +19,9 @@
 
   <append xpath="/recipes">
 
-    <!-- Ham Radio: 4 Electrical Parts + 2 Mechanical Parts + 6 Scrap Polymers + 2 Duct Tape -->
+    <!-- Ham Radio: 2 Electrical Parts + 2 Mechanical Parts + 6 Scrap Polymers + 2 Duct Tape -->
     <recipe name="radioHam" count="1" craft_time="20" always_unlocked="true" tags="CMM">
-      <ingredient name="resourceElectricParts"   count="4"/>
+      <ingredient name="resourceElectricParts"   count="2"/>
       <ingredient name="resourceMechanicalParts" count="2"/>
       <ingredient name="resourceScrapPolymers"   count="6"/>
       <ingredient name="resourceDuctTape"        count="2"/>
