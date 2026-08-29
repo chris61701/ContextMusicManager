@@ -1265,6 +1265,36 @@ namespace CMM
             string file = st.OnAir;
             if (file == null) return;
 
+            // ── THE SLOT, AND THE RECEIVER, BEFORE ANYTHING CAN RETURN ────────────────────────
+            // This used to sit below the level hold, and that was the bug behind "the audio is
+            // still cutting to nothing between stations". The hold returns early and is retried on
+            // the next decision tick, for up to LoudnessStartHoldMs — three seconds in the log —
+            // so arming the receiver after it meant the static began at the moment the voice did.
+            // The hold is the LONGEST part of the gap and the exact thing the noise exists to
+            // cover; anything that covers a wait has to be armed before the wait, not after it.
+            int slot = st.Slot >= 0 ? st.Slot : FreeSlot();
+            if (slot < 0) return;   // shouldn't happen (SelectAndVoice frees one first)
+
+            // A slot last used by a DIFFERENT station still holds its queued dry audio — flush it
+            // (and the slot's render state) so nothing of the old station plays under this voice.
+            bool changedStation =
+                !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
+            if (changedStation)
+            {
+                CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
+                // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change: a
+                // track advancing within one station is not a dial being turned, and hiss over it
+                // would be a fault rather than a feature.
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+                // ...and its speakers, so the noise has somewhere in the world to come from. The
+                // point set is already current — GroupSnapshot filled it earlier this tick.
+                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                // Claimed NOW, so the retries the hold causes do not re-flush and re-arm every
+                // tick, which would restart the search ramp four times a second and stop the
+                // noise ever settling into its wander.
+                _slotLastStation[slot] = st.Name;
+            }
+
             // ── HOLD FOR THE LEVEL, exactly as the personal radio does ─────────────────────────
             // Reported as "the audio goes up before it changes". An unmeasured track starts at
             // LoudnessUnmeasuredDb (-5 dB, a deliberate bias against starting hot), and its real
@@ -1297,39 +1327,12 @@ namespace CMM
             }
             _gainWaitUntil.Clear();
 
-            int slot = st.Slot >= 0 ? st.Slot : FreeSlot();
-            if (slot < 0) return;   // shouldn't happen (SelectAndVoice frees one first)
-
             float trackGain = LoudnessStore.GetTrackGain(file);
             if (fresh)
             {
                 CmmMixer.GetOrCreate().ResetEmitterAcoustics();
                 ExpireBirths();
             }
-            // A slot last used by a DIFFERENT station still holds its queued dry audio — flush it
-            // (and the slot's render state) so nothing of the old station plays under this voice.
-            bool changedStation =
-                !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
-            if (changedStation)
-            {
-                CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
-                // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change:
-                // a track advancing within one station is not a dial being turned, and hiss over
-                // it would be a fault rather than a feature. The slot's lane is rendered from here
-                // even though no voice exists yet — that gap, between the old station going and
-                // the new one opening, is exactly the part that used to be silent, and it is also
-                // where StartStation's level hold sits. The noise covers both.
-                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
-                // ...AND ITS SPEAKERS, NOW. Reported as "the last station cuts out and there is a
-                // delay before we get static". The delay was this: points were only published for a
-                // station that already had a VOICE, so between the old station stopping and the new
-                // one opening the slot had nowhere in the world to put its noise -- and a receiver
-                // with no speakers is silent. The point set is already current here (GroupSnapshot
-                // filled it earlier this tick), so the hiss starts at the speaker in the same tick
-                // the old programme stops, instead of a decode later.
-                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
-            }
-            _slotLastStation[slot] = st.Name;
 
             // Everything the job needs, captured on this thread: it must touch no Unity API and no
             // station object, since a catalog rebuild can replace one while the job runs.
