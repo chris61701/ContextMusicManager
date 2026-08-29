@@ -247,8 +247,13 @@ verification — emitters are excluded there anyway.
   folder means dead air rather than a silent retune, and [[mp-dedi-neutralization]] governs
   what a dedicated server may touch.
 
-- [ ] **A speaker is never detected, and placing more does not help — for the rest of the game
-  process.** *(root-caused 2026-08-27, not fixed.)* Reported as "sometimes on loading into a
+- [x] **A speaker is never detected, and placing more does not help — for the rest of the game
+  process.** *(root-caused 2026-08-27, FIXED 2026-08-27: `EnsureTargetIds` no longer caches a
+  failed or partial resolve, and `ResetSession` — called from `Patch_GameEnded` — drops the
+  block-ID table on world exit. This entry still said "not fixed" a day later, which is exactly
+  how a solved bug gets investigated twice; a user report of "emitters do not work on 3.1" on
+  2026-08-28 sent me looking for a version-specific cause before I checked here. Ship it in
+  1.0.5 and the report almost certainly goes away.)* Reported as "sometimes on loading into a
   world a speaker is not detected as an emitter; when placing more, they don't register
   either." One root cause explains every part of that, including the intermittency and why
   only a full game restart clears it.
@@ -287,9 +292,12 @@ verification — emitters are excluded there anyway.
   - Regression test: load a world, leave to the menu, load a DIFFERENT world in the same
     process, stand next to a known POI speaker. That is the reproduction.
 
-- [ ] **`EmitterFieldCache` is never cleared on world exit — ~43 MB held, and it can serve
+- [x] **`EmitterFieldCache` is never cleared on world exit — ~43 MB held, and it can serve
   the WRONG world's acoustics.** *(found 2026-08-27 while answering "does anything persist
-  across worlds".)* `_fields` is keyed by the speaker's `Vector3i` and evicted **only** by an
+  across worlds"; FIXED the same day — `Patch_GameEnded` now calls `EmitterFieldCache.Clear()`
+  alongside `EmitterRegistry.ResetSession()`, which is what its own comment always claimed
+  happened. Left ticked here rather than deleted: the reasoning below is the record of why a
+  method with zero callers is worse than a missing one.)* `_fields` is keyed by the speaker's `Vector3i` and evicted **only** by an
   LRU cap of 12 entries. At the default `WorldEmitterFieldRadius = 48` each field is
   ~3.6 MB of `short[]`, so up to **~43 MB stays resident after you quit to the menu**, and
   keeps sitting there while you load another world (it drains one entry at a time, only as the
