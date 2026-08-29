@@ -423,6 +423,10 @@ namespace CMM
             EmitterRegistry.Poll();
             MaintainBirths();       // stamp newly-appeared speakers / prune gone ones (placement fade-in)
             GroupSnapshot();        // per-station nearest + culled point sets from the registry snapshot
+            // AFTER GroupSnapshot so the landing voice is seeded from this tick's speaker
+            // positions, and BEFORE the start/stop logic so a station that just landed a voice is
+            // not started a second time.
+            CommitPendingStart();   // land any station start whose open finished off-thread
             MaintainOnAir();        // keep idle nearby stations' on-air pointers current + prewarm loudness
             if (_clockResyncPending) { _clockResyncPending = false; ResyncVoicesToClock(player); }
             MaintainPlayingStations(player);   // airing-file-vanished interrupt + EOF advance
@@ -1134,7 +1138,15 @@ namespace CMM
 
         private static int FreeSlot()
         {
-            for (int s = 0; s < MaxSlots; s++) if (_slotOwner[s] == null) return s;
+            for (int s = 0; s < MaxSlots; s++)
+            {
+                if (_slotOwner[s] != null) continue;
+                // A start that is mid-open has picked this slot but cannot own it yet -- ownership
+                // is only real once the voice exists. Without this exclusion the next tick would
+                // hand the same slot to a second station and both would render into it.
+                if (_emStartPending && s == _emPendingSlot) continue;
+                return s;
+            }
             return -1;
         }
 
@@ -1227,30 +1239,18 @@ namespace CMM
                 fadeIn = CMMConfig.WorldEmitterBirthFade;
             }
 
-            // Open the on-air track. If it fails — the file was moved/deleted since the catalog
-            // scan — drop it from the schedule and re-resolve, bounded so a folder wipe can't spin.
-            // (Dropping shortens the cycle; the next catalog rebuild restores determinism.)
-            IntPtr dec = IntPtr.Zero;
-            int kind = 0, srcCh = 0, srcRate = 0; long total = 0;
-            string file = null;
-            for (int attempt = 0; attempt < 5; attempt++)
+            // One start in flight at a time. A station that misses its turn simply gets the next
+            // tick; the alternative is racing opens fighting over the same slot.
+            if (_emStartPending)
             {
-                file = st.OnAir;
-                if (file == null) return;
-                dec = AudioDecoder.OpenNativeHandle(file, out kind, out srcCh, out srcRate, out total);
-                if (dec != IntPtr.Zero) break;
-                CMMConfig.D($"[CMM] Station '{st.Name}': on-air track failed to open ({Path.GetFileName(file)}) — poisoning in schedule.");
-                RadioStationCatalog.PoisonTrack(file);
-                ResolveOnAir(st, BroadcastSeconds());
+                if (CmmClock.Now - _emStartPendingAt < 10f) return;
+                CMMConfig.D("[CMM] Emitter start job did not return within 10 s — re-allowing dispatch.");
+                _emStartPending = false;
+                _emPendingSlot = -1;
             }
-            if (dec == IntPtr.Zero) return;
 
-            // Continuity: seek to the schedule's offset so we rejoin the broadcast mid-song.
-            long startFrame = 0;
-            double offset = st.OnAirOffset;
-            if (offset < 0) offset = 0;
-            if (srcRate > 0) startFrame = (long)(offset * srcRate);
-            if (total > 0 && startFrame >= total) startFrame = 0;   // clock/length mismatch safety
+            string file = st.OnAir;
+            if (file == null) return;
 
             int slot = st.Slot >= 0 ? st.Slot : FreeSlot();
             if (slot < 0) return;   // shouldn't happen (SelectAndVoice frees one first)
@@ -1266,20 +1266,163 @@ namespace CMM
             if (!string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase))
                 CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
             _slotLastStation[slot] = st.Name;
-            // PlayEmitter → cmm_mix_add_emitter takes ownership of dec and frees it on every failure
-            // path (returns 0), so a 0 id must NOT be closed again here. loop:false so the track ENDS
-            // (retiring the voice) and the station advances along its schedule.
+
+            // Everything the job needs, captured on this thread: it must touch no Unity API and no
+            // station object, since a catalog rebuild can replace one while the job runs.
+            double offset = st.OnAirOffset;
+            if (offset < 0) offset = 0;
             Vector3 pos = new Vector3(st.NearestPos.x + 0.5f, st.NearestPos.y + 0.5f, st.NearestPos.z + 0.5f);
-            long id = CmmMixer.GetOrCreate().PlayEmitter(dec, kind, srcRate, srcCh, total,
-                                                         fadeIn, loop: false,
-                                                         pos.x, pos.y, pos.z,
-                                                         CMMConfig.WorldEmitterMinDistance, CMMConfig.WorldEmitterRange,
-                                                         trackGain: trackGain, startFrame: startFrame, slot: slot);
+            float minDist = CMMConfig.WorldEmitterMinDistance, range = CMMConfig.WorldEmitterRange;
+            string stationName = st.Name;
+            int gen = _emStartGen;
+            float fade = fadeIn;
+            bool freshCap = fresh;
+
+            _emStartPending = true;
+            _emStartPendingAt = CmmClock.Now;
+            _emPendingSlot = slot;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                long id = 0; bool openFailed = false;
+                try
+                {
+                    IntPtr dec = AudioDecoder.OpenNativeHandle(file, out int kind, out int srcCh,
+                                                               out int srcRate, out long total);
+                    if (dec == IntPtr.Zero) openFailed = true;
+                    else if (System.Threading.Volatile.Read(ref _emStartGen) != gen)
+                    {
+                        // Superseded while opening. Close it here rather than adding a voice the
+                        // commit would only have to remove.
+                        AudioDecoder.CloseNativeHandle(dec, kind);
+                    }
+                    else
+                    {
+                        // Continuity: seek to the schedule's offset so we rejoin the broadcast
+                        // mid-song. This is the expensive half on a long file, and it is why the
+                        // whole job is off the frame loop.
+                        long startFrame = 0;
+                        if (srcRate > 0) startFrame = (long)(offset * srcRate);
+                        if (total > 0 && startFrame >= total) startFrame = 0;   // clock/length mismatch safety
+                        // PlayEmitter → cmm_mix_add_emitter takes ownership of dec and frees it on
+                        // every failure path (returns 0), so a 0 id must NOT be closed again here.
+                        // loop:false so the track ENDS (retiring the voice) and the station advances.
+                        id = CmmMixer.GetOrCreate().PlayEmitter(dec, kind, srcRate, srcCh, total,
+                                                                fade, loop: false,
+                                                                pos.x, pos.y, pos.z,
+                                                                minDist, range,
+                                                                trackGain: trackGain,
+                                                                startFrame: startFrame, slot: slot);
+                    }
+                }
+                catch { openFailed = id == 0; }
+                _emDoneVoiceId = id;
+                _emDoneStation = stationName;
+                _emDoneFile = file;
+                _emDoneGain = trackGain;
+                _emDoneSlot = slot;
+                _emDoneGen = gen;
+                _emDoneOpenFailed = openFailed;
+                _emDoneFresh = freshCap;
+                _emStartDone = true;   // publishes every field above
+            });
+
+            ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if it wasn't measured yet
+            // Prime the mixer BEFORE the job can add the voice, so the very first render block is
+            // already positioned and at level rather than snapping into place a tick later.
+            PushTuning();           // apply the curve before the first render block
+            PushEmitterMaster();    // set the radio level before the first block
+            PushListener(player);   // prime the listener so the very first render block is positioned
+            CMMConfig.D($"[CMM] Station '{st.Name}' opening (slot {slot}): {Path.GetFileName(file)} @ {offset:0}s " +
+                        $"(nearest speaker {st.NearestDist:0.0}m; B={BroadcastSeconds():0}s).");
+        }
+
+        // Release a station's voice AND its slot.
+        // ── Asynchronous station start ──────────────────────────────────────────────────────────
+        // Starting a station is a decoder open plus a seek to the broadcast position, and both used
+        // to run on this tick, on the main thread. Measured in a normal session: 403 ms for Lit FM
+        // joining 645 seconds into a podcast, and four of the twelve worst frame spikes in the log
+        // were station starts. Deep seeks are the common case, not the exotic one — the whole point
+        // of the anchored schedule is that you join mid-song.
+        //
+        // So the open and the add go to a ThreadPool job and the result is committed on a later
+        // tick. The personal radio has worked this way since it was written; this is the same
+        // shape, and cmm_mix_add_emitter is as safe off-thread as cmm_mix_add is.
+        //
+        // ONE in flight at a time, globally. Starts are events (a speaker comes into range, a
+        // track ends), so serializing them costs a station at most a tick or two, and it keeps the
+        // invalidation story to a single generation counter instead of one per station.
+        private static volatile bool _emStartPending;
+        private static float _emStartPendingAt;          // hang safety: re-allow dispatch after 10 s
+        private static int _emStartGen;                  // bumped by anything that invalidates a pending start
+        private static volatile bool _emStartDone;
+        private static long   _emDoneVoiceId;
+        private static string _emDoneStation, _emDoneFile;
+        private static float  _emDoneGain;
+        private static int    _emDoneSlot, _emDoneGen;
+        // The slot the in-flight start is opening for. Reserved rather than owned: a failed open
+        // leaves no claim to unwind, matching what the synchronous version did.
+        private static int    _emPendingSlot = -1;
+        private static bool   _emDoneOpenFailed;
+        private static bool   _emDoneFresh;
+
+        // Everything that means "the voice we were opening for is no longer the voice we want".
+        // Cheap enough to call liberally; the cost of missing one is a voice that starts after the
+        // reason for it has gone.
+        private static void InvalidatePendingStart() => _emStartGen++;
+
+        // Main thread, start of tick: land a finished open, or drop it if the world moved on.
+        private static void CommitPendingStart()
+        {
+            if (!_emStartDone) return;
+            _emStartDone = false;
+            _emStartPending = false;
+            _emPendingSlot = -1;
+
+            long id = _emDoneVoiceId;
+            string stationName = _emDoneStation, file = _emDoneFile;
+            _emDoneVoiceId = 0; _emDoneStation = null; _emDoneFile = null;
+
+            // The open failed. Drop the track from the schedule and let the next tick re-resolve --
+            // one poisoning per tick rather than the five-in-five-milliseconds burst the old inline
+            // retry loop produced.
+            if (_emDoneOpenFailed)
+            {
+                _emDoneOpenFailed = false;
+                if (file != null)
+                {
+                    CMMConfig.D($"[CMM] Station '{stationName}': on-air track failed to open " +
+                                $"({Path.GetFileName(file)}) — poisoning in schedule.");
+                    RadioStationCatalog.PoisonTrack(file);
+                }
+                return;
+            }
             if (id == 0) return;
+
+            Station st = null;
+            for (int i = 0; i < _stations.Count; i++)
+                if (string.Equals(_stations[i].Name, stationName, StringComparison.OrdinalIgnoreCase))
+                { st = _stations[i]; break; }
+
+            // Superseded while we were opening -- the station stopped, went out of range, was
+            // replaced by a rebuild, or already has a voice. Retire the orphan rather than leaving
+            // it playing to nobody: an emitter voice is not crossfaded out by the next add, so an
+            // abandoned one would simply keep going.
+            bool stale = _emDoneGen != _emStartGen || st == null || st.VoiceId != 0
+                         || st.NearestDist == float.MaxValue;
+            if (stale)
+            {
+                CmmMixer.Instance?.RemoveEmitter(id, StopFade);
+                CMMConfig.D($"[CMM] Station '{stationName}': start superseded while opening — voice dropped.");
+                return;
+            }
+
             st.VoiceId = id;
-            st.VoiceTrack = file; st.VoiceGainApplied = trackGain;
-            st.Slot = slot;
-            _slotOwner[slot] = st;
+            st.VoiceTrack = file;
+            st.VoiceGainApplied = _emDoneGain;
+            st.Slot = _emDoneSlot;
+            _slotOwner[_emDoneSlot] = st;
+            CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
+                        $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
             // Seed the voice's occlusion before its first audible block. Advance/hot-swap: carry the
             // last landed point set (same speakers, same ear, ≤ a tick old) straight onto the new
@@ -1287,7 +1430,7 @@ namespace CMM
             // silent — and let the first flood glide the true value in (the start fade masks it).
             if (CMMConfig.WorldEmitterOcclusion && CMMConfig.WorldEmitterPathRouting)
             {
-                if (!fresh && st.LastPtPushCount > 0 && CmmClock.Now - st.LastPtPushAt < 1f)
+                if (!_emDoneFresh && st.LastPtPushCount > 0 && CmmClock.Now - st.LastPtPushAt < 1f)
                 {
                     CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.PtFlags, st.LastPtPushCount);
                 }
@@ -1299,15 +1442,8 @@ namespace CMM
                 }
                 _forceRefresh = true;
             }
-            ContextMusicManager.RequestPrewarm(file);   // settle the gain in later if it wasn't measured yet
-            PushTuning();           // apply the curve before the first render block
-            PushEmitterMaster();    // set the radio level before the first block
-            PushListener(player);   // prime the listener so the very first render block is positioned
-            CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {slot}): {Path.GetFileName(file)} @ {offset:0}s " +
-                        $"(nearest speaker {st.NearestDist:0.0}m; B={BroadcastSeconds():0}s).");
         }
 
-        // Release a station's voice AND its slot.
         private static void StopStation(Station st, string why = "?")
         {
             StopVoice(st, why);
@@ -1326,6 +1462,9 @@ namespace CMM
         // the door stopwatch: a diagnostic that omits the deciding term settles no argument.
         private static void StopVoice(Station st, string why = "?")
         {
+            // Even with no live voice there may be one being OPENED for this station; the
+            // generation bump is what stops it landing after the reason for it has gone.
+            InvalidatePendingStart();
             if (st.VoiceId == 0) return;
             CmmMixer.Instance?.RemoveEmitter(st.VoiceId, StopFade);
             CMMConfig.D($"[CMM] Station '{st.Name}' stopped ({why}).");
@@ -1346,6 +1485,9 @@ namespace CMM
         // name → station map.
         internal static void OnCatalogRebuilt(Dictionary<string, Station> old)
         {
+            // Station objects are about to be replaced, so anything mid-open is opening for a
+            // station that will not exist by the time it lands.
+            InvalidatePendingStart();
             for (int i = 0; i < _stations.Count; i++)
             {
                 Station st = _stations[i];
