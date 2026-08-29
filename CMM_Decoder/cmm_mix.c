@@ -683,14 +683,25 @@ CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds)
     if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
     em_recv* r = &g_emRx[slot];
     if (signal < 0.0f) signal = 0.0f; else if (signal > 1.0f) signal = 1.0f;
+    /* Heading DOWN toward a search, rather than up toward a lock. */
+    int startingSearch = (signal < 0.5f) && (!r->armed || r->sig > signal + 0.05f);
     if (!r->armed) {
         /* First arm: start where we are told to, not from a stale ramp. RNG is seeded per slot so
          * three speakers searching at once are three different roars, not one in triplicate. */
         r->armed = 1;
         r->rng = 22222u + (unsigned)(slot * 2654435761u);
-        r->wCur = r->wTgt = 1.0f;
         r->nzLp = r->nzLp2 = r->clk = r->fA = r->fB = r->lp = 0.0f;
         r->sig = signal;
+    }
+    if (startingSearch) {
+        /* RESEED THE WANDER ON EVERY SEARCH, not just the first. It is an AGC breathing as a
+         * signal fades, with a time constant built for a receiver that sits between stations for a
+         * while -- and a sweep is a quarter of a second. Left running, each sweep began wherever
+         * the previous one's random walk had wandered to, so the same retune was a different
+         * loudness every time. Reported as the static's volume changing. The RNG stream is
+         * deliberately NOT reset, so consecutive tunes still sound like different noise. */
+        r->wCur = r->wTgt = 1.0f;
+        r->wHold = 0;
     }
     r->sigTarget = signal;
     if (rampSeconds <= 0.0001f) { r->sig = signal; r->sigStep = 0.0f; return; }

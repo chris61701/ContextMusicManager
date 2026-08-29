@@ -1208,6 +1208,18 @@ namespace CMM
                 if (cand == null) return;
 
                 int free = FreeSlot();
+                if (free < 0 && _borrowSlot >= 0)
+                {
+                    // A SWEEP NEVER COSTS SOMEBODY THEIR MUSIC. The borrow holds a slot with no
+                    // owner, so a station starting while it is held finds nothing free and steals
+                    // from the farthest one playing — reported as the audio cutting out while
+                    // tuning another station. A quarter second of hiss is worth less than a
+                    // station somebody is listening to, so the borrow gives its slot back first
+                    // and only a genuine shortage reaches the steal below.
+                    CMMConfig.D("[CMM] Sweep borrow yields its slot — a station needs it.");
+                    EndSweepBorrowNow();
+                    free = FreeSlot();
+                }
                 if (free < 0)
                 {
                     // All slots held: steal from the FARTHEST incumbent, with hysteresis.
@@ -1863,8 +1875,13 @@ namespace CMM
             {
                 if (_borrowReleaseAt <= 0f && now >= _borrowUntil)
                 {
-                    _borrowReleaseAt = now + ReleaseRamp;
-                    CmmMixer.Instance?.SetEmitterRecv(_borrowSlot, 1f, ReleaseRamp);
+                    // AN ARRIVAL, NOT A RELEASE. The station this speaker is joining is already
+                    // playing, so what happens at the end of the sweep is a station being revealed
+                    // from under the noise — the same event StartStation's lock ramp covers, and
+                    // it earns the same unhurried curve. ReleaseRamp is for a slot going idle with
+                    // nothing behind it, and using it here was the "fades out too quickly" report.
+                    _borrowReleaseAt = now + ArriveRamp;
+                    CmmMixer.Instance?.SetEmitterRecv(_borrowSlot, 1f, ArriveRamp);
                 }
                 if (_borrowReleaseAt > 0f && now >= _borrowReleaseAt)
                 {
@@ -1922,6 +1939,17 @@ namespace CMM
             _slotArmedAt[slot] = now;
             CMMConfig.D($"[CMM] Sweep borrow: slot {slot} sweeps {e.Name} at {pos} onto '{want}' "
                       + "(already playing elsewhere).");
+        }
+
+        // Give the slot back at once: the speaker rejoins its station on the next snapshot and
+        // the station is already playing, so what the ear gets is the noise stopping rather than
+        // anything starting. Abrupt only when something else needed the slot, which is the trade.
+        private static void EndSweepBorrowNow()
+        {
+            if (_borrowSlot < 0) return;
+            CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
+            CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
+            _borrowSlot = -1; _borrowReleaseAt = 0f;
         }
 
         private static readonly float[] _borrowPts = new float[3];
