@@ -155,7 +155,10 @@ namespace CMM
             //    STALE (older than RescanInterval, so respawned/chunk-reset blocks get picked up). One
             //    scan in flight at a time, advanced a slice per poll.
             _prefabScratch.Clear();
-            deco.GetWorldPrefabs(_prefabScratch);
+            // Through the compat shim: 3.x fills a list, 2.6 returns one, and neither token may
+            // appear at this call site (see EmitterCompat). A false return means the list could
+            // not be read this poll -- the next one is 250 ms away.
+            if (!EmitterCompat.GetWorldPrefabs(deco, _prefabScratch)) return;
             _nearIds.Clear();
             float now = Time.realtimeSinceStartup;
             float keepRange = PoiKeepRange();

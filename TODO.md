@@ -221,7 +221,24 @@ verification — emitters are excluded there anyway.
 
 ## Radio / world-emitter
 
-- [ ] **World emitters on 2.6.** *(noted 2026-08-28, not started.)* The emitter layer is
+- [x] **World emitters on 2.6.** *(noted 2026-08-28; BUILT 2026-08-29, in-game test pending.)*
+  The API survey found exactly TWO divergences in everything the emitter layer touches, and the
+  gate was one of them wearing a disguise. `RuntimeSupported` required `TEFeatureDoor`, which is
+  3.0+ only -- so a door type was standing in for a whole subsystem and 2.6 had no speakers at
+  all. Doors are now a CAPABILITY (`HasCompositeDoors`): without them the emitters run and doors
+  simply do not modulate occlusion mid-swing. The real divergence is prefab enumeration, a
+  member-SHAPE split of the kind a per-version compile cannot see -- 3.x
+  `void GetWorldPrefabs(List)` fills the caller's list, 2.6 `List GetDynamicPrefabs()` returns
+  the live one -- now bound by name in `EmitterCompat` so neither token reaches the call site.
+  Everything else was identical: `World.GetChunkSync`, `IChunk.GetBlockNoDamage`,
+  `Block.nameToBlock/IsSeeThrough/IsMovementBlocked/shape/blockMaterial/lightOpacity`,
+  `BlockValue.isair/type/damage/rotation`, `ChunkCache.GetBlockEntity`, `BlockEntityData.transform`,
+  `PrefabInstance.id/name/boundingBox*`, `Origin`, `EntityPlayerLocal.cameraTransform`. Builds
+  clean against all four game versions.
+
+  *(Original note kept below: the reasoning still holds for the next version that diverges.)*
+
+- [ ] ~~**World emitters on 2.6** (superseded by the entry above).~~ *(noted 2026-08-28.)* The emitter layer is
   `GV_V3`-only — every call site is behind `#if GV_V3` — so on 2.6 there are no world speakers
   at all. Work out what the 2.6 block/entity API actually offers versus 3.x and how much of
   `EmitterRegistry` / `EmitterAudioLayer` can be shared rather than forked; see
