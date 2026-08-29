@@ -1250,7 +1250,20 @@ int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames)
      * run dry, it gets its cushion back. Costs one buffer of latency on that lane, which matches
      * what the music path has always had. */
     if (o->emPrime > 0 && ma_pcm_rb_available_read(&sl->rb) == 0) {
+        /* CAPPED, and this is the "it went absolutely silent" bug. emPrime is the MUSIC fill
+         * target: 200 ms when calm and up to NativeOutputMaxRingMs (15 s) while deep-buffered or
+         * after a producer stall. Padding a lane with that much silence is right for a station
+         * whose audio is about to stream, and catastrophic for a receiver armed to make a sound
+         * NOW -- a retune flushes the slot, the ring is empty, and the cushion goes in AHEAD of
+         * the static. Against a 120 ms search and a 250 ms sweep, 200 ms of zeros swallows most of
+         * the tuning and the player hears nothing. "Sometimes" was the fill target moving with the
+         * buffer's state.
+         *
+         * A lane still needs SOME cushion or it crackles on every resume, so this is one small
+         * fixed one: enough to absorb producer jitter, short enough to be inaudible. */
+        ma_uint32 cap = (ma_uint32)(((ma_uint32)o->sampleRate * 40u) / 1000u);
         ma_uint32 want = (ma_uint32)o->emPrime, done = 0;
+        if (want > cap) want = cap;
         while (done < want) {
             ma_uint32 n = want - done;
             void* wp = NULL;

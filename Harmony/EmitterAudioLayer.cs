@@ -1448,7 +1448,18 @@ namespace CMM
                 else _slotArmedAt[slot] = 0f;
                 // ...and its speakers, so the noise has somewhere in the world to come from. The
                 // point set is already current — GroupSnapshot filled it earlier this tick.
-                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                // CLEAR LINE, NOT st.PtGain. PtGain is not a gain -- it is added VIRTUAL DISTANCE
+                // in blocks, and the output mutes a point outright once distance+extra reaches
+                // Range. GroupSnapshot rebuilds Pts/PtFlags/PtCount every tick but never PtGain;
+                // only PostProcessGains writes it, and that runs for VOICED stations. So a search
+                // published with it carried whatever the occlusion model last wrote for a
+                // different, re-ordered speaker set -- and if the station last played far away, or
+                // had never played (seeded to Range, "muted until the first flood lands"), the
+                // static rendered at exactly zero for the whole search. Nothing repaired it
+                // either: every occlusion path needs a voice or a committed slot, and a search has
+                // neither. The sweep borrow already got this right with _borrowGain[0] = 0f.
+                for (int k = 0; k < st.PtCount && k < st.PtGain.Length; k++) _searchGain[k] = 0f;
+                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, _searchGain, st.PtFlags, st.PtCount);
                 // Claimed NOW, so the retries the hold causes do not re-flush and re-arm every
                 // tick, which would restart the search ramp four times a second and stop the
                 // noise ever settling into its wander.
@@ -1966,7 +1977,20 @@ namespace CMM
                     CMMConfig.D($"[CMM] Sweep borrow on slot {_borrowSlot} ended — speaker rejoins its station.");
                     _borrowSlot = -1; _borrowReleaseAt = 0f;
                 }
-                else return;   // one borrow at a time
+                else
+                {
+                    // THE HOLD IS RELEASED EVEN WHEN WE CANNOT ACT. Returning here without it left
+                    // a speaker retuned during a live borrow held out of EVERY station for the
+                    // full 1.5 s dead-man window -- no station, no borrow, no static, silence at
+                    // that radio. It rejoins its station instead and simply goes without a sweep,
+                    // which is the same graceful failure as having no spare slot.
+                    if (_handledTuneAt != EmitterTuner.LastTuneAt)
+                    {
+                        _handledTuneAt = EmitterTuner.LastTuneAt;
+                        EmitterTuner.ReleaseSweepHold();
+                    }
+                    return;   // one borrow at a time
+                }
             }
 
             // Begin: only for a retune we have not handled, and only when the station it moved to
@@ -2030,6 +2054,10 @@ namespace CMM
             CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
             _borrowSlot = -1; _borrowReleaseAt = 0f;
         }
+
+        // A clear-line virtual-distance array for a slot that is searching: the noise is not the
+        // station and does not inherit the station's occlusion history.
+        private static readonly float[] _searchGain = new float[RadioStation.MaxPoints];
 
         private static readonly float[] _borrowPts = new float[3];
         private static readonly float[] _borrowGain = new float[1];
