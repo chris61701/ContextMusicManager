@@ -270,6 +270,8 @@ namespace CMM
             // The flat folder's top-level .m3u files, refreshed by a successful scan; kept as
             // the prior value on error so a transient failure doesn't drop the hot-reload watch.
             string[] discoveredPlaylistFiles = cache.playlistFiles ?? _noPlaylistFiles;
+            // Set by the worker when a playlist's entries name a volume that is not mounted.
+            bool unresolvedPlaylist = false;
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 try
@@ -279,7 +281,13 @@ namespace CMM
                         // Direct playlist: the tracks LISTED in the .m3u (files-only, in list
                         // order). Build the same size+mtime validation keys so a track moved out
                         // and back isn't re-decoded, matching the folder path's behavior.
-                        currentFiles = PlaylistSource.ReadTracks(playlistFile);
+                        currentFiles = PlaylistSource.ReadTracks(playlistFile, out bool plUnresolved);
+                        // The drive its entries live on is away. That is not "every track was
+                        // removed", and letting it through would prune the whole context and
+                        // invalidate its caches -- then do it all again in reverse when the
+                        // drive came back. Flagged here and acted on after the wait, because
+                        // this runs on a worker and a coroutine cannot bail from inside one.
+                        unresolvedPlaylist = plUnresolved;
                         foreach (string f in currentFiles)
                         {
                             try
@@ -371,6 +379,9 @@ namespace CMM
                 finally { scanDone = true; }
             });
             while (!scanDone) yield return null;
+            // Nothing was learned: the playlist reads fine, its music is on a drive that is not
+            // there. Leave every cache exactly as it was and try again on the next sweep.
+            if (unresolvedPlaylist) yield break;
 
             // Record the folder's in-folder .m3u list so the change signature keeps watching
             // them for in-place edits (empty for direct-playlist/recursive; unchanged on error).

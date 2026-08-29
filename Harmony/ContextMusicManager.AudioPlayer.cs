@@ -1084,7 +1084,17 @@ namespace CMM
                 {
                     // Playlist source: gather the listed tracks (flat pool; the subfolders
                     // flag and the recursive crawler don't apply). Cheap single-file read.
-                    files = PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(ctx.Source));
+                    //
+                    // An UNRESOLVED read -- every entry naming a volume that is not mounted --
+                    // is not an empty context, and caching it as one is how a momentary absence
+                    // becomes permanent: the snapshot would say "no music here" and nothing
+                    // re-reads a playlist whose own file never changed. Radio stations got this
+                    // guard when the same failure was found there; contexts kept the bug.
+                    // Reading as NOT READY instead lets the resolver fall back for now and try
+                    // again next time, which is what happens while a folder is still scanning.
+                    files = PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(ctx.Source),
+                                                      out bool plUnresolved);
+                    if (plUnresolved) return null;
                     cache.directorySnapshot = files;
                 }
                 else

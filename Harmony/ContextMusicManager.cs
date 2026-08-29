@@ -797,7 +797,13 @@ namespace CMM
                     {
                         try
                         {
-                            if (isPlaylist) fresh = PlaylistSource.ReadTracks(playlistFile);
+                            if (isPlaylist)
+                            {
+                                fresh = PlaylistSource.ReadTracks(playlistFile, out bool plUnresolved);
+                                // Same rule as everywhere else: an absent volume is not an empty
+                                // playlist, and a rescan that concluded "empty" would stick.
+                                if (plUnresolved) fresh = null;
+                            }
                             else fresh = EnumerateFlatPoolMulti(dirs, claimed, out freshPlaylistFiles);
                         }
                         catch { }

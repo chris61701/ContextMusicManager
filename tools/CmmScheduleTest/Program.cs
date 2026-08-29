@@ -46,12 +46,108 @@ internal static class Program
             DeadTracks(sandbox);
             UnreachableDrive(sandbox);
             Slots();
+            Dial();
         }
         catch (Exception ex) { _fail++; Console.WriteLine("  FAIL  harness threw: " + ex); }
         finally { try { Directory.Delete(sandbox, true); } catch { } }
 
         Console.WriteLine($"\n{_pass} passed, {_fail} failed.");
         return _fail == 0 ? 0 : 1;
+    }
+
+    // ── The dial ─────────────────────────────────────────────────────────────
+    // Not "next in a list". There are n+1 positions over n stations because the dial wraps
+    // through OFF, and the station you are tuned to can leave the catalog while you stay
+    // tuned to its name -- so the position you are stepping FROM may not be in the list.
+    // None of that was reachable by any test before, because the radio needs Unity.
+    static void Dial()
+    {
+        Section("The dial");
+
+        string[] three = { "Alpha", "Beta", "Gamma" };   // catalog order is sorted by name
+
+        // From off, one press either way lands you on something.
+        Check("off, forward -> first station", RadioDial.Step(three, null, false, +1) == 0);
+        Check("off, back -> last station", RadioDial.Step(three, null, false, -1) == 2);
+
+        // Stepping through, and off the end into Off rather than round to the start.
+        Check("Alpha forward -> Beta", RadioDial.Step(three, "Alpha", true, +1) == 1);
+        Check("Beta forward -> Gamma", RadioDial.Step(three, "Beta", true, +1) == 2);
+        Check("Gamma forward -> off", RadioDial.Step(three, "Gamma", true, +1) == RadioDial.Off);
+        Check("Alpha back -> off", RadioDial.Step(three, "Alpha", true, -1) == RadioDial.Off);
+        Check("Gamma back -> Beta", RadioDial.Step(three, "Gamma", true, -1) == 1);
+
+        // The case the phantom slot exists for: tuned to a station that has since gone. The
+        // dial carries on from where it WOULD have been, rather than jumping to an end.
+        Check("gone station between Alpha and Gamma: forward -> Gamma",
+              RadioDial.Step(new[] { "Alpha", "Gamma" }, "Beta", true, +1) == 1);
+        Check("...and back -> Alpha",
+              RadioDial.Step(new[] { "Alpha", "Gamma" }, "Beta", true, -1) == 0);
+        Check("a gone station before everything: forward -> first",
+              RadioDial.Step(three, "Aardvark", true, +1) == 0);
+        Check("...and back -> off",
+              RadioDial.Step(three, "Aardvark", true, -1) == RadioDial.Off);
+        Check("a gone station after everything: forward -> off",
+              RadioDial.Step(three, "Zulu", true, +1) == RadioDial.Off);
+        Check("...and back -> last",
+              RadioDial.Step(three, "Zulu", true, -1) == 2);
+
+        // Degenerate shapes.
+        Check("no stations -> off", RadioDial.Step(new string[0], "Alpha", true, +1) == RadioDial.Off);
+        Check("null list -> off", RadioDial.Step(null, "Alpha", true, +1) == RadioDial.Off);
+        Check("one station, forward off it -> off",
+              RadioDial.Step(new[] { "Solo" }, "Solo", true, +1) == RadioDial.Off);
+        Check("one station, from off -> it", RadioDial.Step(new[] { "Solo" }, null, false, +1) == 0);
+        Check("case does not matter", RadioDial.Step(three, "beta", true, +1) == 2);
+
+        // Every position must be reachable by pressing forward repeatedly, and the walk must
+        // return to Off rather than getting stuck -- otherwise a station is unreachable and
+        // nobody would ever know which.
+        var reached = new HashSet<int>();
+        int at = RadioDial.Off; bool sane = true;
+        for (int i = 0; i < 12; i++)
+        {
+            at = RadioDial.Step(three, at == RadioDial.Off ? null : three[at], at != RadioDial.Off, +1);
+            if (at != RadioDial.Off) { if (!reached.Add(at)) { } }
+            if (at < RadioDial.Off || at >= three.Length) { sane = false; break; }
+        }
+        Check("walking forward reaches every station and returns to off",
+              sane && reached.Count == three.Length, $"reached {reached.Count} of {three.Length}");
+
+        Section("After a track ends");
+
+        // The paper clock says the track that just finished is still on air -- the world clock
+        // froze during a pause while the audio kept running. Replaying it would loop it.
+        string[] order = { "one.wav", "two.wav", "three.wav" };
+        string f = "one.wav"; int idx = 0; double off = 4.2;
+        Check("the ended track is not replayed",
+              RadioDial.SkipEndedTrack(order, "one.wav", ref f, ref idx, ref off)
+              && f == "two.wav" && idx == 1);
+        Near("...and the next one starts at its beginning", off, 0, 1e-9);
+
+        // Wrapping off the end of the order.
+        f = "three.wav"; idx = 2; off = 1;
+        RadioDial.SkipEndedTrack(order, "three.wav", ref f, ref idx, ref off);
+        Check("it wraps to the start of the order", f == "one.wav" && idx == 0);
+
+        // When the schedule has already moved on, nothing is overridden -- the offset it
+        // resolved to is a real mid-song join and must survive.
+        f = "two.wav"; idx = 1; off = 9.5;
+        Check("a schedule that already moved on is left alone",
+              !RadioDial.SkipEndedTrack(order, "one.wav", ref f, ref idx, ref off)
+              && f == "two.wav" && Math.Abs(off - 9.5) < 1e-9);
+
+        // A single-track station: the override lands back on the same file, which is right --
+        // there is nothing else -- but it must start it from zero rather than mid-song.
+        string[] solo = { "only.wav" };
+        f = "only.wav"; idx = 0; off = 7;
+        Check("a one-track station restarts rather than resuming",
+              RadioDial.SkipEndedTrack(solo, "only.wav", ref f, ref idx, ref off)
+              && f == "only.wav" && Math.Abs(off) < 1e-9);
+
+        f = "x"; idx = 0; off = 3;
+        Check("no ended track means no override",
+              !RadioDial.SkipEndedTrack(order, null, ref f, ref idx, ref off));
     }
 
     // ── Emitter slot ownership ───────────────────────────────────────────────

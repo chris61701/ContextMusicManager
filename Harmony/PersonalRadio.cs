@@ -283,23 +283,12 @@ namespace CMM
                 return;
             }
 
-            int target;   // -1 = Off, else station index
-            if (!_on) target = dir > 0 ? 0 : n - 1;
-            else
-            {
-                // Current position: the tuned name's index, or — off air — its insertion point
-                // (idx = first station sorting AFTER it), from which next lands on idx and prev
-                // on idx-1. `exact` compensates the +1 step over the phantom slot.
-                int idx = 0; bool exact = false;
-                for (int i = 0; i < n; i++)
-                {
-                    int cmp = string.Compare(sts[i].Name, _tunedName, StringComparison.OrdinalIgnoreCase);
-                    if (cmp == 0) { idx = i; exact = true; break; }
-                    if (cmp < 0) idx = i + 1;
-                }
-                target = dir > 0 ? (exact ? idx + 1 : idx) : idx - 1;
-                if (target >= n || target < -1) target = -1;   // wrap through Off
-            }
+            // The rule lives in RadioDial, with no Unity in it, so it can be tested: a tuned
+            // station going off air leaves you at a position that is not in the list any more,
+            // and the dial still has to move sensibly from there.
+            var names = new string[n];
+            for (int i = 0; i < n; i++) names[i] = sts[i].Name;
+            int target = RadioDial.Step(names, _tunedName, _on, dir);
 
             if (target < 0) { TurnOff(player); return; }
             Tune(sts[target].Name, player);
@@ -924,12 +913,7 @@ namespace CMM
             if (!RadioStationCatalog.ResolveAt(st, RadioStationCatalog.BroadcastSeconds(),
                                                out string file, out int idx, out double offset))
                 return;
-            if (AdvanceOverride != null && string.Equals(file, AdvanceOverride, StringComparison.OrdinalIgnoreCase))
-            {
-                idx = (idx + 1) % st.Order.Length;
-                file = st.Order[idx];
-                offset = 0;
-            }
+            RadioDial.SkipEndedTrack(st.Order, AdvanceOverride, ref file, ref idx, ref offset);
 
             // Hold the start until the join track's loudness is known: a sub-second wait behind
             // the "tuning…" state beats starting hot and settling audibly, and the broadcast

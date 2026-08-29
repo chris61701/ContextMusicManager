@@ -174,7 +174,14 @@ namespace CMM
             try
             {
                 if (item.IsPlaylist)
-                    return new ScanResult { Files = PlaylistSource.ReadTracks(item.PlaylistFile), PlaylistFiles = _noPlaylistFiles };
+                {
+                    string[] tracks = PlaylistSource.ReadTracks(item.PlaylistFile, out bool plUnresolved);
+                    // Unresolved: the entries name a volume that is not there. Publishing an
+                    // empty snapshot would mark the context as having no music for the session.
+                    // A null Files reads as "not scanned yet", which is exactly the truth.
+                    if (plUnresolved) return new ScanResult { Files = null, PlaylistFiles = _noPlaylistFiles };
+                    return new ScanResult { Files = tracks, PlaylistFiles = _noPlaylistFiles };
+                }
                 bool recursive = item.Option == SearchOption.AllDirectories;
                 if (!recursive)
                     return Multi(item);
