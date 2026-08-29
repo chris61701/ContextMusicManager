@@ -446,6 +446,21 @@ namespace CMM
 
             EmitterRegistry.Poll();
             MaintainBirths();       // stamp newly-appeared speakers / prune gone ones (placement fade-in)
+            // THE SAVED TUNINGS, BEFORE ANYTHING IS PINNED. Reported as "sometimes the radio
+            // starts on the wrong station, then goes to the one I set before I quit".
+            //
+            // EmitterTuner loads Cache/emitters.xml lazily, and the only two things that used to
+            // trigger it were tuning a speaker and LOOKING at one. The audio layer consults
+            // TryPin without ever asking for the file, and TryPin answers "no override" whenever
+            // the map is empty -- which, on a fresh world entry, it always is. So the first
+            // GroupSnapshot fell through to the derived per-POI assignment, cached it in _posPins
+            // and started that station; the overrides only arrived when the player happened to
+            // aim at a radio, and the correction was the audible retune.
+            //
+            // It self-corrected because the override is consulted BEFORE _posPins, which is why
+            // it read as a glitch rather than as lost settings. Loading here costs one early-out
+            // per tick once the save is open.
+            EmitterTuner.EnsureLoaded();
             GroupSnapshot();        // per-station nearest + culled point sets from the registry snapshot
             // AFTER GroupSnapshot so the landing voice is seeded from this tick's speaker
             // positions, and BEFORE the start/stop logic so a station that just landed a voice is
