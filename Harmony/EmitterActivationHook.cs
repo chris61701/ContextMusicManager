@@ -241,10 +241,10 @@ namespace CMM
                 // A block with its own text (the shelf speaker says "Search") keeps it: the radial
                 // is where both live, and overwriting it would hide the loot from the player.
                 if (!string.IsNullOrEmpty(__result)) return;
-                string note = EmitterTuner.PageNote();
+                // The prompt says what the radio IS, not where a menu happens to be scrolled.
+                // The page belongs to the radial, and lives on its arrows.
                 __result = "{0} Tune " + Escape(Pretty(e.Name))
-                         + " ([DECEA3]" + Escape(EmitterTuner.CurrentLabel(e)) + "[-])"
-                         + (note == null ? "" : "  [999999]" + Escape(note) + "[-]");
+                         + " ([DECEA3]" + Escape(EmitterTuner.CurrentLabel(e)) + "[-])";
             }
             catch { }
         }
@@ -404,7 +404,7 @@ namespace CMM
                     // whether the key is down, and by the time a command reaches us it is up. So
                     // paging advances the page and says so, and the next hold opens on it -- the
                     // page is named in the crosshair prompt so it is not a guess.
-                    EmitterTuner.NextPage(e);
+                    EmitterTuner.StepPage(e, cmd == EmitterTuner.CmdPrev ? -1 : +1);
                     PersonalRadio.TuneSfxDial();
                 }
                 else EmitterTuner.Apply(e, cmd);

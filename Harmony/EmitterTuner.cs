@@ -92,18 +92,24 @@ namespace CMM
 
         // -- The choices, in radial order ---------------------------------------------------
         // The radial is 13 segments (windowRadial repeat_count="13") and the catalog is 16
-        // stations, so the list has to page. The layout that falls out of that, in order:
+        // stations, so the list pages. The layout:
         //
         //   0        Turn Off / Turn On     <- THE TAP TARGET, see below
         //   1..10    up to ten stations     <- the current page
-        //   11       Automatic
-        //   12       More                   <- only when there is more than one page
+        //   11       previous page          <- only when there is more than one page
+        //   12       next page              <- only when there is more than one page
         //
         // SLOT 0 IS LOAD-BEARING. XUiC_Radial.Update takes a release BEFORE displayDelay (0.25 s)
         // -- a tap rather than a hold -- and invokes the FIRST ENABLED ENTRY. So putting the
         // on/off toggle there makes "tap to switch it off" fall out of the game's own input
         // handling, with no timing code of ours. It also means the shelf speaker, whose vanilla
         // loot command sorts before all of ours, still LOOTS on a tap: nothing is stolen.
+        //
+        // AUTOMATIC IS NOT ON THE RING any more (removed on request, to make room for two arrows
+        // rather than one "More"). The derived per-POI assignment is still what an untouched
+        // building uses, and "Turn On" falls back to it when there is nothing to restore -- but
+        // there is no longer a direct "put this building back to automatic" segment. Deleting the
+        // building's line from Cache/emitters.xml is the way back.
         internal struct Choice
         {
             public string Label;    // what the centre of the radial reads
@@ -113,7 +119,8 @@ namespace CMM
             public bool Current;    // highlight: this is what is playing now
         }
 
-        internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on", CmdMore = "@more";
+        internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on";
+        internal const string CmdPrev = "@prev", CmdNext = "@next";
 
         // Which page each group is showing. Transient (not saved): a page is where you are in a
         // menu, not a property of the building.
@@ -139,8 +146,8 @@ namespace CMM
             int room = RadialSegments - reserved;                 // what the block's own commands left
             if (room < 3) return;                                 // no sensible menu fits
 
-            bool paged = stations.Count > room - 2;               // 2 fixed: toggle + Automatic
-            int perPage = paged ? Math.Min(PageSize, room - 3) : room - 2;
+            bool paged = stations.Count > room - 1;               // 1 fixed: the on/off toggle
+            int perPage = paged ? Math.Min(PageSize, room - 3) : room - 1;   // paged also costs 2 arrows
             if (perPage < 1) return;
 
             int pages = paged ? (stations.Count + perPage - 1) / perPage : 1;
@@ -164,14 +171,22 @@ namespace CMM
                     Badge = Initials(name), Current = name == current });
             }
 
-            into.Add(new Choice {
-                Label = AutoLabel, Cmd = CmdAuto, Icon = IconAuto, Badge = "",
-                Current = !isOff && !_pins.ContainsKey(key) });
-
             if (paged)
+            {
+                // THE PAGE LIVES IN THE MIDDLE OF THE RING, not in the crosshair prompt: the
+                // prompt is about the radio, and which page a menu is on is about the menu. The
+                // centre label is the only text the vanilla radial has, and it shows the hovered
+                // entry's selection text -- so the arrows say it, and the page NUMBER also rides
+                // on both arrows as a badge so it is legible without hovering anything.
+                string badge = (page + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                int prev = (page - 1 + pages) % pages, next = (page + 1) % pages;
                 into.Add(new Choice {
-                    Label = "More stations (" + (page + 1) + " of " + pages + ")",
-                    Cmd = CmdMore, Icon = IconMore, Badge = "", Current = false });
+                    Label = "Page " + (prev + 1) + " of " + pages,
+                    Cmd = CmdPrev, Icon = IconPrev, Badge = badge, Current = false });
+                into.Add(new Choice {
+                    Label = "Page " + (next + 1) + " of " + pages,
+                    Cmd = CmdNext, Icon = IconNext, Badge = badge, Current = false });
+            }
         }
 
         // Two characters, because that is what the segment's label actually is: the vanilla
@@ -203,30 +218,16 @@ namespace CMM
         }
 
         // True when the choice was a MENU action (paging) rather than a tuning.
-        internal static bool IsMenuAction(string cmd) => cmd == CmdMore;
+        internal static bool IsMenuAction(string cmd) => cmd == CmdPrev || cmd == CmdNext;
 
-        // "page 2 of 2", or null when everything fits on one ring. The crosshair prompt carries
-        // this: paging cannot reopen the radial (see the OnBlockActivated hook for why), so the
-        // player has to know that the next hold shows a different set rather than discovering it.
-        internal static string PageNote()
-        {
-            int perPage = PageSize;
-            int n = RadioStationCatalog.Stations.Count;
-            if (n <= RadialSegments - 2) return null;
-            int pages = (n + perPage - 1) / perPage;
-            if (pages <= 1) return null;
-            int page = 0;
-            foreach (var kv in _page) { page = kv.Value; break; }   // one menu is open at a time
-            if (page >= pages || page < 0) page = 0;
-            return "page " + (page + 1) + " of " + pages;
-        }
-
-        internal static void NextPage(EmitterRegistry.Emitter e)
+        internal static void StepPage(EmitterRegistry.Emitter e, int dir)
         {
             string key = GroupKey(e);
             int page;
             _page.TryGetValue(key, out page);
-            _page[key] = page + 1;                 // BuildChoices wraps it back to 0 past the end
+            int n = RadioStationCatalog.Stations.Count;
+            int pages = Math.Max(1, (n + PageSize - 1) / PageSize);
+            _page[key] = ((page + dir) % pages + pages) % pages;   // wraps both ways
         }
 
         internal static void Apply(EmitterRegistry.Emitter e, string cmd)
@@ -293,7 +294,10 @@ namespace CMM
         internal const string IconAuto    = "wrench";
         internal const string IconOff     = "x";
         internal const string IconOn      = "hand";
-        internal const string IconMore    = "map_cursor";
+        // arrow_left / arrow_right are real sprites in UIAtlas -- vanilla XUi uses them by these
+        // exact names. The radial prefixes "ui_game_symbol_", so that is what is left here.
+        internal const string IconPrev    = "arrow_left";
+        internal const string IconNext    = "arrow_right";
 
         internal static void Load(string modPath)
         {
