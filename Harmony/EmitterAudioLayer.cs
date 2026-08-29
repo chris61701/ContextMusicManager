@@ -1092,6 +1092,8 @@ namespace CMM
                 // distance either, or a station could be kept alive by a speaker that is
                 // currently playing static instead of it.
                 if (_borrowSlot >= 0 && e.Pos.Equals(_borrowPos)) continue;
+                // ...and from the instant the dial turned, before we have decided anything.
+                if (EmitterTuner.SweepHeld(e.Pos)) continue;
                 // The PLAYER'S choice outranks the derived one (EmitterTuner: look at a speaker,
                 // press the tune key). Deliberately NOT written into _posPins: leaving the override
                 // outside the cache means retuning a building lands on the next decision tick with
@@ -1934,6 +1936,9 @@ namespace CMM
             if (_handledTuneAt == EmitterTuner.LastTuneAt) return;
             if (now - EmitterTuner.LastTuneAt > RetuneWindow) return;
             _handledTuneAt = EmitterTuner.LastTuneAt;
+            // Whatever we decide below, the blanket hold ends here — from now on the speaker is
+            // either excluded because the borrow owns it, or back in its station.
+            EmitterTuner.ReleaseSweepHold();
 
             Vector3i pos = EmitterTuner.LastTunePos;
             var snap = EmitterRegistry.Snapshot;

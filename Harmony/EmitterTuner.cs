@@ -146,6 +146,14 @@ namespace CMM
         // when the station you tuned TO is already playing somewhere else, that one speaker has to
         // be lifted out of it to be swept on its own.
         internal static Vector3i LastTunePos;
+        // A speaker held out of every station's point set until the audio layer has decided what to
+        // do with it. Cleared by the layer; the timestamp is a dead-man's switch so a speaker can
+        // never be stranded silent if that decision never comes.
+        internal static Vector3i SweepPos;
+        internal static float SweepHeldAt = -999f;
+        internal static bool SweepHeld(Vector3i p)
+            => SweepHeldAt > 0f && CmmClock.Now - SweepHeldAt < 1.5f && p.Equals(SweepPos);
+        internal static void ReleaseSweepHold() { SweepHeldAt = -999f; }
 
         internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on";
         internal const string CmdPrev = "@prev", CmdNext = "@next";
@@ -299,6 +307,14 @@ namespace CMM
             // turning a knob, and a receiver only searches because somebody turned a knob.
             LastTuneAt = CmmClock.Now;
             LastTunePos = e.Pos;
+            // HELD OUT OF EVERY STATION FROM THIS INSTANT. The audio layer decides on its next
+            // tick whether this speaker needs a sweep of its own, but the pin has ALREADY moved --
+            // so between the two the speaker joins the new station and plays it clean, and the
+            // static only starts when the layer catches up. Reported as the station arriving
+            // undistorted and then going to static. Marking it here closes that window: it is out
+            // of the point sets from the moment the dial turns.
+            SweepPos = e.Pos;
+            SweepHeldAt = CmmClock.Now;
             PersonalRadio.TuneSfxDial();
 
             Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos + " -> " + label);
