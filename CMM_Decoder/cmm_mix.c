@@ -660,6 +660,22 @@ typedef struct {
 } em_recv;
 static em_recv g_emRx[CMM_MAX_EMIT_VOICES];
 
+/* THE EMITTER'S NOISE SITS BELOW THE PERSONAL RADIO'S, and it has to be its own number rather
+ * than a smaller g_recvNoiseTrim, because that one is shared and turning it down would quieten
+ * the radio in your pocket at the same time.
+ *
+ * They are not comparable levels to begin with. The bus receiver scales its noise by g_recvLevel
+ * -- the radio's own context volume -- and the programme arrives already carrying its voice gain.
+ * An emitter lane has neither: it is pre-master, pre-spatialization, pre-occlusion, so noise
+ * written at the bus's amplitude arrives at the ear far hotter than the same figure does through
+ * the music bus. Reported as simply too loud, halved here. */
+static volatile float g_emRecvNoise = 0.5f;
+
+CMM_API void cmm_mix_set_emitter_recv_trim(float trim) {
+    if (trim < 0.0f) trim = 0.0f; else if (trim > 4.0f) trim = 4.0f;
+    g_emRecvNoise = trim;
+}
+
 /* Arm/steer one slot's receiver. signal 0 = searching, 1 = locked; ramped over rampSeconds so a
  * retune is a dial being turned rather than a switch. Called from managed under no lock: these are
  * plain floats read by the producer, and a torn ramp target is inaudible where a lock is not. */
@@ -768,7 +784,7 @@ static void emitter_receiver_mono(int slot, float* lane, int n) {
             float held = g_recvNoiseFloorR + (1.0f - g_recvNoiseFloorR) * nf;
             if (held > nLvl) nLvl = held;
         }
-        float nAmp = nLvl * g_recvNoiseTrim * r->wCur * flut;
+        float nAmp = nLvl * g_recvNoiseTrim * g_emRecvNoise * r->wCur * flut;
         if (nAmp > 1.6f) nAmp = 1.6f;
 
         r->rng = r->rng * 1664525u + 1013904223u;

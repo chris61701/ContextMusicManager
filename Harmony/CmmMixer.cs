@@ -101,6 +101,10 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_clear_emitter_recv(int slot);
 
+        // v55 — the emitter receiver's noise level, relative to the personal radio's.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_recv_trim(float trim);
+
         // v43 — per-slot ring health. The music ring's counters said "underruns 0" while the
         // radios were dropping out, because nothing watched these.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -468,6 +472,11 @@ namespace CMM
         public void ClearEmitterRecv(int slot)
         {
             NativeMix.cmm_mix_clear_emitter_recv(slot);
+        }
+
+        public void SetEmitterRecvTrim(float trim)
+        {
+            NativeMix.cmm_mix_set_emitter_recv_trim(trim);
         }
 
         public void SetEmitterPoints(long id, float[] xyz, float[] gains, int[] flags, int count)

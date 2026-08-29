@@ -986,6 +986,10 @@ Drive and Static default OFF. Voice defaults 0.5 — a shelf speaker with a body
 rather than a hi-fi in a wall. All hot-reload."),
             F("WorldEmitterColorDrive",              "CMMConfig.WorldEmitterColorDrive",            0f),
             F("WorldEmitterColorStatic",             "CMMConfig.WorldEmitterColorStatic",           0f),
+            Cmt(@"How loud a world speaker's TUNING noise is, relative to the personal radio's.
+The receiver itself is tuned once and drives both; this is only the level of the hiss
+that comes out of a speaker in the world. 0 = silent, 1 = the same as the radio you carry."),
+            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            0.5f),
             F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —

@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 54
+#define CMM_DECODER_ABI 55
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -761,6 +761,11 @@ CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds)
 CMM_API void cmm_mix_set_slot_points(int slot, const float* xyz, const float* gains,
                                      const int* flags, int count);
 CMM_API void cmm_mix_clear_emitter_recv(int slot);
+
+/* v55 - how loud the emitter receiver's noise is, relative to the personal radio's. Its own knob
+ * because g_recvNoiseTrim is shared: turning that down to quieten a speaker across the room would
+ * quieten the radio in your pocket too. Default 0.5. */
+CMM_API void cmm_mix_set_emitter_recv_trim(float trim);
 
 /* v38/v39 — set the power-click TONES, both kinds at once. Per kind: `hz` = tone cap (bright
  * tick ↔ dull thud; clamped 300..10000), `snap` = 0..1 bright-noise-ping vs low-thump balance

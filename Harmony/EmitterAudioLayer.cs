@@ -555,7 +555,10 @@ namespace CMM
                     for (int i = 0; i < _stations.Count; i++)
                     {
                         Station st = _stations[i];
-                        if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                        // A station HOLDING A SLOT is published even with no voice: that is a receiver
+                    // searching, and its speakers must stay current (occlusion, doors, the listener
+                    // moving) for the whole of the open, not only once it is playing.
+                    if ((st.VoiceId == 0 && st.Slot < 0) || st.NearestDist > audibleR) continue;
                         _occlStations.Add(st);
                         totalPts += st.PtCount;
                     }
@@ -591,7 +594,10 @@ namespace CMM
                 for (int i = 0; i < _stations.Count; i++)
                 {
                     Station st = _stations[i];
-                    if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
+                    // A station HOLDING A SLOT is published even with no voice: that is a receiver
+                    // searching, and its speakers must stay current (occlusion, doors, the listener
+                    // moving) for the whole of the open, not only once it is playing.
+                    if ((st.VoiceId == 0 && st.Slot < 0) || st.NearestDist > audibleR) continue;
                     if (occlude)
                     {
                         EmitterAcoustics.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain, world);
@@ -1314,6 +1320,14 @@ namespace CMM
                 // the new one opening, is exactly the part that used to be silent, and it is also
                 // where StartStation's level hold sits. The noise covers both.
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+                // ...AND ITS SPEAKERS, NOW. Reported as "the last station cuts out and there is a
+                // delay before we get static". The delay was this: points were only published for a
+                // station that already had a VOICE, so between the old station stopping and the new
+                // one opening the slot had nowhere in the world to put its noise -- and a receiver
+                // with no speakers is silent. The point set is already current here (GroupSnapshot
+                // filled it earlier this tick), so the hiss starts at the speaker in the same tick
+                // the old programme stops, instead of a decode later.
+                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
             }
             _slotLastStation[slot] = st.Name;
 
@@ -1601,6 +1615,7 @@ namespace CMM
                                                 CMMConfig.WorldEmitterFalloff,
                                                 CMMConfig.WorldEmitterMuffle,
                                                 CMMConfig.WorldEmitterStereoWidth);
+            CmmMixer.Instance?.SetEmitterRecvTrim(CMMConfig.WorldEmitterStaticTrim);
             CmmMixer.Instance?.SetEmitterColor(CMMConfig.WorldEmitterColorDrive,
                                                CMMConfig.WorldEmitterColorStatic,
                                                CMMConfig.WorldEmitterColorVoice,

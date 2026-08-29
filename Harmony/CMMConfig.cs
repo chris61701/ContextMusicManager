@@ -740,6 +740,10 @@ namespace CMM
         //                 "small cheap speaker" body. 0 = full-range hi-fi, 1 = fully boxed-in.
         // Disabled (all 0) by default — parked until the acoustics work settles.
         public static float  WorldEmitterColorDrive  = 0f;
+        // How loud a world speaker's TUNING noise is, against the personal radio's. Its own knob
+        // because the receiver's tuning is otherwise shared: turning the shared trim down to
+        // quieten a speaker across the room would quieten the radio in your pocket too.
+        public static float  WorldEmitterStaticTrim = 0.5f;
         public static float  WorldEmitterColorStatic = 0f;
         public static float  WorldEmitterColorVoice  = 0.5f;
         // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead
