@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 53
+#define CMM_DECODER_ABI 54
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -739,6 +739,28 @@ CMM_API void cmm_mix_stop_sfx(int kind);
  * crackle = 0..1 sputter depth (0 = smooth hiss, 1 = full radio crackle). Captured at every
  * ping — including keepalive extensions — so config edits are heard live mid-hash. */
 CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle);
+
+/* v54 - A RECEIVER PER SPEAKER. The world speakers had none: retuning one across the room was
+ * silent until the music appeared, and the only sound that covered it (the SFX tuning static)
+ * plays on the music bus, which has no position -- so it arrived inside the listener's head
+ * instead of out of the radio.
+ *
+ * Each emitter SLOT now has its own receiver, running on that slot's dry mono lane BEFORE the
+ * emitter master, so the hiss inherits distance, occlusion, doors, room reverb and the speaker's
+ * coloration exactly as the programme does. State is per slot (three speakers searching are three
+ * sets, not one in triplicate); every TUNING PARAMETER is shared with the personal radio's
+ * receiver, so the radio.xml knobs move both.
+ *
+ *   signal 0 = searching (full noise), 1 = locked. Ramped over rampSeconds.
+ *   clear_emitter_recv takes the receiver out of the path entirely. */
+CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds);
+
+/* v54 - the slot's speakers. Replaces cmm_mix_set_emitter_points(voiceId, ...): a station's
+ * speakers belong to the SLOT, not to whichever track happens to be playing on it, and a slot
+ * with no voice still needs somewhere in the world to put its receiver's noise. */
+CMM_API void cmm_mix_set_slot_points(int slot, const float* xyz, const float* gains,
+                                     const int* flags, int count);
+CMM_API void cmm_mix_clear_emitter_recv(int slot);
 
 /* v38/v39 — set the power-click TONES, both kinds at once. Per kind: `hz` = tone cap (bright
  * tick ↔ dull thud; clamped 300..10000), `snap` = 0..1 bright-noise-ping vs low-thump balance

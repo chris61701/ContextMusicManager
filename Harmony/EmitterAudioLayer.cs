@@ -46,6 +46,11 @@ namespace CMM
         // until its rescan; stopping instantly churned open+seek every ~10 s. The voice is silent
         // throughout (empty point set ⇒ native gains 0), so the grace costs one idle decode stream.
         private const float UnseenGrace = 12f;
+        // How fast the receiver drops into search on a dial turn, and how slowly it locks back on.
+        // Asymmetric on purpose: losing a station is abrupt (you turned the knob), finding one is
+        // not. Both are short relative to the level hold they cover.
+        private const float SearchRamp = 0.12f;
+        private const float ArriveRamp = 0.90f;
 
         // The station list lives on the shared catalog (RadioStation class, version-neutral); this
         // layer owns the emitter-side fields on it (VoiceId/Slot/points/acoustics).
@@ -454,7 +459,7 @@ namespace CMM
                 Station st = _stations[i];
                 if (st.VoiceId == 0) continue;
                 if (st.NearestDist <= audibleR) { anyAudible = true; continue; }
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
                 RecordPtPush(st, 0);
             }
             if (!anyAudible) { _occlPending = false; return; }
@@ -570,7 +575,7 @@ namespace CMM
                         for (int i = 0; i < _occlStations.Count; i++)
                         {
                             Station st = _occlStations[i];
-                            CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                            CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
                             RecordPtPush(st, 0);
                         }
                         PushReverb(player);
@@ -597,7 +602,7 @@ namespace CMM
                     else
                         for (int k = 0; k < st.PtCount; k++) st.PtGain[k] = 0f;   // clear line (virtual distance 0)
                     PostProcessGains(st);
-                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                     RecordPtPush(st, st.PtCount);
                 }
                 PushReverb(player);
@@ -673,7 +678,7 @@ namespace CMM
                 if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
                 if (st.PtCount == 0)
                 {
-                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
                     RecordPtPush(st, 0);
                     continue;
                 }
@@ -684,7 +689,7 @@ namespace CMM
                 if (!FieldOcclusion.ComputeOcclusion(ear, st.Pts, st.PtCount, st.PtGain))
                 { _statWhy = "field-declined"; continue; }
                 PostProcessGains(st);
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
                 any = true;
             }
@@ -741,7 +746,7 @@ namespace CMM
                 if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
                 if (st.PtCount == 0)
                 {
-                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
                     RecordPtPush(st, 0);
                     continue;
                 }
@@ -750,7 +755,7 @@ namespace CMM
                 // Seal/Solid/Depth deliberately carried over: the reverb bus stays on the shipped
                 // measure so an A/B changes ONE thing — the occlusion — and not the room sound too.
                 PostProcessGains(st);
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
                 any = true;
             }
@@ -793,7 +798,7 @@ namespace CMM
                 if (st.VoiceId == 0 || st.NearestDist > audibleR) continue;
                 if (st.PtCount == 0)
                 {
-                    CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, 0);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
                     RecordPtPush(st, 0);
                     continue;
                 }
@@ -802,7 +807,7 @@ namespace CMM
                 { _statWhy = "flipped"; return false; }   // ready flipped under us — legacy covers this tick
                 st.Seal = seal; st.Solid = solid; st.Depth = depth;
                 PostProcessGains(st);
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
             }
             // Air*/room measure comes from the room-only ear flood the caller keeps running —
@@ -826,7 +831,7 @@ namespace CMM
                 st.Solid = EmitterAcoustics.ReverbSolid;
                 st.Depth = EmitterAcoustics.ReverbDepth;
                 PostProcessGains(st);
-                CmmMixer.Instance?.SetEmitterPoints(st.VoiceId, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
+                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
                 RecordPtPush(st, st.PtCount);
             }
             PushReverb(player);
@@ -1297,8 +1302,19 @@ namespace CMM
             }
             // A slot last used by a DIFFERENT station still holds its queued dry audio — flush it
             // (and the slot's render state) so nothing of the old station plays under this voice.
-            if (!string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase))
+            bool changedStation =
+                !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
+            if (changedStation)
+            {
                 CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
+                // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change:
+                // a track advancing within one station is not a dial being turned, and hiss over
+                // it would be a fault rather than a feature. The slot's lane is rendered from here
+                // even though no voice exists yet — that gap, between the old station going and
+                // the new one opening, is exactly the part that used to be silent, and it is also
+                // where StartStation's level hold sits. The noise covers both.
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+            }
             _slotLastStation[slot] = st.Name;
 
             // Everything the job needs, captured on this thread: it must touch no Unity API and no
@@ -1455,6 +1471,11 @@ namespace CMM
             st.VoiceGainApplied = _emDoneGain;
             st.Slot = _emDoneSlot;
             _slotOwner[_emDoneSlot] = st;
+            // LOCK ON. Ramped, not switched: the noise has to outlast the arrival (g_recvNoiseHold)
+            // or the station is just a fade with hiss laid over it, which is the finding recorded
+            // against the personal radio's v47. Harmless when the receiver was never armed — the
+            // ramp simply runs from 1 to 1.
+            CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, ArriveRamp);
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
@@ -1466,13 +1487,13 @@ namespace CMM
             {
                 if (!_emDoneFresh && st.LastPtPushCount > 0 && CmmClock.Now - st.LastPtPushAt < 1f)
                 {
-                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.PtFlags, st.LastPtPushCount);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, st.LastPtPushCount);
                 }
                 else
                 {
                     WritePoint(st, 0, st.NearestPos, st.NearestFlags);
                     st.PtGain[0] = CMMConfig.WorldEmitterRange;   // muted until the first flood lands
-                    CmmMixer.Instance?.SetEmitterPoints(id, st.Pts, st.PtGain, st.PtFlags, 1);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 1);
                 }
                 _forceRefresh = true;
             }
@@ -1483,6 +1504,11 @@ namespace CMM
             StopVoice(st, why);
             if (st.Slot >= 0)
             {
+                // No station, no receiver: an armed slot renders its lane every block, and a slot
+                // nothing is tuned to should cost nothing and make no sound. Its speakers go too —
+                // the point set describes a station's speakers, and this slot no longer has one.
+                CmmMixer.Instance?.ClearEmitterRecv(st.Slot);
+                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
                 if (_slotOwner[st.Slot] == st) _slotOwner[st.Slot] = null;
                 st.Slot = -1;
             }

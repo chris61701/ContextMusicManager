@@ -313,6 +313,23 @@ static volatile float g_emOcclFullDb = 8.0f;
 
 /* Live emitter reverb (room reflection) params, from the managed room probe. v31: the CARRY send
  * level + air-route depth are PER-SLOT (each station's seal/route differs); the room shape is shared. */
+/* == v54: WHERE A STATION'S SPEAKERS ARE IS A PROPERTY OF THE SLOT ==========================
+ * The point set used to live on the VOICE, and the relay below had to hunt for "this slot's
+ * newest emitter voice" to find it. That was serviceable while a slot without a voice was always
+ * silent -- and it stopped being true the moment a slot could produce a sound of its own. A
+ * receiver searching between stations has no voice by definition: the old station has gone and
+ * the new one has not opened. With the positions on the voice there was nowhere in the world to
+ * put that sound, so the hiss could only have come out of the listener's head, which is the
+ * whole thing we set out to fix.
+ *
+ * It is also the same lesson as v48 one level down. The receiver is not a property of a station;
+ * neither is where the speaker stands. Both belong to the slot, and moving the points here
+ * DELETES the newest-voice search rather than adding an indirection. */
+static float g_emSlotPts[CMM_MAX_EMIT_VOICES][MAX_EMIT_PTS * 3];
+static float g_emSlotGain[CMM_MAX_EMIT_VOICES][MAX_EMIT_PTS];
+static int   g_emSlotFlags[CMM_MAX_EMIT_VOICES][MAX_EMIT_PTS];
+static int   g_emSlotCount[CMM_MAX_EMIT_VOICES];
+
 static volatile float g_emRevWet[CMM_MAX_EMIT_VOICES];    /* per-slot carry-send level (0 = off) */
 static volatile float g_emRevDepth[CMM_MAX_EMIT_VOICES];  /* per-slot air-route blocks (v27 depth grading) */
 static volatile float g_emRevRoom = 0.5f;
@@ -603,6 +620,201 @@ static void receiver_advance(int n) {
             { g_recvSig = g_recvSigTarget; g_recvSigStep = 0.0f; }
         }
         g_recvU[f] = g_recvSig < 0.0f ? 0.0f : (g_recvSig > 1.0f ? 1.0f : g_recvSig);
+    }
+}
+
+/* == v54: A RECEIVER PER SPEAKER ==============================================================
+ * The world speakers had no receiver at all. A station change was a decoder opening and a voice
+ * starting, so retuning a radio across the room was silent until the music simply appeared -- and
+ * the one sound that did cover it, the SFX tuning static, plays on the music bus, which has no
+ * position. It arrived inside the listener's head instead of out of the radio.
+ *
+ * So each emitter SLOT gets its own receiver. Not one shared receiver: two speakers tuned at
+ * different moments are two sets searching independently, and a single ramp would make retuning
+ * one of them hiss out of all three. State is per slot; every PARAMETER above (g_recvKnee,
+ * g_recvNoiseTrim, g_recvWander, the click set, the noise hold...) is READ, not copied, so the
+ * radio.xml knobs that tune the personal radio tune these at the same time. One sound, two places
+ * it comes out of.
+ *
+ * WHY THIS IS NOT render_receiver_add REFACTORED TO TAKE A POINTER. That function is stereo: its
+ * last third is the decoder latch and the stereo width, which is most of its length and all of its
+ * delicacy, and an emitter lane is MONO by construction (it is spatialized afterwards from a point
+ * set). Splitting state from parameters across a function tuned by ear over four failed rounds, to
+ * share a third of it and skip the rest, is a poor trade against writing the mono path out. The
+ * parameters are shared, which is the part that matters for tuning; the stereo stage is the part
+ * that does not apply.
+ *
+ * WHERE IT RUNS: on the slot's dry mono lane, after every voice has contributed to it and BEFORE
+ * the emitter master, so the hiss inherits distance, occlusion, the door model, the room reverb
+ * and the speaker's own coloration exactly as the programme does. It is the same receiver in the
+ * same box. */
+typedef struct {
+    float sig, sigTarget, sigStep;   /* 0 = searching (full noise), 1 = locked */
+    unsigned rng;
+    float nzLp, nzLp2;               /* the de-emphasis pair (noise only) */
+    float clk; int clkNext;          /* click event level + frames until the next one */
+    float wCur, wTgt; int wHold;     /* AGC wander */
+    float fA, fB;                    /* flutter, from band-limited noise */
+    float lp;                        /* the shared hi-cut, one pole (mono) */
+    int   armed;                     /* 0 = no receiver on this slot: the stage is a no-op */
+} em_recv;
+static em_recv g_emRx[CMM_MAX_EMIT_VOICES];
+
+/* Arm/steer one slot's receiver. signal 0 = searching, 1 = locked; ramped over rampSeconds so a
+ * retune is a dial being turned rather than a switch. Called from managed under no lock: these are
+ * plain floats read by the producer, and a torn ramp target is inaudible where a lock is not. */
+CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds) {
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
+    em_recv* r = &g_emRx[slot];
+    if (signal < 0.0f) signal = 0.0f; else if (signal > 1.0f) signal = 1.0f;
+    if (!r->armed) {
+        /* First arm: start where we are told to, not from a stale ramp. RNG is seeded per slot so
+         * three speakers searching at once are three different roars, not one in triplicate. */
+        r->armed = 1;
+        r->rng = 22222u + (unsigned)(slot * 2654435761u);
+        r->wCur = r->wTgt = 1.0f;
+        r->nzLp = r->nzLp2 = r->clk = r->fA = r->fB = r->lp = 0.0f;
+        r->sig = signal;
+    }
+    r->sigTarget = signal;
+    if (rampSeconds <= 0.0001f) { r->sig = signal; r->sigStep = 0.0f; return; }
+    float frames = rampSeconds * (float)g_busRate;
+    if (frames < 1.0f) frames = 1.0f;
+    r->sigStep = (signal - r->sig) / frames;
+    if (r->sigStep == 0.0f) r->sig = signal;
+}
+
+/* Where this slot's speakers are, their per-speaker occlusion gain and render flags. Replaces
+ * cmm_mix_set_emitter_points: the caller now names the SLOT it is describing rather than a voice
+ * that happens to be playing on it, so the description outlives any particular track -- and a
+ * slot with no voice at all still has somewhere to put its receiver's noise. */
+CMM_API void cmm_mix_set_slot_points(int slot, const float* xyz, const float* gains,
+                                     const int* flags, int count) {
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
+    if (count < 0) count = 0;
+    if (count > MAX_EMIT_PTS) count = MAX_EMIT_PTS;
+    int k;
+    if (count > 0 && xyz) {
+        for (k = 0; k < count * 3; k++) g_emSlotPts[slot][k] = xyz[k];
+        for (k = 0; k < count; k++) {
+            g_emSlotGain[slot][k]  = gains ? gains[k] : 1.0f;
+            g_emSlotFlags[slot][k] = flags ? flags[k] : 0;
+        }
+    }
+    g_emSlotCount[slot] = count;
+}
+
+/* Disarm: the slot goes back to plain programme with no receiver in the path. */
+CMM_API void cmm_mix_clear_emitter_recv(int slot) {
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
+    g_emRx[slot].armed = 0;
+    g_emRx[slot].sig = g_emRx[slot].sigTarget = 1.0f;
+    g_emRx[slot].sigStep = 0.0f;
+}
+
+/* The stage. Mono, in place, over one slot's dry lane. Mirrors render_receiver_add's noise:
+ * the same knee into SNR, the same wander and flutter, the same de-emphasised (dark, not bright)
+ * hiss, the same click law, the same hold that makes the noise outlast the tuning -- and the same
+ * refusal to fade the programme, because a real set holds the station at level and lets the NOISE
+ * do the moving. Reading the same globals is what keeps the two in step. */
+static void emitter_receiver_mono(int slot, float* lane, int n) {
+    em_recv* r = &g_emRx[slot];
+    if (!r->armed) return;
+    int f;
+    for (f = 0; f < n; f++) {
+        if (r->sigStep != 0.0f) {
+            r->sig += r->sigStep;
+            if ((r->sigStep > 0.0f && r->sig >= r->sigTarget) ||
+                (r->sigStep < 0.0f && r->sig <= r->sigTarget))
+            { r->sig = r->sigTarget; r->sigStep = 0.0f; }
+        }
+        float u = r->sig < 0.0f ? 0.0f : (r->sig > 1.0f ? 1.0f : r->sig);
+
+        float q;
+        if      (u <= 0.0005f) q = 0.0f;
+        else if (u >= 0.9995f) q = 1.0f;
+        else q = 1.0f / (1.0f + expf(-(u - g_recvKnee) * (4.0f / g_recvKneeW)));
+        float snr = -4.0f + 64.0f * q;
+        int rising = (r->sigStep > 0.0f);
+
+        /* Wander and flutter: see render_receiver_add. A rate you can hear counting is a
+         * metronome, hence band-limited noise rather than an oscillator. */
+        if (--r->wHold <= 0) {
+            r->rng = r->rng * 1664525u + 1013904223u;
+            float uw = (float)(r->rng >> 8) * (1.0f / 16777216.0f);
+            r->wTgt = 1.0f + g_recvWander * (uw * 2.0f - 1.0f);
+            if (r->wTgt < 0.05f) r->wTgt = 0.05f;
+            r->rng = r->rng * 1664525u + 1013904223u;
+            float uh = (float)(r->rng >> 8) * (1.0f / 16777216.0f);
+            r->wHold = (int)((float)g_busRate * (0.18f + 0.9f * uh));
+            if (r->wHold < 1) r->wHold = 1;
+        }
+        r->wCur += (r->wTgt - r->wCur) * 0.00012f;
+        r->rng = r->rng * 1664525u + 1013904223u;
+        float fw = (float)(int)r->rng * (1.0f / 2147483648.0f);
+        r->fA = mix_undenorm(r->fA + g_recvFlutK * (fw - r->fA));
+        r->fB = mix_undenorm(r->fB + g_recvFlutSlowK * (r->fA - r->fB));
+        float fmod = (r->fA - r->fB) * 46.0f;
+        if (fmod > 1.4f) fmod = 1.4f; else if (fmod < -1.4f) fmod = -1.4f;
+        float flut = 1.0f + g_recvFlutter * fmod;
+        if (flut < 0.05f) flut = 0.05f;
+
+        float nLvl = powf(10.0f, -snr * 0.05f);
+        if (g_recvNoiseHold > 0.001f && rising) {
+            float na = 0.22f, nb = 0.55f + 0.42f * g_recvNoiseHold;
+            float nf = 1.0f - (u - na) / (nb - na);
+            if (nf < 0.0f) nf = 0.0f; else if (nf > 1.0f) nf = 1.0f;
+            nf = nf * nf * (3.0f - 2.0f * nf);
+            float held = g_recvNoiseFloorR + (1.0f - g_recvNoiseFloorR) * nf;
+            if (held > nLvl) nLvl = held;
+        }
+        float nAmp = nLvl * g_recvNoiseTrim * r->wCur * flut;
+        if (nAmp > 1.6f) nAmp = 1.6f;
+
+        r->rng = r->rng * 1664525u + 1013904223u;
+        float wn = (float)(int)r->rng * (1.0f / 2147483648.0f);
+        r->nzLp  = mix_undenorm(r->nzLp  + g_recvDeemK * (wn - r->nzLp));
+        r->nzLp2 = mix_undenorm(r->nzLp2 + g_recvDeemK * (r->nzLp - r->nzLp2));
+        float nz = r->nzLp2 * nAmp * 2.0f;
+
+        if (g_recvClickAmt > 0.001f && snr < 14.0f) {
+            if (--r->clkNext <= 0) {
+                float rate = g_recvClickMax * powf(10.0f, -(snr + 4.0f) * 0.1667f);
+                if (rate < 0.05f) rate = 0.05f;
+                r->rng = r->rng * 1664525u + 1013904223u;
+                float uu = (float)(r->rng >> 8) * (1.0f / 16777216.0f);
+                if (uu < 1e-4f) uu = 1e-4f;
+                r->clkNext = (int)(-logf(uu) * (float)g_busRate / rate);
+                if (r->clkNext < 1) r->clkNext = 1;
+                r->rng = r->rng * 1664525u + 1013904223u;
+                float sgn = ((r->rng >> 8) & 1u) ? 1.0f : -1.0f;
+                r->rng = r->rng * 1664525u + 1013904223u;
+                float mag = 0.4f + 0.6f * ((float)(r->rng >> 8) * (1.0f / 16777216.0f));
+                r->clk = sgn * mag * g_recvClickAmt * (nAmp > 0.05f ? nAmp : 0.05f);
+            }
+            r->clk *= g_recvClickDecay;
+            nz += r->clk;
+        }
+
+        /* THE PROGRAMME IS BURIED, NOT FADED. g_recvFloorDb is five decibels on purpose -- the
+         * comment above it is the whole finding, and it applies identically here. */
+        float bury = powf(10.0f, -(1.0f - q) * g_recvFloorDb * 0.05f);
+        float y = lane[f] * bury + nz;
+
+        /* Shared hi-cut, keyed to ramp position exactly as the bus stage keys it. */
+        if (u < 0.9995f && g_recvDull > 0.001f) {
+            float t = 1.0f - (u - g_recvWinA) / (g_recvWinB - g_recvWinA);
+            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            t *= g_recvDull;
+            float fc = 15000.0f * powf(g_recvHiFloor / 15000.0f, t);
+            float ny = (float)g_busRate * 0.45f;
+            if (fc > ny) fc = ny;
+            float k = 1.0f - expf(-6.2831853f * fc / (float)g_busRate);
+            r->lp = mix_undenorm(r->lp + k * (y - r->lp));
+            y = r->lp;
+        } else r->lp = y;
+
+        lane[f] = y;
     }
 }
 
@@ -1198,10 +1410,12 @@ static void pump_body(void) {
             render_sfx_add(n);
 
             /* Relay each slot's live spatial state to the output for consumer-side spatialization.
-             * Per slot, pick its newest emitter voice (normally one; briefly two during a track-
-             * advance overlap — the newer voice carries the fresher point set). A slot with no
-             * voice relays count 0 (silent). dev is valid here (we hold the lock and any
-             * closeWhenIdle teardown runs below). */
+             * v54: read the SLOT's own point set. This used to hunt for the slot's newest emitter
+             * voice and read the points off that, which meant a voiceless slot relayed count 0 and
+             * was therefore silent -- correct while a slot could only ever reproduce a track, and
+             * wrong now that it can also be a receiver searching between stations. A slot is
+             * relayed whenever it HAS SPEAKERS, whether or not anything is playing through them.
+             * dev is valid here (we hold the lock and any closeWhenIdle teardown runs below). */
             if (dev) {
                 int s;
                 float lp[3] = { g_lisPos[0], g_lisPos[1], g_lisPos[2] };
@@ -1209,17 +1423,14 @@ static void pump_body(void) {
                 float wets[CMM_MAX_EMIT_VOICES], depths[CMM_MAX_EMIT_VOICES];
                 int any = 0;
                 for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
-                    mix_voice* em = NULL;
-                    for (i = 0; i < g_voiceCount; i++)
-                        if (g_voices[i]->isEmitter && g_voices[i]->emitSlot == s) em = g_voices[i];
-                    if (em) {
+                    if (g_emSlotCount[s] > 0) {
                         any = 1;
                         /* min/max come from the LIVE tuning globals (not the voice's baked-in values)
                          * so range + plateau are hot-tunable; falloff + muffle likewise. */
                         cmm_out_set_emitter_occl_tone(dev, g_emOcclTone, g_emOcclFullDb);
                         cmm_out_set_emitter_slew(dev, g_emOcclSlew);
-                        cmm_out_set_emitter_spatial(dev, s, lp, lr, em->emitPts, em->emitPtGain,
-                                                    em->emitPtFlags, em->emitPtCount,
+                        cmm_out_set_emitter_spatial(dev, s, lp, lr, g_emSlotPts[s], g_emSlotGain[s],
+                                                    g_emSlotFlags[s], g_emSlotCount[s],
                                                     g_emMinDist, g_emMaxDist,
                                                     g_emFalloffExp, g_emMuffle, g_emStereoWidth);
                         wets[s] = g_emRevWet[s]; depths[s] = g_emRevDepth[s];
@@ -1312,8 +1523,19 @@ static void pump_body(void) {
                 else                emEnd = emMaster;   /* arrives within this block */
             }
             for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
-                if (!emActive[s]) continue;
+                /* An ARMED slot renders even with no voice: that is a receiver searching, and its
+                 * lane is pure noise. The lanes are memset at the top of every block, so a
+                 * voiceless armed slot starts from silence and the stage writes the hiss into it
+                 * -- no stale audio, no special case. Unarmed and voiceless stays skipped, so an
+                 * idle station's ring keeps its onset free of a cushion of zeros. */
+                if (!emActive[s] && !g_emRx[s].armed) continue;
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
+                /* THE RECEIVER, BEFORE THE MASTER. Running it here rather than after means the
+                 * hiss goes through everything the programme goes through -- distance, occlusion,
+                 * the door model, the room reverb, the speaker's own coloration -- because from
+                 * this point down the lane IS the speaker. Put it after the master and it would
+                 * be a noise laid over the mix instead of a sound coming out of a radio. */
+                emitter_receiver_mono(s, lane, n);
                 if (emStart == emMaster) {
                     for (i = 0; i < n; i++) lane[i] *= emMaster;
                 } else {

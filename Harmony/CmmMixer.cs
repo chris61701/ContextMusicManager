@@ -86,6 +86,21 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_points(long id, float[] xyz, float[] gains, int[] flags, int count);
 
+        // v54 — the SLOT's speakers, replacing the per-voice form above. A station's speakers
+        // belong to the slot, not to whichever track is playing on it; and a slot with no voice
+        // still needs somewhere in the world to put its receiver's noise.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_slot_points(int slot, float[] xyz, float[] gains, int[] flags, int count);
+
+        // v54 — one receiver per emitter slot. signal 0 = searching (full noise), 1 = locked,
+        // ramped over rampSeconds. Every TUNING parameter is shared with the personal radio's
+        // receiver, so the radio.xml knobs move both.
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_clear_emitter_recv(int slot);
+
         // v43 — per-slot ring health. The music ring's counters said "underruns 0" while the
         // radios were dropping out, because nothing watched these.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -437,6 +452,22 @@ namespace CMM
             if (!_nativeStarted) return -1;      // no mixer, therefore no rings, and no lock to take
             try { return NativeMix.cmm_mix_emitter_ring_stat(slot, what); }
             catch { return -1; }
+        }
+
+        public void SetSlotPoints(int slot, float[] xyz, float[] gains, int[] flags, int count)
+        {
+            NativeMix.cmm_mix_set_slot_points(slot, xyz, gains, flags, count);
+        }
+
+        // 0 = searching (the receiver's own noise, at the speakers), 1 = locked.
+        public void SetEmitterRecv(int slot, float signal, float rampSeconds)
+        {
+            NativeMix.cmm_mix_set_emitter_recv(slot, signal, rampSeconds);
+        }
+
+        public void ClearEmitterRecv(int slot)
+        {
+            NativeMix.cmm_mix_clear_emitter_recv(slot);
         }
 
         public void SetEmitterPoints(long id, float[] xyz, float[] gains, int[] flags, int count)
