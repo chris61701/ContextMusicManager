@@ -10,13 +10,14 @@ namespace CMM
     // about four characters. Ten segments all wearing the same icon told you nothing, so the
     // abbreviation IS the label — which makes how it is derived a real question rather than a
     // detail. These rules were read off a worked list of seventeen real station names; every one
-    // of them is a case in CmmBadgeTest, and the list is the specification.
+    // of them is a case in CmmScheduleTest, and the list is the specification.
     //
     //   1. Pure-number words are dropped.        CTOP 50            -> CTOP
     //   2. One word: its first four letters.     CTOP               -> CTOP
     //   3. Two words, SHORT last word (<=3):     Cathedral FM       -> CaFM
-    //      keep the last word whole, the first   Wasteland Pop      -> WPop
-    //      word fills whatever is left.          KPOP Top           -> KTop
+    //      keep the last word whole, the first   Lit FM             -> LiFM
+    //      word fills whatever is left.          Wasteland Pop      -> WPop
+    //                                            KPOP Top           -> KTop
     //   4. Two words, LONG last word:            Concrete Jungle    -> CJ
     //      plain initials.                       Enclave Radio      -> ER
     //   5. Three or more words: initials of      Rust Belt Rock     -> RBR
@@ -27,11 +28,10 @@ namespace CMM
     // band never comes out half-cased or clipped. Note that rule 5 outranks this — with four words
     // there is no room for a band to survive whole, which is why LSSF ends in a bare F.
     //
-    // THE ALL-BUT-TWO CAP is the one rule that is not obvious from the outside, and it exists
-    // because of Cathedral FM (CaFM) against Lit FM (LFM). Both have two characters spare after
-    // the band. Cathedral spends both; Lit spends one. The rule that separates them: never take
-    // more than all-but-two letters of a word — taking "Li" out of "Lit" is almost the whole word
-    // and stops reading as an abbreviation. It is also what makes KPOP Top come out as KTop.
+    // There WAS a sixth rule here, capping a word's contribution at all-but-two of its letters,
+    // invented to explain why the worked list had Cathedral FM as CaFM but Lit FM as LFM. It was
+    // explaining a typo: Lit FM is LiFM. The cap is gone and rule 3 is uniform again — which is
+    // the outcome to expect when a rule exists only to justify one entry in a list.
     // ─────────────────────────────────────────────────────────────────────────────────────────
     internal static class RadioBadge
     {
@@ -58,11 +58,9 @@ namespace CMM
                 if (band || last.Length <= ShortWord)
                 {
                     string tail = band ? last.ToUpperInvariant() : last;
-                    // What the first word may spend: the budget the tail leaves, and never more
-                    // than all-but-two of its own letters. At least one, or there is no initial.
-                    int budget = MaxChars - tail.Length;
-                    int allowed = words[0].Length - 2;
-                    int take = Math.Min(budget, allowed);
+                    // The first word spends whatever the tail leaves. At least one letter, or
+                    // there is no initial at all.
+                    int take = MaxChars - tail.Length;
                     if (take < 1) take = 1;
                     return Cap(words[0], take) + tail;
                 }

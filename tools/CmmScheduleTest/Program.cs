@@ -522,8 +522,9 @@ internal static class Program
     // THE WORKED LIST IS THE SPECIFICATION. These seventeen came from Chris as name -> badge
     // pairs, and RadioBadge's rules were read off them rather than invented, so keeping them
     // here means a later tidy-up of that code has to keep agreeing with the thing it came from.
-    // Two are load-bearing and easy to break by "simplifying": Cathedral FM against Lit FM (the
-    // all-but-two cap), and Light Scripe Shadow FM (four words outrank the band rule).
+    // Light Scripe Shadow FM is the load-bearing one: four words outrank the band rule, so it
+    // ends in a bare F. (Lit FM read as LFM in the original list and was a typo -- the rule
+    // invented to explain it has been removed.)
     static void Badges()
     {
         Section("Station name -> four characters");
@@ -543,7 +544,7 @@ internal static class Program
         Badge("Galaxy News Radio",      "GNR");
         Badge("Iron Static",            "IS");
         Badge("KPOP Top",               "KTop");
-        Badge("Lit FM",                 "LFM");
+        Badge("Lit FM",                 "LiFM");
         Badge("Light Scripe Shadow FM", "LSSF");
 
         // Shapes the worked list did not cover, pinned so they cannot drift unnoticed.
