@@ -221,6 +221,25 @@ verification — emitters are excluded there anyway.
 
 ## Radio / world-emitter
 
+- [ ] **Door occlusion timing is completely off on 2.6.** *(found 2026-08-29, once speakers
+  started working there; not started.)* Structural rather than a tuning problem: 2.6 has no
+  `TEFeatureDoor`. Its doors are `BlockDoor`, with open/closed in a BLOCK METADATA bit
+  (`BlockDoor.IsDoorOpen(bv.meta)`) and no tile entity and no Animator. So on 2.6 there is no
+  `SetOpen` chokepoint to hook, no openness to sample mid-swing, and `RegisterAnimatingDoor` is
+  never called — every input the 3.x swing model needs is absent, and the machinery built around
+  them (swing spans, `WorldEmitterDoorLeadMs`, the measured-leaf aperture, the mid-swing blend)
+  runs with nothing feeding it.
+
+  `EmitterCompat.HasCompositeDoors` already exists and is false there. Use it to pick a genuinely
+  different path: read the state from `BlockDoor.IsDoorOpen`, treat the door as a BINARY at-rest
+  aperture with no swing interpolation and no lead time, and disable the swing machinery outright
+  rather than feeding it constants. A door that changes instantly is honest on 2.6; one that
+  pretends to swing is not.
+
+  `BlockDoor.IsDoorOpen` is 2.6-only, so bind it by name against the runtime type exactly as
+  `EmitterCompat.IsSeeThrough` does — referencing it typed would break 3.x the same way
+  `TEFeatureDoor` broke 2.6. Run `tools/CmmApiDiff` before shipping it.
+
 - [x] **World emitters on 2.6.** *(noted 2026-08-28; BUILT 2026-08-29, in-game test pending.)*
   The API survey found exactly TWO divergences in everything the emitter layer touches, and the
   gate was one of them wearing a disguise. `RuntimeSupported` required `TEFeatureDoor`, which is
