@@ -194,38 +194,6 @@ namespace CMM
             catch { return false; }
         }
 
-        // Reopen the radial on the next page. Deferred a frame: this is called from inside the
-        // radial's own command handler, while it is closing, and asking it to open from there
-        // fights its own state machine. If anything about it fails the page has still advanced, so
-        // the next hold shows it -- the cost of a failure is one extra press, not a stuck menu.
-        internal static void ReopenRadial(Vector3i pos)
-        {
-            try
-            {
-                MainThreadDispatcher.Post(() =>
-                {
-                    try
-                    {
-                        var ui = LocalPlayerUI.primaryUI;
-                        if (ui == null || ui.xui == null || ui.xui.RadialWindow == null) return;
-                        World w = GameManager.Instance != null ? GameManager.Instance.World : null;
-                        EntityPlayerLocal p = w != null ? w.GetPrimaryPlayer() : null;
-                        if (p == null) return;
-                        var radial = ui.xui.RadialWindow;
-                        MethodBase set = RadialMethod("SetCurrentBlockData");
-                        if (set == null) return;
-                        radial.Open();
-                        // 3.x (world, pos, blockValue, player); 2.6 inserts clrIdx third.
-                        object[] args = set.GetParameters().Length == 5
-                            ? new object[] { w, pos, 0, w.GetBlock(pos), p }
-                            : new object[] { w, pos, w.GetBlock(pos), p };
-                        set.Invoke(radial, args);
-                    }
-                    catch { }
-                });
-            }
-            catch { }
-        }
     }
 
     // A speaker must ANSWER the game's "is there anything to do here" question, or no prompt and
@@ -273,8 +241,10 @@ namespace CMM
                 // A block with its own text (the shelf speaker says "Search") keeps it: the radial
                 // is where both live, and overwriting it would hide the loot from the player.
                 if (!string.IsNullOrEmpty(__result)) return;
+                string note = EmitterTuner.PageNote();
                 __result = "{0} Tune " + Escape(Pretty(e.Name))
-                         + " ([DECEA3]" + Escape(EmitterTuner.CurrentLabel(e)) + "[-])";
+                         + " ([DECEA3]" + Escape(EmitterTuner.CurrentLabel(e)) + "[-])"
+                         + (note == null ? "" : "  [999999]" + Escape(note) + "[-]");
             }
             catch { }
         }
@@ -423,10 +393,19 @@ namespace CMM
                 string cmd = _commandName.Substring(EmitterActivation.CmdPrefix.Length);
                 if (EmitterTuner.IsMenuAction(cmd))
                 {
-                    // Paging is navigation, not a tuning: nothing is saved, nothing makes a sound,
-                    // and the radial comes straight back on the next page.
+                    // PAGING CANNOT REOPEN THE RADIAL, and the first attempt to do so was worse
+                    // than not paging at all. XUiC_Radial.Update fires the FIRST ENABLED ENTRY on
+                    // any frame where the activate key is not held -- that is the same rule that
+                    // gives us tap-to-toggle for free. Reopening from here, after the release that
+                    // chose "More", therefore invoked entry 0 on the very next frame: clicking
+                    // More switched the radio OFF.
+                    //
+                    // There is no way around it from outside. The radial is driven entirely by
+                    // whether the key is down, and by the time a command reaches us it is up. So
+                    // paging advances the page and says so, and the next hold opens on it -- the
+                    // page is named in the crosshair prompt so it is not a guess.
                     EmitterTuner.NextPage(e);
-                    EmitterActivation.ReopenRadial(_blockPos);
+                    PersonalRadio.TuneSfxDial();
                 }
                 else EmitterTuner.Apply(e, cmd);
                 __result = true;

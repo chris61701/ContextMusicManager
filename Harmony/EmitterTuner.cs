@@ -170,7 +170,7 @@ namespace CMM
 
             if (paged)
                 into.Add(new Choice {
-                    Label = "More (" + (page + 1) + "/" + pages + ")",
+                    Label = "More stations (" + (page + 1) + " of " + pages + ")",
                     Cmd = CmdMore, Icon = IconMore, Badge = "", Current = false });
         }
 
@@ -202,9 +202,24 @@ namespace CMM
             return b == '\0' ? a.ToString() : new string(new[] { a, b });
         }
 
-        // True when the choice was a MENU action (paging) rather than a tuning, so the caller
-        // reopens the radial instead of treating it as a change.
+        // True when the choice was a MENU action (paging) rather than a tuning.
         internal static bool IsMenuAction(string cmd) => cmd == CmdMore;
+
+        // "page 2 of 2", or null when everything fits on one ring. The crosshair prompt carries
+        // this: paging cannot reopen the radial (see the OnBlockActivated hook for why), so the
+        // player has to know that the next hold shows a different set rather than discovering it.
+        internal static string PageNote()
+        {
+            int perPage = PageSize;
+            int n = RadioStationCatalog.Stations.Count;
+            if (n <= RadialSegments - 2) return null;
+            int pages = (n + perPage - 1) / perPage;
+            if (pages <= 1) return null;
+            int page = 0;
+            foreach (var kv in _page) { page = kv.Value; break; }   // one menu is open at a time
+            if (page >= pages || page < 0) page = 0;
+            return "page " + (page + 1) + " of " + pages;
+        }
 
         internal static void NextPage(EmitterRegistry.Emitter e)
         {
@@ -253,9 +268,14 @@ namespace CMM
             // immediately; the tuning static then covers the gap, and StartStation's level hold
             // sits inside it, so what used to be an audible ramp is hidden behind the noise a real
             // receiver would make. The audio layer stops the static when the voice lands.
+            // THE CLICK ALWAYS, THE STATIC ONLY WHEN A NEW STATION HAS TO BE FOUND. Off, On and
+            // Automatic all resume something already known or stop outright, so hiss over them is
+            // noise for its own sake -- and switching a radio back on and hearing static reads as
+            // a fault, not as tuning. Only picking a DIFFERENT station has a gap worth covering.
             PersonalRadio.TuneSfxDial();
-            if (cmd == CmdOff || cmd == CmdAuto) PersonalRadio.TuneSfxStop();
-            else PersonalRadio.TuneSfxStatic();
+            bool seeking = cmd != CmdOff && cmd != CmdAuto && cmd != CmdOn;
+            if (seeking) PersonalRadio.TuneSfxStatic();
+            else PersonalRadio.TuneSfxStop();
 
             Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos
                   + (e.PoiId != 0 ? " (whole building)" : "") + " -> " + label);
@@ -263,7 +283,13 @@ namespace CMM
 
         // Icons are drawn as "ui_game_symbol_" + name by the radial's block path, so these are all
         // names vanilla blocks already use -- an atlas miss draws nothing at all.
-        internal const string IconStation = "electric_switch";
+        //
+        // A STATION HAS NO ICON. Ten segments all wearing the same light switch told you nothing
+        // except that the mod had put something there, and the switch actively read as a control
+        // you could throw. The two-character badge is the label, and an empty icon name resolves
+        // to no sprite, which leaves the badge on a clean disc. The four CONTROLS keep icons,
+        // because they are genuinely different actions and their glyphs distinguish them.
+        internal const string IconStation = "";
         internal const string IconAuto    = "wrench";
         internal const string IconOff     = "x";
         internal const string IconOn      = "hand";
