@@ -4,9 +4,10 @@ All notable changes to Context Music Manager are documented here.
 
 ## 1.0.5
 
-**Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — 2026-08-27.
+**Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — 2026-08-27 ·
+RC4 — 2026-08-28.
 Everything in this section ships in 1.0.5; the RC line above is only there so a tester can tell
-which build they are holding. Items added after RC2 are marked *(RC3)*.
+which build they are holding. Items added after RC2 are marked *(RC3)* or *(RC4)*.
 
 Everything below is measured against **1.0.4b**. Several large features arrive whole in this
 release — world speakers, the personal radio, music packs, the overlay — and are described as
@@ -255,6 +256,53 @@ they now behave, rather than as a history of how they got there.
 
 ### Fixed
 
+- **Long tracks started at the wrong volume, and stayed there** *(RC4)*. A track's loudness can
+  only be worked out by reading the whole file, so a 37-minute podcast took about nine seconds
+  before the mod knew anything about it — three times longer than it is willing to wait — and it
+  played at a guess for the whole of that. On the podcast stations that guess is around 12 dB
+  quiet. Long files are now measured in five-minute pieces: a usable level arrives about a second
+  in and is refined as the rest is read, easing rather than stepping. Anything shorter than five
+  minutes is unaffected. Measured across 27 real files, the first answer was within 0.82 dB of the
+  final one, worst case.
+- **Death and spawn stingers were delayed by up to three seconds** *(RC4)*. Very short audio
+  cannot be loudness-measured at all — the standard needs 400 ms of sound to work with — so the
+  mod waited for a measurement that could never arrive, every single time. You died, then three
+  seconds of nothing, then the sting. Stingers now never wait, and a file too short to measure is
+  recorded as such once instead of being re-read on every play.
+- **Replacing a music file kept the old file's volume** *(RC4)*. Swap a track for a different
+  version under the same filename — a re-encode, or a real track over a placeholder — and the new
+  one played at whatever the old one needed. It cleared on restart, unless you had adjusted that
+  track's volume yourself, in which case it was permanent.
+- **`Cache/loudness.xml` grew far larger than intended** *(RC4)*. It was meant to hold only tracks
+  you had adjusted, banned or favourited, and was instead accumulating an entry for every track
+  played.
+- **World speakers could go silent for the rest of the session** *(RC4)*. Each time the station
+  list rebuilt, a speaker that had claimed one of the three audio slots without having started
+  playing yet never gave it back. Three of those and no speaker in the world played again, with
+  nothing in the log to say why.
+- **Starting a world speaker froze the game briefly** *(RC4)*. Opening the file and skipping to
+  the right point in the broadcast ran on the main thread — measured at 403 ms for a station
+  joining ten minutes into a podcast, and the worst stalls in a session were all speaker starts.
+  It now happens in the background. Measured after: the same work costs under 9 ms.
+- **Re-encoding a radio track put the station out of step** *(RC4)*. Track lengths were remembered
+  by filename and never rechecked, so a track replaced with a different-length version left the
+  station starting songs part way through — and, on a server, players hearing different songs on
+  the same station. Lengths are now rechecked, and the station corrects itself within the hour.
+- **A briefly disconnected drive could take a station off the air permanently** *(RC4)*, and could
+  leave a music context looking empty for the rest of the session. A drive that is not there is
+  now told apart from a track that is genuinely gone, so both come back on their own when the
+  drive does.
+- **Music could stop after a track ended** *(RC4)*, until you walked into a different context.
+  If the next track had been deleted, moved or was otherwise unreadable, the mod gave up instead
+  of picking another. It now moves on, and remembers not to try that file again.
+- **A track that could not be read was retried once a second, forever** *(RC4)* — a full re-read
+  of the file each time. It now backs off.
+- **Playlists quietly losing tracks are now visible** *(RC4)*. If entries in an `.m3u` point at
+  files that have moved, those tracks were dropped in silence unless *every* entry failed. The
+  coverage panel (`Alt+Numpad8`) now shows a station short of its playlist as, for example,
+  `9   of 12 — 3 missing`, counts them in its summary, and lists them in gaps-only mode.
+- **A part-read file could set a wrong volume permanently** *(RC4)*. If a drive dropped out
+  mid-scan, the fraction that had been read was recorded as though it were the whole track.
 - **FLAC files with an ID3 tag would not play at all** *(RC3)*. A FLAC is supposed to begin with
   a `fLaC` marker, but plenty of tagging programs write an ID3 tag in front of one anyway. Those
   files play everywhere else and were silently skipped here — never played, never loudness-
@@ -443,6 +491,13 @@ they now behave, rather than as a history of how they got there.
 
 ### Build
 
+- **Two new offline test suites, and a soak** *(RC4)*. The radio's schedule and the emitter's slot
+  bookkeeping are now covered by `CmmScheduleTest` (68 cases) against the shipped catalog, and a
+  new `CmmSoak` drives a 24-hour play session — trader, quest, POI, combat, blood moons — through
+  the real decision script, rotation, schedule and loudness code while files are added, deleted,
+  renamed, moved and re-encoded underneath it. Ten invariants, over 400,000 checks per run.
+  The schedule suite found that one of this release's own fixes was incomplete on the day it was
+  written, which is the reason it exists.
 - **Now built against 3.1.0 (b14) instead of 3.0.** The supported set is unchanged in spirit —
   one DLL still runs on Alpha 20.7, Alpha 21.2, 2.6 and current 3.x — but 3.0 is no longer a
   build target (Steam upgrades that install in place, so there is no 3.0 left to compile
