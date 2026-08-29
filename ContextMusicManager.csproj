@@ -128,13 +128,17 @@
     <DefineConstants Condition="'$(GameVersionDefine)' != ''">$(DefineConstants);$(GameVersionDefine)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
-    <!-- Localization.txt SHIPS AGAIN, and the exclusion below is gone with it. It was excluded
-         because the file was leftover template junk from another mod (crosshair/weapons keys)
-         that 7DTD auto-loads; it now holds exactly two rows, renaming the two blocks the mod
-         makes craftable so they read as "Speaker" and "Ham Radio" rather than
-         "Electronics Store Book Shelf Speaker". The reason for the original exclusion was the
-         CONTENT, not the mechanism: a file the game auto-loads is only dangerous when nobody
-         has read it. -->
+    <!-- Localization SHIPS AGAIN, under BOTH names, and the exclusion below is gone with it.
+         It was excluded because the file was leftover template junk from another mod
+         (crosshair/weapons keys) that 7DTD auto-loads; it now holds exactly two rows, renaming
+         the two blocks the mod makes craftable so they read as "Speaker" and "Ham Radio" rather
+         than "Electronics Store Book Shelf Speaker". The reason for the original exclusion was
+         the CONTENT, not the mechanism: a file the game auto-loads is only dangerous when nobody
+         has read it.
+         TWO IDENTICAL FILES ON PURPOSE. 3.x reads Config/Localization.csv
+         (Localization.LoadPatchDictionaries); A20, A21 and 2.6 all read Config/Localization.txt.
+         Shipping only the .txt is why the rename did nothing on 3.2 and the speaker kept its
+         full name. One payload goes to all four installs, so it carries both. -->
     <!-- The recorded dial sounds. CopyToOutputDirectory is NOT optional here: without it
          the Content item declares the files without staging them, so Debug got them only
          because DeployConfig force-copies Sounds\ separately, and the RELEASE ZIP
