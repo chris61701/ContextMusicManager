@@ -1000,6 +1000,13 @@ comes out from under the noise. A station already playing nearby opens in millis
 and without this, retuning to one produced no sweep at all. The programme still starts
 on time underneath; this only sets when it is revealed. 0 reveals it as soon as it opens."),
             I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               250),
+            Cmt(@"How fast (ms) a station drops away into static when you turn the dial."),
+            I("WorldEmitterSearchMs",                "CMMConfig.WorldEmitterSearchMs",              120),
+            Cmt(@"How long (ms) the station takes to come out from under the noise once the dial has
+settled. THE LONGEST of the retune timings and the one you are hearing when a retune
+feels slow. Also a floor: a track whose own fade-in is longer than this gets that
+instead, plus a short tail, so the hiss never clears while the music is still climbing."),
+            I("WorldEmitterArriveMs",                "CMMConfig.WorldEmitterArriveMs",              900),
             F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —

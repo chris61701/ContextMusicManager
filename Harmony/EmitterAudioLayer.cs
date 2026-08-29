@@ -49,14 +49,26 @@ namespace CMM
         // How fast the receiver drops into search on a dial turn, and how slowly it locks back on.
         // Asymmetric on purpose: losing a station is abrupt (you turned the knob), finding one is
         // not. Both are short relative to the level hold they cover.
-        private const float SearchRamp = 0.12f;
+        // THE FOUR TIMINGS OF A RETUNE, all in radio.xml because this is tuned by ear and a
+        // rebuild per adjustment is the wrong loop:
+        //
+        //   WorldEmitterSearchMs     how fast the station drops away into static
+        //   WorldEmitterLevelHoldMs  the wait for the new track's measured level (it starts after)
+        //   WorldEmitterSweepMs      the shortest the dial can travel before anything is revealed
+        //   WorldEmitterArriveMs     how long the station takes to come out from under the noise
+        //
+        // The last one is the longest and was the one hardcoded, which is why "where do I change
+        // the delay" kept landing on knobs that were not the one being heard.
+        private static float SearchRamp => CMMConfig.WorldEmitterSearchMs / 1000f;
         // The LOCK, and it is a FLOOR rather than the answer. Reported as "the static will stop
         // while the music is still fading in": a fixed 0.9 s beat any voice fade longer than that,
         // so the noise cleared and left the station still climbing underneath — a fade with
         // nothing over it, which is the exact failure v47 records against the personal radio. The
         // arrival now takes at least as long as the fade it is covering, plus a tail so the hiss
         // is still there when the music finishes arriving rather than ending with it.
-        private const float ArriveRamp = 0.90f;
+        private static float ArriveRamp => CMMConfig.WorldEmitterArriveMs / 1000f;
+        // Added to the VOICE's own fade when that is longer than ArriveRamp, so the noise is still
+        // there when the music finishes arriving rather than ending exactly with it.
         private const float ArriveTail = 0.35f;
         private static float _emPendingFade;
         // When each slot's receiver was last put into search, so the sweep can tell a slot that is

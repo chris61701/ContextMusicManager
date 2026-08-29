@@ -757,6 +757,14 @@ namespace CMM
         // how a set behaves: the dial passes through the same noise whatever you are tuning to.
         // The programme still STARTS on time underneath; this is only when it is revealed.
         public static int    WorldEmitterSweepMs = 250;
+        // How fast a station drops away into static when you turn the dial. Short: turning a knob
+        // is abrupt, and this is the part that should feel like an action.
+        public static int    WorldEmitterSearchMs = 120;
+        // How long the station takes to come out from under the noise once the dial has settled.
+        // THE LONGEST OF THE FOUR and the one you are hearing when a retune feels slow. Also a
+        // floor: a track whose own fade-in is longer than this gets that instead, plus a tail, so
+        // the hiss never clears while the music is still climbing.
+        public static int    WorldEmitterArriveMs = 900;
         public static float  WorldEmitterColorStatic = 0f;
         public static float  WorldEmitterColorVoice  = 0.5f;
         // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead
