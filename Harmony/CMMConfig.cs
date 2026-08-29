@@ -744,6 +744,11 @@ namespace CMM
         // because the receiver's tuning is otherwise shared: turning the shared trim down to
         // quieten a speaker across the room would quieten the radio in your pocket too.
         public static float  WorldEmitterStaticTrim = 0.5f;
+        // How long a world speaker waits for a track's measured level before starting anyway.
+        // Shorter than the personal radio's LoudnessStartHoldMs on purpose: a speaker across the
+        // room is background, so waiting three seconds to avoid a small level error is the wrong
+        // trade. 0 disables the wait entirely.
+        public static int    WorldEmitterLevelHoldMs = 1200;
         public static float  WorldEmitterColorStatic = 0f;
         public static float  WorldEmitterColorVoice  = 0.5f;
         // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead

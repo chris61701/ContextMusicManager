@@ -63,6 +63,11 @@ namespace CMM
         // waiting from one that is stuck. Generous by design: releasing early is an audible cut,
         // releasing late is a second of extra hiss nobody will attribute to a bug.
         private static readonly float[] _slotArmedAt = new float[MaxSlots];
+        private static readonly float[] _slotReleasing = new float[MaxSlots];
+        // How long a deliberate retune stays "recent". Long enough to cover the decision tick plus
+        // the registry noticing the pin moved; far short of anything the world does on its own.
+        private const float RetuneWindow = 3f;
+        private const float ReleaseRamp  = 0.45f;
         private static float SearchGiveUp => CMMConfig.LoudnessStartHoldMs / 1000f + 4f;
 
         // The station list lives on the shared catalog (RadioStation class, version-neutral); this
@@ -1308,14 +1313,24 @@ namespace CMM
             // (and the slot's render state) so nothing of the old station plays under this voice.
             bool changedStation =
                 !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
+            // ONLY A HAND ON THE DIAL SEARCHES. A slot taking its FIRST station (world entry), a
+            // station arriving because you walked into range, and a nearer station stealing a slot
+            // are all "changes" and none of them is a retune — greeting the player with static on
+            // load is the report this came from. A recent deliberate tune is the whole test.
+            bool retuned = changedStation
+                        && _slotLastStation[slot] != null
+                        && CmmClock.Now - EmitterTuner.LastTuneAt < RetuneWindow;
             if (changedStation)
             {
                 CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
                 // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change: a
                 // track advancing within one station is not a dial being turned, and hiss over it
                 // would be a fault rather than a feature.
-                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
-                _slotArmedAt[slot] = CmmClock.Now;
+                if (retuned)
+                {
+                    CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+                    _slotArmedAt[slot] = CmmClock.Now;
+                }
                 // ...and its speakers, so the noise has somewhere in the world to come from. The
                 // point set is already current — GroupSnapshot filled it earlier this tick.
                 CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
@@ -1343,7 +1358,15 @@ namespace CMM
                 float until;
                 if (!_gainWaitUntil.TryGetValue(key, out until))
                 {
-                    until = now + CMMConfig.LoudnessStartHoldMs / 1000f;
+                    // A SHORTER HOLD THAN THE PERSONAL RADIO'S. Reported as stations taking
+                    // forever to tune, and the arithmetic agrees: LoudnessStartHoldMs is three
+                    // seconds, and an unmeasured track pays all of it before the voice even
+                    // starts. That is a fair trade for the radio in your pocket, which is the only
+                    // thing playing and whose level jump you would hear plainly. A speaker across
+                    // the room is background, its level error is smaller against distance and
+                    // occlusion, and three seconds of hiss to hear it is a worse deal than
+                    // arriving slightly hot. Its own knob, so the two can differ.
+                    until = now + CMMConfig.WorldEmitterLevelHoldMs / 1000f;
                     _gainWaitUntil.Clear();          // one station is joining at a time
                     _gainWaitUntil[key] = until;
                     CMMConfig.D($"[CMM] Station '{st.Name}': holding start for level ({Path.GetFileName(file)}).");
@@ -1802,6 +1825,21 @@ namespace CMM
                 // A deadline instead: the hold is bounded by LoudnessStartHoldMs, so anything
                 // still ownerless well past that is stuck rather than working.
                 if (CmmClock.Now - _slotArmedAt[s] < SearchGiveUp) continue;
+
+                // RELEASED IN TWO STEPS, because cutting a receiver mid-roar is a click and was
+                // reported as the static not fading gracefully. Signal 1 IS the quiet end of this
+                // stage — a locked receiver over a silent lane is near silence — so ramping there
+                // fades the noise out through the same curve it faded in through, and only then
+                // is the stage taken out of the path.
+                if (_slotReleasing[s] <= 0f)
+                {
+                    _slotReleasing[s] = CmmClock.Now;
+                    CmmMixer.Instance?.SetEmitterRecv(s, 1f, ReleaseRamp);
+                    continue;
+                }
+                if (CmmClock.Now - _slotReleasing[s] < ReleaseRamp) continue;
+
+                _slotReleasing[s] = 0f;
                 CmmMixer.Instance?.ClearEmitterRecv(s);
                 CmmMixer.Instance?.SetSlotPoints(s, _emptyPts, _emptyGain, _emptyFlags, 0);
                 _slotLastStation[s] = null;

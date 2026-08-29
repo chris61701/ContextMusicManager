@@ -990,6 +990,11 @@ rather than a hi-fi in a wall. All hot-reload."),
 The receiver itself is tuned once and drives both; this is only the level of the hiss
 that comes out of a speaker in the world. 0 = silent, 1 = the same as the radio you carry."),
             F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            0.5f),
+            Cmt(@"How long (ms) a world speaker waits for a track's measured loudness before it
+starts anyway. Shorter than the personal radio's LoudnessStartHoldMs on purpose: a
+speaker across the room is background, so waiting three seconds to avoid a small level
+error is the wrong trade. 0 starts immediately and lets the level settle as it plays."),
+            I("WorldEmitterLevelHoldMs",             "CMMConfig.WorldEmitterLevelHoldMs",           1200),
             F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —

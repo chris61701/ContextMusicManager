@@ -138,6 +138,11 @@ namespace CMM
             public bool Current;    // highlight: this is what is playing now
         }
 
+        // The moment of the last deliberate retune, read by EmitterAudioLayer to decide whether a
+        // station change deserves the searching noise. Not persisted: on a fresh world entry there
+        // has been no retune, which is exactly the answer we want.
+        internal static float LastTuneAt = -999f;
+
         internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on";
         internal const string CmdPrev = "@prev", CmdNext = "@next";
 
@@ -282,6 +287,13 @@ namespace CMM
             // the whole job.
             //
             // The personal radio keeps ITS static, and correctly: that one IS in your head.
+            // WHEN A HUMAN LAST TURNED A DIAL. The emitter receiver hisses on a station change,
+            // and until now "station change" meant any change — including the ones the world makes
+            // on its own. Loading into a world assigns every slot its first station, which counted
+            // as a change and greeted the player with static on arrival. Coming into range of a
+            // POI, or a nearer station stealing a slot, did the same. None of those are somebody
+            // turning a knob, and a receiver only searches because somebody turned a knob.
+            LastTuneAt = CmmClock.Now;
             PersonalRadio.TuneSfxDial();
 
             Log.Out("[CMM] Emitter tuner: " + e.Name + " at " + e.Pos + " -> " + label);
