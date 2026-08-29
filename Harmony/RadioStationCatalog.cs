@@ -504,6 +504,11 @@ namespace CMM
         // A track failed to open AT PLAY time (vanished since its walk probe): mark it dead in the
         // length cache so every chain walk skips it — schedules shift identically for everyone who
         // re-resolves — until the ~2 s catalog watch rebuilds the pool properly.
+        // Set by RebuildCatalog when at least one station could not be resolved because its files
+        // are on an unavailable volume — as opposed to being genuinely empty. Cleared by the
+        // rebuild that finally resolves everything.
+        private static bool _catalogIncomplete;
+
         internal static void PoisonTrack(string file)
         {
             if (string.IsNullOrEmpty(file)) return;
@@ -552,7 +557,14 @@ namespace CMM
                 _nextCatalogCheck = Time.realtimeSinceStartup + CatalogCheckInterval;
                 DateTime sig = SourceSignature(src);
                 long hash = ContentHash(src);
-                if (Stations.Count > 0 && sig == _catalogSig && hash == _catalogHash) return;
+                // _catalogIncomplete forces a retry even when nothing about the SOURCE changed.
+                // A station whose tracks live on a drive that was away resolves to no tracks, and
+                // the signature that would normally prove "nothing changed" sits on a different
+                // drive that never left — so without this the station stays missing for the rest
+                // of the session and the drive returning does nothing. (Stations.Count > 0 already
+                // covers the case where EVERY station failed; the hole was a partial failure.)
+                if (Stations.Count > 0 && !_catalogIncomplete
+                    && sig == _catalogSig && hash == _catalogHash) return;
                 _catalogSig = sig;
                 _catalogHash = hash;
             }
@@ -632,6 +644,7 @@ namespace CMM
             Stations.Clear();
 
             _plScratch.Clear();
+            _catalogIncomplete = false;   // this rebuild's verdict, not the last one's
             try
             {
                 if (!string.IsNullOrWhiteSpace(src))
@@ -641,7 +654,9 @@ namespace CMM
                     {
                         string full = PlaylistSource.ResolveFullPath(src);
                         _plScratch.Add(full);
-                        AddStation(Path.GetFileNameWithoutExtension(src), PlaylistSource.ReadTracks(full));
+                        string[] plTracks = PlaylistSource.ReadTracks(full, out bool plUnresolved);
+                        if (plUnresolved) _catalogIncomplete = true;
+                        AddStation(Path.GetFileNameWithoutExtension(src), plTracks);
                     }
                     else
                     {
@@ -750,7 +765,8 @@ namespace CMM
             {
                 if (!Contexts.IsPlaylistSource(m3u)) continue;    // "*.m3u*" also matches odd extensions
                 _plScratch.Add(m3u);
-                string[] tracks = PlaylistSource.ReadTracks(m3u);
+                string[] tracks = PlaylistSource.ReadTracks(m3u, out bool m3uUnresolved);
+                if (m3uUnresolved) _catalogIncomplete = true;
                 if (tracks == null) continue;
                 foreach (string t in tracks)
                     if (seen.Add(SourceScan.FullKey(t))) pool.Add(t);

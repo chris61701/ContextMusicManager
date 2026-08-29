@@ -50,6 +50,7 @@ namespace CMM
             RunUnionScenarios();
             RunSubfolderScenarios();
             RunEdgeScenarios();
+            RunUnresolvedScenarios();
             RunChangeDetectionScenarios();
             RunSourceChangeScenarios();
             RunRealMusicScenarios();
@@ -276,6 +277,73 @@ namespace CMM
             Check("E2 IsPlaylistSource case-insensitive (.M3U/.m3u8)",
                 Contexts.IsPlaylistSource("a.M3U") && Contexts.IsPlaylistSource("b.m3u8") && !Contexts.IsPlaylistSource("c.mp3"),
                 "extension detection");
+        }
+
+        // ── "Empty" and "the drive is not plugged in" are different answers ──────────
+        // Most stations here are .m3u files on one drive pointing at another, so a playlist
+        // reading perfectly while every target it names is missing is the ordinary shape of a
+        // disconnected drive -- not an exotic case. Recorded as "empty" it is permanent: the
+        // station leaves the catalog, and the only thing that would bring it back is the .m3u's
+        // own timestamp changing, which sits on the drive that never left.
+        static void RunUnresolvedScenarios()
+        {
+            Section("E'. Unavailable drive vs genuinely empty");
+
+            // A path on a drive letter that does not exist. Same shape as an unplugged drive:
+            // the entries parse, resolve to absolute paths, and are simply not there.
+            const string GoneRoot = @"Q:\definitely-not-mounted";
+            WriteM3u("musicroot/offline.m3u", new[]
+            {
+                "#EXTM3U",
+                GoneRoot + @"\one.mp3",
+                GoneRoot + @"\two.flac",
+            });
+            string[] offline = PlaylistSource.ReadTracks(Full("musicroot/offline.m3u"), out bool offlineUnresolved);
+            Check("E'1 a playlist whose drive is absent yields no tracks",
+                  offline.Length == 0, $"{offline.Length} tracks");
+            Check("E'2 ...and reports UNRESOLVED, not empty", offlineUnresolved, "expected unresolved = true");
+
+            // The contrast: a reachable folder whose named files simply are not there. That IS a
+            // settled answer and must not be reported as unresolved, or a genuinely broken
+            // playlist would be retried for ever.
+            Dir("musicroot/present");
+            WriteM3u("musicroot/present/missing.m3u", new[]
+            {
+                "#EXTM3U",
+                "no-such-track.mp3",
+                "also-missing.flac",
+            });
+            string[] missing = PlaylistSource.ReadTracks(Full("musicroot/present/missing.m3u"), out bool missingUnresolved);
+            Check("E'3 missing files on a REACHABLE drive yield no tracks",
+                  missing.Length == 0, $"{missing.Length} tracks");
+            Check("E'4 ...and are reported as empty, NOT unresolved",
+                  !missingUnresolved, "expected unresolved = false");
+
+            // A playlist that produced anything at all is answered, whatever else failed.
+            Touch("musicroot/present/real.mp3");
+            WriteM3u("musicroot/present/partial.m3u", new[]
+            {
+                "#EXTM3U",
+                "real.mp3",
+                GoneRoot + @"\c.mp3",
+            });
+            string[] partial = PlaylistSource.ReadTracks(Full("musicroot/present/partial.m3u"), out bool partialUnresolved);
+            Check("E'5 a playlist with one usable entry is never unresolved",
+                  partial.Length == 1 && !partialUnresolved,
+                  $"{partial.Length} tracks, unresolved = {partialUnresolved}");
+
+            // A playlist that is itself missing recovers on its own -- its presence is part of the
+            // signature the catalog watches -- so it must not latch this flag.
+            string[] noFile = PlaylistSource.ReadTracks(Full("musicroot/does-not-exist.m3u"), out bool noFileUnresolved);
+            Check("E'6 a missing playlist FILE is not 'unresolved'",
+                  noFile.Length == 0 && !noFileUnresolved, $"unresolved = {noFileUnresolved}");
+
+            // Unsupported formats are a settled answer too: the file is right there.
+            Touch("musicroot/present/notes.txt");
+            WriteM3u("musicroot/present/unsupported.m3u", new[] { "#EXTM3U", "notes.txt" });
+            string[] uns = PlaylistSource.ReadTracks(Full("musicroot/present/unsupported.m3u"), out bool unsUnresolved);
+            Check("E'7 an unsupported-format entry is empty, not unresolved",
+                  uns.Length == 0 && !unsUnresolved, $"unresolved = {unsUnresolved}");
         }
 
         static void RunChangeDetectionScenarios()
