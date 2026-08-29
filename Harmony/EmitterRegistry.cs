@@ -105,6 +105,12 @@ namespace CMM
         private static readonly HashSet<int> _nearIds = new HashSet<int>();
         private static readonly List<int> _dropIds = new List<int>();
         private static readonly Dictionary<Vector3i, string> _placedCache = new Dictionary<Vector3i, string>();  // discovered player-placed emitters (pos→name), kept beyond the discovery box
+        // Blocks the sweep found inside a POI too big to scan. They are cached like placed blocks
+        // -- the POI scan will never claim them -- but they are not placed blocks, and hashing
+        // their POSITION gave every speaker in a hospital its own station: stand between two and
+        // you hear two stations, where the same building scanned normally is one. Remembering
+        // which POI a swept block fell inside restores that, and costs one int per block.
+        private static readonly Dictionary<Vector3i, int> _placedPoiId = new Dictionary<Vector3i, int>();
         private static readonly List<Vector3i> _placedDrop = new List<Vector3i>();     // scratch: placed entries to forget this rebuild
         // Positions already in the snapshot → their snapshot index. Dedups BOTH placed-vs-POI AND
         // POI-vs-POI: prefab volumes OVERLAP (a house POI + a part_ sub-prefab + tile pieces), so
@@ -194,6 +200,7 @@ namespace CMM
             //    longer a target id was DESTROYED → drop it; one whose area has UNLOADED → drop the
             //    whole POI cache so it rescans fresh on reload (don't mistake unload for destruction).
             RebuildSnapshot(world, pp);
+            LogCensus();   // one line, only when what we found changes
             _polledOnce = true;
         }
 
@@ -265,10 +272,16 @@ namespace CMM
                 if (!world.IsChunkAreaLoaded(p.ToVector3())) continue;                 // unloaded → keep cached, just not audible now
                 if (world.GetBlock(p.x, p.y, p.z).type != BlockIdFor(kv.Value)) { _placedDrop.Add(p); continue; }  // destroyed/picked up
                 if (_snapPos.ContainsKey(p)) continue;                                 // already counted via a POI
-                Snapshot.Add(new Emitter { Pos = p, Name = kv.Value, Dist = dist, StationHash = StationHashFromPos(p) });
+                // A block inside an unscannable POI takes that POI's identity, so a big building's
+                // speakers form ONE station exactly as a scannable building's do. Anything genuinely
+                // placed by a player keeps its position hash: move it, retune it.
+                int hash = _placedPoiId.TryGetValue(p, out int owningPoi)
+                    ? StationHashFromId(owningPoi)
+                    : StationHashFromPos(p);
+                Snapshot.Add(new Emitter { Pos = p, Name = kv.Value, Dist = dist, StationHash = hash });
                 if (dist < NearestDist) { NearestDist = dist; NearestName = kv.Value; NearestPos = p; }
             }
-            foreach (Vector3i p in _placedDrop) _placedCache.Remove(p);
+            foreach (Vector3i p in _placedDrop) { _placedCache.Remove(p); _placedPoiId.Remove(p); }
         }
 
         // Sweep a small box around the player to DISCOVER target blocks that aren't inside a scannable
@@ -357,10 +370,74 @@ namespace CMM
                                 continue;
                             }
                             _placedCache[pos] = name;   // discover (kept until destroyed / far)
+                            // Inside a POI the scan will never reach? Remember whose, so it joins
+                            // that building's station instead of becoming one of its own.
+                            if (InsideOversizedPoi(pos, out int bigPoiId)) _placedPoiId[pos] = bigPoiId;
+                            else _placedPoiId.Remove(pos);
                         }
                     }
                 }
             }
+        }
+
+        // Which oversized POI, if any, contains `p`. The mirror of InsideScannablePoi: that one
+        // answers "will the scan claim this block", this one answers "is it in a building whose
+        // scan will never run", which is the case that needs a station identity from somewhere.
+        private static bool InsideOversizedPoi(Vector3i p, out int poiId)
+        {
+            poiId = 0;
+            foreach (PrefabInstance pi in _prefabScratch)
+            {
+                if (!_oversizedIds.Contains(pi.id)) continue;
+                Vector3i b = pi.boundingBoxPosition, sz = pi.boundingBoxSize;
+                if (p.x < b.x || p.x >= b.x + sz.x) continue;
+                if (p.z < b.z || p.z >= b.z + sz.z) continue;
+                if (p.y < b.y || p.y >= b.y + sz.y) continue;
+                poiId = pi.id;
+                return true;
+            }
+            return false;
+        }
+
+        // ── What did we actually find? ──────────────────────────────────────────────────────
+        // The registry logged almost nothing about its own results, so "the ham radio works but
+        // the shelf speakers do not" was not a question the log could answer -- on any version.
+        // One line, only when the census CHANGES, naming each block type and how it was found:
+        // a POI scan (shares the building's station) or the proximity sweep (its own, unless it
+        // sits in a building too big to scan).
+        private static readonly Dictionary<string, int> _censusScan = new Dictionary<string, int>();
+        private static readonly Dictionary<string, int> _censusSweep = new Dictionary<string, int>();
+        private static string _lastCensus;
+
+        private static void LogCensus()
+        {
+            if (!CMMConfig.DebugLogging) return;
+            _censusScan.Clear(); _censusSweep.Clear();
+            foreach (var kv in _poiCache)
+                for (int i = 0; i < kv.Value.Count; i++)
+                {
+                    string n = kv.Value[i].Name ?? "?";
+                    _censusScan.TryGetValue(n, out int had); _censusScan[n] = had + 1;
+                }
+            foreach (var kv in _placedCache)
+            {
+                string n = kv.Value ?? "?";
+                _censusSweep.TryGetValue(n, out int had); _censusSweep[n] = had + 1;
+            }
+
+            var sb = new System.Text.StringBuilder();
+            foreach (string n in TargetNames)
+            {
+                _censusScan.TryGetValue(n, out int a);
+                _censusSweep.TryGetValue(n, out int b);
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(n).Append(' ').Append(a + b);
+                if (a + b > 0) sb.Append(" (poi ").Append(a).Append(", swept ").Append(b).Append(')');
+            }
+            string line = sb.ToString();
+            if (line == _lastCensus) return;
+            _lastCensus = line;
+            CMMConfig.D($"[CMM] Emitter census: {line}");
         }
 
         // True when `p` lies inside a nearby, SCANNABLE POI's bounding box — that POI's scan/rescan
@@ -580,6 +657,7 @@ namespace CMM
             _poiScanTime.Clear();
             _oversizedIds.Clear();
             _placedCache.Clear();
+            _placedPoiId.Clear();
 
             Snapshot.Clear();
             _snapPos.Clear();
