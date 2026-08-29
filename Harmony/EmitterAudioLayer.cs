@@ -1386,7 +1386,17 @@ namespace CMM
                         && CmmClock.Now - EmitterTuner.LastTuneAt < RetuneWindow;
             if (changedStation)
             {
-                CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
+                // FLUSH ONLY WHEN THERE IS A STATION TO FLUSH. The ring can still hold a cushion of
+                // the previous station's dry audio, and discarding it is what stops that playing
+                // under the new voice. But it discards whatever is queued, and on a slot with no
+                // voice the only thing queued is OUR NOISE — so retuning again while the first
+                // retune was still searching cut the static dead mid-roar. Reported as a hard cut
+                // when changing station twice quickly.
+                //
+                // _slotOwner is the test: it is set when a voice lands and cleared when one stops,
+                // so it is exactly "is there a station's audio in this ring". A searching slot has
+                // none, and nothing needs discarding.
+                if (_slotOwner[slot] != null) CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
                 // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change: a
                 // track advancing within one station is not a dial being turned, and hiss over it
                 // would be a fault rather than a feature.
