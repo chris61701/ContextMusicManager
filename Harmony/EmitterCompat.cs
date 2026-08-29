@@ -128,6 +128,70 @@ namespace CMM
             catch { return null; }
         }
 
+        // ── Terrain density ──────────────────────────────────────────────────────────────────
+        // The third divergence, and a third KIND: an arity change. 3.x dropped the leading cluster
+        // index that 2.6 requires.
+        //
+        //   3.x   sbyte GetDensity(int x, int y, int z)
+        //   2.6   sbyte GetDensity(int clrIdx, int x, int y, int z)
+        //
+        // My first survey compared member NAMES, which missed the prefab split's shape change. The
+        // second compared DECLARING TYPES, which found GetChunkSync and passed this one, because
+        // the name is on the same types in both. Only comparing full SIGNATURES finds it. Three
+        // rounds, three lessons, and the honest summary is that a version survey has to compare
+        // the whole signature or it is not a survey.
+        //
+        // Cluster 0 is the main world, as every 2.6 caller in the game's own code uses it.
+        private static object _densityWorld;
+        private static Func<int, int, int, sbyte> _getDensity;
+
+        internal static sbyte GetDensity(object world, int x, int y, int z)
+        {
+            // Solid, not air, when the answer cannot be had. This feeds the terrain-fullness
+            // scale in the occlusion cost: -128 reads as a completely full voxel, so a failure
+            // makes rock behave like rock. Returning 0 would make it read as very nearly empty
+            // and leak sound straight through the ground.
+            const sbyte Solid = -128;
+            if (world == null) return Solid;
+
+            if (!ReferenceEquals(world, _densityWorld))
+            {
+                _densityWorld = world;
+                _getDensity = null;
+                try
+                {
+                    Type t = world.GetType();
+                    var three = AccessTools.Method(t, "GetDensity",
+                                                   new[] { typeof(int), typeof(int), typeof(int) });
+                    if (three != null)
+                    {
+                        _getDensity = (Func<int, int, int, sbyte>)Delegate.CreateDelegate(
+                            typeof(Func<int, int, int, sbyte>), world, three);
+                    }
+                    else
+                    {
+                        var four = AccessTools.Method(t, "GetDensity",
+                            new[] { typeof(int), typeof(int), typeof(int), typeof(int) });
+                        if (four != null)
+                        {
+                            var f = (Func<int, int, int, int, sbyte>)Delegate.CreateDelegate(
+                                typeof(Func<int, int, int, int, sbyte>), world, four);
+                            _getDensity = (px, py, pz) => f(0, px, py, pz);
+                        }
+                    }
+                }
+                catch { _getDensity = null; }
+
+                if (_getDensity == null)
+                    Log.Warning("[CMM] World emitters: this game has no GetDensity the mod can call — "
+                              + "terrain will be treated as fully solid for occlusion.");
+            }
+
+            if (_getDensity == null) return Solid;
+            try { return _getDensity(x, y, z); }
+            catch { return Solid; }
+        }
+
         static bool Probe()
         {
             try

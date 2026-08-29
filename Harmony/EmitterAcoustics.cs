@@ -460,7 +460,7 @@ namespace CMM
             // surface cells (always partial) stop over-counting. Interior cells (−128) are unchanged.
             if (b.shape is BlockShapeTerrain)
             {
-                sbyte den = world.GetDensity(x, y, z);
+                sbyte den = EmitterCompat.GetDensity(world, x, y, z);
                 float frac = den < 0 ? -(float)den * (1f / 128f) : (1f / 128f);
                 return MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null) * frac;
             }
