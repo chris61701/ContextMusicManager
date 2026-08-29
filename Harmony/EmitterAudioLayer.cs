@@ -1667,12 +1667,26 @@ namespace CMM
             StopVoice(st, why);
             if (st.Slot >= 0)
             {
-                // No station, no receiver: an armed slot renders its lane every block, and a slot
-                // nothing is tuned to should cost nothing and make no sound. Its speakers go too —
-                // the point set describes a station's speakers, and this slot no longer has one.
-                CmmMixer.Instance?.ClearEmitterRecv(st.Slot);
-                CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
-                if (_slotOwner[st.Slot] == st) _slotOwner[st.Slot] = null;
+                // ONLY IF THIS SLOT IS STILL OURS. st.Slot holds an index until the station
+                // stops, and a slot can be REASSIGNED before that happens — a nearer station
+                // steals it, or a retune starts searching on it. The owner assignment below has
+                // always been guarded for exactly that reason; these two were not, so a station
+                // shutting down cleared the receiver and zeroed the speakers of whatever had
+                // taken its slot over. That is the brief cut to nothing: the noise and the
+                // programme share one lane, one ring and one point set, so silencing the slot
+                // silences the search running on it.
+                //
+                // The guard has to come FIRST, because clearing st.Slot is what ends the question.
+                if (_slotOwner[st.Slot] == st)
+                {
+                    // No station, no receiver: an armed slot renders its lane every block, and a
+                    // slot nothing is tuned to should cost nothing and make no sound. Its speakers
+                    // go too — the point set describes a station's speakers, and this slot no
+                    // longer has one.
+                    CmmMixer.Instance?.ClearEmitterRecv(st.Slot);
+                    CmmMixer.Instance?.SetSlotPoints(st.Slot, st.Pts, st.PtGain, st.PtFlags, 0);
+                    _slotOwner[st.Slot] = null;
+                }
                 st.Slot = -1;
             }
         }
