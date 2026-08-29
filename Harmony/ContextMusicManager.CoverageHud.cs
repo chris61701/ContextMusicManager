@@ -237,6 +237,7 @@ namespace CMM
             _covScratch.Clear();
             int nPop = 0, nCov = 0, nStk = 0, nVan = 0, nSha = 0, nDead = 0;
             long nTracks = 0;   // every playable file the panel can see, contexts + stations
+            int nThin = 0;      // stations whose playlist names files that are not there
 
             // Snapshot the table first. It can be swapped wholesale by the config watcher
             // on another thread, and a half-enumerated dictionary is the one failure this
@@ -346,12 +347,25 @@ namespace CMM
                     // it -- Radio's own source folder holds the station subfolders, not audio --
                     // so adding them here totals rather than double counts.
                     nTracks += n;
+                    // A station short of half its playlist used to look identical to one that is
+                    // simply small, and the log only complained when EVERY entry failed -- so the
+                    // ordinary case, a playlist naming files that have moved, was invisible from
+                    // both. Show the shortfall where someone looks when a station sounds thin.
+                    int missing = s.DroppedEntries;
+                    if (missing > 0) nThin++;
+                    string note = live
+                        ? (missing > 0 ? Col(CovPink, "of " + (n + missing) + " \u2014 " + missing + " missing")
+                                       : Col(CovDim, "station"))
+                        : (missing > 0 ? Col(CovPink, "dead air \u2014 all " + missing + " entries missing")
+                                       : Col(CovPink, "dead air \u2014 no tracks"));
                     _covScratch.Add(new CovRow
                     {
-                        Gap = !live,
+                        // A station missing part of its music belongs in gaps-only mode too: that
+                        // is exactly the state this panel exists to make visible.
+                        Gap = !live || missing > 0,
                         Text = Col(live ? CovGreen : CovPink,
                                    (live ? "\u25cf" : "\u2717") + "   " + Pad(s.Name, 23) + LPad(live ? n.ToString() : "-", 5))
-                             + "  " + (live ? Col(CovDim, "station") : Col(CovPink, "dead air \u2014 no tracks"))
+                             + "  " + note
                     });
                 }
             }
@@ -360,7 +374,8 @@ namespace CMM
             _covSummary = nTracks.ToString("N0") + " tracks \u2022 " + nPop + " with tracks \u2022 " + nCov + " with fallback \u2022 " + nStk
                         + " to stack \u2022 " + nVan + " to vanilla"
                         + (nSha > 0 ? " \u2022 " + nSha + " never play" : "")
-                        + (nDead > 0 ? " \u2022 " + nDead + " dead air" : "");
+                        + (nDead > 0 ? " \u2022 " + nDead + " dead air" : "")
+                        + (nThin > 0 ? " \u2022 " + nThin + " missing files" : "");
 
             // Fold into however many columns fit the screen.
             var keep = new List<string>();

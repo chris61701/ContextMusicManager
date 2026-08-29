@@ -61,6 +61,10 @@ namespace CMM
         // complaint arrived three or four times a second -- ~700 lines in one session
         // from a single mislabelled file. Throttled per station; the condition is real
         // and worth reporting, just not that often.
+        // Playlist entries named but unusable (missing, or an undecodable format). Surfaced by the
+        // coverage panel: a station short of half its music used to look identical to one that was
+        // simply small, and nothing in the log distinguished them either.
+        public int DroppedEntries;
         public ResolveMiss LastMiss = ResolveMiss.None;   // why the last resolve found nothing
         public float NoTracksLoggedAt = -999f;                // FNV-1a of the lowercased name (PRE-shuffle) — anchor mixing
         public bool Ready => Order != null && Order.Length > 0;   // instant — no probing gate
@@ -654,9 +658,10 @@ namespace CMM
                     {
                         string full = PlaylistSource.ResolveFullPath(src);
                         _plScratch.Add(full);
-                        string[] plTracks = PlaylistSource.ReadTracks(full, out bool plUnresolved);
+                        string[] plTracks = PlaylistSource.ReadTracks(full, out bool plUnresolved,
+                                                                      out int plDropped);
                         if (plUnresolved) _catalogIncomplete = true;
-                        AddStation(Path.GetFileNameWithoutExtension(src), plTracks);
+                        AddStation(Path.GetFileNameWithoutExtension(src), plTracks, plDropped);
                     }
                     else
                     {
@@ -669,6 +674,9 @@ namespace CMM
                         // schedule still agrees across sessions and MP clients.
                         var byName = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                         var order = new List<string>();
+                        // Unusable playlist entries, accumulated per station NAME -- a station can
+                        // be merged from a subfolder under more than one music root.
+                        var droppedByName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                         string[] parents = SourceDirs(src);
                         foreach (string dir in parents)
                         {
@@ -678,9 +686,14 @@ namespace CMM
                             Array.Sort(subs, StringComparer.OrdinalIgnoreCase);
                             foreach (string sub in subs)
                             {
-                                string[] pool = StationPool(sub);
-                                if (pool == null || pool.Length == 0) continue;
+                                string[] pool = StationPool(sub, out int subDropped);
                                 string name = Path.GetFileName(sub);
+                                if (subDropped > 0)
+                                {
+                                    droppedByName.TryGetValue(name, out int had);
+                                    droppedByName[name] = had + subDropped;
+                                }
+                                if (pool == null || pool.Length == 0) continue;
                                 if (!byName.TryGetValue(name, out List<string> acc))
                                 { byName[name] = acc = new List<string>(); order.Add(name); }
                                 acc.AddRange(pool);
@@ -692,7 +705,8 @@ namespace CMM
                             var merged = new List<string>();
                             foreach (string f in byName[name])
                                 if (seenT.Add(SourceScan.FullKey(f))) merged.Add(f);
-                            AddStation(name, merged.ToArray());
+                            droppedByName.TryGetValue(name, out int nameDropped);
+                            AddStation(name, merged.ToArray(), nameDropped);
                         }
 
                         if (Stations.Count == 0)
@@ -748,8 +762,13 @@ namespace CMM
         // folder of tracks, a folder holding just a playlist, or any mix. Playlist entries may
         // point anywhere (absolute, or relative to the playlist). Discovered playlists are noted
         // for the catalog signature (in-place edits must trigger a rebuild).
-        private static string[] StationPool(string dir)
+        private static string[] StationPool(string dir) => StationPool(dir, out _);
+
+        // `dropped` accumulates the unusable entries across every .m3u in the station folder, so a
+        // folder-backed station reports the same shortfall a playlist-backed one does.
+        private static string[] StationPool(string dir, out int dropped)
         {
+            dropped = 0;
             string[] audio = SourceScan.EnumerateFolderPoolRaw(dir, true, claimed: new string[0], out _);
             string[] m3us = null;
             try { m3us = Directory.GetFiles(dir, "*.m3u*", SearchOption.AllDirectories); } catch { }
@@ -765,8 +784,9 @@ namespace CMM
             {
                 if (!Contexts.IsPlaylistSource(m3u)) continue;    // "*.m3u*" also matches odd extensions
                 _plScratch.Add(m3u);
-                string[] tracks = PlaylistSource.ReadTracks(m3u, out bool m3uUnresolved);
+                string[] tracks = PlaylistSource.ReadTracks(m3u, out bool m3uUnresolved, out int m3uDropped);
                 if (m3uUnresolved) _catalogIncomplete = true;
+                dropped += m3uDropped;
                 if (tracks == null) continue;
                 foreach (string t in tracks)
                     if (seen.Add(SourceScan.FullKey(t))) pool.Add(t);
@@ -774,10 +794,10 @@ namespace CMM
             return pool.ToArray();
         }
 
-        private static void AddStation(string name, string[] pool)
+        private static void AddStation(string name, string[] pool, int dropped = 0)
         {
             if (pool == null || pool.Length == 0) return;
-            var st = new RadioStation { Name = name };
+            var st = new RadioStation { Name = name, DroppedEntries = dropped };
             // Deterministic broadcast order: sort (path-stable), then Fisher-Yates with an LCG
             // seeded by the STATION NAME — every client with the same folder computes the same
             // order, and adding a different station doesn't reshuffle this one.

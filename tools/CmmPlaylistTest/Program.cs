@@ -338,6 +338,32 @@ namespace CMM
             Check("E'6 a missing playlist FILE is not 'unresolved'",
                   noFile.Length == 0 && !noFileUnresolved, $"unresolved = {noFileUnresolved}");
 
+            // How much was NAMED but unusable. Only ever logged when the count reached ALL of
+            // them, so the ordinary failure -- a playlist naming files that have moved -- was
+            // invisible from the log AND from the panel, which just showed a smaller station.
+            string[] pd = PlaylistSource.ReadTracks(Full("musicroot/present/partial.m3u"),
+                                                    out _, out int pdDropped);
+            Check("E'8 a partly-broken playlist reports how many entries it lost",
+                  pd.Length == 1 && pdDropped == 1, $"{pd.Length} usable, {pdDropped} dropped");
+
+            Touch("musicroot/present/x1.mp3");
+            Touch("musicroot/present/x2.mp3");
+            WriteM3u("musicroot/present/mostly-gone.m3u", new[]
+            {
+                "#EXTM3U", "x1.mp3", "x2.mp3",
+                "gone1.mp3", "gone2.mp3", "gone3.mp3", "gone4.flac",
+            });
+            string[] mg = PlaylistSource.ReadTracks(Full("musicroot/present/mostly-gone.m3u"),
+                                                    out _, out int mgDropped);
+            Check("E'9 ...and the count is right when most of them are gone",
+                  mg.Length == 2 && mgDropped == 4, $"{mg.Length} usable, {mgDropped} dropped");
+
+            string[] ok = PlaylistSource.ReadTracks(Full("musicroot/present/partial.m3u"), out _, out int okDropped);
+            WriteM3u("musicroot/present/all-good.m3u", new[] { "#EXTM3U", "x1.mp3", "x2.mp3" });
+            string[] ag = PlaylistSource.ReadTracks(Full("musicroot/present/all-good.m3u"), out _, out int agDropped);
+            Check("E'10 a healthy playlist reports nothing dropped",
+                  ag.Length == 2 && agDropped == 0, $"{ag.Length} usable, {agDropped} dropped");
+
             // Unsupported formats are a settled answer too: the file is right there.
             Touch("musicroot/present/notes.txt");
             WriteM3u("musicroot/present/unsupported.m3u", new[] { "#EXTM3U", "notes.txt" });

@@ -83,7 +83,10 @@ namespace CMM
         }
 
         public static string[] ReadTracks(string playlistFullPath)
-            => ReadTracks(playlistFullPath, out _);
+            => ReadTracks(playlistFullPath, out _, out _);
+
+        public static string[] ReadTracks(string playlistFullPath, out bool unresolved)
+            => ReadTracks(playlistFullPath, out unresolved, out _);
 
         // `unresolved` distinguishes the two ways a playlist comes back with nothing:
         //
@@ -101,14 +104,21 @@ namespace CMM
         //
         // Costs nothing in normal operation: the reachability check runs only after a playlist
         // has already yielded zero usable tracks.
-        public static string[] ReadTracks(string playlistFullPath, out bool unresolved)
+        // `dropped` is how many entries were named but could not be used -- missing, or a format
+        // we cannot decode. It is reported rather than merely logged because the log only ever
+        // complained when the count reached ALL of them: a playlist that lost ninety percent of its
+        // music said nothing at all, and the station just quietly had less to play. The coverage
+        // panel shows this per station, which is where someone actually looks when a station sounds
+        // thin, and it costs nothing to carry.
+        public static string[] ReadTracks(string playlistFullPath, out bool unresolved, out int dropped)
         {
-            // Default before any early return. An unreadable or missing .m3u is NOT unresolved:
+            // Defaults before any early return. An unreadable or missing .m3u is NOT unresolved:
             // that one recovers on its own, because the playlist file's presence is part of the
             // signature the catalog watches, so it rebuilds when the file goes and again when it
             // returns. The case this flag exists for is the opposite -- a playlist that reads
             // perfectly well while everything it points at is on a drive that is not there.
             unresolved = false;
+            dropped = 0;
             if (string.IsNullOrEmpty(playlistFullPath)) return new string[0];
 
             string[] lines;
@@ -122,6 +132,7 @@ namespace CMM
             var tracks = new List<string>(lines.Length);
             int notFound = 0, unsupported = 0;
             string firstMissingFull = null;
+            dropped = 0;
             string firstBad = null;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string raw in lines)
@@ -163,6 +174,7 @@ namespace CMM
             // exactly like a folder that was never noticed -- which is how a real one (a VLC
             // export full of file:// URIs) cost an hour to diagnose, with nothing in the log to
             // go on. Named entries, so the FORM of the failure is visible at a glance.
+            dropped = notFound + unsupported;
             if (tracks.Count == 0 && (notFound > 0 || unsupported > 0))
             {
                 // Is this "these files are not usable" or "this drive is not plugged in"? Only ask

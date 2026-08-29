@@ -187,9 +187,15 @@ namespace CMM
                     catch { }
                     if (dec == IntPtr.Zero)
                     {
-                        // _invalidFiles is main-thread-only, so the worker only logs; genuinely
-                        // corrupt files get blacklisted by the preload / file-watch paths.
+                        // Report it. This used to only log, on the reasoning that the file-watch
+                        // and preload paths would blacklist a bad file eventually -- but neither
+                        // runs for the track that just failed to START, so the context was left
+                        // with no voice and stayed silent until something else changed context.
+                        // The radio and the emitters have always recovered from this (they hot-swap
+                        // to the next track); the music layer simply gave up.
                         Log.Warning($"[CMM] native: failed to open {Path.GetFileName(req.File)} (worker)");
+                        NativeStartReq f = req;
+                        MainThreadDispatcher.Post(() => RecoverFromFailedStart(f.Context, f.File, f.TransitionId));
                         continue;
                     }
 
@@ -213,8 +219,12 @@ namespace CMM
                         long voiceId = CmmMixer.GetOrCreate().Play(dec, kind, srcRate, srcCh, total, req.Fade, req.Loop, startFrame, req.TrackGain, req.DuckOthersTo, req.SnapTight);
                         if (voiceId == 0)
                         {
-                            // Play (cmm_mix_add) already closed the handle on rejection.
+                            // Play (cmm_mix_add) already closed the handle on rejection. Same
+                            // outcome as a failed open from the listener's side -- no voice -- so
+                            // the same recovery.
                             Log.Warning($"[CMM] native: Play rejected {Path.GetFileName(req.File)}");
+                            NativeStartReq f = req;
+                            MainThreadDispatcher.Post(() => RecoverFromFailedStart(f.Context, f.File, f.TransitionId));
                             continue;
                         }
                         Interlocked.Exchange(ref _nativeVoiceId, voiceId);
@@ -224,6 +234,52 @@ namespace CMM
                     }
                 }
             }
+        }
+
+        // ── Recovery from a start that produced no voice ────────────────────────────────────
+        // The start worker opens the file and adds the voice on its own thread, so a file that has
+        // gone missing, is locked, or is corrupt fails there -- after the main thread has already
+        // committed the track as playing. Nothing used to come back, so the context sat silent
+        // until the player walked into a different one.
+        //
+        // Recovering from the FAILURE rather than predicting it is deliberate. Checking the file
+        // exists before dispatch would race (it can go in the gap) and would only catch one of the
+        // several ways an open fails; this catches all of them, including the mixer refusing the
+        // voice. It also puts the file on the invalid list, which the worker cannot do -- that list
+        // is main-thread-only, which is exactly why the old comment there said bad files would have
+        // to be caught by some other path.
+        //
+        // Bounded per transition. Each attempt blacklists a file, so retries are productive rather
+        // than repetitive -- but if a whole folder has gone (the drive, most likely) there is
+        // nothing to find, and going quiet with a warning beats grinding through hundreds of opens.
+        private const int MaxFailedStartRetries = 8;
+        private static int _failedStartTid = int.MinValue;
+        private static int _failedStartCount;
+
+        private static void RecoverFromFailedStart(string contextName, string file, int transitionId)
+        {
+            if (!string.IsNullOrEmpty(file)) _invalidFiles.Add(file);
+
+            // Superseded: a real context change already happened, so whatever is playing now is
+            // what should be. Nothing to recover.
+            if (transitionId != _transitionId) return;
+            if (!string.Equals(_nativeActiveContext, contextName, StringComparison.OrdinalIgnoreCase)) return;
+
+            if (transitionId != _failedStartTid) { _failedStartTid = transitionId; _failedStartCount = 0; }
+            if (++_failedStartCount > MaxFailedStartRetries)
+            {
+                Log.Warning($"[CMM] '{contextName}': {_failedStartCount - 1} tracks in a row failed to start — "
+                          + "giving up on this transition. Check the music folder is reachable.");
+                return;
+            }
+
+            // A pre-staged advance posts its reconcile before we get here, so the cache already
+            // believes the failed track is playing; releasing the pending flag and starting a
+            // fresh pick puts both back in step.
+            _advancePending = false;
+            CMMConfig.D($"[CMM] '{contextName}': {Path.GetFileName(file)} would not start — picking another.");
+            Instance?.StartNativeContext(contextName, isSameContextSwitchingToNextTrack: true,
+                                         transitionId, forcedFile: null);
         }
 
         // The single branch point for starting a context's playback. A custom-file context
