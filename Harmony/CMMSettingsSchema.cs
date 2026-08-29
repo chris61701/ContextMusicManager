@@ -995,6 +995,11 @@ starts anyway. Shorter than the personal radio's LoudnessStartHoldMs on purpose:
 speaker across the room is background, so waiting three seconds to avoid a small level
 error is the wrong trade. 0 starts immediately and lets the level settle as it plays."),
             I("WorldEmitterLevelHoldMs",             "CMMConfig.WorldEmitterLevelHoldMs",           1200),
+            Cmt(@"The shortest a retune can take (ms) — how far the dial travels before the station
+comes out from under the noise. A station already playing nearby opens in milliseconds,
+and without this, retuning to one produced no sweep at all. The programme still starts
+on time underneath; this only sets when it is revealed. 0 reveals it as soon as it opens."),
+            I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               900),
             F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —

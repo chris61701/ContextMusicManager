@@ -749,6 +749,12 @@ namespace CMM
         // room is background, so waiting three seconds to avoid a small level error is the wrong
         // trade. 0 disables the wait entirely.
         public static int    WorldEmitterLevelHoldMs = 1200;
+        // The shortest a retune can take, in ms — how far the dial travels before the station is
+        // allowed to come out from under the noise. A station that is already warm opens in
+        // milliseconds, and without this a retune to one produced no sweep at all, which is not
+        // how a set behaves: the dial passes through the same noise whatever you are tuning to.
+        // The programme still STARTS on time underneath; this is only when it is revealed.
+        public static int    WorldEmitterSweepMs = 900;
         public static float  WorldEmitterColorStatic = 0f;
         public static float  WorldEmitterColorVoice  = 0.5f;
         // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead

@@ -64,6 +64,9 @@ namespace CMM
         // releasing late is a second of extra hiss nobody will attribute to a bug.
         private static readonly float[] _slotArmedAt = new float[MaxSlots];
         private static readonly float[] _slotReleasing = new float[MaxSlots];
+        // A lock deferred until the sweep has run its minimum, and the ramp it will use.
+        private static readonly float[] _slotLockAt = new float[MaxSlots];
+        private static readonly float[] _slotLockRamp = new float[MaxSlots];
         // How long a deliberate retune stays "recent". Long enough to cover the decision tick plus
         // the registry noticing the pin moved; far short of anything the world does on its own.
         private const float RetuneWindow = 3f;
@@ -1330,7 +1333,9 @@ namespace CMM
                 {
                     CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
                     _slotArmedAt[slot] = CmmClock.Now;
+                    _slotLockAt[slot] = 0f;   // a new sweep cancels the one it interrupted
                 }
+                else _slotArmedAt[slot] = 0f;
                 // ...and its speakers, so the noise has somewhere in the world to come from. The
                 // point set is already current — GroupSnapshot filled it earlier this tick.
                 CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, st.PtGain, st.PtFlags, st.PtCount);
@@ -1546,9 +1551,23 @@ namespace CMM
             // or the station is just a fade with hiss laid over it, which is the finding recorded
             // against the personal radio's v47. Harmless when the receiver was never armed — the
             // ramp simply runs from 1 to 1.
+            // THE DIAL HAS TO TRAVEL. A warm station opens in milliseconds, and locking the
+            // moment its voice landed meant a retune to something already decoded produced no
+            // sweep at all -- which is not how a set behaves. Nothing about turning a knob cares
+            // whether the station you are moving to happens to be easy to receive; the dial passes
+            // through the same noise either way, and the station is BURIED under it until you
+            // settle, not withheld until you arrive. So the programme starts now, on time, and the
+            // lock is scheduled for when the sweep has run its minimum.
             float arrive = _emPendingFade + ArriveTail;
             if (arrive < ArriveRamp) arrive = ArriveRamp;
-            CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, arrive);
+            float swept = CmmClock.Now - _slotArmedAt[_emDoneSlot];
+            float minSweep = CMMConfig.WorldEmitterSweepMs / 1000f;
+            if (_slotArmedAt[_emDoneSlot] > 0f && swept < minSweep)
+            {
+                _slotLockAt[_emDoneSlot] = _slotArmedAt[_emDoneSlot] + minSweep;
+                _slotLockRamp[_emDoneSlot] = arrive;
+            }
+            else CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, arrive);
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
@@ -1815,6 +1834,13 @@ namespace CMM
         {
             for (int s = 0; s < MaxSlots; s++)
             {
+                // A lock held back so the dial had time to travel (see the start-completion path).
+                if (_slotLockAt[s] > 0f && CmmClock.Now >= _slotLockAt[s])
+                {
+                    CmmMixer.Instance?.SetEmitterRecv(s, 1f, _slotLockRamp[s]);
+                    _slotLockAt[s] = 0f;
+                }
+
                 if (_slotOwner[s] != null) continue;                    // a station holds it
                 if (_emStartPending && _emPendingSlot == s) continue;   // a start is on its way
                 if (_slotLastStation[s] == null) continue;              // already released
