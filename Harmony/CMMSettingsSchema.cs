@@ -994,7 +994,7 @@ that comes out of a speaker in the world. 0 = silent, 1 = the same as the radio 
 starts anyway. Shorter than the personal radio's LoudnessStartHoldMs on purpose: a
 speaker across the room is background, so waiting three seconds to avoid a small level
 error is the wrong trade. 0 starts immediately and lets the level settle as it plays."),
-            I("WorldEmitterLevelHoldMs",             "CMMConfig.WorldEmitterLevelHoldMs",           1200),
+            I("WorldEmitterLevelHoldMs",             "CMMConfig.WorldEmitterLevelHoldMs",           500),
             Cmt(@"The shortest a retune can take (ms) — how far the dial travels before the station
 comes out from under the noise. A station already playing nearby opens in milliseconds,
 and without this, retuning to one produced no sweep at all. The programme still starts

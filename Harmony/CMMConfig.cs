@@ -745,10 +745,12 @@ namespace CMM
         // quieten a speaker across the room would quieten the radio in your pocket too.
         public static float  WorldEmitterStaticTrim = 0.5f;
         // How long a world speaker waits for a track's measured level before starting anyway.
-        // Shorter than the personal radio's LoudnessStartHoldMs on purpose: a speaker across the
-        // room is background, so waiting three seconds to avoid a small level error is the wrong
-        // trade. 0 disables the wait entirely.
-        public static int    WorldEmitterLevelHoldMs = 1200;
+        // Shorter than the personal radio's LoudnessStartHoldMs on purpose, and shortened again
+        // once the receiver existed: a level jump UNDER the searching noise is most of the way to
+        // inaudible, so the hold no longer has to be long enough to hide it on its own. It is the
+        // dominant term in how long a retune feels -- the sweep is the small half. 0 starts the
+        // station immediately and lets the level settle while it plays.
+        public static int    WorldEmitterLevelHoldMs = 500;
         // The shortest a retune can take, in ms — how far the dial travels before the station is
         // allowed to come out from under the noise. A station that is already warm opens in
         // milliseconds, and without this a retune to one produced no sweep at all, which is not
