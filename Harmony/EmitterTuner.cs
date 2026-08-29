@@ -46,6 +46,10 @@ namespace CMM
         private static readonly Dictionary<string, Dictionary<string, string>> _otherSaves =
             new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         private static bool _loaded;
+        // Other saves' undo entries, carried through a write so playing one world never discards
+        // another world's way back on.
+        private static readonly Dictionary<string, string> _otherPrev =
+            new Dictionary<string, string>(StringComparer.Ordinal);
 
         // EVERY RADIO IS SAVED ON ITS OWN, by where it stands.
         //
@@ -163,7 +167,10 @@ namespace CMM
         private static readonly Dictionary<string, int> _page =
             new Dictionary<string, int>(StringComparer.Ordinal);
         // What a group was tuned to before it was switched off, so "Turn On" has somewhere to go
-        // back to. Also transient -- Off itself is persisted, this is only the undo.
+        // back to. PERSISTED alongside the silent pin, because it was in memory only: silencing a
+        // speaker, quitting and coming back left Turn On with nothing to restore, so it fell
+        // through to Automatic and the derived station -- rarely the one you switched off. Off
+        // survived the reload and the way back did not.
         private static readonly Dictionary<string, string> _beforeOff =
             new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -353,6 +360,8 @@ namespace CMM
             _loaded = true;
             _pins.Clear();
             _otherSaves.Clear();
+            _beforeOff.Clear();
+            _otherPrev.Clear();
             if (_file == null || !File.Exists(_file)) return;
             try
             {
@@ -373,7 +382,13 @@ namespace CMM
                         var pe = pinNode as XmlElement;
                         if (pe == null || pe.Name != "pin") continue;
                         string k = pe.GetAttribute("group");
-                        if (!string.IsNullOrEmpty(k)) into[k] = pe.GetAttribute("station");
+                        if (string.IsNullOrEmpty(k)) continue;
+                        into[k] = pe.GetAttribute("station");
+                        string prev = pe.GetAttribute("prev");
+                        if (string.IsNullOrEmpty(prev)) continue;
+                        // This save's rows own the live undo map; another save's are held aside
+                        // and written back untouched.
+                        if (into == _pins) _beforeOff[k] = prev; else _otherPrev[k] = prev;
                     }
                 }
                 if (_pins.Count > 0)
@@ -403,9 +418,18 @@ namespace CMM
             if (pins.Count == 0) return;
             sb.Append("  <save id=\"").Append(System.Security.SecurityElement.Escape(id ?? "")).Append("\">\n");
             foreach (var kv in pins)
+            {
                 sb.Append("    <pin group=\"").Append(System.Security.SecurityElement.Escape(kv.Key))
-                  .Append("\" station=\"").Append(System.Security.SecurityElement.Escape(kv.Value ?? ""))
-                  .Append("\" />\n");
+                  .Append("\" station=\"").Append(System.Security.SecurityElement.Escape(kv.Value ?? ""));
+                // THE WAY BACK ON. Written for a silenced speaker so Turn On still knows what
+                // it was playing after a reload. Other saves' rows carry theirs through
+                // untouched, so playing one world never discards another world's undo.
+                string prev;
+                if ((pins == _pins ? _beforeOff : _otherPrev).TryGetValue(kv.Key, out prev)
+                    && !string.IsNullOrEmpty(prev))
+                    sb.Append("\" prev=\"").Append(System.Security.SecurityElement.Escape(prev));
+                sb.Append("\" />\n");
+            }
             sb.Append("  </save>\n");
         }
 
