@@ -337,7 +337,44 @@ namespace CMM
         private static double BroadcastSeconds() => RadioStationCatalog.BroadcastSeconds();
         private static void EnsureCatalog() => RadioStationCatalog.EnsureCatalog();
         private static void ResolveOnAir(Station st, double B) => RadioStationCatalog.ResolveOnAir(st, B);
-        private static void AdvanceStation(Station st, string endedTrack) => RadioStationCatalog.AdvanceStation(st, endedTrack);
+        // AN ADVANCE IS A DECISION, AND IT HAS TO SURVIVE UNTIL IT IS ACTED ON.
+        //
+        // AdvanceStation works out what plays next and writes it to st.OnAir. RadioStationCatalog
+        // does that carefully: when the broadcast clock is frozen or has drifted, the paper
+        // schedule still names the track that just ENDED, so it deliberately steps to the next
+        // entry at offset 0 instead of believing the paper.
+        //
+        // MaintainOnAir then overwrote it. It re-derives OnAir from the paper for any station with
+        // no voice, every tick, and a station that has advanced but not yet STARTED has no voice —
+        // so the paper's answer (the track that just ended, at its old offset) replaced the
+        // considered one. The station replayed the tail it had just finished, hit EOF, advanced,
+        // was clobbered again, and looped. In the log that is Enclave Radio restarting every 20.1
+        // seconds, which is exactly the tail length.
+        //
+        // Any start that does not land inside one tick is exposed: an async open spanning a tick,
+        // a start superseded by a slot steal — and, since today, the LOUDNESS LEVEL HOLD, which
+        // returns early by design and made a rare race into the common case.
+        //
+        // So an advance pins OnAir for a bounded window. Bounded because a pin that could not
+        // expire would strand a station on a track it never managed to start.
+        private static readonly Dictionary<string, float> _onAirPinned =
+            new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        private const float OnAirPinSeconds = 15f;   // > level hold + open + a steal retry
+
+        private static void AdvanceStation(Station st, string endedTrack)
+        {
+            RadioStationCatalog.AdvanceStation(st, endedTrack);
+            _onAirPinned[st.Name] = CmmClock.Now + OnAirPinSeconds;
+        }
+
+        private static bool OnAirPinned(Station st)
+        {
+            float until;
+            if (!_onAirPinned.TryGetValue(st.Name, out until)) return false;
+            if (CmmClock.Now < until) return true;
+            _onAirPinned.Remove(st.Name);
+            return false;
+        }
         private static bool SafeExists(string file) => RadioStationCatalog.SafeExists(file);
         private static Contexts RadioContext() => RadioStationCatalog.RadioContext();
         private static float StartFade() => RadioStationCatalog.StartFade();
@@ -1615,6 +1652,8 @@ namespace CMM
                 return;   // the slot's receiver is released by ReleaseIdleReceivers below
             }
 
+            // The decision has been acted on; the paper is authoritative again.
+            _onAirPinned.Remove(st.Name);
             st.VoiceId = id;
             st.VoiceTrack = file;
             st.VoiceGainApplied = _emDoneGain;
@@ -2116,7 +2155,9 @@ namespace CMM
             {
                 Station st = _stations[i];
                 if (!st.Ready || st.NearestDist == float.MaxValue) continue;
-                if (st.VoiceId == 0) ResolveOnAir(st, B);   // idle: track the broadcast virtually
+                // Idle: track the broadcast virtually — UNLESS this station has just decided what
+                // to play next and is still trying to start it. See AdvanceStation above.
+                if (st.VoiceId == 0 && !OnAirPinned(st)) ResolveOnAir(st, B);
                 if (ahead == 0 || st.OnAir == null) continue;
                 ContextMusicManager.RequestPrewarm(st.OnAir);
                 for (int k = 1; k <= ahead && k < st.Order.Length; k++)
