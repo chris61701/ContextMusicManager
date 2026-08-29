@@ -58,29 +58,30 @@ namespace CMM
         // needs no side table keyed by index — the game hands us the identity of the thing chosen.
         internal const string CmdPrefix = "cmmTune:";
 
-        // The radial's block-command path renders `Localization.Get("blockcommand_" + text)`, and
-        // Localization.Get returns the KEY UNCHANGED when it is missing — so an unregistered
-        // command shows up as the literal "blockcommand_cmmTune:Classic Rock". Localization
-        // .mDictionary is a public static Dictionary<string,string[]> indexed by language column,
-        // so the fix is to register the entry rather than to patch the radial: one row per choice,
-        // filled at both the current and default language columns.
-        private static readonly HashSet<string> _localized = new HashSet<string>(StringComparer.Ordinal);
-
-        internal static void RegisterLabel(string cmdText, string label)
+        // What each of our command indexes should read as: the four-character disc label, and the
+        // full text for the centre of the ring. Filled while the command list is built, applied by
+        // the radial postfix a moment later. Keyed by CommandIndex, the only identity an entry keeps.
+        //
+        // THE CENTRE TEXT IS WRITTEN DIRECTLY, NOT LOCALIZED, and that is a correction. The
+        // radial's block path renders a command as Localization.Get("blockcommand_" + text), so
+        // the first version registered a row in Localization.mDictionary for every station. It did
+        // not take -- the middle of the ring read the raw key, "blockcommand_cmmTune:Continue FM".
+        // Rather than work out which of the several ways that can fail was the one that did, the
+        // whole detour is gone: XUiC_RadialEntry.SelectionText is a public field and the postfix
+        // is already walking every entry to place the badge. Setting it is one assignment, cannot
+        // silently miss, and needs no dictionary to be in the right state at the right moment.
+        // Station names are folder names anyway -- there was never anything to translate.
+        internal struct Entry { public string Badge, Selection; }
+        private static readonly Dictionary<int, Entry> _entries = new Dictionary<int, Entry>();
+        internal static bool HasEntries { get { return _entries.Count > 0; } }
+        internal static void BeginEntries() { _entries.Clear(); }
+        internal static void NoteEntry(int commandIndex, string badge, string selection)
         {
-            try
-            {
-                string key = "blockcommand_" + cmdText;
-                if (!_localized.Add(key)) return;
-                var dict = Localization.mDictionary;
-                if (dict == null) return;
-                int cur = Localization.currentLanguageIndex, def = Localization.defaultLanguageIndex;
-                int n = Math.Max(Math.Max(cur, def), 0) + 1;
-                var row = new string[n];
-                for (int i = 0; i < n; i++) row[i] = label;
-                dict[key] = row;
-            }
-            catch { /* a missing label is cosmetic; never break a block's activation for it */ }
+            _entries[commandIndex] = new Entry { Badge = badge, Selection = selection };
+        }
+        internal static bool EntryFor(int commandIndex, out Entry e)
+        {
+            return _entries.TryGetValue(commandIndex, out e);
         }
 
         // Both declaring types, resolved by name.
@@ -150,22 +151,6 @@ namespace CMM
         {
             try { return EmitterCompat.RuntimeSupported && Targets(name).Count > 0; }
             catch { return false; }
-        }
-
-        // Which command index carries which two-character badge, filled while the command list is
-        // built and read back by the radial postfix a moment later. Keyed by CommandIndex because
-        // that is the only identity XUiC_RadialEntry keeps.
-        private static readonly Dictionary<int, string> _badges = new Dictionary<int, string>();
-        internal static bool HasBadges { get { return _badges.Count > 0; } }
-        internal static void BeginEntries(int firstIndex) { _badges.Clear(); }
-        internal static void NoteBadge(int commandIndex, string badge)
-        {
-            if (!string.IsNullOrEmpty(badge)) _badges[commandIndex] = badge;
-        }
-        internal static string BadgeFor(int commandIndex)
-        {
-            string b;
-            return _badges.TryGetValue(commandIndex, out b) ? b : null;
         }
 
         // XUiC_Radial, by name. The radial is XUi, which is the part of the game that differs most
@@ -291,13 +276,12 @@ namespace CMM
                 // every composite block in the world and grow it again on every look.
                 var outp = new BlockActivationCommand[have.Length + _choices.Count];
                 Array.Copy(have, outp, have.Length);
-                EmitterActivation.BeginEntries(have.Length);
+                EmitterActivation.BeginEntries();
                 for (int i = 0; i < _choices.Count; i++)
                 {
                     EmitterTuner.Choice c = _choices[i];
                     string text = EmitterActivation.CmdPrefix + c.Cmd;
-                    EmitterActivation.RegisterLabel(text, c.Label);
-                    EmitterActivation.NoteBadge(have.Length + i, c.Badge);
+                    EmitterActivation.NoteEntry(have.Length + i, c.Badge, c.Label);
                     // BUILT BY FIELD, NOT BY CONSTRUCTOR. BlockActivationCommand's ctor gained a
                     // fifth parameter (eventName) after A21, so `new BlockActivationCommand(a,b,c,d)`
                     // compiles to a FIVE-argument call against 3.x that A20/A21 do not declare -- a
@@ -380,13 +364,14 @@ namespace CMM
                         _homePos = it.text.Position;
                         _homeSize = it.text.Size;
                     }
-                    string badge = EmitterActivation.HasBadges
-                                 ? EmitterActivation.BadgeFor(it.CommandIndex) : null;
-                    if (badge != null)
+                    EmitterActivation.Entry ours;
+                    if (EmitterActivation.HasEntries
+                        && EmitterActivation.EntryFor(it.CommandIndex, out ours))
                     {
                         it.text.Position = CentredPos;
                         it.text.Size = CentredSize;
-                        it.SetText(badge);
+                        it.SetText(ours.Badge ?? "");
+                        it.SelectionText = ours.Selection;   // the middle of the ring
                     }
                     else
                     {

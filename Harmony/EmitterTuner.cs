@@ -94,7 +94,17 @@ namespace CMM
         internal static string CurrentLabel(EmitterRegistry.Emitter e)
         {
             string station;
-            if (TryPin(e, out station)) return string.IsNullOrEmpty(station) ? SilentLabel : station;
+            if (TryPin(e, out station))
+            {
+                if (string.IsNullOrEmpty(station)) return SilentLabel;
+                // A SAVED STATION WHOSE FOLDER IS GONE. The pin is kept on purpose -- rename a
+                // folder back, or plug the drive in, and the radio returns to what it was set to
+                // -- but the audio layer resolves a name it cannot find to no station at all, so
+                // the speaker is silent meanwhile. Saying "Continue FM" over a silent radio would
+                // be a lie by omission; this says what is set AND why nothing is coming out.
+                if (!RadioStationCatalog.ByName.ContainsKey(station)) return station + " - off air";
+                return station;
+            }
             station = EmitterAudioLayer.PinnedStationAt(e.Pos);
             return string.IsNullOrEmpty(station) ? "tuning" : station;
         }
