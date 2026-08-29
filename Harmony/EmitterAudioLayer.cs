@@ -69,7 +69,10 @@ namespace CMM
         private static readonly float[] _slotLockRamp = new float[MaxSlots];
         // How long a deliberate retune stays "recent". Long enough to cover the decision tick plus
         // the registry noticing the pin moved; far short of anything the world does on its own.
-        private const float RetuneWindow = 3f;
+        // Generous, because it is the delay between the press and the START, not between the
+        // press and the sound. One start is in flight at a time, so dialling quickly queues them:
+        // three seconds was short enough that a press could miss its own window and arrive silent.
+        private const float RetuneWindow = 8f;
         private const float ReleaseRamp  = 0.45f;
         private static float SearchGiveUp => CMMConfig.LoudnessStartHoldMs / 1000f + 4f;
 
@@ -1320,8 +1323,14 @@ namespace CMM
             // station arriving because you walked into range, and a nearer station stealing a slot
             // are all "changes" and none of them is a retune — greeting the player with static on
             // load is the report this came from. A recent deliberate tune is the whole test.
+            // A RECENT TUNE IS THE WHOLE TEST, and it used to also require the slot to have held
+            // a station before -- which was wrong and is why the static sometimes did not happen
+            // at all. A slot released while idle has its last station cleared to null, and a
+            // station that lands on a FREE slot has never held one, so both of those retunes were
+            // silently excluded. World entry is already excluded by the tune stamp alone (a fresh
+            // world has never had one), so the extra condition bought nothing and cost the cases
+            // most likely to occur.
             bool retuned = changedStation
-                        && _slotLastStation[slot] != null
                         && CmmClock.Now - EmitterTuner.LastTuneAt < RetuneWindow;
             if (changedStation)
             {

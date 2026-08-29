@@ -754,7 +754,7 @@ namespace CMM
         // milliseconds, and without this a retune to one produced no sweep at all, which is not
         // how a set behaves: the dial passes through the same noise whatever you are tuning to.
         // The programme still STARTS on time underneath; this is only when it is revealed.
-        public static int    WorldEmitterSweepMs = 900;
+        public static int    WorldEmitterSweepMs = 250;
         public static float  WorldEmitterColorStatic = 0f;
         public static float  WorldEmitterColorVoice  = 0.5f;
         // The HAM RADIO's own coloration set (same three levers) — applied to radioHam points instead

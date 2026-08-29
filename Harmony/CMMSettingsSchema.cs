@@ -999,7 +999,7 @@ error is the wrong trade. 0 starts immediately and lets the level settle as it p
 comes out from under the noise. A station already playing nearby opens in milliseconds,
 and without this, retuning to one produced no sweep at all. The programme still starts
 on time underneath; this only sets when it is revealed. 0 reveals it as soon as it opens."),
-            I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               900),
+            I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               250),
             F("WorldEmitterColorVoice",              "CMMConfig.WorldEmitterColorVoice",            0.5f, changedIn: 19, was: 0f),
             Cmt(@"HAM RADIO coloration: the radioHam block's OWN set of the same three levers (the shelf
 speakers keep the set above). A ham is a small communications speaker, so it defaults ON —
