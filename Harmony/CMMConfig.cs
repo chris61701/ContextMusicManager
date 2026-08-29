@@ -945,15 +945,6 @@ namespace CMM
         // cluster as Ins/Del/Home/End, same modifier gate. In-game only.
         public static KeyCode KeyRadioNext        = KeyCode.PageUp;
         public static KeyCode KeyRadioPrev        = KeyCode.PageDown;
-        // Tune the world speaker you are LOOKING AT (EmitterTuner). The activate key, because
-        // that is the gesture the prompt appears for -- and it is only read while a speaker is
-        // under the crosshair, so it never shadows the game's own use of it elsewhere. Where the
-        // block has a vanilla use of its own (the shelf speaker is a loot container) the tuner
-        // asks for Alt with it instead of stealing it, and the prompt says which.
-        // NOT under the KeybindRequireCtrl/Alt gate: this one is guarded by what you are looking
-        // at, which is a stronger gate than a modifier, and the debug config's bare bindings would
-        // otherwise make it unreachable.
-        public static KeyCode KeyEmitterTune      = KeyCode.E;
         public static bool NowPlayingEnabled = false;
         // Per-press change to the current track's manual volume trim (linear factor),
         // persisted per-track in Cache/loudness.xml. Folded into the loudness gain, so
