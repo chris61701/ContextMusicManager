@@ -47,6 +47,7 @@ internal static class Program
             UnreachableDrive(sandbox);
             Slots();
             Dial();
+            Badges();
         }
         catch (Exception ex) { _fail++; Console.WriteLine("  FAIL  harness threw: " + ex); }
         finally { try { Directory.Delete(sandbox, true); } catch { } }
@@ -516,4 +517,50 @@ internal static class Program
         Rebuild(radio);
         Check("a reachable-but-broken playlist is still not a station", Station("Offline") == null);
     }
+
+    // -- Four characters for a station name ----------------------------------
+    // THE WORKED LIST IS THE SPECIFICATION. These seventeen came from Chris as name -> badge
+    // pairs, and RadioBadge's rules were read off them rather than invented, so keeping them
+    // here means a later tidy-up of that code has to keep agreeing with the thing it came from.
+    // Two are load-bearing and easy to break by "simplifying": Cathedral FM against Lit FM (the
+    // all-but-two cap), and Light Scripe Shadow FM (four words outrank the band rule).
+    static void Badges()
+    {
+        Section("Station name -> four characters");
+
+        Badge("Cathedral FM",           "CaFM");
+        Badge("Mazirene FM",            "MaFM");
+        Badge("Concrete Jungle",        "CJ");
+        Badge("Quiet Hours",            "QH");
+        Badge("Continue FM",            "CoFM");
+        Badge("Rust Belt Rock",         "RBR");
+        Badge("CTOP 50",                "CTOP");
+        Badge("The Blue Lounge",        "TBL");
+        Badge("Dust Bowl Country",      "DBC");
+        Badge("Wasteland Pop",          "WPop");
+        Badge("Enclave Radio",          "ER");
+        Badge("Yuletide Static",        "YS");
+        Badge("Galaxy News Radio",      "GNR");
+        Badge("Iron Static",            "IS");
+        Badge("KPOP Top",               "KTop");
+        Badge("Lit FM",                 "LFM");
+        Badge("Light Scripe Shadow FM", "LSSF");
+
+        // Shapes the worked list did not cover, pinned so they cannot drift unnoticed.
+        Badge("",                       "");        // no name at all
+        Badge("Jazz",                   "Jazz");    // one short word, kept whole
+        Badge("Underground",            "Unde");    // one long word, clipped to four
+        Badge("50",                     "50");      // every word numeric: keep it, or no label
+        Badge("Rock_Classic_Hits",      "RCH");     // folder underscores read as spaces
+        Badge("a b c d e f",            "ABCD");    // never longer than four
+        Badge("Deep AM",                "DeAM");    // AM behaves as FM does
+        Badge("q xm",                   "QXM");     // band uppercased, one-letter first word
+    }
+
+    static void Badge(string name, string expect)
+    {
+        string got = RadioBadge.For(name);
+        Check($"\"{name}\" -> \"{expect}\"", got == expect, "got \"" + got + "\"");
+    }
+
 }

@@ -155,9 +155,15 @@ namespace CMM
             if (!_page.TryGetValue(key, out page) || page >= pages || page < 0) page = 0;
             _page[key] = page;
 
+            // The centre label is the only text the vanilla radial has, and it shows the HOVERED
+            // entry. So the page rides on the front of every entry's centre text, on its own line:
+            // it then reads above the station name, and it is there whatever you are pointing at
+            // rather than only over the arrows.
+            string head = paged ? "Page " + (page + 1) + " of " + pages + "\n" : "";
+
             // 0 -- the tap target.
             into.Add(new Choice {
-                Label = isOff ? "Turn On" : "Turn Off",
+                Label = head + (isOff ? "Turn On" : "Turn Off"),
                 Cmd   = isOff ? CmdOn : CmdOff,
                 Icon  = isOff ? IconOn : IconOff,
                 Badge = "",
@@ -167,7 +173,7 @@ namespace CMM
             {
                 string name = stations[i].Name;
                 into.Add(new Choice {
-                    Label = name, Cmd = name, Icon = IconStation,
+                    Label = head + name, Cmd = name, Icon = IconStation,
                     Badge = Initials(name), Current = name == current });
             }
 
@@ -178,44 +184,23 @@ namespace CMM
                 // centre label is the only text the vanilla radial has, and it shows the hovered
                 // entry's selection text -- so the arrows say it, and the page NUMBER also rides
                 // on both arrows as a badge so it is legible without hovering anything.
-                string badge = (page + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
                 int prev = (page - 1 + pages) % pages, next = (page + 1) % pages;
+                // NO BADGE ON AN ARROW. A number crammed next to a glyph made the arrow read as a
+                // labelled thing rather than a direction, and the page is said in the centre now
+                // -- where it is legible on every entry, not just these two.
                 into.Add(new Choice {
-                    Label = "Page " + (prev + 1) + " of " + pages,
-                    Cmd = CmdPrev, Icon = IconPrev, Badge = badge, Current = false });
+                    Label = head + "Previous page", Cmd = CmdPrev, Icon = IconPrev,
+                    Badge = "", Current = false });
                 into.Add(new Choice {
-                    Label = "Page " + (next + 1) + " of " + pages,
-                    Cmd = CmdNext, Icon = IconNext, Badge = badge, Current = false });
+                    Label = head + "Next page", Cmd = CmdNext, Icon = IconNext,
+                    Badge = "", Current = false });
             }
         }
 
-        // Two characters, because that is what the segment's label actually is: the vanilla
-        // radial_entry template gives it a 48x48 box at font size 28, which is a corner badge, not
-        // a caption. The full name goes to the CENTRE label, where there is room for it.
-        // Initials of the first two words beat the first two letters -- "Concrete Jungle" reads as
-        // CJ, where "Co" would collide with "Continue FM".
-        internal static string Initials(string name)
-        {
-            if (string.IsNullOrEmpty(name)) return "";
-            char a = '\0', b = '\0';
-            bool atWordStart = true;
-            for (int i = 0; i < name.Length; i++)
-            {
-                char c = name[i];
-                if (c == ' ' || c == '_' || c == '-') { atWordStart = true; continue; }
-                if (atWordStart)
-                {
-                    if (a == '\0') a = char.ToUpperInvariant(c);
-                    else if (b == '\0') { b = char.ToUpperInvariant(c); break; }
-                    atWordStart = false;
-                }
-            }
-            if (a == '\0') return "";
-            // A one-word name has no second initial, so take its second letter instead, or every
-            // C-station would show a bare C.
-            if (b == '\0' && name.Length > 1) b = char.ToLowerInvariant(name[1]);
-            return b == '\0' ? a.ToString() : new string(new[] { a, b });
-        }
+        // The four-character label. RadioBadge is version-neutral and has no game types, so the
+        // rules are covered by CmmScheduleTest against the worked list they were derived from --
+        // see the header there. Kept out of this file for exactly that reason.
+        internal static string Initials(string name) => RadioBadge.For(name);
 
         // True when the choice was a MENU action (paging) rather than a tuning.
         internal static bool IsMenuAction(string cmd) => cmd == CmdPrev || cmd == CmdNext;

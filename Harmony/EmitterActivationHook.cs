@@ -324,14 +324,23 @@ namespace CMM
     // stations that all share one -- you cannot tell them apart without sweeping over each.
     //
     // XUiC_RadialEntry DOES have a text label (the vanilla radial_entry template gives it a 48x48
-    // box at font size 28) and a public SetText. It is a corner badge, not a caption: two
-    // characters. So the station initials go there and the full name stays in the centre.
+    // box) and a public SetText -- vanilla uses it for ammo counts on the reload wheel. It holds
+    // about four characters, so the station abbreviation goes there (see RadioBadge) and the full
+    // name stays in the centre. The label is also RE-STYLED here: the template parks it at
+    // -15,+15 at font size 28, which is where a one or two digit count belongs and not where a
+    // four-character name does. Ours is centred and smaller. Every entry we do NOT own is put
+    // back to what it was, because this same label is the ammo count on the next wheel you open.
     //
     // This runs as a postfix on SetCurrentBlockData, after the game has created every entry, and
     // writes only the entries whose CommandIndex we claimed.
     [HarmonyPatch]
     internal static class Patch_EmitterRadialBadges
     {
+        // Centred in the 75x75 entry, and wide enough for four characters at the template's font
+        // size. Height is the label's own line, not the disc.
+        private static readonly Vector2i CentredPos  = new Vector2i(0, 0);
+        private static readonly Vector2i CentredSize = new Vector2i(72, 32);
+
         static bool Prepare() => EmitterActivation.SupportedRadial();
         static MethodBase TargetMethod() => EmitterActivation.RadialMethod("SetCurrentBlockData");
 
@@ -341,12 +350,19 @@ namespace CMM
         // versions -- one this never executes, since the emitter layer is off there, but the
         // baseline is worth keeping clean. IList covers an array and a List alike.
         private static System.Reflection.FieldInfo _menuItemField;
+        // The template's own placement for that label, captured the first time we see it so every
+        // entry we do not own can be put back. It is 48x48 parked at -15,+15 -- the right home for
+        // a one or two digit ammo count on the reload wheel, and the wrong one for a four
+        // character station name. Ours is centred and wider. Restoring is not optional: the very
+        // next wheel the player opens may be that ammo wheel, using these same entry objects.
+        private static bool _labelHome;
+        private static Vector2i _homePos, _homeSize;
 
         static void Postfix(object __instance)
         {
             try
             {
-                if (!EmitterActivation.HasBadges || __instance == null) return;
+                if (__instance == null) return;
                 if (_menuItemField == null)
                 {
                     _menuItemField = AccessTools.Field(__instance.GetType(), "menuItem");
@@ -357,9 +373,26 @@ namespace CMM
                 for (int i = 0; i < items.Count; i++)
                 {
                     var it = items[i] as XUiC_RadialEntry;
-                    if (it == null) continue;
-                    string badge = EmitterActivation.BadgeFor(it.CommandIndex);
-                    if (badge != null) it.SetText(badge);
+                    if (it == null || it.text == null) continue;
+                    if (!_labelHome)
+                    {
+                        _labelHome = true;
+                        _homePos = it.text.Position;
+                        _homeSize = it.text.Size;
+                    }
+                    string badge = EmitterActivation.HasBadges
+                                 ? EmitterActivation.BadgeFor(it.CommandIndex) : null;
+                    if (badge != null)
+                    {
+                        it.text.Position = CentredPos;
+                        it.text.Size = CentredSize;
+                        it.SetText(badge);
+                    }
+                    else
+                    {
+                        it.text.Position = _homePos;
+                        it.text.Size = _homeSize;
+                    }
                 }
             }
             catch { }

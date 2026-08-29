@@ -35,6 +35,7 @@
     <Compile Include="..\..\Harmony\RadioStationCatalog.cs" Link="linked\RadioStationCatalog.cs" />
     <Compile Include="..\..\Harmony\EmitterSlots.cs"        Link="linked\EmitterSlots.cs" />
     <Compile Include="..\..\Harmony\RadioDial.cs"        Link="linked\RadioDial.cs" />
+    <Compile Include="..\..\Harmony\RadioBadge.cs"      Link="linked\RadioBadge.cs" />
     <Compile Include="..\..\Harmony\DataStructures.cs"     Link="linked\DataStructures.cs" />
     <Compile Include="..\..\Harmony\TrackRotation.cs"      Link="linked\TrackRotation.cs" />
     <Compile Include="..\..\Harmony\PlaylistSource.cs"      Link="linked\PlaylistSource.cs" />
