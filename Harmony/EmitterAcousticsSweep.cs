@@ -288,7 +288,7 @@ namespace CMM
             int cz0 = _z0 >> 4, cz1 = (_z0 + _sz - 1) >> 4;
             for (int cx = cx0; cx <= cx1; cx++)
                 for (int cz = cz0; cz <= cz1; cz++)
-                    if (world.GetChunkSync(cx, cz) == null) return false;
+                    if (EmitterCompat.GetChunkSync(world, cx, cz) == null) return false;
             return true;
         }
 

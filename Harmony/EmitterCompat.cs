@@ -83,6 +83,51 @@ namespace CMM
             return false;
         }
 
+        // ── Fetching a loaded chunk ──────────────────────────────────────────────────────────
+        // The second divergence, and a nastier kind than the prefab one: the NAME is the same, the
+        // SIGNATURE is the same, the return type is the same. What moved is the DECLARING TYPE.
+        //
+        //   3.x   abstract WorldBase.GetChunkSync(int, int), overridden on World
+        //   2.6            World.GetChunkSync(int, int), and no WorldBase declaration at all
+        //
+        // Because 3.x's is virtual, a call compiled there targets the slot on WorldBase -- so the
+        // shipped DLL asks 2.6 for WorldBase.GetChunkSync and gets MissingMethodException, 36 of
+        // them in the first minute. Nothing about the call site looks version-specific, and a
+        // survey that checks a member EXISTS finds it on both: it is only wrong about WHERE.
+        //
+        // Bound against the world's own runtime type, which finds the method wherever it is
+        // declared. Closed over the instance and cached, because this is called once per chunk in
+        // the proximity sweep -- roughly 120 times per pass -- and reflection per call would be a
+        // real cost on the frame thread. Rebound whenever the world object changes, i.e. per load.
+        private static object _chunkWorld;
+        private static Func<int, int, IChunk> _getChunkSync;
+
+        internal static IChunk GetChunkSync(object world, int chunkX, int chunkZ)
+        {
+            if (world == null) return null;
+            if (!ReferenceEquals(world, _chunkWorld))
+            {
+                _chunkWorld = world;
+                _getChunkSync = null;
+                try
+                {
+                    var m = AccessTools.Method(world.GetType(), "GetChunkSync",
+                                               new[] { typeof(int), typeof(int) });
+                    if (m != null)
+                        _getChunkSync = (Func<int, int, IChunk>)Delegate.CreateDelegate(
+                            typeof(Func<int, int, IChunk>), world, m);
+                }
+                catch { _getChunkSync = null; }
+
+                if (_getChunkSync == null)
+                    Log.Warning("[CMM] World emitters: this game has no GetChunkSync(int,int) — "
+                              + "speaker discovery cannot run.");
+            }
+            if (_getChunkSync == null) return null;
+            try { return _getChunkSync(chunkX, chunkZ); }
+            catch { return null; }
+        }
+
         static bool Probe()
         {
             try

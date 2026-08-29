@@ -319,7 +319,7 @@ namespace CMM
                     if (cx != curCX || cz != curCZ)
                     {
                         curCX = cx; curCZ = cz;
-                        chunk = world.GetChunkSync(cx, cz);
+                        chunk = EmitterCompat.GetChunkSync(world, cx, cz);
                     }
                     if (chunk == null) continue;   // unloaded -- GetBlock would have returned Air
                     for (int y = y0; y < y1; y++)
@@ -448,7 +448,7 @@ namespace CMM
                     if (cx != curCX || cz != curCZ)
                     {
                         curCX = cx; curCZ = cz;
-                        chunk = world.GetChunkSync(cx, cz);
+                        chunk = EmitterCompat.GetChunkSync(world, cx, cz);
                     }
                     for (int y = _scanY0; chunk != null && y < _scanY1; y++)
                     {
