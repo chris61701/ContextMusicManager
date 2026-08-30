@@ -50,6 +50,7 @@ namespace CMM
         internal static bool  AnyDoorAnimating => false;
         internal static void  StatReset() { StatBrR = StatBrB = StatBrF = StatSamples = 0; StatJitterSum = StatJitterMax = 0f; }
         internal static void  InvalidateFieldForAnimatingDoors() { }
+        internal static void  PumpDoors(World world) { }
         internal static void  ComputeOcclusion(Vector3 ear, float[] pts, int count, float[] extra, World world)
         { for (int i = 0; i < count; i++) extra[i] = 0f; }
         internal static void  OcclusionBegin(Vector3 ear, World world) { }

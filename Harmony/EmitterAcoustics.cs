@@ -2010,7 +2010,20 @@ namespace CMM
         // flood's reads ("Collection was modified", which aborted the whole emitter tick). Instead it enqueues
         // here under a lock; RefreshDoorAnim drains this on the main thread, so _doors/_doorTypes stay
         // single-threaded for every read (CellLoss) and iteration.
-        private struct PendingDoor { public int Type; public Vector3i Pos; public bool Opening; }
+        private struct PendingDoor { public int Type; public Vector3i Pos; public bool Opening; public float At; }
+        // A PENDING ENTRY MEANS "THIS INSTANT". It exists to cover the gap between the latch
+        // flipping and the drain applying it, which is one tick -- so past this it is not late
+        // news, it is a LIE, and it must stop being consulted whether or not anything drained it.
+        //
+        // It lied for a whole session. The drain lives in RefreshDoorAnim, which is reached only
+        // from the legacy flood's two entry points, and the shipping model is the field, which
+        // calls neither -- so on a normal install nothing ever drained this. The reader then
+        // answered from the PRE-toggle pose for ever, which does not seal a doorway, it INVERTS
+        // it: close the door and the entry says "was open" (free air), open it and the entry says
+        // "was shut" (full loss). Reported exactly that way -- the tone came through a shut door
+        // and stopped at an open one -- and only the tone showed it, because a shut door is about
+        // 20 dB and music survives that where a carrier at -34 dBFS does not.
+        private const float PendingDoorTtl = 0.5f;
         private static readonly List<PendingDoor> _doorPending = new List<PendingDoor>();
         private static readonly object _doorLock = new object();
 
@@ -2038,8 +2051,14 @@ namespace CMM
             if (_doorPendingCount == 0) return false;
             lock (_doorLock)
             {
+                float now = CmmClock.Now;
                 for (int i = _doorPending.Count - 1; i >= 0; i--)   // latest wins
-                    if (_doorPending[i].Pos == parent) { opening = _doorPending[i].Opening; return true; }
+                    if (_doorPending[i].Pos == parent)
+                    {
+                        // Expired: fall through to the live block rather than to stale news.
+                        if (now - _doorPending[i].At > PendingDoorTtl) return false;
+                        opening = _doorPending[i].Opening; return true;
+                    }
             }
             return false;
         }
@@ -2157,7 +2176,26 @@ namespace CMM
 
         // True while any door is mid-swing — the emitter layer speeds its refresh so door transitions are
         // sampled tightly (fade starts promptly, close timing is precise) instead of in 250 ms 4 Hz steps.
-        internal static bool AnyDoorAnimating => _doors.Count > 0 || _doorPending.Count > 0;
+        // Expired entries do not count as a swing either: a stale one left DoorMovingOrJustMoved
+        // true for the session, which permanently bypassed the field's dB slew (the raw 0 -> 35
+        // block stepping that looked like a missing rate limiter) and printed EarTrace on every
+        // frame for ever -- 1315 lines in one session, with zero DoorTrace beside them, which is
+        // the pair of numbers that finally gave this away.
+        internal static bool AnyDoorAnimating
+        {
+            get
+            {
+                if (_doors.Count > 0) return true;
+                if (_doorPendingCount == 0) return false;
+                lock (_doorLock)
+                {
+                    float now = CmmClock.Now;
+                    for (int i = 0; i < _doorPending.Count; i++)
+                        if (now - _doorPending[i].At <= PendingDoorTtl) return true;
+                }
+                return false;
+            }
+        }
 
         // The parent positions of the doors currently animating, appended to the caller's list.
         // Exists so a listener of the door edge can re-read just those blocks instead of the whole
@@ -2273,9 +2311,38 @@ namespace CMM
             // May be off-thread — just enqueue; RefreshDoorAnim applies it on the main thread.
             lock (_doorLock)
             {
-                _doorPending.Add(new PendingDoor { Type = blockType, Pos = parentPos, Opening = opening });
+                _doorPending.Add(new PendingDoor { Type = blockType, Pos = parentPos,
+                                                   Opening = opening, At = CmmClock.Now });
                 _doorPendingCount = _doorPending.Count;
             }
+        }
+
+        // DRAIN THE DOOR QUEUE, WHATEVER MODEL IS RUNNING.
+        //
+        // RefreshDoorAnim was reached from exactly two places, ComputeOcclusion and
+        // OcclusionBegin, and BOTH are the legacy per-point flood. The shipping model is
+        // FieldOcclusion, which never called either -- so on every normal install the queue a
+        // door toggle enqueues into was never drained at all, and everything downstream of it
+        // was frozen at the instant of the first door in the session:
+        //
+        //   * AnyDoorAnimating stays true for ever (_doorPending.Count > 0). The log shows it
+        //     exactly: 1315 EarTrace lines, which are gated on it, and ZERO DoorTrace, which
+        //     needs a door to have actually entered _doors.
+        //   * TryGetPendingDoor keeps answering for that door for ever, and the last toggle of a
+        //     close-then-open is the OPENING one -- so CellLoss takes its "was shut, leaf has not
+        //     moved" branch and charges DoorShutLoss on a doorway that is standing wide open.
+        //     Permanently, per door, cumulatively as you cycle more of them, and untouched by
+        //     anything to do with the speaker. Which is the report, in full.
+        //   * DoorMovingOrJustMoved is stuck true, so the field's dB slew is permanently
+        //     bypassed -- which is the raw 0 -> 35 block stepping that looked like a missing
+        //     limiter earlier today. It was this.
+        //
+        // The tick calls this once, before whichever model runs, so the queue drains on every
+        // path rather than only on the one nothing uses.
+        internal static void PumpDoors(World world)
+        {
+            if (world == null) return;
+            RefreshDoorAnim(world);
         }
 
         // Refresh every tracked door from its Animator; drop the ones that settled / can't be read. Runs at

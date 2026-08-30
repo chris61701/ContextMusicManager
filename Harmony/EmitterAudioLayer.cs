@@ -483,6 +483,14 @@ namespace CMM
                     // (chunk flicker was churning voices).
                     EmitterRegistry.RefreshSnapshot(w, player.position);
 
+                    // DRAIN THE DOOR QUEUE FIRST, WHATEVER MODEL RUNS BELOW. It used to drain
+                    // only inside the legacy flood's two entry points, and the shipping model is
+                    // the field, which calls neither -- so on a normal install a toggled door was
+                    // enqueued and never applied. See EmitterAcoustics.PumpDoors for what that
+                    // froze; the short version is that a door you closed and opened again went on
+                    // being charged as shut for the rest of the session.
+                    EmitterAcoustics.PumpDoors(w);
+
                     // Advance the amortized occlusion flood by one time slice per FRAME; when it
                     // completes, land every culled station's output from the finished field —
                     // unless it was a ROOM-ONLY flood (field-cache path): its job is just the
