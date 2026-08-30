@@ -774,7 +774,11 @@ namespace CMM
         public static float  WorldEmitterOffAirHz     = 1000f;
         public static float  WorldEmitterOffAirHz2    = 0f;
         public static float  WorldEmitterOffAirHz3    = 0f;
-        public static float  WorldEmitterOffAirLevel  = 0.05f;
+        // Sits alongside the tuning static, so it is scaled like it. 0.05 was a guess and it put
+        // the carrier about 12 dB UNDER the hiss -- roughly -47 dBFS at two metres once distance
+        // and WorldEmitterVolume were through with it, which is why it read as "the tone never
+        // plays" when it had been playing the whole time.
+        public static float  WorldEmitterOffAirLevel  = 0.5f;
         // It FADES. A carrier that snapped on was a click, which reads as a fault rather than as a
         // station going off the air.
         public static int    WorldEmitterOffAirFadeMs = 400;

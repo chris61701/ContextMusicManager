@@ -2498,10 +2498,16 @@ namespace CMM
                 }
                 else if (now >= _tuneGiveUp)
                 {
-                    // OFF AIR, NOT SILENT. A station that will not open used to leave the speaker
-                    // quiet, which is indistinguishable from the mod having broken. A set that
-                    // finds nothing sits on the carrier instead.
-                    GoOffAir(_tuneSlot);
+                    // OFF AIR, NOT SILENT -- but NOT A SECOND CARRIER. The station is !Ready,
+                    // so GroupSnapshot is already flagging this speaker as dead air and
+                    // MaintainDeadAir raises the tone on a lane of its own. Raising one here too
+                    // gave two tones and a single _offAirSlot to track them: the first was
+                    // orphaned and could never be cleared again.
+                    //
+                    // The lane also has to be given back. The handover pinned a !Ready station to
+                    // it, and nothing ever stops a station that never started, so it would be held
+                    // for ever.
+                    if (to != null && to.Slot == _tuneSlot) { _slotOwner[_tuneSlot] = null; to.Slot = -1; }
                     CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
                     CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — slot {_tuneSlot} goes off air.");
                     _tunePhase = 0; _tuneSlot = -1;

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 48;
+        internal const int CurrentSchema = 49;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1012,7 +1012,8 @@ stopped broadcasting for the night, which is what actually happened. Hz then lev
             F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              1000f, since: 47),
             F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             0f,    since: 48),
             F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             0f,    since: 48),
-            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.05f, since: 47),
+            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.5f,  since: 47,
+                                                                                                     changedIn: 49, was: 0.05f),
             Cmt(@"How long (ms) the off-air carrier takes to fade in and out. A tone that snapped on
 was a click, which reads as a fault rather than as a station going off the air."),
             I("WorldEmitterOffAirFadeMs",            "CMMConfig.WorldEmitterOffAirFadeMs",          400,   since: 48),
