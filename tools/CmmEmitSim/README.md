@@ -67,6 +67,29 @@ Every assertion is one of the user's reports, stated as a number:
 `--csv` writes the full tape per scenario: ear dBFS per frame, plus `sig` / lane dBFS / mirror
 gain / tone envelope for all six lanes, with the presses annotated.
 
+## One process per scenario
+
+`EmitterAudioLayer` is a static singleton with twelve-second grace timers, a pending-start latch,
+and a native mixer `cmm_mix_start_ex` will not re-enter cleanly. Resetting all of that from
+outside would mean modelling it, which is the mistake this harness exists to avoid — so the
+parent run spawns a child per scenario and adds up the verdicts. `--only <name>` is the child.
+`CmmEmitLab` settled on the same answer for the same reason.
+
+It matters: `off-mid-tune` passed alone and failed after `rapid-switch`, purely because the
+previous scenario's audio was still draining. A result that depends on what ran before it is not
+a result.
+
+## What is NOT deterministic
+
+The clock is driven, but a station start is a decoder open plus a seek **on a ThreadPool thread**,
+so how many ticks pass before the first sound is not fixed — measured across runs at 83, 133 and
+167 ms for the same scenario. So the assertions split the two: `StaticBy` owns the onset delay
+and carries a budget wide enough for it, while `NoHole` measures from *when the sound actually
+starts*, which is not variable because by then nothing is waiting on a thread.
+
+Scenarios wait for a station to be audible rather than pressing on a stopwatch, for the same
+reason.
+
 ## The library
 
 Written by the harness at KNOWN levels (`Library.cs`, −20 dBFS sines, a different pitch per

@@ -46,6 +46,7 @@
   <ItemGroup>
     <!-- The subject. -->
     <Compile Include="..\..\Harmony\EmitterAudioLayer.cs"   Link="linked\EmitterAudioLayer.cs" />
+    <Compile Include="..\..\Harmony\EmitterTuner.cs"        Link="linked\EmitterTuner.cs" />
     <!-- Everything it talks to that does not need a voxel world. -->
     <Compile Include="..\..\Harmony\CmmMixer.cs"            Link="linked\CmmMixer.cs" />
     <Compile Include="..\..\Harmony\CMMConfig.cs"           Link="linked\CMMConfig.cs" />

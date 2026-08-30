@@ -29,38 +29,13 @@ namespace CMM
         internal static void RefreshSnapshot(World world, Vector3 playerPos) { }
     }
 
-    // ── THE DIAL ─────────────────────────────────────────────────────────────────────────────
-    // Scenarios press it through Press()/Off(); the pin table is the only state, exactly as the
-    // real tuner's is. The radial menu it normally lives behind needs a game and is not tested.
-    internal static class EmitterTuner
-    {
-        internal static readonly Dictionary<Vector3i, string> Pins = new Dictionary<Vector3i, string>();
-        internal const string SilentPin = "\u0000off";
-
-        internal static float    LastTuneAt = -999f;
-        internal static Vector3i LastTunePos;
-        internal static Vector3i SweepPos;
-        internal static float    SweepHeldAt = -999f;
-
-        internal static bool SweepHeld(Vector3i p) => SweepHeldAt > -900f
-            && CmmClock.Now - SweepHeldAt < 1.5f && SweepPos.Equals(p);
-        internal static void ReleaseSweepHold() { SweepHeldAt = -999f; }
-        internal static void HoldSweep() { SweepHeldAt = CmmClock.Now; SweepPos = LastTunePos; }
-        internal static void EnsureLoaded() { }
-
-        internal static bool TryPin(EmitterRegistry.Emitter e, out string station)
-            => Pins.TryGetValue(e.Pos, out station) && !string.IsNullOrEmpty(station);
-
-        // What a scenario calls. Mirrors what Apply() leaves behind on a real dial turn: the pin
-        // moves, the press is stamped, and the speaker is held out of the point sets.
-        internal static void Press(Vector3i pos, string station)
-        {
-            Pins[pos] = station;
-            LastTunePos = pos; LastTuneAt = CmmClock.Now;
-            SweepPos = pos; SweepHeldAt = CmmClock.Now;
-        }
-        internal static void Off(Vector3i pos) => Press(pos, SilentPin);
-    }
+    // THE DIAL IS THE REAL ONE. Harmony/EmitterTuner.cs is linked, not modelled, because a
+    // fake of it lied: the real TryPin maps SilentPin to "" and returns TRUE, and a fake that
+    // returned false instead invented a bug -- the harness reported a speaker sitting on the
+    // off-air carrier after being switched off, which the game does not do. Its only game
+    // dependency is the save directory, shimmed below, so there was never a reason to model it.
+    //
+    // Scenarios press it through EmitterTuner.Apply, exactly as the radial menu does.
 
     // ── THE FLOOD ────────────────────────────────────────────────────────────────────────────
     // Clear line, always. Occlusion has its own harnesses (CmmAcousticsJudge, and the acsweep
@@ -111,6 +86,7 @@ namespace CMM
         internal static int    LoudnessInFlight = 0;
         internal static float  SettleRamp = 0.35f;
         internal static string MusicDirectory = "";
+        internal static bool   inGame = false;
         internal static void   RequestPrewarm(string file) { }
 
         // The Radio context, as contexts.xml declares it. A real Contexts, because the catalog
@@ -205,3 +181,14 @@ namespace CMM
         }
     }
 }
+
+namespace CMM
+{
+    // The pocket radio's dial click. The real tuner fires one on every press; the sound itself is
+    // not what this harness measures, and loading the samples needs a mod folder.
+    internal static class PersonalRadio { internal static void TuneSfxDial() { } }
+}
+
+// The game's save directory. Empty here, which is the answer the tuner's own guard expects
+// outside a world: pins live in memory for the run and nothing is written to disk.
+internal static class GameIO { internal static string GetSaveGameDir() => ""; }

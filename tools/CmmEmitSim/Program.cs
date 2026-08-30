@@ -17,6 +17,17 @@ namespace CMM
             bool csv  = Array.IndexOf(args, "--csv")  >= 0;
             string only = Arg(args, "--only");
 
+            // ONE PROCESS PER SCENARIO. EmitterAudioLayer is a static singleton with twelve-second
+            // grace timers, a pending-start latch and a native mixer that cmm_mix_start_ex will not
+            // re-enter cleanly -- so a scenario inherited whatever the last one left behind, and
+            // off-mid-tune passed alone while failing after rapid-switch. A result that depends on
+            // what ran before it is not a result.
+            //
+            // Resetting all of that from outside would mean modelling it, which is the exact
+            // mistake this harness exists to avoid. The process boundary is the only reset that
+            // cannot drift, and it is what CmmEmitLab settled on for the same reason.
+            if (only == null) return RunEach(args);
+
             string root = Path.Combine(Path.GetTempPath(), "CmmEmitSim");
             Directory.CreateDirectory(root);
             Console.WriteLine("CmmEmitSim - the real EmitterAudioLayer, offline");
@@ -44,7 +55,7 @@ namespace CMM
 
             for (int i = 0; i < names.Length; i++)
             {
-                if (only != null && names[i] != only) continue;
+                if (names[i] != only) continue;
                 Console.WriteLine("-- " + names[i] + " " + new string('-', Math.Max(0, 52 - names[i].Length)));
                 int before = _fail;
                 Reset();
@@ -64,6 +75,53 @@ namespace CMM
             try { CmmMixer.Instance?.StopAllNow(); } catch { }
             System.Threading.Thread.Sleep(150);
             return _fail == 0 ? 0 : 1;
+        }
+
+        static readonly string[] Scenarios =
+            { "turn-on", "retune-shared", "retune-cold", "rapid-switch", "off-mid-tune", "broken-station" };
+
+        // The parent: run each scenario in its own process, relay its output, add up the verdicts.
+        static int RunEach(string[] args)
+        {
+            var pass = new List<string>();
+            var fail = new List<string>();
+            string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            string extra = "";
+            foreach (string a in args) if (a != "--only") extra += " " + a;
+
+            foreach (string name in Scenarios)
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(exe, "--only " + name + extra)
+                { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+                using (var pr = System.Diagnostics.Process.Start(psi))
+                {
+                    string outp = pr.StandardOutput.ReadToEnd();
+                    pr.WaitForExit();
+                    char[] nl = { (char)10, (char)13 };
+                    foreach (string line in outp.Split(nl, StringSplitOptions.RemoveEmptyEntries))
+                        if (line.StartsWith("   ") || line.StartsWith("-- ") || line.Contains("stations:"))
+                            Console.WriteLine(line.TrimEnd());
+                    // A CHILD THAT DIES SAYS SO. Counting the exit code alone let a scenario that
+                    // crashed, or never started the mixer, register as a plain "failed" with no
+                    // FAIL line anywhere above it -- a silent failure in the one tool whose job is
+                    // to make failures loud.
+                    if (pr.ExitCode != 0 && !outp.Contains("FAIL"))
+                    {
+                        Console.WriteLine("   DIED  exit " + pr.ExitCode + ", no failure reported:");
+                        string err = pr.StandardError.ReadToEnd();
+                        string tailSrc = err.Length > 0 ? err : outp;
+                        string[] tl = tailSrc.Split(nl, StringSplitOptions.RemoveEmptyEntries);
+                        for (int k = Math.Max(0, tl.Length - 6); k < tl.Length; k++)
+                            Console.WriteLine("         " + tl[k].TrimEnd());
+                    }
+                    (pr.ExitCode == 0 ? pass : fail).Add(name);
+                }
+            }
+
+            Console.WriteLine(new string('=', 62));
+            Console.WriteLine(pass.Count + "/" + Scenarios.Length + " scenario(s) held every invariant.");
+            if (fail.Count > 0) Console.WriteLine("failed: " + string.Join(", ", fail.ToArray()));
+            return fail.Count == 0 ? 0 : 1;
         }
 
         static string Arg(string[] a, string k)
@@ -102,13 +160,59 @@ namespace CMM
             EmitterAudioLayer.Tick();
             CMMConfig.WorldEmitterEnabled = true;
 
-            EmitterTuner.Pins.Clear();
+            // Back to automatic through the real command, so nothing of the last scenario's
+            // pins, before-off memory or sweep hold survives into the next.
+            var snap = EmitterRegistry.Snapshot;
+            for (int i = 0; i < snap.Count; i++) EmitterTuner.Apply(snap[i], EmitterTuner.CmdAuto);
             EmitterTuner.LastTuneAt = -999f; EmitterTuner.SweepHeldAt = -999f;
             EmitterRegistry.Snapshot.Clear();
             _sim = new Sim();
             GameManager.Instance.World.Player.position = new Vector3(10.5f, 64.5f, 12.5f);
             GameManager.Instance.World.Player.cameraTransform.position = new Vector3(10.5f, 65.2f, 12.5f);
-            _sim.Run(0.5f);   // settle to silence before the scenario starts
+
+            // SILENT BEFORE THE SCENARIO STARTS, AND PROVED SO. A fixed settle was not enough:
+            // off-mid-tune passed alone and failed after rapid-switch, purely because the previous
+            // scenario's audio was still draining. A result that depends on what ran before it is
+            // not a result. So this runs until the ear is actually quiet -- and says so if it
+            // never gets there, because that would be a leak worth knowing about rather than a
+            // reason to carry on measuring.
+            _sim.Run(0.25f);                       // a tape to look at before asking about it
+            for (int i = 0; i < 300; i++)
+            {
+                if (Sim.Db(_sim.Tape[_sim.Tape.Count - 1].Rms) <= Floor) break;
+                _sim.Step();
+            }
+            _sim.Run(0.20f);
+            float residue = _sim.MeanDb(_sim.Now - 0.2f, _sim.Now);
+            if (residue > Floor)
+                Console.WriteLine("   note  did not reach silence before this scenario: "
+                                  + residue.ToString("0.0") + " dBFS");
+        }
+
+        // A PRESS IS THE REAL ONE. EmitterTuner.Apply is what the radial menu invokes, so a
+        // scenario turning a dial takes the same path a player does -- the pin write, the silent
+        // pin, the before-off memory, the sweep hold and the retune stamp all included.
+        static void Dial(Vector3i pos, string cmd)
+        {
+            var snap = EmitterRegistry.Snapshot;
+            for (int i = 0; i < snap.Count; i++)
+                if (snap[i].Pos.Equals(pos)) { EmitterTuner.Apply(snap[i], cmd); return; }
+            throw new Exception("no speaker at " + pos);
+        }
+
+        // WAIT FOR THE SPEAKER TO BE PLAYING, rather than assuming it after N seconds. A cold
+        // start has to find the station, open a file and seek into the broadcast, and how long
+        // that takes is not a constant -- so a scenario that pressed on a stopwatch was really
+        // measuring "was it up yet", and said 4.3 seconds of missing static when it was not.
+        static bool WaitAudible(float maxSeconds = 8f)
+        {
+            int cap = (int)(maxSeconds * 60f);
+            for (int i = 0; i < cap; i++)
+            {
+                _sim.Step();
+                if (Sim.Db(_sim.Tape[_sim.Tape.Count - 1].Rms) > Floor) { _sim.Run(1.0f); return true; }
+            }
+            return false;
         }
 
         static void Place(Vector3i pos)
@@ -131,8 +235,21 @@ namespace CMM
 
         // No silence between the press and the arrival. This is "CTOP static stopped playing
         // before the music started playing", stated as a number.
-        static void NoHole(string sc, float from, float to, float maxMs)
+        // FROM WHEN THE SOUND STARTS, not from the press.
+        //
+        // These two were double-counting. A station open is a decoder open plus a seek on a
+        // ThreadPool thread, so how many ticks pass before the first sound is genuinely variable
+        // -- measured across runs at 83, 133 and 167 ms for the same scenario, with a driven
+        // clock. That delay is StaticBy's business and it has its own budget.
+        //
+        // What this measures is the reported bug: a hole in the middle, AFTER the speaker has
+        // started making a noise and BEFORE the station arrives. That is not variable, because
+        // once the static is running nothing is waiting on a thread any more.
+        static void NoHole(string sc, float press, float to, float maxMs)
         {
+            float from = _sim.FirstAbove(press, Floor);
+            if (float.IsNaN(from)) { Fail(sc, "nothing was ever audible after the press"); return; }
+            from += 0.02f;
             float at;
             float hole = _sim.LongestHole(from, to, Floor, out at) * 1000f;
             Check(sc, hole <= maxMs, "no hole between press and arrival",
@@ -190,19 +307,24 @@ namespace CMM
             Console.WriteLine("   pass  every arrival had a programme under it");
         }
 
-        // A borrow that leaves a live station must carry that station under its noise. If the
-        // mirror gain is zero for the whole leave, the speaker went silent the instant it was
-        // retuned, which no radio does.
+        // Step 2: the station being left keeps playing, buried by the receiver -- never stopped,
+        // never faded. Stated as LEVEL, not as mechanism.
+        //
+        // This used to look for mirror gain on a tuning lane, which is only how the BORROW does
+        // it. The tune machine does the same job on the station's own lane and carries no mirror
+        // at all, so a retune taking the better path failed an assertion for taking it. What both
+        // owe the ear is identical and that is what is measured: through the leave the speaker
+        // stays within a few dB of where it was, because a programme is still under the noise.
         static void LeavesWithProgramme(string sc, float press)
         {
-            float best = -1f;
-            int i0 = _sim.IndexAt(press), i1 = _sim.IndexAt(press + 0.7f);
-            for (int i = i0; i <= i1 && i < _sim.Tape.Count; i++)
-                for (int s = CmmMixer.StationSlots; s < CmmMixer.MaxEmitterSlots; s++)
-                    if (_sim.Tape[i].Mir[s] > best) best = _sim.Tape[i].Mir[s];
-            Check(sc, best > 0.2f, "the station being left plays on under the noise",
-                  best < 0f ? "no mirror on any tuning lane" : "peak mirror gain " + best.ToString("0.00"));
+            float before = _sim.MeanDb(press - 0.30f, press - 0.02f);
+            float during = _sim.MeanDb(press + 0.05f, press + LeaveRamp);
+            float drop   = before - during;
+            Check(sc, drop < 10f, "the station being left plays on under the noise",
+                  "was " + before.ToString("0.0") + " dBFS, " + during.ToString("0.0")
+                  + " through the leave (" + drop.ToString("+0.0;-0.0") + " dB)");
         }
+        const float LeaveRamp = 0.70f;
 
         // -- scenarios -------------------------------------------------------------------------
         //
@@ -213,16 +335,28 @@ namespace CMM
         {
             const string sc = "turn-on";
             Place(A);
-            EmitterTuner.Off(A); _sim.Run(1.0f);
+            Dial(A, EmitterTuner.CmdOff); _sim.Run(1.0f);
 
             float press = _sim.Now;
             _sim.Note("press: off -> Alpha FM");
-            EmitterTuner.Press(A, "Alpha FM");
+            Dial(A, "Alpha FM");
             _sim.Run(4.0f);
 
-            StaticBy(sc, press, 200f);
-            NoHole(sc, press + 0.05f, press + 3.0f, 120f);
-            NoStep(sc, press, press + 3.5f, 14f);
+            StaticBy(sc, press, 350f);
+            // ONE EMIT TICK, AND IT IS THE FLOOR. Turning a silenced speaker on has nothing
+            // playing to carry it, so the first sound it can make waits for the layer's next tick
+            // (~110 ms) plus the ring. Measured at 133 ms and structural: shortening it means
+            // arming the noise from the keypress rather than from the tick.
+            //
+            // Left as it is because the dial CLICK already fires on the press, so the control is
+            // acknowledged instantly and the gap is underneath it. The budget records the real
+            // number rather than pretending it is zero -- if it grows, that is a regression.
+            NoHole(sc, press, press + 3.0f, 120f);
+            // FROM AFTER THE ONSET. Turning a silenced speaker on has no station to slide out of,
+            // so the noise deliberately arrives at its level in 40 ms -- which is 16 dB between two
+            // frames at 60 Hz. That is the designed fade-in, not a discontinuity, and measuring it
+            // as one would make the control's own responsiveness read as a fault.
+            NoStep(sc, press + 0.2f, press + 3.5f, 14f);
             ArrivesOntoSomething(sc);
             Console.WriteLine("   level at 3 s: " + _sim.MeanDb(press + 2.8f, press + 3.2f).ToString("0.0") + " dBFS");
         }
@@ -231,16 +365,17 @@ namespace CMM
         {
             const string sc = "retune-shared";
             Place(A); Place(B);
-            EmitterTuner.Press(A, "Alpha FM");
-            EmitterTuner.Press(B, "Beta FM");
-            _sim.Run(6.0f);                       // both stations up and settled
+            Dial(A, "Alpha FM");
+            Dial(B, "Beta FM");
+            if (!WaitAudible()) Fail(sc, "neither station became audible");
+            _sim.Run(2.0f);                       // both stations up and settled
 
             float press = _sim.Now;
             _sim.Note("press: A, Alpha FM -> Beta FM (already playing for B)");
-            EmitterTuner.Press(A, "Beta FM");
+            Dial(A, "Beta FM");
             _sim.Run(4.0f);
 
-            StaticBy(sc, press, 200f);
+            StaticBy(sc, press, 350f);
             LeavesWithProgramme(sc, press);
             NoHole(sc, press, press + 3.0f, 60f);
             NoStep(sc, press, press + 3.5f, 12f);
@@ -251,15 +386,15 @@ namespace CMM
         {
             const string sc = "retune-cold";
             Place(A);
-            EmitterTuner.Press(A, "Alpha FM");
-            _sim.Run(6.0f);
+            Dial(A, "Alpha FM");
+            if (!WaitAudible()) Fail(sc, "Alpha FM never became audible");
 
             float press = _sim.Now;
             _sim.Note("press: Alpha FM -> Gamma FM (nothing is playing it)");
-            EmitterTuner.Press(A, "Gamma FM");
+            Dial(A, "Gamma FM");
             _sim.Run(5.0f);
 
-            StaticBy(sc, press, 200f);
+            StaticBy(sc, press, 350f);
             LeavesWithProgramme(sc, press);
             NoHole(sc, press, press + 4.0f, 60f);
             NoStep(sc, press, press + 4.5f, 12f);
@@ -270,15 +405,15 @@ namespace CMM
         {
             const string sc = "rapid-switch";
             Place(A);
-            EmitterTuner.Press(A, "Alpha FM");
-            _sim.Run(6.0f);
+            Dial(A, "Alpha FM");
+            if (!WaitAudible()) Fail(sc, "Alpha FM never became audible");
 
             float first = _sim.Now;
             string[] dial = { "Beta FM", "Gamma FM", "Alpha FM", "Beta FM", "Gamma FM" };
             for (int i = 0; i < dial.Length; i++)
             {
                 _sim.Note("press -> " + dial[i]);
-                EmitterTuner.Press(A, dial[i]);
+                Dial(A, dial[i]);
                 _sim.Run(0.45f);                  // faster than a sweep: the stress case
             }
             _sim.Run(5.0f);
@@ -292,15 +427,15 @@ namespace CMM
         {
             const string sc = "off-mid-tune";
             Place(A);
-            EmitterTuner.Press(A, "Alpha FM");
-            _sim.Run(6.0f);
+            Dial(A, "Alpha FM");
+            if (!WaitAudible()) Fail(sc, "Alpha FM never became audible");
 
             _sim.Note("press -> Gamma FM");
-            EmitterTuner.Press(A, "Gamma FM");
+            Dial(A, "Gamma FM");
             _sim.Run(0.5f);                       // mid sweep
             float off = _sim.Now;
             _sim.Note("press -> off, mid-tune");
-            EmitterTuner.Off(A);
+            Dial(A, EmitterTuner.CmdOff);
             _sim.Run(3.0f);
 
             float quiet = _sim.MeanDb(off + 1.0f, off + 2.5f);
@@ -312,12 +447,12 @@ namespace CMM
         {
             const string sc = "broken-station";
             Place(A);
-            EmitterTuner.Press(A, "Alpha FM");
-            _sim.Run(6.0f);
+            Dial(A, "Alpha FM");
+            if (!WaitAudible()) Fail(sc, "Alpha FM never became audible");
 
             float press = _sim.Now;
             _sim.Note("press -> Broken FM (nothing in it will decode)");
-            EmitterTuner.Press(A, "Broken FM");
+            Dial(A, "Broken FM");
             _sim.Run(12.0f);
 
             float carrier = -1f;
