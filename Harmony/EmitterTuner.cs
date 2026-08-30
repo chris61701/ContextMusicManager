@@ -158,6 +158,10 @@ namespace CMM
         internal static bool SweepHeld(Vector3i p)
             => SweepHeldAt > 0f && CmmClock.Now - SweepHeldAt < 1.5f && p.Equals(SweepPos);
         internal static void ReleaseSweepHold() { SweepHeldAt = -999f; }
+        // Re-stamp the dead-man. The audio layer calls this while it is still trying to find a
+        // lane to sweep on: the hold is what keeps the speaker out of its new station, and letting
+        // it expire mid-attempt is how the station arrived clean and the static followed it.
+        internal static void HoldSweep() { SweepHeldAt = CmmClock.Now; }
 
         internal const string CmdAuto = "@auto", CmdOff = "@off", CmdOn = "@on";
         internal const string CmdPrev = "@prev", CmdNext = "@next";

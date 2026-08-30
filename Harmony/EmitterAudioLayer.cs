@@ -1320,8 +1320,24 @@ namespace CMM
                     // the folder is gone or empty, "Broken FM". That speaker is tuned to a dead
                     // frequency, which is precisely what the carrier is for, and clearing it here
                     // was why the tone never played for the one station built to be broken.
-                    if (string.IsNullOrEmpty(pinned)) EndDeadAir("the speaker was switched off");
-                    else if (!_deadAirOn || !_deadAirPos.Equals(e.Pos)) GoDeadAir(e.Pos, -1);
+                    // THIS SPEAKER, NOT ANY SPEAKER. Both of these are inside the per-emitter
+                    // loop, and neither used to check WHOSE dead air it was talking about. The
+                    // save carries nine tuned buildings, several of them switched off or pinned to
+                    // stations that no longer exist -- so every single GroupSnapshot walked past
+                    // one of them and ended the carrier belonging to a completely different
+                    // speaker. That is the two-millisecond death: MaintainTune raised the tone and
+                    // GroupSnapshot, running immediately after it in the same tick, killed it on
+                    // behalf of a radio in another building.
+                    if (string.IsNullOrEmpty(pinned))
+                    {
+                        if (_deadAirOn && _deadAirPos.Equals(e.Pos))
+                            EndDeadAir("this speaker was switched off");
+                    }
+                    // FIRST COME, AND THEN LEFT ALONE. There is one carrier and this loop can
+                    // see many off-air speakers -- nine buildings are restored on this save --
+                    // so `!_deadAirPos.Equals(e.Pos)` meant every one of them seized it from the
+                    // last, every tick, re-raising the tone forever and never sounding.
+                    else if (!_deadAirOn) GoDeadAir(e.Pos, -1);
                     continue;
                 }
                 st.LastSeenAt = now;
@@ -2493,11 +2509,18 @@ namespace CMM
         // next report diagnosable.
         private static void TuneDeclined(string who, string why)
         {
-            if (_declinedAt == EmitterTuner.LastTuneAt) return;   // once per press, not once per tick
-            _declinedAt = EmitterTuner.LastTuneAt;
+            // ONCE PER PRESS PER SOURCE. Keyed on the press alone, the tune machine's decline
+            // silenced the borrow's -- and the borrow is the one that retries, so the interesting
+            // message ("no spare lane yet", repeated for over a second) was exactly the one that
+            // never appeared.
+            bool borrow = who == "borrow";
+            float last = borrow ? _declinedBorrowAt : _declinedTuneAt;
+            if (last == EmitterTuner.LastTuneAt) return;
+            if (borrow) _declinedBorrowAt = EmitterTuner.LastTuneAt;
+            else        _declinedTuneAt   = EmitterTuner.LastTuneAt;
             CMMConfig.D($"[CMM] Tune declined by {who}: {why}.");
         }
-        private static float _declinedAt = -999f;
+        private static float _declinedTuneAt = -999f, _declinedBorrowAt = -999f;
 
         private static void MaintainTune()
         {
@@ -2872,6 +2895,12 @@ namespace CMM
                 // Not handled, not released: the speaker stays out of every station and we try
                 // again next tick. Held silent for a moment beats arriving clean and then being
                 // buried in front of the player.
+                // AND KEEP HOLDING IT. The dead-man in EmitterTuner expires after 1.5 s and lets
+                // the speaker join its new station cleanly -- which is the "music arrives, then
+                // static, then music" ordering, with the borrow finally landing 1.7 s after the
+                // press. While we are still trying for a lane the speaker has somewhere to be
+                // that is not "already listening to the station we have not introduced yet".
+                EmitterTuner.HoldSweep();
                 TuneDeclined("borrow", "every lane is busy — holding the speaker for one more tick");
                 return;
             }
