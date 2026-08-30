@@ -467,6 +467,19 @@ namespace CMM
 
             float late = _sim.MeanDb(press + 9f, press + 11f);
             Check(sc, late > Floor, "the carrier is still audible once settled", late.ToString("0.0") + " dBFS");
+
+            // TURNING IT DOWN WHILE IT PLAYS. radio.xml hot-reloads, but the carrier's level was
+            // sampled once when it armed and then held in the native tone, so editing it while a
+            // speaker sat on the carrier did nothing until you dialled away and back.
+            float before = _sim.MeanDb(_sim.Now - 1.0f, _sim.Now);
+            _sim.Note("OffAirLevel 0.15 -> 0.02 while the carrier is sounding");
+            CMMConfig.WorldEmitterOffAirLevel = 0.02f;
+            _sim.Run(3.0f);
+            float after = _sim.MeanDb(_sim.Now - 1.0f, _sim.Now);
+            CMMConfig.WorldEmitterOffAirLevel = 0.15f;
+            Check(sc, before - after > 8f, "the carrier level follows a live config edit",
+                  before.ToString("0.0") + " -> " + after.ToString("0.0") + " dBFS ("
+                  + (before - after).ToString("0.0") + " dB, want > 8)");
         }
 
         // -- does it get quieter as you walk away? ----------------------------------------------

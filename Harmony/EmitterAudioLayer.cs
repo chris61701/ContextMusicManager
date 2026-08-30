@@ -2540,6 +2540,12 @@ namespace CMM
         // A carrier below this is a rumble, not a station. Only reachable by winding Variance up
         // past the root itself.
         private const float MinCarrierHz = 40f;
+        // What the LIVE carrier was built from. radio.xml hot-reloads and every other emitter
+        // knob is read where it is used, but these four were sampled once in GoOffAir and then
+        // held in the native tone until the carrier ended -- so turning the tone down while
+        // listening to it did nothing, which is not the contract the rest of the file keeps.
+        private static float _offAirLiveLevel = -1f, _offAirLiveHz = -1f,
+                             _offAirLiveHz2 = -1f, _offAirLiveHz3 = -1f, _offAirLiveVary = -1f;
 
         private static void GoOffAir(int slot)
         {
@@ -2600,6 +2606,11 @@ namespace CMM
             CmmMixer.Instance?.SetEmitterTone(slot, _offAirHz, _offAirLvl, 3,
                                               CMMConfig.WorldEmitterOffAirFadeMs / 1000f);
             _offAirSlot = slot;
+            _offAirLiveLevel = CMMConfig.WorldEmitterOffAirLevel;
+            _offAirLiveHz    = CMMConfig.WorldEmitterOffAirHz;
+            _offAirLiveHz2   = CMMConfig.WorldEmitterOffAirHz2;
+            _offAirLiveHz3   = CMMConfig.WorldEmitterOffAirHz3;
+            _offAirLiveVary  = CMMConfig.WorldEmitterOffAirVarianceHz;
             CMMConfig.D($"[CMM] Off-air carrier on slot {slot}: {_offAirHz[0]:0.0} / {_offAirHz[1]:0.0}"
                       + $" / {_offAirHz[2]:0.0} Hz"
                       + (vary > 0f ? $" (root {root - cfgRoot:+0.0;-0.0} Hz off {cfgRoot:0.0})" : "")
@@ -2792,6 +2803,23 @@ namespace CMM
                           + $"carrier, {CMMConfig.WorldEmitterOffAirHz:0} Hz at level "
                           + $"{CMMConfig.WorldEmitterOffAirLevel:0.00}.");
             }
+            // TURNED WHILE YOU LISTEN TO IT, like every other knob in radio.xml. GoOffAir samples
+            // these four and hands them to the native tone, which then holds them until the
+            // carrier ends -- so editing the level while a speaker sat on the carrier did nothing
+            // at all, and the only way to hear a change was to dial away and back.
+            //
+            // Rebuilding is the whole fix because SetEmitterTone takes a ramp: re-arming with the
+            // new numbers slides to them over the same fade the carrier arrived on, so a save
+            // lands as a level change rather than as a click.
+            else if (_deadAirToneUp && _offAirSlot >= 0
+                     && (_offAirLiveLevel != CMMConfig.WorldEmitterOffAirLevel
+                      || _offAirLiveHz    != CMMConfig.WorldEmitterOffAirHz
+                      || _offAirLiveHz2   != CMMConfig.WorldEmitterOffAirHz2
+                      || _offAirLiveHz3   != CMMConfig.WorldEmitterOffAirHz3
+                      || _offAirLiveVary  != CMMConfig.WorldEmitterOffAirVarianceHz))
+            {
+                GoOffAir(_deadAirSlot);
+            }
         }
 
         private static int _deadAirSlot = -1;
@@ -2814,6 +2842,19 @@ namespace CMM
             EntityPlayerLocal p = w?.GetPrimaryPlayer();
             if (w == null || p == null) { gain[0] = 0f; return; }
             FieldOcclusion.ComputeOcclusion(ListenerWorldPos(p), pts, 1, gain);
+            // ...AND THROUGH THE SAME RATE LIMITER THE STATIONS GET.
+            //
+            // Taking the field's answer raw is why the carrier VANISHED on a door. The readout
+            // has it: pt stepping 0.0 -> 34.7 -> 0.0 -> 34.4 -> 0.0 between consecutive seconds.
+            // Thirty-five blocks of added virtual distance is effectively muted, so the tone
+            // disappeared and came back on the spot, over and over.
+            //
+            // A station never shows that because PostProcessGains runs LimitOcclusionRise over
+            // it first: rises are rate-limited, falls pass straight through. The carrier and the
+            // sweep were publishing the same field's raw output with nothing smoothing it, which
+            // is half of "one model for everything" -- the model was shared, the treatment of its
+            // answer was not.
+            LimitOcclusionRise(pts, gain, 1);
         }
 
         private static readonly float[] _deadPts = new float[3];
