@@ -497,6 +497,12 @@ namespace CMM
         // (0 = snap at the latch). Measured latch-to-published-field is 33-79 ms, so nothing here
         // is latency; it is all the shape of the ramp.
         public static float  WorldEmitterDoorSwingFrac  = 1f;
+        // HINGED DOORS ONLY, and negative means "not set" so nothing else changes. Ordinary doors
+        // and swing gates sweep their opening clear far faster than a roller door climbs or a
+        // drawbridge falls, so they are the one class worth timing separately. See
+        // EmitterAcoustics.IsHingedDoor for how they are told apart -- the game's own placement
+        // helper, no name list.
+        public static float  WorldEmitterDoorSwingFracHinged = -1f;
         // HOW HARD A PARTLY OPEN FACE ATTENUATES: transmission = openFraction ^ this.
         //
         // The other two material knobs set what a SOLID block is worth, and a solid block is

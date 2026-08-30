@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 53;
+        internal const int CurrentSchema = 54;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -918,6 +918,14 @@ that with one global number.
 If a door seals too late, lower WorldEmitterDoorHalfArea instead. 0 here ignores the
 animation entirely and snaps at the latch, which is the only thing this is still good for."),
             F("WorldEmitterDoorSwingFrac",           "CMMConfig.WorldEmitterDoorSwingFrac",         1f),
+            Cmt(@"The same remap, for HINGED DOORS ONLY -- ordinary doors and swing gates. They
+sweep their opening clear in a fraction of a second, where a garage door climbs, a
+drawbridge falls and a catwalk trapdoor flips, so one number was never going to fit all
+four. Set it and it overrides DoorSwingFrac for hinged doors and touches nothing else;
+-1 (the default) means unset, and every door keeps following DoorSwingFrac exactly as
+before. Lower = the doorway opens and shuts acoustically EARLIER in the animation.
+Hot-reloads, and DoorTrace prints `hinged frac=` so you can see which rule a door took."),
+            F("WorldEmitterDoorSwingFracHinged",     "CMMConfig.WorldEmitterDoorSwingFracHinged",  -1f, since: 54),
             F("WorldEmitterDoorMaxLoss",             "CMMConfig.WorldEmitterDoorMaxLoss",           0.6f, since: 21),
 
             Gap(),

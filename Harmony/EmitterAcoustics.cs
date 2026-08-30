@@ -495,7 +495,7 @@ namespace CMM
                     // read/wait/solve separately. TREAT THIS KNOB AS UNCALIBRATED until it has been
                     // re-tuned against a VERIFIED number. Damage openness is a static
                     // hole and is not remapped -- there is no swing to be early for.
-                    float frac = CMMConfig.WorldEmitterDoorSwingFrac;
+                    float frac = SwingFracFor(b, bv.type);
                     float swing = da.Openness;
                     if (frac > 0.001f && frac < 0.999f) swing = Mathf.Clamp01(swing / frac);
                     else if (frac <= 0.001f) swing = da.Openness > 0.5f ? 1f : 0f;
@@ -1853,6 +1853,41 @@ namespace CMM
             return s;
         }
 
+        // A DOOR ON A HINGE, AS OPPOSED TO EVERYTHING ELSE THAT OPENS.
+        //
+        // IsSwingingLeaf deliberately casts wide -- doors, gates, drawbridges, garage and vault
+        // doors, catwalk trapdoors -- because for "has this cell's matter left the voxel" they
+        // all behave the same way. For TIMING they do not: a leaf on a hinge sweeps its opening
+        // clear in a fraction of a second, a roller door climbs, a drawbridge falls, and a
+        // trapdoor flips about a horizontal edge. One number cannot be right for all four.
+        //
+        // The game's own data separates them cleanly and without a name list: the hinged ones are
+        // the BlockPlacementDoor helper (Place="Door" -- 76 blocks, every ordinary door and swing
+        // gate), while garage and vault doors are BlockPoweredDoor, catwalk traps are
+        // BlockTrapDoor, and drawbridges have their own helper. Excluding the last three is what
+        // keeps a hinged-door knob off every other kind.
+        private static readonly Dictionary<int, bool> _hingedCache = new Dictionary<int, bool>();
+        internal static bool IsHingedDoor(Block b, int type)
+        {
+            if (_hingedCache.TryGetValue(type, out bool h)) return h;
+            BlockPlacement p = null;
+            try { p = b.BlockPlacementHelper; } catch { }
+            h = p is BlockPlacementDoor && !(p is BlockPlacementDrawBridge)
+                && !(b is BlockPoweredDoor) && !(b is BlockTrapDoor);
+            _hingedCache[type] = h;
+            return h;
+        }
+
+        // The swing remap in force for THIS door: the hinged-only override when it is set and the
+        // door is hinged, otherwise the shared one. Negative means "not set", so a fresh install
+        // and an untouched config behave exactly as before.
+        internal static float SwingFracFor(Block b, int type)
+        {
+            float hinged = CMMConfig.WorldEmitterDoorSwingFracHinged;
+            if (hinged >= 0f && IsHingedDoor(b, type)) return hinged;
+            return CMMConfig.WorldEmitterDoorSwingFrac;
+        }
+
         private static float SolidLoss(Block b, BlockValue bv)
         {
             float m = MaterialLoss(b.blockMaterial != null ? b.blockMaterial.SurfaceCategory : null);
@@ -2688,7 +2723,11 @@ namespace CMM
                             + " area=" + aOpen.ToString("0.00") + "/" + aDoor.ToString("0.00") + "m2"
                             + " travel=" + travel.ToString("0.000")
                             + " open=" + da.Openness.ToString("0.000")
-                            + " at " + parent + " cells=" + _doorCellsBlendedPrev);
+                            + " at " + parent + " cells=" + _doorCellsBlendedPrev
+                            + (dbb != null
+                                ? (IsHingedDoor(dbb, da.Type) ? " hinged frac=" : " NOT-hinged frac=")
+                                  + SwingFracFor(dbb, da.Type).ToString("0.00")
+                                : ""));
             }
             return swingNt < 1f;   // still animating until the swing clip completes
         }
