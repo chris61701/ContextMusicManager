@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 51;
+        internal const int CurrentSchema = 52;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -989,8 +989,8 @@ rather than a hi-fi in a wall. All hot-reload."),
             Cmt(@"How loud a world speaker's TUNING noise is, relative to the personal radio's.
 The receiver itself is tuned once and drives both; this is only the level of the hiss
 that comes out of a speaker in the world. 0 = silent, 1 = the same as the radio you carry."),
-            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            2.0f, since: 45,
-                                                                                                     changedIn: 50, was: 0.5f),
+            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            1.0f, since: 45,
+                                                                                                     changedIn: 52, was: new object[] { 0.5f, 2.0f }),
             Cmt(@"How long (ms) a world speaker waits for a track's measured loudness before it
 starts anyway. Shorter than the personal radio's LoudnessStartHoldMs on purpose: a
 speaker across the room is background, so waiting three seconds to avoid a small level
@@ -1017,8 +1017,10 @@ stopped broadcasting for the night, which is what actually happened. Hz then lev
 0 Hz disables it and the speaker simply goes quiet."),
             F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              440f,  since: 47,
                                                                                                      changedIn: 51, was: 1000f),
-            F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             0f,    since: 48),
-            F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             0f,    since: 48),
+            F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             147f,  since: 48,
+                                                                                                     changedIn: 52, was: 0f),
+            F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             880f,  since: 48,
+                                                                                                     changedIn: 52, was: 0f),
             F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.15f, since: 47,
                                                                                                      changedIn: 51, was: new object[] { 0.05f, 0.5f }),
             Cmt(@"How long (ms) the off-air carrier takes to fade in and out. A tone that snapped on

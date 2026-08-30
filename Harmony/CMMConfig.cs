@@ -750,7 +750,7 @@ namespace CMM
         // a world speaker's hiss lands where it was measured at -24.9 dBFS instead of -37.0, which
         // is only 5 dB above a station and is what "the static is inaudible at times" sounds like.
         // Native clamps this at 4.0.
-        public static float  WorldEmitterStaticTrim = 2.0f;
+        public static float  WorldEmitterStaticTrim = 1.0f;
         // How long a world speaker waits for a track's measured level before starting anyway.
         // Shorter than the personal radio's LoudnessStartHoldMs on purpose, and shortened again
         // once the receiver existed: a level jump UNDER the searching noise is most of the way to
@@ -793,8 +793,8 @@ namespace CMM
         // exposed in a way music never is, and doubly so at the resonance. 440 is below it, and is
         // what a station actually leaves on when it goes off the air.
         public static float  WorldEmitterOffAirHz     = 440f;
-        public static float  WorldEmitterOffAirHz2    = 0f;
-        public static float  WorldEmitterOffAirHz3    = 0f;
+        public static float  WorldEmitterOffAirHz2    = 147f;
+        public static float  WorldEmitterOffAirHz3    = 880f;
         // Sits alongside the tuning static, so it is scaled like it. 0.05 was a guess and it put
         // the carrier about 12 dB UNDER the hiss -- roughly -47 dBFS at two metres once distance
         // and WorldEmitterVolume were through with it, which is why it read as "the tone never

@@ -961,6 +961,20 @@ static void emitter_receiver_mono(int slot, float* lane, int n) {
             if (held > nLvl) nLvl = held;
         }
         float nAmp = nLvl * g_recvNoiseTrim * g_emRecvNoise * r->wCur * flut;
+        /* THE CARRIER TAKES THE LANE AS IT ARRIVES (v63). A residual bed that never quite goes is
+         * right for a STATION -- absolute zero reads as "sound effect ended" rather than
+         * "receiver" -- but a lane sitting on the off-air carrier has nothing else on it, so that
+         * bed is heard as hiss forming over the tone and staying there.
+         *
+         * Ducking by the carrier's own envelope keeps the sequence the design asks for: hiss while
+         * the set hunts, tone rising underneath, and then the hiss going as the tone takes over,
+         * with nothing left on top of it. Emitter-only -- the bus receiver's floor, and the pocket
+         * radio's hiss with it, is a separate number and is not touched here. */
+        if (g_emToneAmp[slot] > 0.0f) {
+            float duck = 1.0f - g_emToneAmp[slot];
+            if (duck < 0.0f) duck = 0.0f;
+            nAmp *= duck;
+        }
         if (nAmp > 1.6f) nAmp = 1.6f;
 
         r->rng = r->rng * 1664525u + 1013904223u;

@@ -1367,7 +1367,20 @@ namespace CMM
                 //
                 // It also left stations owning a slot with no speakers at all, which is the
                 // float.MaxValue in "steals the slot of 'Rust Belt Rock' (34028230000...0.0m)".
-                bool borrowed = _borrowSlot >= 0 && e.Pos.Equals(_borrowPos);
+                // ...AND ONLY UNTIL THE HANDOVER. Excluding the speaker for the whole borrow
+                // meant the "crossover" was nothing of the kind: the mirror faded to zero over a
+                // full second while the speaker was still in NO station's point set, and only once
+                // the borrow released did it rejoin and come back at full on the next tick.
+                //
+                // The tape says it exactly -- the station's own lane steady at -26 dBFS while the
+                // ear falls -40, -50, -58, -64, -89 and then jumps back to -30. That is a 180 ms
+                // hole with a step at each end, from a speaker being handed between two lanes that
+                // were never both carrying it. "The static fades out before the audio has faded
+                // in", measured.
+                //
+                // From the handover on it belongs to the station again, so the mirror can fade out
+                // from underneath a speaker that is already hearing the same audio on its own lane.
+                bool borrowed = _borrowSlot >= 0 && _borrowReleaseAt <= 0f && e.Pos.Equals(_borrowPos);
                 // STILL ON THE STATION IT IS LEAVING, and still one of its speakers, until the
                 // handover. This is the pocket radio's rule -- "the station being left keeps
                 // playing... it is not faded and it is not stopped, the receiver buries it" -- and
@@ -2498,13 +2511,33 @@ namespace CMM
         private static int    _offAirSlot = -1;
         private static readonly float[] _offAirHz  = new float[3];
         private static readonly float[] _offAirLvl = new float[3];
+        // Fundamental, body, edge. Fixed rather than configurable: the two extra partials exist to
+        // give the carrier a shape, and their BALANCE is what makes it read as one sound instead
+        // of three -- the knobs that matter are which frequencies, and how loud the whole thing is.
+        private static readonly float[] _offAirWeights = { 1.00f, 0.40f, 0.22f };
 
         private static void GoOffAir(int slot)
         {
             _offAirHz[0] = CMMConfig.WorldEmitterOffAirHz;
             _offAirHz[1] = CMMConfig.WorldEmitterOffAirHz2;
             _offAirHz[2] = CMMConfig.WorldEmitterOffAirHz3;
-            for (int i = 0; i < 3; i++) _offAirLvl[i] = CMMConfig.WorldEmitterOffAirLevel;
+            // WEIGHTED, AND THE SET NORMALISED TO THE FUNDAMENTAL'S OLD LOUDNESS.
+            //
+            // Every partial used to be handed the SAME level, so a carrier with three of them was
+            // three tones of equal weight -- a chord, not a carrier -- and getting on for twice as
+            // loud as the one tone OffAirLevel was tuned against by ear. A real carrier is its
+            // fundamental with a little body under it and a little edge above; the extras are
+            // there to stop it sounding like a test oscillator, not to be heard as notes.
+            //
+            // Normalising by the weights in use means OffAirLevel keeps meaning what it meant:
+            // turning a partial off changes the TIMBRE and leaves the loudness alone.
+            float[] w = _offAirWeights;
+            float wsum = 0f;
+            for (int i = 0; i < 3; i++) if (_offAirHz[i] > 0f) wsum += w[i];
+            if (wsum < 0.0001f) wsum = 1f;
+            for (int i = 0; i < 3; i++)
+                _offAirLvl[i] = _offAirHz[i] > 0f
+                    ? CMMConfig.WorldEmitterOffAirLevel * (w[i] / wsum) : 0f;
             CmmMixer.Instance?.SetEmitterTone(slot, _offAirHz, _offAirLvl, 3,
                                               CMMConfig.WorldEmitterOffAirFadeMs / 1000f);
             _offAirSlot = slot;
@@ -3114,8 +3147,20 @@ namespace CMM
                     // through the mirror all along, so making it serve the silence again would be
                     // a second tune-in for a station it is already listening to.
                     CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, ArriveRamp);
+                    // BOTH SIDES OF THE CROSSOVER, OVER THE SAME SPAN. This marked the speaker
+                    // ALREADY ARRIVED so it would not serve the mandatory silence twice -- right
+                    // in intent, wrong in effect, because it published at full the moment it
+                    // rejoined and the rejoin did not happen until the borrow ENDED. One side
+                    // faded out, nothing faded in, and the speaker came back a second later at
+                    // full: a hole with a step at each end.
+                    //
+                    // The silence is still not served twice: the hold is subtracted, so the fade
+                    // starts NOW and runs for exactly as long as the mirror takes to go. Both
+                    // lanes carry the same decode, sample-aligned by construction, and both fades
+                    // are linear in LEVEL (see FadeExtra) -- so the sum is flat across the whole
+                    // handover and the audio simply moves from one lane to the other.
                     _joinedAt[_borrowPos] =
-                        CmmClock.Now - (CMMConfig.WorldEmitterSweepMs / 1000f + ArriveRamp);
+                        CmmClock.Now - (CMMConfig.WorldEmitterSweepMs / 1000f);
                     // AN ARRIVAL, NOT A RELEASE. The station this speaker is joining is already
                     // playing, so what happens at the end of the sweep is a station being revealed
                     // from under the noise — the same event StartStation's lock ramp covers, and
