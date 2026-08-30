@@ -1300,7 +1300,25 @@ namespace CMM
                 // station whose folder is empty is very much IN the catalog -- it resolves, it just
                 // has nothing to play. It therefore never took this branch, which is why the one
                 // station built to be broken was the one that never got the off-air tone.
-                if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st) || !st.Ready)
+                // DEAD AIR IS "THIS STATION CANNOT PRODUCE SOUND", and !Ready is only one of the
+                // three ways that happens. The third is the one that actually occurs:
+                //
+                //     WRN Station 'Broken FM': no playable tracks (1 file(s) in the pool, none
+                //         decodable).
+                //
+                // One file, so Order.Length is 1, so Ready is TRUE -- and the catalog has already
+                // walked the whole pool and found every track dead. It says so in LastMiss.
+                //
+                // Until now the carrier depended entirely on the tune machine's give-up, which
+                // only exists if the machine STARTED. Turning a silenced radio straight onto a
+                // dead station declines at "the speaker was on no station", so the machine never
+                // ran, so the give-up never fired, so no tone was possible on the one gesture
+                // most likely to want it. Reading the catalog's own verdict here makes the carrier
+                // independent of how the speaker arrived.
+                RadioStationCatalog.ByName.TryGetValue(pinned, out Station st);
+                bool poolDead = st != null && st.VoiceId == 0 && st.OnAir == null
+                             && st.LastMiss == ResolveMiss.NoUsableTracks;
+                if (st == null || !st.Ready || poolDead)
                 {
                     // SILENCED, OR PINNED TO A STATION THAT NO LONGER EXISTS. The speaker is on
                     // nothing, and _posStation must say so -- it is only ever WRITTEN below, so
