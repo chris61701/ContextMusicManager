@@ -1000,6 +1000,11 @@ error is the wrong trade. 0 starts immediately and lets the level settle as it p
 comes out from under the noise. A station already playing nearby opens in milliseconds,
 and without this, retuning to one produced no sweep at all. The programme still starts
 on time underneath; this only sets when it is revealed. 0 reveals it as soon as it opens."),
+            Cmt(@"THE MANDATORY SILENCE BEFORE ANY MUSIC, in ms. After a retune the speaker's
+programme is held completely inaudible for this long, and only then does it fade in.
+Without it the receiver's own 5 dB of burying was all that held a station back, so it was
+simply THERE the instant it reached the lane. Static starts at the press; music starts on
+this clock. 0 = audible as soon as it arrives."),
             I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               250, since: 45),
             Cmt(@"How long (ms) the station you are LEAVING takes to sink under the static. Not a
 fade-out: it keeps playing at full level and the receiver buries it, which is the only

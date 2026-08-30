@@ -763,9 +763,16 @@ namespace CMM
         // milliseconds, and without this a retune to one produced no sweep at all, which is not
         // how a set behaves: the dial passes through the same noise whatever you are tuning to.
         // The programme still STARTS on time underneath; this is only when it is revealed.
-        // SUPERSEDED — the emitter tuning now reads the pocket radio's RadioTune* knobs so the
-        // two are one instrument rather than a near-miss of each other. Kept so existing config
-        // files still parse; nothing reads them.
+        // THE MANDATORY SILENCE BEFORE ANY MUSIC. After a retune, the speaker's programme is held
+        // completely inaudible for this long, and only then does it fade in.
+        //
+        // Nothing enforced this before, and burying was doing the job instead -- badly. The
+        // receiver attenuates a programme by RadioRecvFloorDb, which is FIVE decibels, so the
+        // instant a station reached the lane it was there, five decibels down, under the hiss.
+        // "Music comes in too quickly" is that: not a fast fade, no delay at all. Static starts at
+        // the press; music starts on a clock.
+        //
+        // 0 restores the old behaviour (audible as soon as it is on the lane).
         public static int    WorldEmitterSweepMs = 250;
         // How long (ms) the station you are LEAVING takes to sink under the static. The pocket
         // radio's RadioTuneLeaveMs, for world speakers. It is NOT a fade-out: the station goes on

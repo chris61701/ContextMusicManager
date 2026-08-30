@@ -1146,7 +1146,8 @@ namespace CMM
             // which is why a retune arrived at full level -- "music comes in hot (not from 0)".
             // The station it joins is very often already at full for other speakers, so there is
             // no voice fade to ride either; the point itself is the only thing that can ramp.
-            float jdur = ArriveRamp;
+            float jhold = CMMConfig.WorldEmitterSweepMs / 1000f;
+            float jdur  = ArriveRamp;
             if (jdur > 0f && _joinedAt.Count > 0)
             {
                 for (int i = 0; i < count; i++)
@@ -1154,6 +1155,10 @@ namespace CMM
                     Vector3i key = SlotKey(pts, i);
                     if (!_joinedAt.TryGetValue(key, out float j0)) continue;
                     float jage = now - j0;
+                    // SILENT FIRST, THEN FADE. Held fully muted for the hold, so the station is
+                    // genuinely absent rather than five decibels down underneath the hiss.
+                    if (jage < jhold) { gains[i] += range; continue; }
+                    jage -= jhold;
                     if (jage >= jdur) continue;
                     gains[i] += FadeExtra(1f - jage / jdur, range);
                 }
@@ -2934,7 +2939,7 @@ namespace CMM
             // speaker back to. Handing it back to a station with no voice is the cut this exists to
             // remove — the speaker would rejoin something silent and wait out the decode in the
             // clear. Capped, because a station that never opens must not hold a slot for ever.
-            _borrowUntil = now + LeaveRamp + MinStatic;
+            _borrowUntil = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f + MinStatic;
             _borrowGiveUp = now + BorrowGiveUp;
             _borrowReleaseAt = 0f;
             // One point, clear line. The occlusion the station computes for this speaker belongs to
@@ -2977,7 +2982,10 @@ namespace CMM
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 1f, 0f);          // locked on what it has
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, LeaveRamp);   // ...and now leaving it
                 _borrowMirrorTo = target.Slot;
-                _borrowSwapAt = now + LeaveRamp;
+                // The mirror is what puts a programme on this lane, so it waits out the same
+                // silence. Bringing it in at the end of the leave is what made a borrow's station
+                // audible the instant the dial stopped moving.
+                _borrowSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
             }
             else
             {
@@ -2996,7 +3004,10 @@ namespace CMM
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 1f, 0f);          // nothing on it yet
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);  // ...and now searching
                 _borrowMirrorTo = target.Slot;
-                _borrowSwapAt = now + LeaveRamp;
+                // The mirror is what puts a programme on this lane, so it waits out the same
+                // silence. Bringing it in at the end of the leave is what made a borrow's station
+                // audible the instant the dial stopped moving.
+                _borrowSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
             }
             _slotArmedAt[slot] = now;
             _slotLockAt[slot] = 0f;   // a new sweep cancels whatever this slot was still owed
