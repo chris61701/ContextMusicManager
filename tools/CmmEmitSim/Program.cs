@@ -49,9 +49,11 @@ namespace CMM
             Console.WriteLine();
 
             var names = new string[] { "turn-on", "retune-shared", "retune-cold",
-                                       "rapid-switch", "off-mid-tune", "broken-station" };
+                                       "rapid-switch", "off-mid-tune", "broken-station",
+                                       "distance-tone", "distance-music" };
             var runs  = new Action[] { Turn_On, Retune_To_Live_Station, Retune_To_Cold_Station,
-                                       Rapid_Switching, Off_Mid_Tune, Broken_Station };
+                                       Rapid_Switching, Off_Mid_Tune, Broken_Station,
+                                       Distance_Tone, Distance_Music };
 
             for (int i = 0; i < names.Length; i++)
             {
@@ -78,7 +80,8 @@ namespace CMM
         }
 
         static readonly string[] Scenarios =
-            { "turn-on", "retune-shared", "retune-cold", "rapid-switch", "off-mid-tune", "broken-station" };
+            { "turn-on", "retune-shared", "retune-cold", "rapid-switch", "off-mid-tune",
+              "broken-station", "distance-tone", "distance-music" };
 
         // The parent: run each scenario in its own process, relay its output, add up the verdicts.
         static int RunEach(string[] args)
@@ -464,6 +467,65 @@ namespace CMM
 
             float late = _sim.MeanDb(press + 9f, press + 11f);
             Check(sc, late > Floor, "the carrier is still audible once settled", late.ToString("0.0") + " dBFS");
+        }
+
+        // -- does it get quieter as you walk away? ----------------------------------------------
+        //
+        // Reported from the game: an off-air TONE plays at full volume anywhere inside
+        // WorldEmitterRange, while occlusion clearly works on it. Distance and occlusion are the
+        // same computation in the spatialiser (occlusion is added VIRTUAL distance), so one
+        // working and the other not is a contradiction worth measuring rather than reasoning
+        // about. `distance-music` is the control: the identical walk with a station playing.
+        static void MoveListener(float z)
+        {
+            var w = GameManager.Instance.World;
+            w.Player.position = new Vector3(10.5f, 64.5f, z);
+            w.Player.cameraTransform.position = new Vector3(10.5f, 65.2f, z);
+        }
+
+        static float Walk(string sc, string station, bool wantTone)
+        {
+            Place(A);                                  // speaker at (10, 64, 10)
+            MoveListener(12.5f);                       // ~2.5 blocks away
+            Dial(A, station);
+            if (!WaitAudible(14f)) { Fail(sc, station + " never became audible"); return 0f; }
+            _sim.Run(wantTone ? 8f : 2f);              // the carrier takes its hunt first
+
+            if (wantTone)
+            {
+                float tone = -1f;
+                for (int i = _sim.Tape.Count - 60; i < _sim.Tape.Count; i++)
+                    for (int k = 0; k < CmmMixer.MaxEmitterSlots; k++)
+                        if (i >= 0 && _sim.Tape[i].Tone[k] > tone) tone = _sim.Tape[i].Tone[k];
+                if (tone < 0.5f) { Fail(sc, "the carrier never came up (tone " + tone.ToString("0.00") + ")"); return 0f; }
+            }
+
+            float near = _sim.MeanDb(_sim.Now - 1.5f, _sim.Now);
+            _sim.Note("walk to 40 blocks");
+            MoveListener(50.5f);                       // ~40 blocks, still inside Range (60)
+            _sim.Run(4f);                              // let the position glide settle
+            float far = _sim.MeanDb(_sim.Now - 1.5f, _sim.Now);
+
+            Console.WriteLine("   near " + near.ToString("0.0") + " dBFS, far "
+                              + far.ToString("0.0") + " dBFS, drop "
+                              + (near - far).ToString("0.0") + " dB");
+            return near - far;
+        }
+
+        static void Distance_Tone()
+        {
+            const string sc = "distance-tone";
+            float drop = Walk(sc, "Broken FM", true);
+            Check(sc, drop > 12f, "the off-air tone gets quieter with distance",
+                  drop.ToString("0.0") + " dB over 2.5 -> 40 blocks, want > 12");
+        }
+
+        static void Distance_Music()
+        {
+            const string sc = "distance-music";
+            float drop = Walk(sc, "Alpha FM", false);
+            Check(sc, drop > 12f, "a station gets quieter with distance",
+                  drop.ToString("0.0") + " dB over 2.5 -> 40 blocks, want > 12");
         }
 
         // -- the tape, for a human --------------------------------------------------------------

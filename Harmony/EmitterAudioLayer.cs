@@ -362,6 +362,21 @@ namespace CMM
                 // state, smoothing, both reverbs re-inited inside the audio callback). Straight
                 // through the sweep the player is listening to.
                 if (_borrowSlot >= 0) return true;
+                // AND SO DOES THE CARRIER, for exactly the reason above and one more.
+                //
+                // A speaker sitting on the off-air tone has no station voice by definition, so
+                // this returned false and Tick skipped PushListener -- which meant the native
+                // mixer kept whatever listener position it held when the last voice died. The
+                // tone then played at a FIXED distance for as long as it lasted: walk away and it
+                // does not get quieter.
+                //
+                // Occlusion went on working the whole time, which is what made it read as "the
+                // distance factor is broken" rather than "the listener is stale": occlusion is
+                // computed on THIS side from the live player position and published as virtual
+                // distance, while the real distance is computed natively from a listener nobody
+                // was updating. Measured in CmmEmitSim: a station drops 25.3 dB walking from 2.5
+                // to 40 blocks, the carrier dropped 0.0.
+                if (_deadAirSlot >= 0) return true;
                 for (int i = 0; i < _stations.Count; i++) if (_stations[i].VoiceId != 0) return true;
                 return false;
             }
