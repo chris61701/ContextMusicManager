@@ -165,7 +165,12 @@ static float joinExtra(float ageMs) {
 static void mix_boot(void) {
     int err = 0;
     memset(&g_fakeDev, 0, sizeof(g_fakeDev));
-    cmm_mix_start_ex(RATE, CH, RATE / 5, RATE * 2, 1, &err);
+    /* AS SHALLOW AS THE MIXER ALLOWS. The producer fills ahead and the callback drains
+     * behind, so ring depth is LATENCY between a control call and the audio it shapes. At
+     * 200 ms tight / 2 s max the callback was rendering audio produced up to two seconds
+     * before the call that set it up -- which is why the static appeared to peak at the end
+     * of the window rather than during the leave. One block keeps the two within ~10 ms. */
+    cmm_mix_start_ex(RATE, CH, BLK, BLK * 2, 1, &err);
     mix_sleep_ms(60);
     if (!g_out) { mix_lock(&g_lock); g_deviceWanted = 1; mix_unlock(&g_lock); }
     for (int i = 0; i < 200 && !g_out; i++) mix_sleep_ms(5);
@@ -183,6 +188,12 @@ static void mix_reset(void) {
         cmm_mix_set_slot_points(s, NULL, NULL, NULL, 0);
     }
     mix_sleep_ms(40);
+    /* AND RE-ACQUIRE THE DEVICE. stop_all_now drops the voice count to zero and the idle
+     * teardown then closes the output, leaving the stand-in device pointing at freed
+     * memory -- which renders as silence. The same lifetime the mod itself got wrong twice. */
+    mix_lock(&g_lock); g_deviceWanted = 1; g_closeWhenIdle = 0; mix_unlock(&g_lock);
+    for (int i = 0; i < 200 && !g_out; i++) mix_sleep_ms(5);
+    g_fakeDev.pUserData = g_out;
 }
 
 /* ── The two sequences ─────────────────────────────────────────────────────────────────
@@ -240,6 +251,7 @@ static void run_emitter(track* t, int programme, int arm) {
         gains[0] = joinAtMs >= 0 ? joinExtra((float)(ms - joinAtMs)) : 0.0f;
         cmm_out_set_emitter_spatial(g_out, 0, lis, rgt, pts, gains, flags, 1,
                                     MINDIST, RANGE, FALLOFF, 0.9f, 0.8f);
+        mix_sleep_ms(2);                 /* let the producer top the shallow ring back up */
         memset(g_outBuf, 0, sizeof(g_outBuf));
         cmm_out_data_callback(&g_fakeDev, g_outBuf, NULL, BLK);
         tr_push(t, g_outBuf, BLK);
@@ -258,8 +270,14 @@ static void run_radio(track* t, int programme, int arm) {
     cmm_mix_set_voice_radio(vOld, 1);
     if (arm) cmm_mix_set_receiver_signal(1.0f, 0.0f, 0.85f, 1.0f, 1, 1.0f);
 
-    static float cap[BLK * CH];
-    for (int i = 0; i < 60; i++) cmm_mix_pump_capture(cap, BLK);
+    /* THROUGH THE SAME DEVICE AS THE EMITTER. pump_capture and the device callback are
+     * alternative drains of one bus, and a device is open here -- so pumping returned
+     * silence. The music bus feeds cmm_out too, so one path measures both instruments and
+     * they are directly comparable. */
+    for (int i = 0; i < 60; i++) {
+        memset(g_outBuf, 0, sizeof(g_outBuf));
+        cmm_out_data_callback(&g_fakeDev, g_outBuf, NULL, BLK);
+    }
 
     if (arm) cmm_mix_set_receiver_signal(0.0f, 1000.0f / LEAVE_MS, 0.85f, 1.0f, 1, 1.0f);
 
@@ -274,9 +292,10 @@ static void run_radio(track* t, int programme, int arm) {
             cmm_mix_set_voice_radio(vNew, 1);
             if (arm) cmm_mix_set_receiver_signal(1.0f, 1000.0f / ARRIVE_MS, 0.85f, 1.0f, 1, 1.0f);
         }
-        int got = cmm_mix_pump_capture(cap, BLK);
-        if (got < BLK) memset(cap + got * CH, 0, (BLK - got) * CH * sizeof(float));
-        tr_push(t, cap, BLK);
+        mix_sleep_ms(2);
+        memset(g_outBuf, 0, sizeof(g_outBuf));
+        cmm_out_data_callback(&g_fakeDev, g_outBuf, NULL, BLK);
+        tr_push(t, g_outBuf, BLK);
     }
 }
 
@@ -300,29 +319,88 @@ static void csv(const char* who, track* stat, track* mus, track* both) {
                db(stat->rms[i]), db(mus->rms[i]), db(both->rms[i]));
 }
 
+/* -- ONE PROCESS PER PASS ------------------------------------------------------------
+ * Six passes through one mixer contaminate each other: cmm_mix_start_ex is not re-entrant,
+ * stop_all_now triggers an idle teardown that reallocates the output, and the receiver, the
+ * tone envelopes and the ring depth all carry state across. Running the same numbers twice
+ * gave a 650 ms swing in the static onset -- larger than most of what we are measuring.
+ *
+ * So the parent re-executes itself once per pass and collates. Each child runs exactly one
+ * sequence in a fresh address space, prints one machine-readable line, and exits. Slower,
+ * and deterministic, which is the whole reason to have a rig instead of an opinion. */
+static void emit_result(track* t) {
+    int pk; double peak = t_peak(t, &pk);
+    printf("RESULT %d %.1f %d %d %d\n",
+           t_onset(t, -60.0), db(peak), pk, t_end(t, -45.0), t_settle(t, 3.0));
+}
+
+typedef struct { int onset; double peakDb; int peakMs; int endMs; int settleMs; } passres;
+
+static passres run_child(const char* self, const char* pass) {
+    passres r; char cmd[1024], line[512]; FILE* f;
+    r.onset = -1; r.peakDb = -999.0; r.peakMs = 0; r.endMs = -1; r.settleMs = -1;
+    snprintf(cmd, sizeof(cmd), "\"%s\" --pass %s", self, pass);
+    f = _popen(cmd, "r");
+    if (!f) return r;
+    while (fgets(line, sizeof(line), f))
+        if (strncmp(line, "RESULT ", 7) == 0)
+            sscanf(line + 7, "%d %lf %d %d %d",
+                   &r.onset, &r.peakDb, &r.peakMs, &r.endMs, &r.settleMs);
+    _pclose(f);
+    return r;
+}
+
 int main(int argc, char** argv) {
-    int wantCsv = argc > 1 && strcmp(argv[1], "--csv") == 0;
-    static track eS, eM, eB, rS, rM, rB;
     setvbuf(stdout, NULL, _IONBF, 0);
-    mix_boot();
 
-    run_emitter(&eS, 0, 1);  run_emitter(&eM, 1, 0);  run_emitter(&eB, 1, 1);
-    run_radio  (&rS, 0, 1);  run_radio  (&rM, 1, 0);  run_radio  (&rB, 1, 1);
+    /* child: one pass, one line */
+    if (argc >= 3 && strcmp(argv[1], "--pass") == 0) {
+        static track t;
+        const char* w = argv[2];
+        mix_boot();
+        if      (!strcmp(w, "es")) run_emitter(&t, 0, 1);
+        else if (!strcmp(w, "em")) run_emitter(&t, 1, 0);
+        else if (!strcmp(w, "eb")) run_emitter(&t, 1, 1);
+        else if (!strcmp(w, "rs")) run_radio  (&t, 0, 1);
+        else if (!strcmp(w, "rm")) run_radio  (&t, 1, 0);
+        else if (!strcmp(w, "rb")) run_radio  (&t, 1, 1);
+        else return 2;
+        emit_result(&t);
+        return 0;
+    }
 
-    printf("CmmEmitLab — one retune, both instruments, shipped defaults\n");
+    /* parent: six children, one table */
+    {
+    passres eS = run_child(argv[0], "es"), eM = run_child(argv[0], "em"),
+            eB = run_child(argv[0], "eb"), rS = run_child(argv[0], "rs"),
+            rM = run_child(argv[0], "rm"), rB = run_child(argv[0], "rb");
+
+    printf("CmmEmitLab - one retune, both instruments, shipped defaults\n");
     printf("  leave %.0f  hold %.0f  minStatic %.0f  arrive %.0f ms   listener %.0f blocks\n",
            LEAVE_MS, HOLD_MS, MINSTAT_MS, ARRIVE_MS, LISTEN_D);
-    report("WORLD SPEAKER", &eS, &eM, &eB);
-    report("POCKET RADIO",  &rS, &rM, &rB);
+
+    printf("\nWORLD SPEAKER\n");
+    printf("  static  onset %5d ms  peak %7.1f dBFS at %4d ms  clears    %5d ms\n",
+           eS.onset, eS.peakDb, eS.peakMs, eS.endMs);
+    printf("  music   onset %5d ms  peak %7.1f dBFS at %4d ms  within3dB %5d ms\n",
+           eM.onset, eM.peakDb, eM.peakMs, eM.settleMs);
+    printf("  static %+.1f dB over the music it covers;  composite peak %.1f dBFS\n",
+           eS.peakDb - eM.peakDb, eB.peakDb);
+
+    printf("\nPOCKET RADIO\n");
+    printf("  static  onset %5d ms  peak %7.1f dBFS at %4d ms  clears    %5d ms\n",
+           rS.onset, rS.peakDb, rS.peakMs, rS.endMs);
+    printf("  music   onset %5d ms  peak %7.1f dBFS at %4d ms  within3dB %5d ms\n",
+           rM.onset, rM.peakDb, rM.peakMs, rM.settleMs);
+    printf("  static %+.1f dB over the music it covers;  composite peak %.1f dBFS\n",
+           rS.peakDb - rM.peakDb, rB.peakDb);
 
     printf("\nDIFFERENCE (emitter - radio)\n");
-    printf("  static onset  %+5d ms\n", t_onset(&eS, -60.0) - t_onset(&rS, -60.0));
-    printf("  music  onset  %+5d ms\n", t_onset(&eM, -60.0) - t_onset(&rM, -60.0));
-    printf("  music  settle %+5d ms\n", t_settle(&eM, 3.0)  - t_settle(&rM, 3.0));
+    printf("  static onset  %+5d ms\n", eS.onset - rS.onset);
+    printf("  music  onset  %+5d ms\n", eM.onset - rM.onset);
+    printf("  music  settle %+5d ms\n", eM.settleMs - rM.settleMs);
     printf("  static/music  %+5.1f dB\n",
-           (db(t_peak(&eS, NULL)) - db(t_peak(&eM, NULL))) -
-           (db(t_peak(&rS, NULL)) - db(t_peak(&rM, NULL))));
-
-    if (wantCsv) { csv("WORLD SPEAKER", &eS, &eM, &eB); csv("POCKET RADIO", &rS, &rM, &rB); }
+           (eS.peakDb - eM.peakDb) - (rS.peakDb - rM.peakDb));
+    }
     return 0;
 }
