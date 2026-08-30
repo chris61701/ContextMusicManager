@@ -1320,7 +1320,7 @@ namespace CMM
                     // the folder is gone or empty, "Broken FM". That speaker is tuned to a dead
                     // frequency, which is precisely what the carrier is for, and clearing it here
                     // was why the tone never played for the one station built to be broken.
-                    if (string.IsNullOrEmpty(pinned)) EndDeadAir();
+                    if (string.IsNullOrEmpty(pinned)) EndDeadAir("the speaker was switched off");
                     else if (!_deadAirOn || !_deadAirPos.Equals(e.Pos)) GoDeadAir(e.Pos, -1);
                     continue;
                 }
@@ -2415,6 +2415,10 @@ namespace CMM
         private static void GoDeadAir(Vector3i pos, int preferredSlot)
         {
             _deadAirPos = pos; _deadAirOn = true;
+            // ...AND THE GRACE STARTS NOW. Left over from a previous episode, `now - stale > 2f`
+            // is true on the very first tick, so the carrier was ended by a two-second deadline
+            // that had already expired before it was raised.
+            _deadAirMissingAt = 0f;
             if (_deadAirSlot < 0)
             {
                 _deadAirSlot = preferredSlot >= CmmMixer.StationSlots ? preferredSlot : FreeTuneSlot();
@@ -2433,14 +2437,15 @@ namespace CMM
 
         // GIVE THE CARRIER'S LANE BACK. Separate from ClearOffAir because that one is about the
         // TONE and this one is about the LANE, and conflating them is what stranded the index.
-        private static void EndDeadAir()
+        private static void EndDeadAir(string why)
         {
             _deadAirOn = false;
             _deadAirMissingAt = 0f;
             if (_deadAirSlot < 0) return;
+            CMMConfig.D($"[CMM] Dead air ending on slot {_deadAirSlot}: {why}.");
             ClearOffAir(_deadAirSlot);
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
-            CMMConfig.D($"[CMM] Dead air on slot {_deadAirSlot} ends.");
+
             _deadAirSlot = -1;
         }
 
@@ -2462,7 +2467,7 @@ namespace CMM
             {
                 // ...unless it stays missing, which means the speaker is gone for good.
                 if (_deadAirMissingAt <= 0f) _deadAirMissingAt = CmmClock.Now;
-                else if (CmmClock.Now - _deadAirMissingAt > 2f) EndDeadAir();
+                else if (CmmClock.Now - _deadAirMissingAt > 2f) EndDeadAir("its speaker left the registry");
                 return;
             }
             _deadAirMissingAt = 0f;
@@ -2502,7 +2507,7 @@ namespace CMM
             // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
             // start -- left the tone sounding under the new station.
             if (_handledTuneAt != EmitterTuner.LastTuneAt
-                && now - EmitterTuner.LastTuneAt < RetuneWindow) EndDeadAir();
+                && now - EmitterTuner.LastTuneAt < RetuneWindow) EndDeadAir("the dial moved");
 
             // AFTER that clear, never before it. Landing on a dead station IS a dial turn, so
             // running this first meant the carrier was raised and then wiped in the same tick by

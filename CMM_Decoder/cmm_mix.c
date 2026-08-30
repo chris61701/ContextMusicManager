@@ -1704,7 +1704,13 @@ static void pump_body(void) {
                  * idle station's ring keeps its onset free of a cushion of zeros. */
                 if (!emActive[s] && !g_emRx[s].armed && !em_tone_live(s)) continue;
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
-                if (em_tone_live(s)) {
+                /* AN ARMED RECEIVER OUTRANKS THE CARRIER. The tone REPLACES the lane outright,
+                 * so a lane still fading a carrier out -- or one whose fade froze because the
+                 * producer skipped this block -- rendered the tone instead of the search, and a
+                 * borrow that later took that lane got no static at all. Reported as the hiss
+                 * being permanently quiet after visiting the broken station, which is the one
+                 * thing that raises a carrier. Somebody tuning outranks nobody listening. */
+                if (em_tone_live(s) && !g_emRx[s].armed) {
                     /* OFF AIR. Replaces the lane outright -- programme and hiss both -- because it
                      * is not a layer over a station, it is what is there instead of one. */
                     int k;
