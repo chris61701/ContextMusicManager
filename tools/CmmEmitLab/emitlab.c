@@ -262,9 +262,10 @@ static void run_emitter(track* t, int programme, int arm) {
         /* ...and the mandatory silence is on the VOICE: muted when it lands, held, then up
          * over the arrive. Mirrors MaintainTune's phase 2. */
         if (vNew != 0 && joinAtMs >= 0) {
+            /* A FLOOR from the handover, not an addition after the voice lands. */
             float age = (float)(ms - joinAtMs);
-            if (age < HOLD_MS)                       cmm_mix_set_voice_gain(vNew, 0.0f, 0.0f);
-            else if (age < HOLD_MS + MS_PER_BLK)     cmm_mix_set_voice_gain(vNew, 1.0f, ARRIVE_MS / 1000.0f);
+            if (age < HOLD_MS)                   cmm_mix_set_voice_gain(vNew, 0.0f, 0.0f);
+            else if (age < HOLD_MS + MS_PER_BLK) cmm_mix_set_voice_gain(vNew, 1.0f, ARRIVE_MS / 1000.0f);
         }
         cmm_out_set_emitter_spatial(g_out, 0, lis, rgt, pts, gains, flags, 1,
                                     MINDIST, RANGE, FALLOFF, 0.9f, 0.8f);

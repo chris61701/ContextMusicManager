@@ -2695,7 +2695,14 @@ namespace CMM
                     return;
                 }
                 _tunePhase = 2;
-                _tuneMusicAt = 0f;
+                // THE FLOOR IS ANCHORED HERE, at the handover -- not at whenever the voice
+                // happens to land. Anchored at the landing it was an ADDITION: the open and the
+                // level hold ran in dead air, and then a further quarter second was tacked on
+                // afterwards. As a floor it costs nothing whenever the station takes longer than
+                // this to arrive, which is the common case, and only bites on a station that
+                // opens instantly -- which is exactly when a dial needs to be stopped from
+                // arriving too fast.
+                _tuneMusicAt = now;
                 CMMConfig.D($"[CMM] Tune: handover on slot {_tuneSlot} — '{_tuneFrom}' retires, "
                           + $"'{_tuneTo}' takes the lane under the noise.");
             }
@@ -2721,13 +2728,12 @@ namespace CMM
                     // THE MANDATORY SILENCE, ON THE VOICE. Muted the instant it lands, held, then
                     // up over the arrive -- so the static is untouched by it and the music
                     // genuinely is not there, rather than five decibels down under the hiss.
-                    if (_tuneMusicAt <= 0f)
+                    // Muted the instant it lands, whenever that is.
+                    if (now - _tuneMusicAt < CMMConfig.WorldEmitterSweepMs / 1000f)
                     {
-                        _tuneMusicAt = now;
                         CmmMixer.Instance?.SetVoiceTrackGain(to.VoiceId, 0f, 0f);
                         return;
                     }
-                    if (now - _tuneMusicAt < CMMConfig.WorldEmitterSweepMs / 1000f) return;
                     CmmMixer.Instance?.SetVoiceTrackGain(
                         to.VoiceId, to.VoiceGainApplied > 0f ? to.VoiceGainApplied : 1f, ArriveRamp);
                     CMMConfig.D($"[CMM] Tune: '{_tuneTo}' rises on slot {_tuneSlot} after "

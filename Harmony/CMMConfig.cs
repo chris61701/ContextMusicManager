@@ -763,8 +763,10 @@ namespace CMM
         // milliseconds, and without this a retune to one produced no sweep at all, which is not
         // how a set behaves: the dial passes through the same noise whatever you are tuning to.
         // The programme still STARTS on time underneath; this is only when it is revealed.
-        // THE MANDATORY SILENCE BEFORE ANY MUSIC. After a retune, the speaker's programme is held
-        // completely inaudible for this long, and only then does it fade in.
+        // THE MANDATORY SILENCE BEFORE ANY MUSIC, as a FLOOR measured from the handover -- not
+        // as an addition after the voice lands. A station that takes longer than this to open
+        // pays nothing extra; one that opens instantly is still held, which is the only case
+        // that needs holding.
         //
         // Nothing enforced this before, and burying was doing the job instead -- badly. The
         // receiver attenuates a programme by RadioRecvFloorDb, which is FIVE decibels, so the
