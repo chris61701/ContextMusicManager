@@ -52,21 +52,27 @@ namespace CMM
         // THE FOUR TIMINGS OF A RETUNE, all in radio.xml because this is tuned by ear and a
         // rebuild per adjustment is the wrong loop:
         //
-        //   WorldEmitterSearchMs     how fast the station drops away into static
+        //   (all four now read the POCKET RADIO's RadioTune* knobs -- see LeaveRamp below.
+        //    The WorldEmitter* entries remain in the schema so no existing file breaks, but
+        //    nothing reads them: one instrument, one set of timings.)
+        //   RadioTuneLeaveMs         how fast the station drops away into static
         //   WorldEmitterLevelHoldMs  the wait for the new track's measured level (it starts after)
-        //   WorldEmitterSweepMs      the shortest the dial can travel before anything is revealed
-        //   WorldEmitterArriveMs     how long the station takes to come out from under the noise
+        //   RadioTuneMinStaticMs     the shortest the dial can travel before anything is revealed
+        //   RadioTuneArriveMs        how long the station takes to come out from under the noise
         //
         // The last one is the longest and was the one hardcoded, which is why "where do I change
         // the delay" kept landing on knobs that were not the one being heard.
-        private static float SearchRamp => CMMConfig.WorldEmitterSearchMs / 1000f;
+        // A search arms from wherever the signal is, over the same span the radio's dial takes to
+        // leave a station. The emitter used to snap there in 120 ms, which is why a borrow sounded
+        // abrupt next to the pocket radio's unhurried slide off a station.
+        private static float SearchRamp => CMMConfig.RadioTuneLeaveMs / 1000f;
         // The LOCK, and it is a FLOOR rather than the answer. Reported as "the static will stop
         // while the music is still fading in": a fixed 0.9 s beat any voice fade longer than that,
         // so the noise cleared and left the station still climbing underneath — a fade with
         // nothing over it, which is the exact failure v47 records against the personal radio. The
         // arrival now takes at least as long as the fade it is covering, plus a tail so the hiss
         // is still there when the music finishes arriving rather than ending with it.
-        private static float ArriveRamp => CMMConfig.WorldEmitterArriveMs / 1000f;
+        private static float ArriveRamp => CMMConfig.RadioTuneArriveMs / 1000f;
         // Added to the VOICE's own fade when that is longer than ArriveRamp, so the noise is still
         // there when the music finishes arriving rather than ending exactly with it.
         private const float ArriveTail = 0.35f;
@@ -1592,7 +1598,8 @@ namespace CMM
             // A RETUNE FADES IN OVER THE ARRIVE, so the music rising and the noise falling are the
             // same span and cross in the middle. A 200 ms advance fade under a 900 ms noise fade
             // is what left the hiss sitting on top of a finished station.
-            if (_tunePhase != 0 && slot == _tuneSlot && fadeIn < ArriveRamp) fadeIn = ArriveRamp;
+            // (moved below, next to `retuned`, so it covers every deliberate retune and not only
+            // the ones the tune machine owns)
             bool changedStation =
                 !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
             // ONLY A HAND ON THE DIAL SEARCHES. A slot taking its FIRST station (world entry), a
@@ -1617,6 +1624,12 @@ namespace CMM
                         // searching, deliberately, with the old station buried under it; arming
                         // again here restarts the ramp and throws the leave away.
                         && !(_tunePhase != 0 && slot == _tuneSlot);
+            // A RETUNE'S MUSIC RISES OVER THE SAME SPAN THE NOISE FALLS, so they cross in the
+            // middle and finish together. Left to itself this is the Radio context's fadeintime,
+            // five seconds, which is a context changing rather than a dial settling -- and against
+            // a 900 ms noise fade it left the hiss gone long before the station was up.
+            if (retuned) fadeIn = ArriveRamp;
+
             if (changedStation)
             {
                 // FLUSH ONLY WHEN THERE IS A STATION TO FLUSH. The ring can still hold a cushion of
@@ -1918,9 +1931,15 @@ namespace CMM
             // sides of the crossover are the same span and land together. The minimum sweep still
             // holds the start off if the dial has not travelled yet.
             float minEnd = _slotArmedAt[_emDoneSlot] > 0f
-                         ? _slotArmedAt[_emDoneSlot] + CMMConfig.WorldEmitterSweepMs / 1000f
+                         ? _slotArmedAt[_emDoneSlot] + MinStatic
                          : 0f;
-            float ramp = _emPendingFade > 0.05f ? _emPendingFade : ArriveRamp;
+            // THE NOISE SETS THE SPAN AND THE MUSIC FOLLOWS IT. Reading the length off the
+            // station's own fade inverted that, and the Radio context ships fadeintime="5" -- so a
+            // retune's hiss took FIVE SECONDS to clear, against about two on the pocket radio.
+            // A context fade is for a context changing; it has no business setting how long a dial
+            // takes to settle. ArriveRamp is the tuned, bounded value for that, and StartStation
+            // stretches a retuning station's fade to match it so the two still cross symmetrically.
+            float ramp = ArriveRamp;
             if (minEnd > CmmClock.Now)
             {
                 _slotLockAt[_emDoneSlot]   = minEnd;   // dial still travelling; start when it lands
@@ -2258,7 +2277,21 @@ namespace CMM
         }
         private static int    _tunePhase;         // 0 = idle, 1 = leaving, 2 = arriving
 
-        private static float LeaveRamp => CMMConfig.WorldEmitterLeaveMs / 1000f;
+        // ── ONE SET OF TIMINGS, AND THEY ARE THE POCKET RADIO'S ─────────────────────────────
+        // These read RadioTune* directly rather than the WorldEmitter* pair that used to shadow
+        // them. Two sets of knobs for one instrument is not a feature: they drifted (900 against
+        // 1000, a 250 ms floor against 100), every fix had to be made twice, and the emitters
+        // ended up sounding like a near-miss of the radio in your pocket rather than the same
+        // receiver heard across a room -- which is the entire design.
+        //
+        // Tuning the radio now tunes both, which is what was asked for when the receiver was first
+        // shared. The WorldEmitter* timing entries stay in the schema so nobody's file breaks;
+        // they simply no longer drive anything.
+        private static float LeaveRamp  => CMMConfig.RadioTuneLeaveMs  / 1000f;
+        private static float MinStatic  => CMMConfig.RadioTuneMinStaticMs / 1000f;
+        // The crossfade the pocket radio spends entirely underneath the static (PersonalRadio's
+        // SwapFade). The station being left and the one arriving overlap by this much, buried.
+        private const  float SwapFade = 0.25f;
 
         private static Station ByName(string name)
         {
@@ -2355,7 +2388,7 @@ namespace CMM
                         EmitterTuner.ReleaseSweepHold();
                         _tuneFrom = on.Name; _tuneTo = wantR;
                         _tunePhase = 1;
-                        _tuneSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
+                        _tuneSwapAt = now + LeaveRamp + MinStatic;
                         _tuneGiveUp = _tuneSwapAt + CMMConfig.WorldEmitterLevelHoldMs / 1000f + 2f;
                         _slotLockAt[_tuneSlot] = 0f;   // the arrive we were waiting on is off
                         CmmMixer.GetOrCreate().SetEmitterRecv(_tuneSlot, 0f, LeaveRamp);
@@ -2498,7 +2531,7 @@ namespace CMM
             // Leave, then a floor of static, then the swap. Anchored AFTER the leave for the same
             // reason the pocket radio anchors it there: measured from the press, the fade eats
             // most of the floor and leaves a fraction of the static anyone actually auditioned.
-            _tuneSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _tuneSwapAt = now + LeaveRamp + MinStatic;
             // Sized to opening a file and its level hold, not to a hang. Six seconds was a
             // ceiling on a wait that could not be satisfied; now that it can, an over-long one is
             // just hiss the player has to sit through.
@@ -2508,7 +2541,7 @@ namespace CMM
             _slotArmedAt[_tuneSlot] = now;
             _slotLockAt[_tuneSlot] = 0f;
             CMMConfig.D($"[CMM] Tune: leaving '{fromName}' on slot {_tuneSlot} over "
-                      + $"{CMMConfig.WorldEmitterLeaveMs:0} ms — it plays on, buried.");
+                      + $"{CMMConfig.RadioTuneLeaveMs:0} ms — it plays on, buried.");
         }
 
         // Begin, hold and end the sweep borrow. Runs before GroupSnapshot so a borrow started
@@ -2660,7 +2693,7 @@ namespace CMM
             // speaker back to. Handing it back to a station with no voice is the cut this exists to
             // remove — the speaker would rejoin something silent and wait out the decode in the
             // clear. Capped, because a station that never opens must not hold a slot for ever.
-            _borrowUntil = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _borrowUntil = now + LeaveRamp + MinStatic;
             _borrowGiveUp = now + BorrowGiveUp;
             _borrowReleaseAt = 0f;
             // One point, clear line. The occlusion the station computes for this speaker belongs to
