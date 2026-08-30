@@ -743,7 +743,14 @@ namespace CMM
         // How loud a world speaker's TUNING noise is, against the personal radio's. Its own knob
         // because the receiver's tuning is otherwise shared: turning the shared trim down to
         // quieten a speaker across the room would quieten the radio in your pocket too.
-        public static float  WorldEmitterStaticTrim = 0.5f;
+        // MEASURED, not guessed. The emitter receiver reads the SHARED noise level, and pushing
+        // the pocket radio's RadioRecvNoise (0.15) deterministically -- which had to happen, or the
+        // hiss changed character the first time the player dialled the radio -- costs 12.0 dB
+        // against the C file's own default of 0.45. This puts it back: 0.5 -> 2.0 is +12.0 dB, so
+        // a world speaker's hiss lands where it was measured at -24.9 dBFS instead of -37.0, which
+        // is only 5 dB above a station and is what "the static is inaudible at times" sounds like.
+        // Native clamps this at 4.0.
+        public static float  WorldEmitterStaticTrim = 2.0f;
         // How long a world speaker waits for a track's measured level before starting anyway.
         // Shorter than the personal radio's LoudnessStartHoldMs on purpose, and shortened again
         // once the receiver existed: a level jump UNDER the searching noise is most of the way to

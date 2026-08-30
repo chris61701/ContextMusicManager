@@ -1494,7 +1494,7 @@ namespace CMM
                 {
                     // All slots held: steal from the FARTHEST incumbent, with hysteresis.
                     Station far = null;
-                    for (int s = 0; s < MaxSlots; s++)
+                    for (int s = 0; s < CmmMixer.StationSlots; s++)
                     {
                         Station own = _slotOwner[s];
                         if (own == null) continue;
@@ -1522,6 +1522,20 @@ namespace CMM
         }
 
         // Both slot rules live in EmitterSlots so they can be tested; see the header there.
+        // A LANE FOR TUNING, from the reserved tail. Never handed to a station, never reaped by
+        // the idle sweep while it is in use, and never in competition with the music -- which is
+        // the whole point: the sweep exists precisely when every station lane is busy.
+        private static int FreeTuneSlot()
+        {
+            for (int s = CmmMixer.StationSlots; s < MaxSlots; s++)
+            {
+                if (s == _borrowSlot || s == _deadAirSlot) continue;
+                if (_slotOwner[s] != null) continue;   // cannot happen, but cheap to be sure
+                return s;
+            }
+            return -1;
+        }
+
         private static int FreeSlot() =>
             EmitterSlots.FreeSlot(_slotOwner, _emStartPending, _emPendingSlot,
                                   _borrowSlot >= 0 ? _borrowSlot : _deadAirSlot);
@@ -2409,8 +2423,12 @@ namespace CMM
             EmitterRegistry.Emitter e = snap[at];
             if (_deadAirSlot < 0)
             {
-                int slot = FreeSlot();
-                if (slot < 0) return;   // every lane busy: a dead station is the first thing to go without
+                int slot = FreeTuneSlot();
+                if (slot < 0)
+                {
+                    CMMConfig.D("[CMM] Dead air: no tuning lane spare — the carrier waits.");
+                    return;
+                }
                 _deadAirSlot = slot;
                 CMMConfig.D($"[CMM] Dead air: slot {slot} carries the off-air tone for {e.Name} at {e.Pos}.");
                 GoOffAir(slot);
@@ -2806,8 +2824,7 @@ namespace CMM
             if (target == null || target.VoiceId == 0)
             { TuneDeclined("borrow", "the target is not playing anywhere — the start path sweeps it"); return; }
 
-            int slot = FreeSlot();
-            if (slot < 0) slot = TakeInaudibleSlot();
+            int slot = FreeTuneSlot();
             if (slot < 0)
             {
                 // Not handled, not released: the speaker stays out of every station and we try

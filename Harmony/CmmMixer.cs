@@ -375,7 +375,10 @@ namespace CMM
         // is unknown — i.e. it finished and was retired, or never existed.
         // Max simultaneously-voiced stations (native render slots). MUST match the native
         // CMM_MAX_EMIT_VOICES — the per-slot reverb arrays are exactly this long.
-        internal const int MaxEmitterSlots = 3;
+        internal const int MaxEmitterSlots = 6;
+        // ...of which only the first StationSlots may ever hold a station. The rest are reserved
+        // for tuning: a sweep, or a speaker on the off-air carrier. See CMM_MAX_EMIT_VOICES.
+        internal const int StationSlots   = 3;
 
         // Install an EMITTER voice: an independent positional layer that plays ALONGSIDE the music
         // voices instead of crossfading them (a diegetic world speaker keeps playing while the

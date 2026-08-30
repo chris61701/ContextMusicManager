@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 49;
+        internal const int CurrentSchema = 50;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -989,7 +989,8 @@ rather than a hi-fi in a wall. All hot-reload."),
             Cmt(@"How loud a world speaker's TUNING noise is, relative to the personal radio's.
 The receiver itself is tuned once and drives both; this is only the level of the hiss
 that comes out of a speaker in the world. 0 = silent, 1 = the same as the radio you carry."),
-            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            0.5f, since: 45),
+            F("WorldEmitterStaticTrim",              "CMMConfig.WorldEmitterStaticTrim",            2.0f, since: 45,
+                                                                                                     changedIn: 50, was: 0.5f),
             Cmt(@"How long (ms) a world speaker waits for a track's measured loudness before it
 starts anyway. Shorter than the personal radio's LoudnessStartHoldMs on purpose: a
 speaker across the room is background, so waiting three seconds to avoid a small level

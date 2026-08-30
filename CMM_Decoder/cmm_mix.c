@@ -120,7 +120,7 @@ static const mix_close_fn CLOSE_FN[KIND_COUNT] = {
 #define BUS_MAXFRAMES        2048   /* largest block produced per device write */
 #define REFILL_FRAMES        2048   /* per-iteration input top-up for a converted voice */
 #define MAX_VOICES              4   /* out+in crossfade needs 2; a few overlaps need 3 */
-#define MAX_VOICES_HARD        12   /* array headroom: 4 music (+ pre-evict append) + up to
+#define MAX_VOICES_HARD        20   /* array headroom: 4 music (+ pre-evict append) + up to
                                      * CMM_MAX_EMIT_VOICES stations × 2 (advance crossfade overlap) */
 #define CALM_MS              3000
 #define FLUSH_GRACE_MS        750

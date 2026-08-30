@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 58
+#define CMM_DECODER_ABI 59
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -244,7 +244,15 @@ typedef struct cmm_decoder cmm_decoder;
 
 /* Max SIMULTANEOUSLY-VOICED stations (native slots). The station catalog can be any size; the
  * managed layer voices only the K nearest audible stations, each pinned to one slot here. */
-#define CMM_MAX_EMIT_VOICES 3
+/* Six lanes: three carry STATIONS, three are reserved for TUNING (a sweep, or a speaker sitting
+ * on the off-air carrier). The split is enforced on the managed side; native just sizes for it.
+ *
+ * Three was the whole cause of the "static never played" class. A sweep needs a lane of its own,
+ * and so does a carrier -- but they competed with stations for the same three, and the condition
+ * that makes a sweep necessary (two or three other stations audible nearby) is exactly the
+ * condition that leaves none spare. A tuning lane costs a ring and a memcpy: it carries a MIRROR
+ * of an already-decoded station or pure synthesis, never a decoder of its own. */
+#define CMM_MAX_EMIT_VOICES 6
 CMM_API int CMM_Decoder_abi(void);
 
 /* ── Native heap accounting (see cmm_mem.c) ───────────────────────────────

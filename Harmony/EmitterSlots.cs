@@ -90,7 +90,11 @@ namespace CMM
                                      int borrowSlot = -1)
         {
             if (slotOwner == null) return -1;
-            for (int s = 0; s < slotOwner.Length; s++)
+            // STATION LANES ONLY. The tail of the array is reserved for tuning (see
+            // CmmMixer.StationSlots): a sweep and an off-air carrier each need a lane of their
+            // own, and letting stations take them is what made the static optional.
+            int n = slotOwner.Length < CmmMixer.StationSlots ? slotOwner.Length : CmmMixer.StationSlots;
+            for (int s = 0; s < n; s++)
             {
                 if (slotOwner[s] != null) continue;
                 if (startPending && s == pendingSlot) continue;
