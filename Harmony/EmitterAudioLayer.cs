@@ -1235,6 +1235,7 @@ namespace CMM
         //      !Ready was never going to catch it.
         private static Vector3i _deadAirPos;
         private static bool     _deadAirOn;
+        private static Vector3i _deadAirLogged;
 
         private static void GroupSnapshot()
         {
@@ -2410,6 +2411,14 @@ namespace CMM
                     if (snap[i].Pos.Equals(_deadAirPos)) { at = i; break; }
             if (at < 0)
             {
+                // INSTRUMENTED, because the carrier is reported as never sounding and the code
+                // path reads as correct. This is the only exit that was silent.
+                if (_deadAirOn && _deadAirLogged != _deadAirPos)
+                {
+                    _deadAirLogged = _deadAirPos;
+                    CMMConfig.D($"[CMM] Dead air wanted at {_deadAirPos} but that speaker is not in "
+                              + $"the registry snapshot ({snap.Count} tracked) — carrier not raised.");
+                }
                 if (_deadAirSlot >= 0)
                 {
                     ClearOffAir(_deadAirSlot);
@@ -2430,7 +2439,10 @@ namespace CMM
                     return;
                 }
                 _deadAirSlot = slot;
-                CMMConfig.D($"[CMM] Dead air: slot {slot} carries the off-air tone for {e.Name} at {e.Pos}.");
+                CMMConfig.D($"[CMM] Dead air: slot {slot} carries the off-air tone for {e.Name} at "
+                          + $"{e.Pos} — {CMMConfig.WorldEmitterOffAirHz:0} Hz at level "
+                          + $"{CMMConfig.WorldEmitterOffAirLevel:0.00}, fade "
+                          + $"{CMMConfig.WorldEmitterOffAirFadeMs:0} ms.");
                 GoOffAir(slot);
             }
             // Republished every tick so the tone tracks the listener's occlusion like any other
@@ -3042,6 +3054,13 @@ namespace CMM
                 if (CmmClock.Now - _slotReleasing[s] < ReleaseRamp) continue;
 
                 _slotReleasing[s] = 0f;
+                // AND THE ARM STAMP, or this never ends. The guard above is
+                // `_slotLastStation[s] == null && _slotArmedAt[s] <= 0f -> continue`, so leaving
+                // _slotArmedAt set meant a released lane failed the test again on the very next
+                // tick and went round the whole release again: arm, wait 0.45 s, clear, repeat,
+                // for ever. Visible in the log as "Emitter slot 3 released" every 0.45 s
+                // indefinitely, and it kept re-arming a receiver on a lane nothing was using.
+                _slotArmedAt[s] = 0f;
                 CmmMixer.Instance?.ClearEmitterRecv(s);
                 CmmMixer.Instance?.SetSlotPoints(s, _emptyPts, _emptyGain, _emptyFlags, 0);
                 _slotLastStation[s] = null;
