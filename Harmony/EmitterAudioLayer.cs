@@ -108,6 +108,9 @@ namespace CMM
         // The lane this borrow swaps its mirror to once the leave has finished, and when.
         private static int   _borrowMirrorTo = -1;
         private static float _borrowSwapAt;
+        // The point gain the borrow is fading UP to (the speaker's real occlusion), and when that
+        // fade started. Zero when nothing is fading.
+        private static float _borrowGainTo, _borrowFadeAt;
         private static string _borrowTarget;
         // A station that never opens must not hold a slot for ever. Comfortably past the level
         // hold plus a decode plus a retry.
@@ -2822,9 +2825,30 @@ namespace CMM
                 // THE SWAP, UNDER THE NOISE. Signal is at zero by now, so changing which station
                 // this lane copies is inaudible -- the same handover the single-speaker path makes,
                 // except nothing has to start or stop because both stations are already playing.
+                // THE MUSIC FADES IN HERE TOO. The borrow only ever ramped the receiver's SIGNAL,
+                // and signal moves a station about five decibels end to end -- so connecting the
+                // mirror put the programme on this lane at full level, instantly, and the arrive
+                // was a curtain lifting off a finished picture. That is "audio comes in hot", and
+                // it is loudest on turn-on because a silenced speaker always takes this path.
+                //
+                // The lane's own point is the only thing that can fade it, so it does: muted at
+                // the swap, up to the speaker's real occlusion over the arrive.
+                if (_borrowFadeAt > 0f)
+                {
+                    float bt = (now - _borrowFadeAt) / Mathf.Max(0.01f, ArriveRamp);
+                    if (bt >= 1f) { _borrowGain[0] = _borrowGainTo; _borrowFadeAt = 0f; }
+                    else _borrowGain[0] = _borrowGainTo
+                                        + FadeExtra(1f - bt, CMMConfig.WorldEmitterRange);
+                    CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _borrowPts, _borrowGain,
+                                                     _borrowFlags, 1);
+                }
+
                 if (_borrowSwapAt > 0f && now >= _borrowSwapAt)
                 {
                     if (_borrowMirrorTo >= 0) CmmMixer.Instance?.SetLaneMirror(_borrowSlot, _borrowMirrorTo);
+                    // Muted, and rising from here.
+                    _borrowGainTo = _borrowGain[0];
+                    _borrowFadeAt = now;
                     CMMConfig.D($"[CMM] Sweep borrow: slot {_borrowSlot} swaps its copy to lane "
                               + $"{_borrowMirrorTo} under the noise.");
                     _borrowSwapAt = 0f; _borrowMirrorTo = -1;
@@ -2975,6 +2999,7 @@ namespace CMM
             // speaker back to. Handing it back to a station with no voice is the cut this exists to
             // remove — the speaker would rejoin something silent and wait out the decode in the
             // clear. Capped, because a station that never opens must not hold a slot for ever.
+            _borrowFadeAt = 0f;
             _borrowUntil = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f + MinStatic;
             _borrowGiveUp = now + BorrowGiveUp;
             _borrowReleaseAt = 0f;
@@ -3088,7 +3113,7 @@ namespace CMM
             CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
             CmmMixer.Instance?.SetLaneMirror(_borrowSlot, -1);
             CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
-            _borrowSlot = -1; _borrowReleaseAt = 0f;
+            _borrowSlot = -1; _borrowReleaseAt = 0f; _borrowFadeAt = 0f;
             // Handing the slot to a station mid-sweep ends the borrow's claim on this retune, so
             // the station's own arm picks the search back up on the slot it just took. The noise
             // continues rather than stopping dead halfway through a dial turn.
