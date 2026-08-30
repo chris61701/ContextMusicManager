@@ -2625,8 +2625,14 @@ namespace CMM
             // AND DISARM THE RECEIVER. GoDeadAir arms one; this cleared the tone and the points
             // and left the hiss running for ever on a lane nothing owned -- measured at
             // -20.8 dBFS for a whole session, with no TUNE, BORROW or DEAD tag beside it.
-            CmmMixer.Instance?.ClearEmitterRecv(_deadAirSlot);
-            _slotArmedAt[_deadAirSlot] = 0f;
+            // RAMPED OUT, NOT CUT. ClearEmitterRecv snaps the signal to 1 -- a receiver that was
+            // still making noise stops on the sample, which is a click, and dialling away from a
+            // broken station is a common enough gesture to hear it often.
+            //
+            // The lane is raised instead and left to ReleaseIdleReceivers, which fades and then
+            // clears it properly. That sweep can only see it because GoDeadAir stamps
+            // _slotArmedAt -- so this deliberately does NOT clear the stamp on the way out.
+            CmmMixer.Instance?.SetEmitterRecv(_deadAirSlot, 1f, ReleaseRamp);
             ClearOffAir(_deadAirSlot);
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
 
@@ -2685,7 +2691,12 @@ namespace CMM
                 // signal to 1 is what removes the noise -- a locked receiver over a lane with no
                 // voice is silence -- and leaves the carrier alone.
                 GoOffAir(_deadAirSlot);
-                CmmMixer.Instance?.SetEmitterRecv(_deadAirSlot, 1f, ArriveRamp);
+                // ON THE TONE'S CLOCK, NOT THE STATION ARRIVE'S. The carrier rises over
+                // WorldEmitterOffAirFadeMs (400 ms) and the hiss was leaving over ArriveRamp
+                // (1000 ms), so more than half a second of static sat on top of a tone that had
+                // already fully arrived. They cross now, and finish together.
+                CmmMixer.Instance?.SetEmitterRecv(_deadAirSlot, 1f,
+                                                  CMMConfig.WorldEmitterOffAirFadeMs / 1000f);
                 CMMConfig.D($"[CMM] Dead air: nothing found — slot {_deadAirSlot} settles on the "
                           + $"carrier, {CMMConfig.WorldEmitterOffAirHz:0} Hz at level "
                           + $"{CMMConfig.WorldEmitterOffAirLevel:0.00}.");
@@ -3064,6 +3075,18 @@ namespace CMM
                     && !TargetAudible()) return;
                 if (_borrowReleaseAt <= 0f && now >= _borrowUntil)
                 {
+                    // THE HANDOFF IS A CROSSOVER. The speaker is about to rejoin the station's
+                    // own lane, and the borrow's copy used to be CUT at that moment -- an instant
+                    // stop against a point that was itself starting from the mandatory silence.
+                    // A hole with a discontinuity at each end, which is the click.
+                    //
+                    // So the copy fades out across the same span the speaker takes to arrive, and
+                    // the speaker is marked as ALREADY ARRIVED: it has been hearing this station
+                    // through the mirror all along, so making it serve the silence again would be
+                    // a second tune-in for a station it is already listening to.
+                    CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, ArriveRamp);
+                    _joinedAt[_borrowPos] =
+                        CmmClock.Now - (CMMConfig.WorldEmitterSweepMs / 1000f + ArriveRamp);
                     // AN ARRIVAL, NOT A RELEASE. The station this speaker is joining is already
                     // playing, so what happens at the end of the sweep is a station being revealed
                     // from under the noise — the same event StartStation's lock ramp covers, and
