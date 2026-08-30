@@ -184,20 +184,32 @@ namespace CMM
             // A version with neither block (A20 has no ham radio at all) has nothing to install,
             // which is the right state rather than a permanent retry.
             if (_built.Count == 0) return true;
-            List<Recipe> all = CraftingManager.GetAllRecipes();
-            if (all == null) return false;
+
+            // IDS FIRST, AND REGARDLESS OF MEMBERSHIP. Checking "is it still in the list" before
+            // "does it still name the right block" returns false on the very event that moves the
+            // ids -- a world load empties the list AND reassigns them -- so Offer saw a non-null
+            // _built, skipped the rebuild, and put the STALE recipes back. They were in the list
+            // and pointed at whatever now owned their old ids, which is exactly the symptom this
+            // was meant to fix: nothing craftable on the second world.
+            //
+            // Caught by CmmCraftTest, which reloads the world the way the game does. Reasoning
+            // about it is what produced the bug in the first place.
             for (int i = 0; i < _built.Count; i++)
             {
-                if (!all.Contains(_built[i])) return false;
                 ItemClass ic = ItemClass.GetForId(_built[i].itemValueType);
                 if (ic == null || !string.Equals(ic.GetItemName(), _builtFor[i],
                                                  StringComparison.OrdinalIgnoreCase))
                 {
-                    // The id moved under us: throw the recipes away and build them again.
-                    _built = null; _builtFor = null;
+                    _built = null; _builtFor = null;   // throw them away and build again
                     return false;
                 }
             }
+
+            // Then membership. A reload that did NOT move the ids just needs them adding back.
+            List<Recipe> all = CraftingManager.GetAllRecipes();
+            if (all == null) return false;
+            for (int i = 0; i < _built.Count; i++)
+                if (!all.Contains(_built[i])) return false;
             return true;
         }
 
