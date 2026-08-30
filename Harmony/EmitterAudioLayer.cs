@@ -3320,7 +3320,16 @@ namespace CMM
         // and the caller then falls back to holding the noise until the lane frees.
         private static bool ReaimBorrow(float now)
         {
-            if (_borrowSlot < 0 || _borrowReleaseAt > 0f) return false;   // not live, or ending
+            // AN ARRIVAL IS INTERRUPTIBLE. Refusing while _borrowReleaseAt is set ruled out the
+            // whole arrive ramp -- a full second of the roughly two a borrow lasts -- and a press
+            // 52 ms after the swap therefore fell straight through to "busy" and waited it out.
+            // That was most of the fifty-eight holds left in the last session.
+            //
+            // The pocket radio's rule is the answer and it is about exactly this: "interrupting is
+            // the whole reason this is a rate rather than a duration. Press again half way through
+            // a tune-in and the leave starts from a half." The lane is still ours, the receiver is
+            // mid-ramp, and taking it back down from wherever it stands is precisely right.
+            if (_borrowSlot < 0) return false;
             var snap = EmitterRegistry.Snapshot;
             EmitterRegistry.Emitter e = default(EmitterRegistry.Emitter);
             bool found = false;
@@ -3334,8 +3343,9 @@ namespace CMM
             Station target = ByName(want);
             if (target == null) return false;
 
-            _handledTuneAt  = EmitterTuner.LastTuneAt;
-            _borrowOwnsTune = EmitterTuner.LastTuneAt;
+            _handledTuneAt   = EmitterTuner.LastTuneAt;
+            _borrowOwnsTune  = EmitterTuner.LastTuneAt;
+            _borrowReleaseAt = 0f;          // whatever ending had begun is off
             EmitterTuner.ReleaseSweepHold();
 
             // Back to pure noise while the dial travels again, and the new target connects at
