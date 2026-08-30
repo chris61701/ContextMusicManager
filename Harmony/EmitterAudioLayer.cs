@@ -2549,6 +2549,8 @@ namespace CMM
             EntityPlayerLocal dp = dw?.GetPrimaryPlayer();
             if (CMMConfig.WorldEmitterOcclusion && dw != null && dp != null)
                 EmitterAcoustics.ComputeOcclusion(ListenerWorldPos(dp), _deadPts, 1, _deadGain, dw);
+            float dcap = CMMConfig.WorldEmitterRange * 0.75f;
+            if (_deadGain[0] > dcap) _deadGain[0] = dcap;
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 1);
 
             // ...and the tone only once the hunt is over.
@@ -2856,7 +2858,7 @@ namespace CMM
                 {
                     if (_borrowMirrorTo >= 0) CmmMixer.Instance?.SetLaneMirror(_borrowSlot, _borrowMirrorTo);
                     // Muted, and rising from here.
-                    _borrowGainTo = _borrowGain[0];
+                    _borrowGainTo = _borrowGain[0];   // the occlusion we are fading UP to
                     _borrowFadeAt = now;
                     CMMConfig.D($"[CMM] Sweep borrow: slot {_borrowSlot} swaps its copy to lane "
                               + $"{_borrowMirrorTo} under the noise.");
@@ -3025,7 +3027,26 @@ namespace CMM
             //
             // The value belongs to the speaker, not the station, so the one the station it is
             // leaving computed for this very point is correct and current.
-            _borrowGain[0] = PointGain(ByName(_posStation.TryGetValue(pos, out string pg) ? pg : null), pos);
+            // COMPUTED FRESH, NEVER INHERITED. This read the leaving station's PtGain for the
+            // point -- and PtGain is added VIRTUAL DISTANCE, written only by the occlusion model
+            // for VOICED stations. A station that had never played is seeded to Range ("muted
+            // until the first flood lands"), and a station that last played far away carries
+            // whatever it computed there. Either value mutes the point outright, so the search
+            // rendered at exactly zero however close the player was standing.
+            //
+            // My own note beside the search publish warned about this in as many words, and I
+            // reintroduced it the moment I made the hiss respect geometry. One ray for one point
+            // is cheap and cannot be stale.
+            _borrowGain[0] = 0f;
+            World bw = GameManager.Instance?.World;
+            EntityPlayerLocal bp = bw?.GetPrimaryPlayer();
+            if (CMMConfig.WorldEmitterOcclusion && bw != null && bp != null)
+                EmitterAcoustics.ComputeOcclusion(ListenerWorldPos(bp), _borrowPts, 1, _borrowGain, bw);
+            // ...AND A SEARCH IS NEVER INAUDIBLE. Occlusion may muffle it as far as it likes, but
+            // a dial being turned has to be heard or the control reads as dead. Capped short of
+            // the range that mutes a point entirely.
+            float bcap = CMMConfig.WorldEmitterRange * 0.75f;
+            if (_borrowGain[0] > bcap) _borrowGain[0] = bcap;
             _borrowFlags[0] = e.Name == "radioHam" ? 1 : 0;
             // AND THE MUSIC UNDERNEATH IT. The borrow used to render noise over an EMPTY lane,
             // which is why the shared case could never sound like the pocket radio: there was no
@@ -3133,20 +3154,6 @@ namespace CMM
         // station and does not inherit the station's occlusion history.
         private static readonly float[] _searchGain = new float[RadioStation.MaxPoints];
 
-        // The occlusion a station last computed for one speaker of its own, as added virtual
-        // distance. 0 (clear line) when the station has no point there -- the honest default for a
-        // speaker nothing has flooded yet.
-        private static float PointGain(Station st, Vector3i pos)
-        {
-            if (st == null || st.PtCount <= 0) return 0f;
-            float x = pos.x + 0.5f, y = pos.y + 0.5f, z = pos.z + 0.5f;
-            for (int i = 0; i < st.PtCount && i < st.PtGain.Length; i++)
-            {
-                int o = i * 3;
-                if (st.Pts[o] == x && st.Pts[o + 1] == y && st.Pts[o + 2] == z) return st.PtGain[i];
-            }
-            return 0f;
-        }
 
         private static readonly float[] _borrowPts = new float[3];
         private static readonly float[] _borrowGain = new float[1];
