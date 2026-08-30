@@ -2755,6 +2755,21 @@ namespace CMM
                                   + $"'{on.Name}' is now the one being left, for '{wantR}'.");
                         return;
                     }
+
+                    // CANNOT RE-AIM? THEN LET GO OF THE PRESS. The one case this refuses is a
+                    // target already voiced on ANOTHER lane, which is exactly what the borrow
+                    // exists for -- but the borrow is gated off while a phase is running
+                    // (`if (_tunePhase == 0) MaintainSweepBorrow()`), so the press was held
+                    // hostage until the phase finished. At a press every 1.1 s against a 2 s
+                    // retune that is most of them, and it is the difference between "the dial
+                    // responds" and "the dial responds eventually".
+                    //
+                    // The receiver is raised rather than cut, so the lane it leaves behind fades
+                    // instead of stopping, and the borrow picks the press up on this same tick.
+                    CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
+                    CMMConfig.D($"[CMM] Tune: handing slot {_tuneSlot} back — '{wantR}' plays "
+                              + "elsewhere, so the borrow takes this one.");
+                    _tunePhase = 0; _tuneSlot = -1;
                 }
             }
 
