@@ -107,6 +107,8 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_lane_mirror(int dst, int src);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_lane_mirror_gain(int slot, float gain, float rampSeconds);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_tone(int slot, float[] hz, float[] levels,
                                                             int count, float rampSeconds);
 
@@ -494,6 +496,14 @@ namespace CMM
         {
             if (!_nativeStarted) return;
             try { NativeMix.cmm_mix_set_lane_mirror(dst, src); } catch { }
+        }
+
+        // Fade a mirrored lane's PROGRAMME without touching its static. See
+        // cmm_mix_set_lane_mirror_gain.
+        public void SetLaneMirrorGain(int slot, float gain, float rampSeconds)
+        {
+            if (!_nativeStarted) return;
+            try { NativeMix.cmm_mix_set_lane_mirror_gain(slot, gain, rampSeconds); } catch { }
         }
 
         // A steady off-air tone on one lane, in place of programme and hiss (hz <= 0 clears).

@@ -150,7 +150,16 @@ static const float LISTEN_D   = 2.0f;     /* blocks from the speaker */
  * FadeExtra. Held fully muted for the hold, then rising — and expressed as added VIRTUAL
  * DISTANCE with the falloff inverted, so the fade is linear in LEVEL rather than in
  * distance (a linear distance decay puts 72% of the fade below -19 dB). */
-static float joinExtra(float ageMs) {
+/* SUPERSEDED, and left here as the record of a trap. The mandatory silence USED to be
+ * expressed as added virtual distance on the point -- and a point gain scales everything that
+ * lane carries at that speaker, the station AND the receiver's static, because by then they
+ * are one signal. So the silence before music silenced the hiss with it. The shipping code
+ * now fades the VOICE instead, which is what this harness drives below.
+ *
+ * This is exactly the drift the header warns about: for one build this function mirrored code
+ * that no longer existed, and the rig reported a static onset of 1100 ms that the game does
+ * not have. A harness that mirrors managed logic has to be re-read whenever that logic moves. */
+static float joinExtra_superseded(float ageMs) {
     if (ageMs < HOLD_MS) return RANGE;                    /* silent */
     float t = (ageMs - HOLD_MS) / ARRIVE_MS;
     if (t >= 1.0f) return 0.0f;
@@ -248,7 +257,15 @@ static void run_emitter(track* t, int programme, int arm) {
             if (arm) cmm_mix_set_emitter_recv(0, 1.0f, ARRIVE_MS / 1000.0f);  /* ARRIVE */
             lockedFired = 1;
         }
-        gains[0] = joinAtMs >= 0 ? joinExtra((float)(ms - joinAtMs)) : 0.0f;
+        /* The point is OCCLUSION ONLY now. Clear line at two blocks, unchanging. */
+        gains[0] = 0.0f;
+        /* ...and the mandatory silence is on the VOICE: muted when it lands, held, then up
+         * over the arrive. Mirrors MaintainTune's phase 2. */
+        if (vNew != 0 && joinAtMs >= 0) {
+            float age = (float)(ms - joinAtMs);
+            if (age < HOLD_MS)                       cmm_mix_set_voice_gain(vNew, 0.0f, 0.0f);
+            else if (age < HOLD_MS + MS_PER_BLK)     cmm_mix_set_voice_gain(vNew, 1.0f, ARRIVE_MS / 1000.0f);
+        }
         cmm_out_set_emitter_spatial(g_out, 0, lis, rgt, pts, gains, flags, 1,
                                     MINDIST, RANGE, FALLOFF, 0.9f, 0.8f);
         mix_sleep_ms(2);                 /* let the producer top the shallow ring back up */

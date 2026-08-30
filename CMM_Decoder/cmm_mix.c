@@ -675,6 +675,29 @@ static em_recv g_emRx[CMM_MAX_EMIT_VOICES];
  * source lane are untouched, which is the whole requirement. */
 static int g_emMirror[CMM_MAX_EMIT_VOICES];
 
+/* ── THE MIRROR'S OWN LEVEL (v60) ─────────────────────────────────────────────────────────
+ * A mirrored lane carries a copy of a station, and the RECEIVER on that same lane carries
+ * the static. They are one signal by the time a point gain is applied, so fading the point
+ * fades both -- which is why the mandatory silence before music was also silencing the
+ * hiss it was supposed to be heard under.
+ *
+ * This scales the COPY, before the receiver runs, so a lane can fade its programme in and
+ * out while its static does whatever it likes. That separation is the whole requirement:
+ * "the speaker fades, not the stream". */
+static float g_emMirrorAmp[CMM_MAX_EMIT_VOICES];
+static float g_emMirrorTgt[CMM_MAX_EMIT_VOICES];
+static float g_emMirrorStp[CMM_MAX_EMIT_VOICES];
+
+CMM_API void cmm_mix_set_lane_mirror_gain(int slot, float gain, float rampSeconds) {
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
+    if (gain < 0.0f) gain = 0.0f; else if (gain > 1.0f) gain = 1.0f;
+    g_emMirrorTgt[slot] = gain;
+    if (rampSeconds <= 0.0001f) { g_emMirrorAmp[slot] = gain; g_emMirrorStp[slot] = 0.0f; return; }
+    float frames = rampSeconds * (float)g_busRate;
+    if (frames < 1.0f) frames = 1.0f;
+    g_emMirrorStp[slot] = (gain - g_emMirrorAmp[slot]) / frames;
+}
+
 /* ── OFF-AIR TONE (v57) ───────────────────────────────────────────────────────────────────────
  * A steady tone on one lane, in place of both programme and hiss. What a station that will not
  * open gets, rather than silence: a set that finds nothing does not go quiet, it sits on the
@@ -1690,9 +1713,22 @@ static void pump_body(void) {
                 int src = g_emMirror[s];
                 if (src < 0 || src >= CMM_MAX_EMIT_VOICES) continue;
                 if (g_emMirror[src] >= 0) continue;          /* one level deep only */
-                memcpy(g_emitterMono + (size_t)s * BUS_MAXFRAMES,
-                       g_emitterMono + (size_t)src * BUS_MAXFRAMES,
-                       (size_t)n * sizeof(float));
+                {
+                    float* dstL = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
+                    const float* srcL = g_emitterMono + (size_t)src * BUS_MAXFRAMES;
+                    float a = g_emMirrorAmp[s], st = g_emMirrorStp[s], tg = g_emMirrorTgt[s];
+                    if (st == 0.0f && a == 1.0f) memcpy(dstL, srcL, (size_t)n * sizeof(float));
+                    else {
+                        for (i = 0; i < n; i++) {
+                            if (st != 0.0f) {
+                                a += st;
+                                if ((st > 0.0f && a >= tg) || (st < 0.0f && a <= tg)) { a = tg; st = 0.0f; }
+                            }
+                            dstL[i] = srcL[i] * a;
+                        }
+                        g_emMirrorAmp[s] = a; g_emMirrorStp[s] = st;
+                    }
+                }
                 emActive[s] = emActive[src];                 /* renders exactly when its source does */
             }
 
@@ -1819,7 +1855,11 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_convTmp     = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     /* NO MIRRORS UNTIL ASKED. Static storage zeroes, and zero is a VALID slot index -- left
      * alone, every lane would claim to mirror lane 0. */
-    { int mi; for (mi = 0; mi < CMM_MAX_EMIT_VOICES; mi++) g_emMirror[mi] = -1; }
+    { int mi; for (mi = 0; mi < CMM_MAX_EMIT_VOICES; mi++) {
+          g_emMirror[mi] = -1;
+          g_emMirrorAmp[mi] = g_emMirrorTgt[mi] = 1.0f;   /* full unless asked otherwise */
+          g_emMirrorStp[mi] = 0.0f;
+      } }
     g_emitterMono = (float*)malloc((size_t)CMM_MAX_EMIT_VOICES * BUS_MAXFRAMES * sizeof(float));
     g_radioBus    = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_recvU       = (float*)malloc((size_t)BUS_MAXFRAMES * sizeof(float));

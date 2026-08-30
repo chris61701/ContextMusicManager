@@ -108,9 +108,6 @@ namespace CMM
         // The lane this borrow swaps its mirror to once the leave has finished, and when.
         private static int   _borrowMirrorTo = -1;
         private static float _borrowSwapAt;
-        // The point gain the borrow is fading UP to (the speaker's real occlusion), and when that
-        // fade started. Zero when nothing is fading.
-        private static float _borrowGainTo, _borrowFadeAt;
         private static string _borrowTarget;
         // A station that never opens must not hold a slot for ever. Comfortably past the level
         // hold plus a decode plus a retry.
@@ -1149,23 +1146,17 @@ namespace CMM
             // which is why a retune arrived at full level -- "music comes in hot (not from 0)".
             // The station it joins is very often already at full for other speakers, so there is
             // no voice fade to ride either; the point itself is the only thing that can ramp.
-            float jhold = CMMConfig.WorldEmitterSweepMs / 1000f;
-            float jdur  = ArriveRamp;
-            if (jdur > 0f && _joinedAt.Count > 0)
-            {
-                for (int i = 0; i < count; i++)
-                {
-                    Vector3i key = SlotKey(pts, i);
-                    if (!_joinedAt.TryGetValue(key, out float j0)) continue;
-                    float jage = now - j0;
-                    // SILENT FIRST, THEN FADE. Held fully muted for the hold, so the station is
-                    // genuinely absent rather than five decibels down underneath the hiss.
-                    if (jage < jhold) { gains[i] += range; continue; }
-                    jage -= jhold;
-                    if (jage >= jdur) continue;
-                    gains[i] += FadeExtra(1f - jage / jdur, range);
-                }
-            }
+            // THE JOIN FADE IS GONE FROM HERE, and this is the whole reason:
+            //
+            // A point gain scales EVERYTHING that lane carries at that speaker -- the station's
+            // programme AND the receiver's static, which are one signal by the time it applies.
+            // So the mandatory silence before music was silencing the hiss it was meant to be
+            // heard under. "Static, then nothing, then music" is exactly that, and it survived
+            // every attempt to fix it because at this stage the two were never separable.
+            //
+            // Music-side fades now live where only the music is: the VOICE track gain on a lane
+            // that has a voice, and the MIRROR gain on a lane carrying a copy. A point gain is
+            // occlusion and nothing else. See MaintainTune and MaintainSweepBorrow.
 
             if (_speakerFirstSeen.Count == 0) return;
             float dur = CMMConfig.WorldEmitterBirthFade >= 0f ? CMMConfig.WorldEmitterBirthFade : StartFade();
@@ -1251,7 +1242,9 @@ namespace CMM
         // them finds something.
         // Long enough to read as a set genuinely hunting, short enough not to read as nothing
         // happening. The static is at full for all of it.
-        private static float DeadAirHunt => CMMConfig.WorldEmitterSweepMs / 1000f + LeaveRamp;
+        // The pocket radio's shape: the leave, then its static floor, and the carrier then
+        // arrives exactly as a station would.
+        private static float DeadAirHunt => LeaveRamp + MinStatic;
 
         private static void GroupSnapshot()
         {
@@ -2385,6 +2378,8 @@ namespace CMM
         private static int    _tuneSlot = -1;
         private static string _tuneFrom, _tuneTo;
         private static float  _tuneSwapAt, _tuneGiveUp;
+        // When the arriving voice landed, so the mandatory silence is timed from it.
+        private static float  _tuneMusicAt;
         // The handover carried the leaving station's occlusion onto the arriving one, so the
         // changeover can publish that instead of clear line.
         private static bool   _tuneGainValid;
@@ -2700,6 +2695,7 @@ namespace CMM
                     return;
                 }
                 _tunePhase = 2;
+                _tuneMusicAt = 0f;
                 CMMConfig.D($"[CMM] Tune: handover on slot {_tuneSlot} — '{_tuneFrom}' retires, "
                           + $"'{_tuneTo}' takes the lane under the noise.");
             }
@@ -2722,8 +2718,20 @@ namespace CMM
                 // So this phase only watches. The voice landing IS the arrival.
                 if (to != null && to.VoiceId != 0 && to.Slot == _tuneSlot)
                 {
-                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' landed on slot {_tuneSlot} — "
-                              + "the start path raises the receiver over its own fade.");
+                    // THE MANDATORY SILENCE, ON THE VOICE. Muted the instant it lands, held, then
+                    // up over the arrive -- so the static is untouched by it and the music
+                    // genuinely is not there, rather than five decibels down under the hiss.
+                    if (_tuneMusicAt <= 0f)
+                    {
+                        _tuneMusicAt = now;
+                        CmmMixer.Instance?.SetVoiceTrackGain(to.VoiceId, 0f, 0f);
+                        return;
+                    }
+                    if (now - _tuneMusicAt < CMMConfig.WorldEmitterSweepMs / 1000f) return;
+                    CmmMixer.Instance?.SetVoiceTrackGain(
+                        to.VoiceId, to.VoiceGainApplied > 0f ? to.VoiceGainApplied : 1f, ArriveRamp);
+                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' rises on slot {_tuneSlot} after "
+                              + $"{CMMConfig.WorldEmitterSweepMs:0} ms of silence.");
                     _tunePhase = 0; _tuneSlot = -1;
                 }
                 else if (now >= _tuneGiveUp)
@@ -2817,6 +2825,12 @@ namespace CMM
             _tuneGiveUp = _tuneSwapAt + CMMConfig.WorldEmitterLevelHoldMs / 1000f + 2f;
             // DOWN, not off. The old station plays on into this lane and sinks under the hiss.
             CmmMixer.GetOrCreate().SetEmitterRecv(_tuneSlot, 0f, LeaveRamp);
+            // ...AND THE STATION GOES WITH IT. The speaker is alone on this lane (PtCount == 1 is
+            // the entry condition), so fading the VOICE fades it here and nowhere else, which is
+            // the rule: the speaker fades, not the stream. Over the leave, so it is gone by the
+            // time the static peaks.
+            if (fromSt.VoiceId != 0)
+                CmmMixer.GetOrCreate().SetVoiceTrackGain(fromSt.VoiceId, 0f, LeaveRamp);
             _slotArmedAt[_tuneSlot] = now;
             _slotLockAt[_tuneSlot] = 0f;
             CMMConfig.D($"[CMM] Tune: leaving '{fromName}' on slot {_tuneSlot} over "
@@ -2844,22 +2858,18 @@ namespace CMM
                 //
                 // The lane's own point is the only thing that can fade it, so it does: muted at
                 // the swap, up to the speaker's real occlusion over the arrive.
-                if (_borrowFadeAt > 0f)
-                {
-                    float bt = (now - _borrowFadeAt) / Mathf.Max(0.01f, ArriveRamp);
-                    if (bt >= 1f) { _borrowGain[0] = _borrowGainTo; _borrowFadeAt = 0f; }
-                    else _borrowGain[0] = _borrowGainTo
-                                        + FadeExtra(1f - bt, CMMConfig.WorldEmitterRange);
-                    CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _borrowPts, _borrowGain,
-                                                     _borrowFlags, 1);
-                }
 
                 if (_borrowSwapAt > 0f && now >= _borrowSwapAt)
                 {
-                    if (_borrowMirrorTo >= 0) CmmMixer.Instance?.SetLaneMirror(_borrowSlot, _borrowMirrorTo);
-                    // Muted, and rising from here.
-                    _borrowGainTo = _borrowGain[0];   // the occlusion we are fading UP to
-                    _borrowFadeAt = now;
+                    if (_borrowMirrorTo >= 0)
+                    {
+                        // SILENT, THEN RISING -- on the MIRROR, so the static above it is
+                        // untouched. Connecting a copy at full level was "audio comes in hot",
+                        // and fading it by the point took the hiss down with it.
+                        CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, 0f);
+                        CmmMixer.Instance?.SetLaneMirror(_borrowSlot, _borrowMirrorTo);
+                        CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 1f, ArriveRamp);
+                    }
                     CMMConfig.D($"[CMM] Sweep borrow: slot {_borrowSlot} swaps its copy to lane "
                               + $"{_borrowMirrorTo} under the noise.");
                     _borrowSwapAt = 0f; _borrowMirrorTo = -1;
@@ -3010,7 +3020,6 @@ namespace CMM
             // speaker back to. Handing it back to a station with no voice is the cut this exists to
             // remove — the speaker would rejoin something silent and wait out the decode in the
             // clear. Capped, because a station that never opens must not hold a slot for ever.
-            _borrowFadeAt = 0f;
             _borrowUntil = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f + MinStatic;
             _borrowGiveUp = now + BorrowGiveUp;
             _borrowReleaseAt = 0f;
@@ -3092,8 +3101,10 @@ namespace CMM
                 // noise to render, which is what a set between stations actually sounds like.
                 CmmMixer.GetOrCreate().SetLaneMirror(slot, -1);
                 CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
-                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 1f, 0f);          // nothing on it yet
-                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);  // ...and now searching
+                // AT ITS LEVEL, AT ONCE. There is no station to slide out of when a silenced
+                // speaker is switched on, so a 700 ms slide into the noise is only a hole where
+                // the player expects the control to have done something.
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, 0.04f);
                 _borrowMirrorTo = target.Slot;
                 // The mirror is what puts a programme on this lane, so it waits out the same
                 // silence. Bringing it in at the end of the leave is what made a borrow's station
@@ -3143,7 +3154,7 @@ namespace CMM
             CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
             CmmMixer.Instance?.SetLaneMirror(_borrowSlot, -1);
             CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
-            _borrowSlot = -1; _borrowReleaseAt = 0f; _borrowFadeAt = 0f;
+            _borrowSlot = -1; _borrowReleaseAt = 0f;
             // Handing the slot to a station mid-sweep ends the borrow's claim on this retune, so
             // the station's own arm picks the search back up on the slot it just took. The noise
             // continues rather than stopping dead halfway through a dial turn.
