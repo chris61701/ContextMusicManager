@@ -104,6 +104,8 @@ namespace CMM
         // v55 — the emitter receiver's noise level, relative to the personal radio's.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_recv_trim(float trim);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void cmm_mix_set_lane_mirror(int dst, int src);
 
         // v43 — per-slot ring health. The music ring's counters said "underruns 0" while the
         // radios were dropping out, because nothing watched these.
@@ -477,6 +479,15 @@ namespace CMM
         public void SetEmitterRecvTrim(float trim)
         {
             NativeMix.cmm_mix_set_emitter_recv_trim(trim);
+        }
+
+        // Make emitter lane `dst` render a COPY of `src`'s dry audio (src < 0 clears). One decode,
+        // two lanes, two receivers: the source keeps playing untouched for every speaker on it
+        // while the copy belongs to one speaker being retuned. See cmm_mix_set_lane_mirror.
+        public void SetLaneMirror(int dst, int src)
+        {
+            if (!_nativeStarted) return;
+            try { NativeMix.cmm_mix_set_lane_mirror(dst, src); } catch { }
         }
 
         public void SetEmitterPoints(long id, float[] xyz, float[] gains, int[] flags, int count)

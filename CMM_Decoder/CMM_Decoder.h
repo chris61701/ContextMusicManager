@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 55
+#define CMM_DECODER_ABI 56
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -471,6 +471,12 @@ CMM_API int cmm_out_queued(cmm_out* o);
  *   emitter_stat: 0 = frames queued, 1 = frames lost to starvation, 2 = times re-cushioned. */
 CMM_API void cmm_out_set_emitter_prime(cmm_out* o, int frames);
 CMM_API int  cmm_out_emitter_stat(cmm_out* o, int slot, int what);
+
+/* v56 — make emitter lane `dst` render a COPY of lane `src`'s dry audio (src < 0 clears).
+ * One decode, two lanes, two independent receivers: the source keeps playing untouched for every
+ * speaker on it while the copy belongs to a single speaker being retuned. Sample-aligned by
+ * construction, so the two never comb. Copied after the voices land and before any receiver runs. */
+CMM_API void cmm_mix_set_lane_mirror(int dst, int src);
 
 /* Request a flush: the next audio callback discards all queued frames, snapping the
  * cushion to empty (then it refills tight). Only raises a flag — safe from the

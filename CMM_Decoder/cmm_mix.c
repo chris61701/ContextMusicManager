@@ -660,6 +660,30 @@ typedef struct {
 } em_recv;
 static em_recv g_emRx[CMM_MAX_EMIT_VOICES];
 
+/* ── LANE MIRRORS (v56) ───────────────────────────────────────────────────────────────────────
+ * Which lane, if any, a slot takes its dry audio FROM instead of from voices of its own.
+ * -1 = none, the ordinary case.
+ *
+ * A station's lane is shared by every speaker playing it, and the receiver sits on the lane -- so
+ * hissing ONE speaker of a shared station would hiss all of them. The old answer was to give the
+ * retuned speaker a spare lane with no voice at all, which meant its static had nothing playing
+ * underneath: no station to duck away, none to rise. Every "cuts to nothing" report came from that.
+ *
+ * A second decoder of the same file would drift and comb. But the lane is already decoded, so the
+ * retuned speaker can simply take a COPY of it and run its own receiver over that. One decode, two
+ * lanes, two independent tuning states, sample-aligned by construction. The other speakers on the
+ * source lane are untouched, which is the whole requirement. */
+static int g_emMirror[CMM_MAX_EMIT_VOICES];
+
+/* dst takes its audio from src (src < 0 clears). Self-mirroring is refused; so is a src that is
+ * itself a mirror, which keeps the copy one level deep and the ordering below trivially correct. */
+CMM_API void cmm_mix_set_lane_mirror(int dst, int src) {
+    if (dst < 0 || dst >= CMM_MAX_EMIT_VOICES) return;
+    if (src >= CMM_MAX_EMIT_VOICES) return;
+    if (src == dst) return;
+    g_emMirror[dst] = src < 0 ? -1 : src;
+}
+
 /* THE EMITTER'S NOISE SITS BELOW THE PERSONAL RADIO'S, and it has to be its own number rather
  * than a smaller g_recvNoiseTrim, because that one is shared and turning it down would quieten
  * the radio in your pocket at the same time.
@@ -1575,6 +1599,21 @@ static void pump_body(void) {
                 else if (d < -span) emEnd = emStart - span;
                 else                emEnd = emMaster;   /* arrives within this block */
             }
+            /* MIRROR BEFORE THE RECEIVERS, AFTER THE VOICES. Every voice has landed in its own
+             * lane by now and no receiver has run, so this is the one moment a lane holds clean
+             * dry audio. Copy it, and the two lanes then take their own receivers below --
+             * the source lane keeps playing untouched for everyone on it, while the copy is the
+             * retuned speaker's alone to duck, hiss over and bring back up. */
+            for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
+                int src = g_emMirror[s];
+                if (src < 0 || src >= CMM_MAX_EMIT_VOICES) continue;
+                if (g_emMirror[src] >= 0) continue;          /* one level deep only */
+                memcpy(g_emitterMono + (size_t)s * BUS_MAXFRAMES,
+                       g_emitterMono + (size_t)src * BUS_MAXFRAMES,
+                       (size_t)n * sizeof(float));
+                emActive[s] = emActive[src];                 /* renders exactly when its source does */
+            }
+
             for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
                 /* An ARMED slot renders even with no voice: that is a receiver searching, and its
                  * lane is pure noise. The lanes are memset at the top of every block, so a
@@ -1653,6 +1692,9 @@ CMM_API int cmm_mix_start_ex(int busRate, int busChannels, int tightFrames, int 
     g_bus         = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_voiceStereo = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_convTmp     = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
+    /* NO MIRRORS UNTIL ASKED. Static storage zeroes, and zero is a VALID slot index -- left
+     * alone, every lane would claim to mirror lane 0. */
+    { int mi; for (mi = 0; mi < CMM_MAX_EMIT_VOICES; mi++) g_emMirror[mi] = -1; }
     g_emitterMono = (float*)malloc((size_t)CMM_MAX_EMIT_VOICES * BUS_MAXFRAMES * sizeof(float));
     g_radioBus    = (float*)malloc((size_t)BUS_MAXFRAMES * g_busChannels * sizeof(float));
     g_recvU       = (float*)malloc((size_t)BUS_MAXFRAMES * sizeof(float));

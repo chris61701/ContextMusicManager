@@ -2353,6 +2353,7 @@ namespace CMM
                 if (_borrowReleaseAt > 0f && now >= _borrowReleaseAt)
                 {
                     CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
+                    CmmMixer.Instance?.SetLaneMirror(_borrowSlot, -1);
                     CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
                     CMMConfig.D($"[CMM] Sweep borrow on slot {_borrowSlot} ended — speaker rejoins its station.");
                     _borrowSlot = -1; _borrowReleaseAt = 0f;
@@ -2462,6 +2463,12 @@ namespace CMM
             _borrowPts[0] = pos.x + 0.5f; _borrowPts[1] = pos.y + 0.5f; _borrowPts[2] = pos.z + 0.5f;
             _borrowGain[0] = 0f;
             _borrowFlags[0] = e.Name == "radioHam" ? 1 : 0;
+            // AND THE MUSIC UNDERNEATH IT. The borrow used to render noise over an EMPTY lane,
+            // which is why the shared case could never sound like the pocket radio: there was no
+            // station to duck away and none to rise out of the hiss. The target is already decoded
+            // on its own lane, so this one takes a copy and runs its own receiver over that -- one
+            // decode, sample-aligned, and every other speaker on the source lane is untouched.
+            if (target.Slot >= 0) CmmMixer.GetOrCreate().SetLaneMirror(slot, target.Slot);
             CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
             CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
             _slotArmedAt[slot] = now;
@@ -2505,6 +2512,7 @@ namespace CMM
         {
             if (_borrowSlot < 0) return;
             CmmMixer.Instance?.ClearEmitterRecv(_borrowSlot);
+            CmmMixer.Instance?.SetLaneMirror(_borrowSlot, -1);
             CmmMixer.Instance?.SetSlotPoints(_borrowSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
             _borrowSlot = -1; _borrowReleaseAt = 0f;
             // Handing the slot to a station mid-sweep ends the borrow's claim on this retune, so
