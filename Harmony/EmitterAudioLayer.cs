@@ -1647,8 +1647,18 @@ namespace CMM
                 // but OUR NOISE -- and the flush discards it, then re-primes from empty with 40 ms
                 // of zeros. That is the "fraction of a second of no audio, almost a pop", landing
                 // exactly where the two stations change hands.
-                if (_slotOwner[slot] != null && !(_tunePhase != 0 && slot == _tuneSlot))
-                    CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
+                // FLUSH WHATEVER WE DID NOT PUT THERE. The old test was "does a station own this
+                // lane", which is false for a lane that was RELEASED -- and releasing does not
+                // empty the ring. So a cold start onto a recently freed lane played out the
+                // previous station's queued tail (measured at up to 240 ms) and then jumped into
+                // the new one: "the audio pops and jumps forward or backward, like it's trying to
+                // connect two clips together".
+                //
+                // The only thing that must survive a flush is noise WE are generating, so that is
+                // the test: a lane a tune or a borrow is searching on keeps its ring, everything
+                // else starts clean.
+                bool oursAlready = (_tunePhase != 0 && slot == _tuneSlot) || slot == _borrowSlot;
+                if (!oursAlready) CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
                 // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change: a
                 // track advancing within one station is not a dial being turned, and hiss over it
                 // would be a fault rather than a feature.
@@ -1930,8 +1940,20 @@ namespace CMM
             // sets the length -- StartStation stretches it to ArriveRamp for a retune, so both
             // sides of the crossover are the same span and land together. The minimum sweep still
             // holds the start off if the dial has not travelled yet.
+            // ANCHORED AFTER THE RAMP, NOT AT THE ARM -- the pocket radio's own lesson, which I
+            // reintroduced here the moment its 700 ms leave replaced the emitter's 120 ms search:
+            //
+            //   "ANCHORED AFTER THE LEAVE, NOT AT THE PRESS. Anchoring it at the press meant the
+            //    1.2 s fade-out ate most of the 1.5 s floor and left about a third of a second of
+            //    actual static -- a fifth of what was auditioned."
+            //
+            // Against a 100 ms floor and a 700 ms slide into the noise, the arrive began when the
+            // signal was about a seventh of the way down and turned straight back. The hiss never
+            // reached a level you could hear, and on the shortest changes it never audibly
+            // happened at all -- "static so low I couldn't hear it", and "several station changes
+            // didn't play static at all".
             float minEnd = _slotArmedAt[_emDoneSlot] > 0f
-                         ? _slotArmedAt[_emDoneSlot] + MinStatic
+                         ? _slotArmedAt[_emDoneSlot] + SearchRamp + MinStatic
                          : 0f;
             // THE NOISE SETS THE SPAN AND THE MUSIC FOLLOWS IT. Reading the length off the
             // station's own fade inverted that, and the Radio context ships fadeintime="5" -- so a
@@ -2347,13 +2369,18 @@ namespace CMM
         {
             float now = CmmClock.Now;
 
-            MaintainDeadAir();
-
             // ANY DIAL TURN ENDS THE CARRIER, before we work out which path this retune takes.
             // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
             // start -- left the tone sounding under the new station.
             if (_handledTuneAt != EmitterTuner.LastTuneAt
                 && now - EmitterTuner.LastTuneAt < RetuneWindow) ClearOffAir();
+
+            // AFTER that clear, never before it. Landing on a dead station IS a dial turn, so
+            // running this first meant the carrier was raised and then wiped in the same tick by
+            // the very retune that called for it -- which is why the one station built to be
+            // broken still made no sound.
+            MaintainDeadAir();
+
 
             // A DIAL TURN DURING A DIAL TURN. The pocket radio has nothing to resolve here: one
             // receiver, one signal, and a fresh press just re-aims from wherever that signal
