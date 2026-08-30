@@ -1077,7 +1077,7 @@ namespace CMM
             // A fade is not an occlusion change. It is a decision, it is already a smooth ramp, and
             // it must neither be limited nor enter the limiter's history.
             LimitOcclusionRise(st.Pts, st.PtGain, st.PtCount);
-            ApplyBirthFades(st.Pts, st.PtGain, st.PtCount);
+            ApplyBirthFades(st.Pts, st.PtGain, st.PtCount, st.Slot);
         }
 
         // Rate-limit occlusion RISES (see _publishedExtra). Falls pass through untouched; door
@@ -1189,7 +1189,7 @@ namespace CMM
         // published occlusion gain (virtual distance, blocks) carries a decaying extra that starts
         // silent and reaches 0 over WorldEmitterBirthFade (< 0 ⇒ inherit the start fade, so the
         // placement ramp can be tuned without dragging station-approach / radio-join fades along).
-        private static void ApplyBirthFades(float[] pts, float[] gains, int count)
+        private static void ApplyBirthFades(float[] pts, float[] gains, int count, int slot)
         {
             if (count <= 0) return;
             float now = CmmClock.Now;
@@ -1202,7 +1202,39 @@ namespace CMM
             // which is why a retune arrived at full level -- "music comes in hot (not from 0)".
             // The station it joins is very often already at full for other speakers, so there is
             // no voice fade to ride either; the point itself is the only thing that can ramp.
-            // THE JOIN FADE IS GONE FROM HERE, and this is the whole reason:
+            // THE JOIN FADE IS BACK, WITH THE RULE IT SHOULD ALWAYS HAVE HAD.
+            //
+            // A point gain scales everything that lane carries at that speaker -- programme AND
+            // the receiver's static, which are one signal by then -- so fading the point on a lane
+            // that is SEARCHING silences the hiss with the music. That is real, and it is why the
+            // mandatory silence moved onto the voice.
+            //
+            // But removing it outright was too broad, and the cost is the case it was covering: a
+            // borrow onto a COLD station renders pure noise while that station opens on a lane of
+            // its OWN, and when the borrow ends the speaker rejoins that lane -- at full, with
+            // nothing to fade it. Music, instantly, on exactly the gesture (turning a radio on)
+            // that most wants a tune-in.
+            //
+            // The lane carrying the static is never the lane being joined, so the rule is simply:
+            // not on a lane that is searching. There, the voice gain does it.
+            bool searching = slot >= 0 && ((_tunePhase != 0 && slot == _tuneSlot) || slot == _borrowSlot);
+            float jhold = CMMConfig.WorldEmitterSweepMs / 1000f;
+            float jdur  = ArriveRamp;
+            if (!searching && jdur > 0f && _joinedAt.Count > 0)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    Vector3i key = SlotKey(pts, i);
+                    if (!_joinedAt.TryGetValue(key, out float j0)) continue;
+                    float jage = now - j0;
+                    if (jage < jhold) { gains[i] += range; continue; }   // the mandatory silence
+                    jage -= jhold;
+                    if (jage >= jdur) continue;
+                    gains[i] += FadeExtra(1f - jage / jdur, range);
+                }
+            }
+
+            // THE ORIGINAL NOTE, kept because the trap is still live:
             //
             // A point gain scales EVERYTHING that lane carries at that speaker -- the station's
             // programme AND the receiver's static, which are one signal by the time it applies.
