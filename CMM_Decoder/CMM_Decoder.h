@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 61
+#define CMM_DECODER_ABI 62
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -548,6 +548,10 @@ CMM_API int cmm_out_drain(cmm_out* o, int frames);
 
 /* Enqueue up to `frames` mono f32 frames of one SLOT's dry signal (v31: one ring per station slot).
  * Non-blocking; returns frames accepted (SPSC — the producer is the sole writer per ring). */
+/* Consumer-side truth for one emitter slot: 0 ptCount, 1 applied dry gain, 2 slewed virtual
+ * distance, 3 real distance in blocks. What the ear got, not what we published. */
+float cmm_out_slot_applied(cmm_out* o, int slot, int what);
+
 int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames);
 
 /* Relay one SLOT's live spatial state: `count` speaker positions (interleaved xyz) with per-speaker

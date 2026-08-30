@@ -770,6 +770,16 @@ CMM_API float cmm_mix_emitter_lane_stat(int slot, int what) {
         case 1: return g_emLaneRms[slot];                              /* linear RMS */
         case 2: return g_emMirror[slot] >= 0 ? g_emMirrorAmp[slot] : -1.0f;
         case 3: return em_tone_live(slot) ? g_emToneAmp[slot] : -1.0f;
+        /* 4..7 come from the CONSUMER, not from what we asked for. See cmm_out_slot_applied. */
+        case 4: case 5: case 6: case 7: {
+            cmm_out* dev;
+            float v;
+            mix_lock(&g_lock);
+            dev = g_out;
+            v = dev ? cmm_out_slot_applied(dev, slot, what - 4) : -1.0f;
+            mix_unlock(&g_lock);
+            return v;
+        }
         default: return -1.0f;
     }
 }

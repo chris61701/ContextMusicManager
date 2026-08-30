@@ -1265,6 +1265,42 @@ CMM_API int cmm_out_write(cmm_out* o, const float* data, int frames)
 
 /* v20/v31 — enqueue up to `frames` MONO f32 frames of one SLOT's dry signal. Non-blocking; returns
  * frames accepted. SPSC: the producer (mixer thread) is the sole writer per ring, like cmm_out_write. */
+/* WHAT THE EAR ACTUALLY GOT ON THIS SLOT (v64).
+ *
+ * Every emitter number the log could show was an INTENTION -- the virtual distance we published,
+ * the level we asked the tone for -- and an evening went on "the tone does not obey occlusion"
+ * with no way to tell a bad model from a publish that never landed. These come from the
+ * CONSUMER's own state, after distance, occlusion, its smoothing and the pan:
+ *
+ *   0  points the consumer holds for this slot (0 = it renders nothing, whatever we published)
+ *   1  applied dry gain, magnitude across the pan, loudest class -- the ear's answer
+ *   2  the slewed virtual distance the consumer is using for point 0
+ *   3  real distance from the listener to point 0, in blocks
+ */
+CMM_API float cmm_out_slot_applied(cmm_out* o, int slot, int what)
+{
+    if (!o || slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return -1.0f;
+    struct cmm_emit_slot* sl = &o->emSlots[slot];
+    switch (what) {
+        case 0: return (float)sl->ptCount;
+        case 1: {
+            float a = sqrtf(sl->gLsm[0]*sl->gLsm[0] + sl->gRsm[0]*sl->gRsm[0]);
+            float b = sqrtf(sl->gLsm[1]*sl->gLsm[1] + sl->gRsm[1]*sl->gRsm[1]);
+            return a > b ? a : b;
+        }
+        case 2: return sl->ptCount > 0 ? sl->gainsSmooth[0] : -1.0f;
+        case 3: {
+            float dx, dy, dz;
+            if (sl->ptCount <= 0) return -1.0f;
+            dx = sl->ptsSmooth[0] - o->emLisPos[0];
+            dy = sl->ptsSmooth[1] - o->emLisPos[1];
+            dz = sl->ptsSmooth[2] - o->emLisPos[2];
+            return sqrtf(dx*dx + dy*dy + dz*dz);
+        }
+    }
+    return -1.0f;
+}
+
 int cmm_out_write_emitter(cmm_out* o, int slot, const float* mono, int frames)
 {
     if (!o || slot < 0 || slot >= CMM_MAX_EMIT_VOICES || !mono || frames <= 0) return 0;

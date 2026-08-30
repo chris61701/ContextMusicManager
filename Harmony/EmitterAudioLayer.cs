@@ -839,6 +839,28 @@ namespace CMM
                 // "is the carrier occluded" was missing from every readout of the carrier.
                 if (own == null && s == _deadAirSlot) sb.Append(" pt=").Append(_deadGain[0].ToString("0.0"));
                 else if (own == null && s == _borrowSlot) sb.Append(" pt=").Append(_borrowGain[0].ToString("0.0"));
+                // WHAT THE EAR GOT, next to what we asked for. Everything above this line is an
+                // INTENTION -- the virtual distance we published, the level we asked the tone for
+                // -- and an evening went on "the tone does not obey occlusion" with no way to tell
+                // a wrong model from a publish that never landed. These four come from the
+                // consumer's own state, after distance, occlusion, its smoothing and the pan:
+                //
+                //   n    points it holds. 0 means it renders nothing, whatever we published.
+                //   d    real distance to the speaker, in blocks.
+                //   occ  the virtual distance IT is using, after its own slew.
+                //   app  the applied dry gain in dB. This is the answer; everything else is why.
+                float appN   = CmmMixer.EmitterLaneStat(s, 4);
+                float appG   = CmmMixer.EmitterLaneStat(s, 5);
+                float appOcc = CmmMixer.EmitterLaneStat(s, 6);
+                float appD   = CmmMixer.EmitterLaneStat(s, 7);
+                if (appN >= 0f)
+                {
+                    sb.Append(" n=").Append(appN.ToString("0"));
+                    if (appD >= 0f)   sb.Append(" d=").Append(appD.ToString("0.0"));
+                    if (appOcc >= 0f) sb.Append(" occ=").Append(appOcc.ToString("0.0"));
+                    sb.Append(" app=").Append(appG > 0.000001f
+                        ? (20f * Mathf.Log10(appG)).ToString("0.0") : "MUTE");
+                }
                 if (own != null)
                 {
                     sb.Append(" [").Append(own.Name).Append(" g=")
