@@ -2557,6 +2557,11 @@ namespace CMM
             // but a hole. Nothing in a game feels worse than a control that appears to do nothing,
             // and a quiet second after a dial turn reads as broken rather than as searching.
             CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 0f, 0.04f);
+            // STAMPED, so the idle sweep can reap this lane if anything ever loses track of it.
+            // Without it _slotLastStation is null AND _slotArmedAt is 0, which is exactly the
+            // "already released, nothing to do" test -- so a carrier lane could never be caught
+            // by the one mechanism that exists to catch what every other path forgets.
+            _slotArmedAt[_deadAirSlot] = CmmClock.Now;
             CMMConfig.D($"[CMM] Dead air: slot {_deadAirSlot} searching at {pos} — "
                       + "the carrier follows if nothing is found.");
         }
@@ -2569,6 +2574,11 @@ namespace CMM
             _deadAirMissingAt = 0f;
             if (_deadAirSlot < 0) return;
             CMMConfig.D($"[CMM] Dead air ending on slot {_deadAirSlot}: {why}.");
+            // AND DISARM THE RECEIVER. GoDeadAir arms one; this cleared the tone and the points
+            // and left the hiss running for ever on a lane nothing owned -- measured at
+            // -20.8 dBFS for a whole session, with no TUNE, BORROW or DEAD tag beside it.
+            CmmMixer.Instance?.ClearEmitterRecv(_deadAirSlot);
+            _slotArmedAt[_deadAirSlot] = 0f;
             ClearOffAir(_deadAirSlot);
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
 
@@ -2999,7 +3009,13 @@ namespace CMM
                         //
                         // So the borrow holds its noise and simply does not finish: the release is
                         // deferred until the new retune can be served.
-                        _borrowUntil = now + LeaveRamp;
+                        // BOUNDED. Extending on every tick while a retune is unhandled is an
+                        // INFINITE hold when that retune can never be served -- switching the
+                        // speaker off leaves a press no path will take, and the borrow then
+                        // hissed for the rest of the session. The give-up is the ceiling it
+                        // already has; this may postpone the ending, never remove it.
+                        float held = now + LeaveRamp;
+                        _borrowUntil = held < _borrowGiveUp ? held : _borrowGiveUp;
                         EmitterTuner.ReleaseSweepHold();
                         CMMConfig.D("[CMM] Sweep borrow busy — holding its noise until the lane frees.");
                     }
