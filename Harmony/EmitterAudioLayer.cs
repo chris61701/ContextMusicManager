@@ -2129,6 +2129,18 @@ namespace CMM
                     to.Slot = _tuneSlot;
                     _slotOwner[_tuneSlot] = to;
                 }
+                // IT TOOK THE LANE OR THE TUNE IS OVER. Hissing on a slot the arriving station is
+                // not going to use means hissing at a speaker that is already hearing that station
+                // from somewhere else. Better a retune with no sweep than a sweep laid over the
+                // music it was supposed to introduce.
+                if (to == null || to.Slot != _tuneSlot)
+                {
+                    CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
+                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' could not take slot {_tuneSlot} "
+                              + "(playing elsewhere) — ending the sweep rather than talking over it.");
+                    _tunePhase = 0; _tuneSlot = -1;
+                    return;
+                }
                 _tunePhase = 2;
                 CMMConfig.D($"[CMM] Tune: handover on slot {_tuneSlot} — '{_tuneFrom}' retires, "
                           + $"'{_tuneTo}' takes the lane under the noise.");
@@ -2189,6 +2201,19 @@ namespace CMM
             if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want)) return;
             if (string.Equals(want, fromName, StringComparison.OrdinalIgnoreCase)) return;   // no change
 
+            // THE TARGET MUST BE ABLE TO COME TO THIS LANE. A station already voiced on ANOTHER
+            // slot cannot: it has its own speakers there and moving it would cut them off. The
+            // machine used to start anyway, hand over, and then wait for a station that was never
+            // going to arrive -- six seconds of hiss on this slot while the speaker, whose pin HAD
+            // moved, played that same station at full volume off the other one. Both of the
+            // standing reports in one: "static playing over music already at full volume", and the
+            // give-up that follows it reading as the audio cutting out.
+            //
+            // That case is exactly what the sweep borrow is for, so leave it alone and let the
+            // borrow have it -- _handledTuneAt is deliberately NOT stamped here.
+            Station toSt = ByName(want);
+            if (toSt != null && toSt.VoiceId != 0 && toSt.Slot != fromSt.Slot) return;
+
             _handledTuneAt = EmitterTuner.LastTuneAt;
             // The blanket hold kept the speaker out of EVERY station; from here it stays on the
             // one it is leaving instead, which is the entire point.
@@ -2201,7 +2226,10 @@ namespace CMM
             // reason the pocket radio anchors it there: measured from the press, the fade eats
             // most of the floor and leaves a fraction of the static anyone actually auditioned.
             _tuneSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
-            _tuneGiveUp = _tuneSwapAt + 6f;
+            // Sized to opening a file and its level hold, not to a hang. Six seconds was a
+            // ceiling on a wait that could not be satisfied; now that it can, an over-long one is
+            // just hiss the player has to sit through.
+            _tuneGiveUp = _tuneSwapAt + CMMConfig.WorldEmitterLevelHoldMs / 1000f + 2f;
             // DOWN, not off. The old station plays on into this lane and sinks under the hiss.
             CmmMixer.GetOrCreate().SetEmitterRecv(_tuneSlot, 0f, LeaveRamp);
             _slotArmedAt[_tuneSlot] = now;
