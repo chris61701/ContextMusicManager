@@ -405,3 +405,4 @@ CMM_Decoder/*.wav
 CMM_Decoder/CMM_Decoder.dll
 CMM_Decoder/clicks.tuned.xml
 tools/CmmEmitLab/emitlab.exe
+tools/CmmTuneWeb/static.wav

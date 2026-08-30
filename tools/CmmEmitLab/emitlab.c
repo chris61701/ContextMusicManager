@@ -96,10 +96,45 @@ static double db(double x) { return x > 1e-9 ? 20.0 * log10(x) : -999.0; }
 #define MAXPT 600                    /* 6 s at 10 ms */
 typedef struct { double rms[MAXPT]; int n; } track;
 
+/* The rendered audio itself, kept so a pass can be written to a WAV. That is what lets
+ * anything else -- the tuning web app, an editor, your ears -- hear the REAL receiver
+ * instead of a reimplementation of it, which is the one thing the offline radio simulator
+ * exists to prevent. */
+static float g_capture[MAXPT * BLK * CH];
+static long  g_captured;
+
+static void wav_write(const char* path) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "emitlab: cannot write %s", path); return; }
+    long  frames = g_captured / CH;
+    long  bytes  = g_captured * 2;
+    unsigned int  u32; unsigned short u16;
+    fwrite("RIFF", 1, 4, f); u32 = (unsigned)(36 + bytes); fwrite(&u32, 4, 1, f);
+    fwrite("WAVEfmt ", 1, 8, f); u32 = 16; fwrite(&u32, 4, 1, f);
+    u16 = 1;    fwrite(&u16, 2, 1, f);            /* PCM   */
+    u16 = CH;   fwrite(&u16, 2, 1, f);
+    u32 = RATE; fwrite(&u32, 4, 1, f);
+    u32 = RATE * CH * 2; fwrite(&u32, 4, 1, f);
+    u16 = CH * 2; fwrite(&u16, 2, 1, f);
+    u16 = 16;     fwrite(&u16, 2, 1, f);
+    fwrite("data", 1, 4, f); u32 = (unsigned)bytes; fwrite(&u32, 4, 1, f);
+    for (long i = 0; i < g_captured; i++) {
+        float v = g_capture[i];
+        if (v >  1.0f) v =  1.0f;
+        if (v < -1.0f) v = -1.0f;
+        short sv = (short)(v * 32767.0f);
+        fwrite(&sv, 2, 1, f);
+    }
+    fclose(f);
+    fprintf(stderr, "emitlab: wrote %s (%ld frames)", path, frames);
+}
+
 static void tr_push(track* t, const float* buf, int frames) {
     double sum = 0; int i;
     for (i = 0; i < frames * CH; i++) sum += (double)buf[i] * buf[i];
     if (t->n < MAXPT) t->rms[t->n++] = sqrt(sum / (frames * CH));
+    for (i = 0; i < frames * CH && g_captured < (long)(MAXPT * BLK * CH); i++)
+        g_capture[g_captured++] = buf[i];
 }
 
 /* First moment the track rises above `floorDb`, in ms. -1 if never. */
@@ -277,6 +312,32 @@ static void run_emitter(track* t, int programme, int arm) {
     (void)lockedFired;
 }
 
+/* STEADY FULL STATIC, for anything that needs a loopable sample of the real receiver rather
+ * than a reimplementation of it. No leave, no arrive -- the signal is pinned at 0 and left
+ * there, so the whole window is the hiss at its shipped level. */
+static void run_hiss(track* t) {
+    mix_reset();
+    push_receiver_defaults();
+    cmm_mix_set_emitter_master(EM_MASTER);
+    cmm_mix_set_emitter_recv_trim(STATICTRIM);
+    cmm_mix_set_emitter_tuning(MINDIST, RANGE, FALLOFF, 0.9f, 0.8f);
+
+    float lis[3] = { 0, 0, 0 }, rgt[3] = { 1, 0, 0 };
+    float pts[3] = { 0, 0, LISTEN_D };
+    float gains[1] = { 0 }; int flags[1] = { 0 };
+
+    cmm_mix_set_emitter_recv(0, 0.0f, 0.0f);          /* pinned wide open */
+    for (int ms = 0; ms < MAXPT * MS_PER_BLK; ms += MS_PER_BLK) {
+        cmm_mix_set_emitter_recv(0, 0.0f, 0.0f);      /* and held there */
+        cmm_out_set_emitter_spatial(g_out, 0, lis, rgt, pts, gains, flags, 1,
+                                    MINDIST, RANGE, FALLOFF, 0.9f, 0.8f);
+        mix_sleep_ms(2);
+        memset(g_outBuf, 0, sizeof(g_outBuf));
+        cmm_out_data_callback(&g_fakeDev, g_outBuf, NULL, BLK);
+        tr_push(t, g_outBuf, BLK);
+    }
+}
+
 /* POCKET RADIO: one bus receiver, leave as a RATE, swap under the noise, arrive. */
 static void run_radio(track* t, int programme, int arm) {
     mix_reset();
@@ -382,8 +443,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(w, "rs")) run_radio  (&t, 0, 1);
         else if (!strcmp(w, "rm")) run_radio  (&t, 1, 0);
         else if (!strcmp(w, "rb")) run_radio  (&t, 1, 1);
+        else if (!strcmp(w, "hiss")) run_hiss (&t);
         else return 2;
         emit_result(&t);
+        if (argc >= 5 && strcmp(argv[3], "--wav") == 0) wav_write(argv[4]);
         return 0;
     }
 
