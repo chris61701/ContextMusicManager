@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+       CmmEmitSim . the emitter tuning state machine, offline, at speed.
+
+       THE GAP THIS EXISTS TO CLOSE. Twelve harnesses compile real Harmony
+       source; not one of them compiled EmitterAudioLayer.cs, which is the file
+       every tuning bug of the last week lived in. CmmEmitLab mirrors its logic
+       in C and CmmTuneWeb mirrors it in JavaScript, and A MIRROR CANNOT HAVE A
+       MISSING CALL. It only has what was written into it, so the two defects of
+       2026-08-30 (a mirror gain never restored, a swap committing to a slot that
+       did not exist yet) were both structurally invisible to every tool we had.
+
+       So this one models nothing. It links the REAL state machine, the REAL
+       CmmMixer, the REAL station catalog and schedule, and the REAL native
+       mixer, and drives them tick by tick against a scripted world.
+
+       WHAT IS REAL: EmitterAudioLayer in its entirety, every tune, borrow,
+       re-aim, carrier, slot steal and fade, plus CmmMixer, cmm_mix.c, cmm_out.c,
+       the decoder, the anchored schedule and the loudness store.
+       WHAT IS NOT: the block registry, the tuner's radial menu and the acoustics
+       flood. All three need a voxel world; none of them is under test, and each
+       is replaced by a fake whose whole surface is a handful of fields this
+       harness sets directly.
+
+       THE CLOCK IS DRIVEN, NOT WALL. CmmClock is the one shipped file the
+       harness replaces, so a two-second tune-in costs whatever the decode costs
+       rather than two seconds, and every run is identical.
+
+         dotnet run (project tools/CmmEmitSim) -c Release
+       Exit code 0 = every invariant held.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmEmitSim</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <DefineConstants>$(DefineConstants);GV_V3;CMM_EMITSIM</DefineConstants>
+    <NoWarn>$(NoWarn);CS0649;CS0414;CS0169;CS0067</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The subject. -->
+    <Compile Include="..\..\Harmony\EmitterAudioLayer.cs"   Link="linked\EmitterAudioLayer.cs" />
+    <!-- Everything it talks to that does not need a voxel world. -->
+    <Compile Include="..\..\Harmony\CmmMixer.cs"            Link="linked\CmmMixer.cs" />
+    <Compile Include="..\..\Harmony\CMMConfig.cs"           Link="linked\CMMConfig.cs" />
+    <Compile Include="..\..\Harmony\RadioStationCatalog.cs" Link="linked\RadioStationCatalog.cs" />
+    <Compile Include="..\..\Harmony\EmitterSlots.cs"        Link="linked\EmitterSlots.cs" />
+    <Compile Include="..\..\Harmony\RadioBadge.cs"          Link="linked\RadioBadge.cs" />
+    <Compile Include="..\..\Harmony\PlaylistSource.cs"      Link="linked\PlaylistSource.cs" />
+    <Compile Include="..\..\Harmony\SourceScan.cs"          Link="linked\SourceScan.cs" />
+    <Compile Include="..\..\Harmony\MusicRoots.cs"          Link="linked\MusicRoots.cs" />
+    <Compile Include="..\..\Harmony\DataStructures.cs"      Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs"       Link="linked\TrackRotation.cs" />
+    <Compile Include="..\..\Harmony\AudioDecoder.cs"        Link="linked\AudioDecoder.cs" />
+    <Compile Include="..\..\Harmony\NativeAudio.cs"         Link="linked\NativeAudio.cs" />
+    <Compile Include="..\..\Harmony\LoudnessStore.cs"       Link="linked\LoudnessStore.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\CMM_Decoder\dist\CMM_Decoder.dll" Link="CMM_Decoder.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

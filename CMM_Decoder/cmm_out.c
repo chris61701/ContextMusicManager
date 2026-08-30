@@ -477,12 +477,26 @@ static void cmm_emitter_gains(cmm_out* o, struct cmm_emit_slot* sl, ma_uint32 fr
 
 /* Realtime consumer: drain the ring into `output`. Runs on miniaudio's audio
  * thread — keep it to memcpy + memset only. */
-static void cmm_out_data_callback(ma_device* dev, void* output, const void* input, ma_uint32 frameCount)
+/* ── THE RENDER, SHARED BY THE DEVICE AND THE HARNESS (v62) ───────────────────────────────────
+ * This was the device callback's body, and being ONLY the callback's body is what made every
+ * offline measurement of a world speaker wrong. The emitter lanes are spatialised, filtered,
+ * reverberated and mixed HERE; the headless drain moved the ring pointers and threw the slot
+ * rings away, so a harness capture contained the music bus and nothing else. CmmEmitSim read
+ * -140 dBFS through a tune-in the lane telemetry showed was fully lit.
+ *
+ * The comment on cmm_out_drain_into promised "the mixer's real output as samples". It is true
+ * now: both paths run this, so a captured render and an audible one are the same signal for
+ * emitters as they always were for the music bus. */
+static void cmm_out_render(cmm_out* o, float* outBase, ma_uint32 frameCount)
 {
-    cmm_out* o = (cmm_out*)dev->pUserData;
-    float* out = (float*)output;
+    /* THE MUSIC LOOP WALKS `out` FORWARD as it copies, so everything downstream of it -- the
+     * emitter mix, the clip guard, the output gain ramp -- must index from the buffer's START.
+     * That is why they were written against the untouched parameter rather than the cursor, and
+     * folding the two together (as the first cut of this split did) writes the emitter block one
+     * whole buffer past the end: a 2x overrun, which on a device is somebody else's audio and
+     * through the harness is the managed heap. */
+    float* out = outBase;
     ma_uint32 remaining = frameCount;
-    (void)input;
 
     /* Flush request: discard every queued frame so freshly-written audio plays
      * immediately instead of behind a deep cushion. Done HERE (the consumer) so we
@@ -781,7 +795,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             }
         }
 
-        /* Render whenever ANY dry is audible OR there's reverb to run. The carry wet is NOT occluded
+    /* Render whenever ANY dry is audible OR there's reverb to run. The carry wet is NOT occluded
          * (it carries around corners/through walls — the "it bounced / next room" cue), so it MUST
          * render even when every dry is fully occluded to silence. Rings are drained (and residual
          * discarded) regardless, keeping them in lockstep with the music ring. */
@@ -820,7 +834,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
                 }
             }
             if (render) {
-                float* op = (float*)output + (size_t)base * o->channels;
+                float* op = outBase + (size_t)base * o->channels;
                 ma_uint32 f;
                 for (f = 0; f < chunk; f++) {
                     float carryIn = 0.0f, locIn = 0.0f;
@@ -921,7 +935,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         }
         /* Clip-guard the summed output (music + emitters can exceed unity). */
         if (render) {
-            float* p = (float*)output;
+            float* p = outBase;
             ma_uint32 total = frameCount * (ma_uint32)o->channels, i;
             for (i = 0; i < total; i++) {
                 float sv = p[i];
@@ -938,7 +952,7 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
         float g = o->gain, gt = o->gainTarget, gs = o->gainStep;
         if (gs != 0.0f || g != 1.0f) {
             ma_uint32 ch = (ma_uint32)o->channels;
-            float* p = (float*)output;
+            float* p = outBase;
             ma_uint32 f;
             for (f = 0; f < frameCount; f++) {
                 ma_uint32 c;
@@ -952,6 +966,13 @@ static void cmm_out_data_callback(ma_device* dev, void* output, const void* inpu
             o->gainStep = gs;
         }
     }
+}
+
+/* The device's consumer. Everything it does is above; this only names the buffer. */
+static void cmm_out_data_callback(ma_device* dev, void* output, const void* input, ma_uint32 frameCount)
+{
+    (void)input;
+    cmm_out_render((cmm_out*)dev->pUserData, (float*)output, frameCount);
 }
 
 /* Open + start a playback device on the default endpoint.
@@ -1075,48 +1096,20 @@ CMM_API cmm_out* cmm_out_open_null(int sampleRate, int channels, int ringFrames,
  * audible one are the same signal. */
 CMM_API int cmm_out_drain_into(cmm_out* o, float* dst, int frames)
 {
-    int consumed = 0;
     if (!o || !dst || frames <= 0) return 0;
 
-    if (o->flush) {
-        o->flush = 0;
-        ma_uint32 avail = ma_pcm_rb_available_read(&o->rb);
-        while (avail > 0) {
-            ma_uint32 n = avail; void* p = NULL;
-            if (ma_pcm_rb_acquire_read(&o->rb, &n, &p) != MA_SUCCESS || n == 0) break;
-            ma_pcm_rb_commit_read(&o->rb, n);
-            avail -= n;
-        }
-        if (o->flushSetGain) {
-            o->flushSetGain = 0;
-            o->gain = o->flushGain; o->gainTarget = o->flushGain; o->gainStep = 0.0f;
-        }
-    }
-
-    while (consumed < frames) {
-        ma_uint32 n = (ma_uint32)(frames - consumed);
-        void* readPtr = NULL;
-        if (ma_pcm_rb_acquire_read(&o->rb, &n, &readPtr) != MA_SUCCESS || n == 0) break;
-        memcpy(dst + (size_t)consumed * o->channels, readPtr,
-               (size_t)n * o->channels * sizeof(float));
-        ma_pcm_rb_commit_read(&o->rb, n);
-        consumed += (int)n;
-    }
-
-    /* The same per-frame gain ramp the realtime callback applies. */
+    /* PACE ON THE PRODUCER, THEN RENDER LIKE THE DEVICE. Returning short when the ring is not
+     * yet full is what lets a harness advance its clock on real rendered audio rather than on
+     * silence it mistook for a hole -- so this reports what is actually available first, and
+     * cmm_out_render then consumes exactly that much through the same path a speaker hears. */
     {
-        int f, c;
-        for (f = 0; f < consumed; f++) {
-            if (o->gainStep != 0.0f) {
-                o->gain += o->gainStep;
-                if ((o->gainStep > 0.0f && o->gain >= o->gainTarget) ||
-                    (o->gainStep < 0.0f && o->gain <= o->gainTarget))
-                { o->gain = o->gainTarget; o->gainStep = 0.0f; }
-            }
-            for (c = 0; c < o->channels; c++) dst[(size_t)f * o->channels + c] *= o->gain;
-        }
+        ma_uint32 avail = ma_pcm_rb_available_read(&o->rb);
+        if ((int)avail < frames) frames = (int)avail;
     }
-    return consumed;
+    if (frames <= 0) return 0;
+
+    cmm_out_render(o, dst, (ma_uint32)frames);
+    return frames;
 }
 
 CMM_API int cmm_out_drain(cmm_out* o, int frames)

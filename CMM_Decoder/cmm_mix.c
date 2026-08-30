@@ -1493,6 +1493,11 @@ static void render_sfx_add(int n) {
     }
 }
 
+/* Non-zero while a headless pump is inside cmm_out_render on a device the producer might
+ * otherwise close. Only the headless path sets it; the realtime device is torn down by
+ * miniaudio, which stops its own callback first. */
+static int g_pumpBusy;
+
 /* ── Producer thread ──────────────────────────────────────────────────────*/
 static void pump_body(void) {
     while (g_running) {
@@ -1505,7 +1510,8 @@ static void pump_body(void) {
         if (g_reinitRequested) {
             g_reinitRequested = 0;
             /* Detach under the lock, close+reopen OUTSIDE it (both block on the backend). */
-            if (g_out) { toClose = g_out; g_out = NULL; g_deviceWanted = 1; }
+            if (g_out && !g_pumpBusy) { toClose = g_out; g_out = NULL; g_deviceWanted = 1; }
+            else g_reinitRequested = 1;   /* a pump is rendering on it; try again next pass */
         }
         if (g_deviceWanted) {
             g_deviceWanted = 0;   /* one attempt per request — no open storm without an endpoint */
@@ -1658,7 +1664,7 @@ static void pump_body(void) {
          * so testing it here makes the teardown agree with the renderer. Deliberately NOT
          * g_emSlotCount: a stopped station can leave points published, and keying on those would
          * hold the device open for ever. */
-        if (g_closeWhenIdle && g_voiceCount == 0 && !emitters_armed()) {
+        if (g_closeWhenIdle && g_voiceCount == 0 && !emitters_armed() && !g_pumpBusy) {
             idleDetached = teardown_detach_locked();
             g_closeWhenIdle = 0;
             closeIdle = 1;
@@ -1923,11 +1929,31 @@ CMM_API int cmm_mix_start(int busRate, int busChannels, int tightFrames, int max
  * away, which is all a leak-hunt needs; rendering a station change to a file needs them back.
  * dst holds frames * channels interleaved floats. Headless only. */
 CMM_API int cmm_mix_pump_capture(float* dst, int frames) {
-    int drained;
+    cmm_out* dev;
+    /* THE RENDER RUNS OUTSIDE THE LOCK, exactly as the device callback does.
+     *
+     * This used to hold g_lock across the whole drain, which was harmless while the drain was a
+     * memcpy. Now that it RENDERS (v62 -- see cmm_out_render), holding the lock means the caller
+     * blocks the producer thread that has to refill the very ring it is draining: the pump takes
+     * the lock, renders, returns almost nothing because the ring is empty, spins, and takes the
+     * lock again before the producer has had a chance to run. An offline harness went from
+     * "a second of audio in a fraction of a second" to not finishing at all.
+     *
+     * The realtime path has always had the shape this now copies: miniaudio's callback holds no
+     * mixer lock, and the producer writes the rings underneath it. The lock is taken only to read
+     * which device is current. */
     mix_lock(&g_lock);
-    drained = (g_out && g_headless) ? cmm_out_drain_into(g_out, dst, frames) : 0;
+    dev = (g_out && g_headless) ? g_out : NULL;
+    if (dev) g_pumpBusy++;              /* keep the teardown off it while we render */
     mix_unlock(&g_lock);
-    return drained;
+    if (!dev) return 0;
+    {
+        int drained = cmm_out_drain_into(dev, dst, frames);
+        mix_lock(&g_lock);
+        g_pumpBusy--;
+        mix_unlock(&g_lock);
+        return drained;
+    }
 }
 
 CMM_API int cmm_mix_pump_out(int frames) {
