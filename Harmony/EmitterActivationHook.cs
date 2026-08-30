@@ -261,15 +261,24 @@ namespace CMM
         {
             try
             {
-                if (!EmitterActivation.Ready()) return;
+                // OURS ONLY, AND ONLY WHILE IT IS OURS. _entries used to survive until the next
+                // emitter was looked at, and the badge postfix matches on CommandIndex -- a bare
+                // int. So the next wheel the player opened, for a workstation or a vehicle or a
+                // door, found stale entries under the same indices and wore our four-character
+                // station badges over its own labels. Reported as station buttons overlapping
+                // icons in radials that have nothing to do with the radio.
+                //
+                // This postfix runs for every block whose activation commands are fetched, which
+                // is what builds the wheel, so clearing here lands before that wheel is laid out.
+                if (!EmitterActivation.Ready()) { EmitterActivation.BeginEntries(); return; }
                 EmitterRegistry.Emitter e;
-                if (!EmitterTuner.EmitterAt(_blockPos, out e)) return;
+                if (!EmitterTuner.EmitterAt(_blockPos, out e)) { EmitterActivation.BeginEntries(); return; }
 
                 var have = __result ?? new BlockActivationCommand[0];
                 // The block's OWN commands come first and are counted against the 13 segments, so
                 // the menu shrinks to fit rather than overflowing off the ring.
                 EmitterTuner.BuildChoices(e, _choices, have.Length);
-                if (_choices.Count == 0) return;
+                if (_choices.Count == 0) { EmitterActivation.BeginEntries(); return; }
 
                 // A NEW ARRAY, never an append in place: BlockCompositeTileEntity returns a CACHED
                 // field (`commands`), and growing the game's own array would leak our entries into

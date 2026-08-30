@@ -1542,7 +1542,13 @@ namespace CMM
                 // _slotOwner is the test: it is set when a voice lands and cleared when one stops,
                 // so it is exactly "is there a station's audio in this ring". A searching slot has
                 // none, and nothing needs discarding.
-                if (_slotOwner[slot] != null) CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
+                // ...AND NOT THROUGH A HANDOVER. MaintainTune pins the incoming station to the
+                // slot before it starts, so _slotOwner is set while the lane still holds nothing
+                // but OUR NOISE -- and the flush discards it, then re-primes from empty with 40 ms
+                // of zeros. That is the "fraction of a second of no audio, almost a pop", landing
+                // exactly where the two stations change hands.
+                if (_slotOwner[slot] != null && !(_tunePhase != 0 && slot == _tuneSlot))
+                    CmmMixer.GetOrCreate().FlushEmitterSlot(slot);
                 // THE RECEIVER GOES SEARCHING, AT THE SPEAKERS. Only on a real station change: a
                 // track advancing within one station is not a dial being turned, and hiss over it
                 // would be a fault rather than a feature.
@@ -2135,11 +2141,19 @@ namespace CMM
                 // whole point: the noise covers the open and the level hold rather than the
                 // speaker sitting silent through them. The station comes up FIRST and the static
                 // then fades out from under it -- never the other way round, which is a crossfade.
+                // THE ARRIVE IS NOT OURS TO FIRE. CommitPendingStart already raises the receiver
+                // the moment the voice lands, and it does it over `_emPendingFade + ArriveTail`
+                // floored at ArriveRamp -- the track's OWN fade-in plus a tail, so the hiss is
+                // still there while the music is climbing out from under it. Setting it here as a
+                // flat ArriveRamp ignored the fade entirely, so on any track whose fade runs
+                // longer than 900 ms the static finished first. "Static goes before the track has
+                // faded in", exactly.
+                //
+                // So this phase only watches. The voice landing IS the arrival.
                 if (to != null && to.VoiceId != 0 && to.Slot == _tuneSlot)
                 {
-                    CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
-                    CMMConfig.D($"[CMM] Tune: arriving on slot {_tuneSlot} — '{_tuneTo}' rises out "
-                              + $"of the noise over {CMMConfig.WorldEmitterArriveMs:0} ms.");
+                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' landed on slot {_tuneSlot} — "
+                              + "the start path raises the receiver over its own fade.");
                     _tunePhase = 0; _tuneSlot = -1;
                 }
                 else if (now >= _tuneGiveUp)
@@ -2295,7 +2309,17 @@ namespace CMM
             for (int i = 0; i < _stations.Count; i++)
                 if (string.Equals(_stations[i].Name, want, StringComparison.OrdinalIgnoreCase))
                 { target = _stations[i]; break; }
-            if (target == null) return;
+            // ONLY WHEN THE LANE IS GENUINELY SHARED. A borrow renders noise over an EMPTY lane,
+            // so it can never be the pocket radio's "station rising out of the noise" -- there is
+            // nothing under it to rise. When the target is NOT already playing, the ordinary start
+            // path is strictly better: the station opens on a slot, that slot's own receiver
+            // searches, and CommitPendingStart raises it over the track's fade. Routing those
+            // through the borrow is why turning a radio on gave static, then silence, then music
+            // arriving on its own somewhere else.
+            //
+            // A target already voiced elsewhere is the one case with no better answer: its slot
+            // carries other speakers, who must not be hissed.
+            if (target == null || target.VoiceId == 0) return;
 
             int slot = FreeSlot();
             if (slot < 0) slot = TakeInaudibleSlot();
