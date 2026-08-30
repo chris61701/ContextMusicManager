@@ -679,6 +679,13 @@ CMM_API void cmm_mix_set_emitter_recv_trim(float trim) {
 /* Arm/steer one slot's receiver. signal 0 = searching, 1 = locked; ramped over rampSeconds so a
  * retune is a dial being turned rather than a switch. Called from managed under no lock: these are
  * plain floats read by the producer, and a torn ramp target is inaudible where a lock is not. */
+/* Any emitter slot that would render with no voice behind it — see the idle teardown. */
+static int emitters_armed(void) {
+    int s;
+    for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) if (g_emRx[s].armed) return 1;
+    return 0;
+}
+
 CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds) {
     if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
     em_recv* r = &g_emRx[slot];
@@ -689,6 +696,12 @@ CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds)
         /* First arm: start where we are told to, not from a stale ramp. RNG is seeded per slot so
          * three speakers searching at once are three different roars, not one in triplicate. */
         r->armed = 1;
+        /* AND ASK FOR THE OUTPUT. g_deviceWanted is set only by cmm_mix_add / _add_emitter /
+         * _reinit -- that is, only by ADDING A VOICE -- so a borrow arriving while the device was
+         * already closed could never open one, and hissed into nothing for its whole life. Set
+         * after r->armed so the producer cannot win the race and tear down between the two. */
+        g_deviceWanted = 1;
+        g_closeWhenIdle = 0;
         r->rng = 22222u + (unsigned)(slot * 2654435761u);
         r->nzLp = r->nzLp2 = r->clk = r->fA = r->fB = r->lp = 0.0f;
         r->sig = signal;
@@ -1480,7 +1493,20 @@ static void pump_body(void) {
             }
         }
         cmm_out* idleDetached = NULL;
-        if (g_closeWhenIdle && g_voiceCount == 0) {
+        /* A SEARCHING RECEIVER IS SOMETHING PLAYING, even though it is not a voice. g_voiceCount
+         * alone tore the device down underneath a sweep: the borrow renders hiss on a slot with
+         * NO voice by design, so the last real voice retiring during one took the output with it.
+         * Nothing cleared g_emRx[].armed, so the managed side saw a perfectly healthy borrow --
+         * timers running, log lines firing -- for its full duration while nothing rendered at all.
+         * Then the arriving station's cmm_mix_add_emitter reopened the device and the station
+         * landed with no sweep in front of it: "static doesn't come in at all, and stations tune
+         * in immediately". Measured headless at -999 dBFS with the borrow armed and no voice.
+         *
+         * `armed` is the exact term the lane gate below uses to decide a voiceless slot renders,
+         * so testing it here makes the teardown agree with the renderer. Deliberately NOT
+         * g_emSlotCount: a stopped station can leave points published, and keying on those would
+         * hold the device open for ever. */
+        if (g_closeWhenIdle && g_voiceCount == 0 && !emitters_armed()) {
             idleDetached = teardown_detach_locked();
             g_closeWhenIdle = 0;
             closeIdle = 1;
