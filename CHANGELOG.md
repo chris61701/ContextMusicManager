@@ -5,9 +5,9 @@ All notable changes to Context Music Manager are documented here.
 ## 1.0.5
 
 **Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — 2026-08-27 ·
-RC4 — 2026-08-28 · RC5 — 2026-08-30.
+RC4 — 2026-08-30.
 Everything in this section ships in 1.0.5; the RC line above is only there so a tester can tell
-which build they are holding. Items added after RC2 are marked *(RC3)*, *(RC4)* or *(RC5)*.
+which build they are holding. Items added after RC2 are marked *(RC3)* or *(RC4)*.
 
 Everything below is measured against **1.0.4b**. Several large features arrive whole in this
 release — world speakers, the personal radio, music packs, the overlay — and are described as
@@ -150,7 +150,7 @@ they now behave, rather than as a history of how they got there.
   world — POI tier and infestation, trader identity, vehicle, weather, biome, threat detail —
   so custom resolution policies can key off things that were previously not exposed. The
   documented API in `Config/context.api.md` covers the additions.
-- **Every dead station sits on its own note** *(RC5)*. A station whose folder holds nothing
+- **Every dead station sits on its own note** *(RC4)*. A station whose folder holds nothing
   playable no longer parks on a single 440 Hz test tone. It is a minor triad — 440 / 523.25 /
   659.25 Hz, each one a setting — and the new `WorldEmitterOffAirVarianceHz` moves the root by up
   to that many Hz either way, seeded from the station's NAME. So a dead channel keeps the same
@@ -161,7 +161,7 @@ they now behave, rather than as a history of how they got there.
 
 ### Changed
 
-- **The static from world speakers is half as loud** *(RC5)*. It was set against the hiss from
+- **The static from world speakers is half as loud** *(RC4)*. It was set against the hiss from
   the radio in your pocket, which reaches your ears through a different path entirely — a world
   speaker's noise arrives before distance, occlusion and the room are applied, so the same number
   is far hotter out of a shelf speaker across a room. `WorldEmitterStaticTrim` drops from 2.0 to
@@ -269,7 +269,7 @@ they now behave, rather than as a history of how they got there.
 
 ### Fixed
 
-- **World speakers went quiet in the middle of a station change** *(RC5)*. Changing station on a
+- **World speakers went quiet in the middle of a station change** *(RC4)*. Changing station on a
   speaker is meant to be a crossover: the static covers the change while the new station rises
   under it. It only ever had one side. The speaker was held out of every station until the
   handover had completely finished, so the old sound faded away over a full second with nothing
@@ -277,13 +277,13 @@ they now behave, rather than as a history of how they got there.
   a 180 ms hole with a level step at each end, while the station's own audio sat there at a
   steady level the whole time. Both sides now cross over the same span, and because both carry
   the same decode the sound simply moves across rather than fading out and back in.
-- **Ticking and popping when you turned your head near a speaker** *(RC5)*. A speaker's position
+- **Ticking and popping when you turned your head near a speaker** *(RC4)*. A speaker's position
   in the stereo field depends on which way you are facing, and that was recalculated once per
   audio block and applied as a single value across it — so turning quickly moved it a whole
   block's worth in one sample, over and over, which is heard as ticking. It now slides across the
   block instead. Nothing is delayed by this: the turn still lands in the same block, the change is
   just spread across it rather than sitting on its edge.
-- **Static formed over the off-air tone and stayed there** *(RC5)*. The receiver keeps a faint bed
+- **Static formed over the off-air tone and stayed there** *(RC4)*. The receiver keeps a faint bed
   of noise even when locked on, because falling to absolute silence sounds like a sound effect
   ending rather than like a receiver. That is right for a station and wrong for a speaker sitting
   on the off-air tone, which has nothing else on it. The hiss now clears as the tone comes up, so

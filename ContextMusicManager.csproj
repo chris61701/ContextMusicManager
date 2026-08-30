@@ -450,8 +450,8 @@
            "does not define a valid Version" in every tester's log, so the old way of marking a
            candidate (writing 1.0.5RC3 into ModInfo) bought a filename at the cost of a warning
            in the very build being tested. This never touches ModInfo:
-               msbuild -p:Configuration=Release -p:RcLabel=RC5
-           gives 'ContextMusicManager V1.0.5RC5 for ...zip' with ModInfo still saying 1.0.5. -->
+               msbuild -p:Configuration=Release -p:RcLabel=RC4
+           gives 'ContextMusicManager V1.0.5RC4 for ...zip' with ModInfo still saying 1.0.5. -->
       <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion)$(RcLabel) for A20-A21-2.6-3.2.zip</_ZipPath>
     </PropertyGroup>
     <Delete Files="$(_ZipPath)" />
