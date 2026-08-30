@@ -566,6 +566,7 @@ namespace CMM
 
             // Push the live spatial-curve tuning + radio master from config (hot-reloaded).
             PushTuning();
+            PushReceiverTuning();
             PushEmitterMaster();
 
             EnsureCatalog();        // stations from the Radio source's subfolders (throttled disk stat)
@@ -1154,7 +1155,7 @@ namespace CMM
                     if (!_joinedAt.TryGetValue(key, out float j0)) continue;
                     float jage = now - j0;
                     if (jage >= jdur) continue;
-                    gains[i] += (1f - jage / jdur) * range;
+                    gains[i] += FadeExtra(1f - jage / jdur, range);
                 }
             }
 
@@ -1167,8 +1168,31 @@ namespace CMM
                 if (!_speakerFirstSeen.TryGetValue(key, out float t0)) continue;
                 float age = now - t0;
                 if (age >= dur) continue;
-                gains[i] += (1f - age / dur) * range;
+                gains[i] += FadeExtra(1f - age / dur, range);
             }
+        }
+
+        // A FADE HAS TO BE LINEAR IN LEVEL, AND VIRTUAL DISTANCE IS NOT.
+        //
+        // These fades work by adding distance and decaying it to nothing, but the output turns
+        // distance into level through a power law -- level ~ ((Range - d)/span)^Falloff, Falloff
+        // 2.5. Decaying the DISTANCE linearly therefore produces, in dB: silent until 3% of the
+        // way, -57 dB at a quarter, -34 dB at half, -19 dB at three quarters, and the whole
+        // remaining 18.5 dB in the last third. Measured across a one-second arrive, 72% of it sits
+        // below -19 dB and the audible rise is squeezed into the final 320 ms.
+        //
+        // That is "the audio comes through too quickly": not a fast ramp, a ramp whose audible
+        // part is compressed into its own tail. Inverting the falloff spreads it evenly -- ask for
+        // the distance that yields THIS level, rather than assuming distance and level are the
+        // same shape.
+        private static float FadeExtra(float attenuate01, float range)
+        {
+            if (attenuate01 <= 0f) return 0f;
+            if (attenuate01 >= 1f) return range;
+            float falloff = CMMConfig.WorldEmitterFalloff;
+            if (falloff < 0.1f) falloff = 0.1f;
+            float wanted = 1f - attenuate01;                       // the level we want, 0..1
+            return (1f - Mathf.Pow(wanted, 1f / falloff)) * range;  // ...as added distance
         }
 
         // When each speaker last CHANGED station. Stamped in GroupSnapshot, which is the one place
@@ -3117,6 +3141,41 @@ namespace CMM
         // contexts.xml — that one now trims ONLY the personal radio (PersonalRadio
         // .MasterVolumeOverride). The two share a station catalog but not a level: a speaker across
         // the room and a radio in your head want different trims.
+        // THE RECEIVER'S TUNING, PUSHED BY US TOO.
+        //
+        // Every one of these parameters is a file-static in cmm_mix.c shared by both receivers --
+        // deliberately, so one sound is tuned once. But only PersonalRadio.AimSignal ever pushed
+        // them, and nothing in this layer did. So world speakers ran on the C file's COMPILED
+        // defaults until the player happened to dial the pocket radio once, and then silently
+        // flipped to radio.xml's values for the rest of the session.
+        //
+        // Measured, same chain, same distance: the hiss is 12.0 dB quieter after the pocket radio
+        // has been touched (-25.06 dBFS against -37.02), and the knee moves 0.45 -> 0.90, which
+        // shifts where the station comes out from under the noise from signal 0.45 to 0.88. The
+        // world radios audibly changed character mid-session according to something the player did
+        // somewhere else entirely -- and "sometimes the static is so quiet I cannot hear it" is
+        // exactly what a 12 dB drop nobody asked for sounds like.
+        //
+        // Pushing the same config values from here makes it deterministic. Both writers now agree
+        // because both read radio.xml; whoever writes last writes the same numbers.
+        private static void PushReceiverTuning()
+        {
+            var m = CmmMixer.Instance;
+            if (m == null) return;
+            m.SetReceiverShape(CMMConfig.RadioRecvFloorDb, CMMConfig.RadioRecvMuteWidth,
+                               CMMConfig.RadioRecvDrive, CMMConfig.RadioRecvWander,
+                               CMMConfig.RadioRecvFlutter, CMMConfig.RadioRecvFlutterHz);
+            m.SetReceiverTone(CMMConfig.RadioRecvKnee, CMMConfig.RadioRecvKneeWidth,
+                              CMMConfig.RadioRecvNoise, CMMConfig.RadioRecvClicks,
+                              CMMConfig.RadioRecvClickRate, CMMConfig.RadioRecvHiFloorHz,
+                              CMMConfig.RadioRecvDeemphHz);
+            m.SetReceiverArrival(CMMConfig.RadioRecvNoiseHold, CMMConfig.RadioRecvNoiseFloor,
+                                 CMMConfig.RadioRecvWindowA, CMMConfig.RadioRecvWindowB,
+                                 CMMConfig.RadioRecvLockAt, CMMConfig.RadioRecvLockMs);
+            m.SetReceiverRadio(CMMConfig.RadioRecvMangle, CMMConfig.RadioRecvMakeupDb,
+                               CMMConfig.RadioRecvLowCutHz, CMMConfig.RadioRecvHighCutHz);
+        }
+
         private static void PushEmitterMaster()
         {
             float trim = Mathf.Clamp01(CMMConfig.WorldEmitterVolume);

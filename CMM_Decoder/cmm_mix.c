@@ -705,6 +705,11 @@ CMM_API void cmm_mix_set_emitter_tone(int slot, const float* hz, const float* le
 
     if (live == 0) { g_emToneTgt[slot] = 0.0f; }
     else {
+        /* AND ASK FOR THE OUTPUT, exactly as arming a receiver does. This was the only emitter
+         * lane source that never did, so raising a carrier while the device was closed rendered
+         * into nothing for its whole life -- measured at silence with g_deviceWanted still 0. */
+        g_deviceWanted = 1;
+        g_closeWhenIdle = 0;
         if (g_emToneAmp[slot] <= 0.0001f)
             for (k = 0; k < EM_TONE_MAX; k++) g_emTonePh[slot][k] = 0.0f;   /* from a zero crossing */
         for (k = 0; k < count; k++) {
@@ -753,9 +758,18 @@ CMM_API void cmm_mix_set_emitter_recv_trim(float trim) {
  * retune is a dial being turned rather than a switch. Called from managed under no lock: these are
  * plain floats read by the producer, and a torn ramp target is inaudible where a lock is not. */
 /* Any emitter slot that would render with no voice behind it — see the idle teardown. */
+static int em_tone_live(int s);
+
+/* Anything that would render on an emitter lane with no voice behind it -- see the idle teardown.
+ * MUST agree with the lane gate in the producer, which is
+ *     if (!emActive[s] && !g_emRx[s].armed && !em_tone_live(s)) continue;
+ * It did not: this tested `armed` alone, so a speaker sitting on the OFF-AIR CARRIER -- which has
+ * no voice and no armed receiver by definition -- was the one emitter sound with nothing holding
+ * the device open, and the teardown closed it underneath. Measured: tone raised, device torn down,
+ * nothing renders. */
 static int emitters_armed(void) {
     int s;
-    for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) if (g_emRx[s].armed) return 1;
+    for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) if (g_emRx[s].armed || em_tone_live(s)) return 1;
     return 0;
 }
 
