@@ -106,7 +106,6 @@ namespace CMM
         private static Vector3i _borrowPos;
         private static float _borrowUntil, _borrowReleaseAt, _borrowGiveUp;
         // The lane this borrow swaps its mirror to once the leave has finished, and when.
-        private static int   _borrowMirrorTo = -1;
         private static float _borrowSwapAt;
         private static string _borrowTarget;
         // A station that never opens must not hold a slot for ever. Comfortably past the level
@@ -3055,18 +3054,48 @@ namespace CMM
 
                 if (_borrowSwapAt > 0f && now >= _borrowSwapAt)
                 {
-                    if (_borrowMirrorTo >= 0)
+                    // RESOLVED HERE, NOT AT THE BEGIN. This used to swap to a slot number captured
+                    // when the borrow started -- and a station that is not playing yet HAS no slot,
+                    // so a dial turn onto a cold station recorded -1 and the swap then connected
+                    // NOTHING. The arrive lifted the static off an empty lane and the speaker sat
+                    // in silence until it rejoined the station's own lane a second later. That is
+                    // "the static stopped playing before the music started", exactly, and the log
+                    // says it in as many words: "swaps its copy to lane -1".
+                    //
+                    // The target is known by NAME for the whole borrow, and its slot is a fact
+                    // about right now, so it is read right now.
+                    Station tgt = ByName(_borrowTarget);
+                    if (tgt == null || tgt.Slot < 0 || tgt.VoiceId == 0)
+                    {
+                        // NOT THERE YET -- SO KEEP THE NOISE. The floor has passed but the voice
+                        // has not arrived, and step 7 wants BOTH. Swapping to nothing is the one
+                        // outcome that cannot be recovered from; waiting costs a few hundred
+                        // milliseconds of hiss, which is what the hiss is for. The give-up cap
+                        // still applies underneath, so a station that never opens is not waited on
+                        // for ever -- it falls through to the carrier like any other dead one.
+                        if (now < _borrowGiveUp) return;
+                    }
+                    else
                     {
                         // SILENT, THEN RISING -- on the MIRROR, so the static above it is
                         // untouched. Connecting a copy at full level was "audio comes in hot",
                         // and fading it by the point took the hiss down with it.
                         CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, 0f);
-                        CmmMixer.Instance?.SetLaneMirror(_borrowSlot, _borrowMirrorTo);
+                        CmmMixer.Instance?.SetLaneMirror(_borrowSlot, tgt.Slot);
                         CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 1f, ArriveRamp);
+                        CMMConfig.D($"[CMM] Sweep borrow: slot {_borrowSlot} swaps its copy to "
+                                  + $"lane {tgt.Slot} ('{tgt.Name}') under the noise"
+                                  + (now > _borrowSwapAt + 0.05f
+                                       ? $" — {(now - _borrowSwapAt) * 1000f:0} ms late, waited for the voice." : "."));
+                        // A LATE SWAP MOVES THE ARRIVE WITH IT. The release is gated on the same
+                        // voice this swap was waiting for, so both would come free on the very same
+                        // tick -- the music connected and the speaker handed back in one step, with
+                        // no arrive between them. It gets its mandatory silence measured from when
+                        // it actually became possible, not from when it was scheduled.
+                        float floor = now + MinStatic;
+                        if (floor > _borrowUntil) _borrowUntil = floor < _borrowGiveUp ? floor : _borrowGiveUp;
                     }
-                    CMMConfig.D($"[CMM] Sweep borrow: slot {_borrowSlot} swaps its copy to lane "
-                              + $"{_borrowMirrorTo} under the noise.");
-                    _borrowSwapAt = 0f; _borrowMirrorTo = -1;
+                    _borrowSwapAt = 0f;
                 }
                 // Not until the station it is joining can actually be heard. Waiting here is the
                 // whole point: the noise covers the decode instead of the speaker sitting silent
@@ -3319,11 +3348,29 @@ namespace CMM
             Station leave = ByName(_posStation.TryGetValue(pos, out string ls) ? ls : null);
             if (leave != null && leave.Slot >= 0 && leave.VoiceId != 0)
             {
+                // AT FULL, AND THEN AWAY. The mirror gain is a lane property that survives the
+                // borrow that set it, and every borrow ENDS by fading it to zero -- so the first
+                // sweep of a session mirrored the leaving station correctly and every sweep after
+                // it mirrored a station at gain zero. Silence under the noise, for the whole leave,
+                // for the rest of the session.
+                //
+                // That one missing line is both of the last two reports. With no programme on the
+                // lane the arrive faded the static off nothing ("the static stopped before the
+                // music started"), and the handover then swapped a static-only lane for a music
+                // lane at a completely different level ("stitching two different volume clips").
+                // With the copy present the crossover is music into the SAME music, one decode
+                // either side of it, and there is no level to mismatch.
+                CmmMixer.GetOrCreate().SetLaneMirrorGain(slot, 1f, 0f);
                 CmmMixer.GetOrCreate().SetLaneMirror(slot, leave.Slot);
+                // ...AND IT FADES OUT ACROSS THE LEAVE. The receiver alone only buries a programme
+                // by RadioRecvFloorDb, about five decibels, so a station left playing under full
+                // static is still plainly there -- and the swap would then have to CUT it, on the
+                // sample, which is a click by construction. Fading it out over the same span the
+                // signal falls means the swap happens between silence and silence.
+                CmmMixer.GetOrCreate().SetLaneMirrorGain(slot, 0f, LeaveRamp);
                 CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 1f, 0f);          // locked on what it has
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, LeaveRamp);   // ...and now leaving it
-                _borrowMirrorTo = target.Slot;
                 // The mirror is what puts a programme on this lane, so it waits out the same
                 // silence. Bringing it in at the end of the leave is what made a borrow's station
                 // audible the instant the dial stopped moving.
@@ -3347,7 +3394,6 @@ namespace CMM
                 // speaker is switched on, so a 700 ms slide into the noise is only a hole where
                 // the player expects the control to have done something.
                 CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, 0.04f);
-                _borrowMirrorTo = target.Slot;
                 // The mirror is what puts a programme on this lane, so it waits out the same
                 // silence. Bringing it in at the end of the leave is what made a borrow's station
                 // audible the instant the dial stopped moving.
@@ -3421,11 +3467,17 @@ namespace CMM
 
             // Back to pure noise while the dial travels again, and the new target connects at
             // the swap exactly as it would have on a fresh borrow.
-            CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, 0f);
-            CmmMixer.Instance?.SetLaneMirror(_borrowSlot, -1);
+            //
+            // FADED, NOT CUT. This dropped the mirror gain to zero on the sample and disconnected
+            // the source in the same breath -- and a re-aim is by definition an interruption, so
+            // the most likely moment for one is while the music is rising out of the arrive. That
+            // is a full-level programme stopping between two samples: a click, and the same shape
+            // as every other one in this file. The station the speaker is leaving now fades out
+            // across the leave, exactly as it does when a borrow begins, and the source is left
+            // connected for the swap to replace.
+            CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, LeaveRamp);
             CmmMixer.Instance?.SetEmitterRecv(_borrowSlot, 0f, LeaveRamp);
             _borrowTarget   = target.Name;
-            _borrowMirrorTo = target.Slot;
             _borrowSwapAt   = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
             _borrowUntil    = _borrowSwapAt + MinStatic;
             _borrowGiveUp   = now + BorrowGiveUp;
