@@ -340,6 +340,12 @@ namespace CMM
         {
             get
             {
+                // A SWEEP COUNTS. It renders on a slot with no station voice, so counting only
+                // voices reports "nothing playing" mid-hiss — and SelectAndVoice passes exactly
+                // this as `fresh:`, which fires ResetEmitterAcoustics across ALL slots (filter
+                // state, smoothing, both reverbs re-inited inside the audio callback). Straight
+                // through the sweep the player is listening to.
+                if (_borrowSlot >= 0) return true;
                 for (int i = 0; i < _stations.Count; i++) if (_stations[i].VoiceId != 0) return true;
                 return false;
             }
@@ -1284,6 +1290,18 @@ namespace CMM
         private static void SelectAndVoice(EntityPlayerLocal player)
         {
             float range = CMMConfig.WorldEmitterRange;
+
+            // NOTHING CAN LAND THIS TICK, SO TAKE NOTHING. StartStation returns immediately while a
+            // start is in flight, but SelectAndVoice used to run the whole selection first — and
+            // could STEAL a slot on the way, stopping a station for a start that then never
+            // dispatched. Worse, StopStation -> StopVoice -> InvalidatePendingStart bumps the
+            // generation, so the steal also killed the in-flight open it was queued behind.
+            //
+            // That is the churn in the log: one dial turn stopping three stations and opening
+            // 'Lit FM' twice, 550 ms apart, the first one dropped as superseded. The next tick
+            // costs a tenth of a second and takes nothing that was playing.
+            if (_emStartPending && CmmClock.Now - _emStartPendingAt < 10f) return;
+
             for (;;)
             {
                 // Nearest unvoiced candidate.
@@ -1809,6 +1827,10 @@ namespace CMM
                 // this path knows only that one station is finishing, which was never enough to
                 // decide whether the slot is idle.
                 if (_slotOwner[st.Slot] == st) _slotOwner[st.Slot] = null;
+                // AND THE LOCK IT WAS STILL OWED. A deferred lock outlives the station it was
+                // scheduled for, and the next thing on this slot inherits it — see the ordering
+                // note in ReleaseIdleReceivers.
+                _slotLockAt[st.Slot] = 0f;
                 st.Slot = -1;
             }
         }
@@ -2151,6 +2173,7 @@ namespace CMM
             CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
             CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
             _slotArmedAt[slot] = now;
+            _slotLockAt[slot] = 0f;   // a new sweep cancels whatever this slot was still owed
             CMMConfig.D($"[CMM] Sweep borrow: slot {slot} sweeps {e.Name} at {pos} onto '{want}' "
                       + (target.VoiceId != 0 ? "(already playing)." : "(opening under the noise)."));
         }
@@ -2226,6 +2249,19 @@ namespace CMM
         {
             for (int s = 0; s < MaxSlots; s++)
             {
+                // NOT ON THE SLOT SOMEBODY IS SWEEPING ON. This guard used to sit two lines lower,
+                // below the deferred lock, and that ordering is a silent kill: SetEmitterRecv(s, 1f)
+                // on a slot with NO VOICE ramps its receiver to LOCKED over a silent lane, which is
+                // the hiss disappearing mid-sweep. Nothing repaired it and nothing logged it — the
+                // borrow's own arrival ramp is then a no-op and the release just clears.
+                //
+                // It needs a stale deadline to fire, and the churn provides one: a lock is
+                // scheduled on a slot whose station is then stolen within the sweep window, the
+                // slot is released, the next retune borrows it, and the orphan fires into the
+                // borrow. StopStation never cleared it and neither did the borrow's arm — only
+                // StartStation's did. Both now do, below; this guard is the belt to that braces.
+                if (s == _borrowSlot) continue;                         // a speaker is sweeping on it
+
                 // A lock held back so the dial had time to travel (see the start-completion path).
                 if (_slotLockAt[s] > 0f && CmmClock.Now >= _slotLockAt[s])
                 {
@@ -2234,7 +2270,6 @@ namespace CMM
                 }
 
                 if (_slotOwner[s] != null) continue;                    // a station holds it
-                if (s == _borrowSlot) continue;                         // a speaker is sweeping on it
                 if (_emStartPending && _emPendingSlot == s) continue;   // a start is on its way
                 if (_slotLastStation[s] == null) continue;              // already released
                 // AND NOT WHILE IT IS LEGITIMATELY SEARCHING. The level hold returns before the
