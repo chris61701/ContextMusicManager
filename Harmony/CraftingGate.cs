@@ -81,8 +81,12 @@ namespace CMM
             },
         };
 
-        // Built once and reused, so joining and leaving does not churn objects.
+        // Built once and reused, so joining and leaving does not churn objects -- but REBUILT
+        // when the world changes, because a Recipe stores itemValueType and the game reassigns
+        // block ids on every world load. Caching them for the process is the same mistake that
+        // made speakers stop being detected on the second world of a session.
         private static List<Recipe> _built;
+        private static List<string> _builtFor;   // the spec output each _built entry was made for
 
         // Null when this game has no such block (A20 has no ham radio at all) or no such
         // ingredient. ItemClass.GetItem answers ItemValue.None rather than throwing, which is the
@@ -131,6 +135,7 @@ namespace CMM
         }
 
         private static bool _offered;
+        private static int   _failures;
         private static float _nextCheck;
         private const float CheckInterval = 5f;   // a join is not a per-frame event
 
@@ -153,8 +158,47 @@ namespace CMM
             }
             catch { return; }
 
-            if (multiplayer != _offered) return;      // already in the right state
-            if (multiplayer) Withdraw(); else Offer();
+            // ASK THE GAME, DO NOT TRUST A FLAG.
+            //
+            // _offered was set once and never re-examined, and the game RELOADS ITS RECIPE LIST on
+            // every world load -- so the first world of a session had the ham radio and the speaker
+            // and no world after it did, for the rest of the session. The log said "2 craftable
+            // emitter recipe(s) offered" either way, because that was true when it was printed.
+            //
+            // Exactly the shape that made speakers stop being detected: state cached per PROCESS
+            // against a fact the game rebuilds per WORLD.
+            if (multiplayer)
+            {
+                if (_offered) Withdraw();
+                return;
+            }
+            if (!Installed()) Offer();
+        }
+
+        // Are our recipes actually in the game's list, and still naming the blocks we built them
+        // for? Both halves matter: a world load empties the list, and it also reassigns block ids,
+        // so a recipe object that survived would be pointing at whatever now holds its old id.
+        private static bool Installed()
+        {
+            if (_built == null) return false;
+            // A version with neither block (A20 has no ham radio at all) has nothing to install,
+            // which is the right state rather than a permanent retry.
+            if (_built.Count == 0) return true;
+            List<Recipe> all = CraftingManager.GetAllRecipes();
+            if (all == null) return false;
+            for (int i = 0; i < _built.Count; i++)
+            {
+                if (!all.Contains(_built[i])) return false;
+                ItemClass ic = ItemClass.GetForId(_built[i].itemValueType);
+                if (ic == null || !string.Equals(ic.GetItemName(), _builtFor[i],
+                                                 StringComparison.OrdinalIgnoreCase))
+                {
+                    // The id moved under us: throw the recipes away and build them again.
+                    _built = null; _builtFor = null;
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static void Offer()
@@ -164,10 +208,11 @@ namespace CMM
                 if (_built == null)
                 {
                     _built = new List<Recipe>();
+                    _builtFor = new List<string>();
                     for (int i = 0; i < Specs.Length; i++)
                     {
                         Recipe r = Build(Specs[i]);
-                        if (r != null) _built.Add(r);
+                        if (r != null) { _built.Add(r); _builtFor.Add(Specs[i].Output); }
                         else CMMConfig.D($"[CMM] No craftable '{Specs[i].Output}' on this game "
                                        + "version — that recipe is not offered.");
                     }
@@ -179,13 +224,77 @@ namespace CMM
                     if (all == null || !all.Contains(_built[i])) CraftingManager.AddRecipe(_built[i]);
                 Refresh();
                 CMMConfig.D($"[CMM] Single player — {_built.Count} craftable emitter recipe(s) offered.");
+                Report();
                 _offered = true;
+                _failures = 0;
             }
             catch (Exception e)
             {
-                Log.Warning("[CMM] Could not add the craftable emitter recipes (" + e.Message + ").");
-                _offered = true;   // do not retry every tick
+                // BACK OFF, DO NOT GIVE UP. The old code set _offered here and never tried again,
+                // which was safe only because nothing re-examined the flag. Now that Tick asks the
+                // game whether the recipes are really installed, an exception would otherwise mean
+                // retrying every five seconds for the rest of the session -- so failures widen the
+                // interval instead, and a world load that fixes the cause is still picked up.
+                _failures++;
+                _nextCheck = UnityEngine.Time.realtimeSinceStartup
+                           + CheckInterval * (_failures < 6 ? (1 << _failures) : 64);
+                if (_failures <= 3)
+                    Log.Warning("[CMM] Could not add the craftable emitter recipes ("
+                              + e.Message + "); retrying later.");
             }
+        }
+
+        // WHAT THE PLAYER WILL ACTUALLY SEE, not what we asked for.
+        //
+        // "2 recipes offered" was true and useless: the recipes were in CraftingManager.recipes
+        // and still nowhere in the crafting window, and nothing in the log could tell the two
+        // apart. Everything that decides visibility is checked here instead of reasoned about --
+        //
+        //   cached    the UI reads CraftingManager.NonScrapableRecipes, a CACHE rebuilt by
+        //             PostInit. Ours is bound by name because A20 lacks it, so a silent miss
+        //             leaves the recipe real and invisible.
+        //   area      "" is the backpack. PostInit REWRITES this to "workbench" for us when the
+        //             player has Backpack Crafting set to anything but Enabled -- so the game can
+        //             move our recipe out of the menu being looked at, after we added it.
+        //   groups    the crafting window filters by category and a block with no group is
+        //             dropped from EVERY tab (FilterRecipesByCategory just continues).
+        //   learnable a recipe gated behind a schematic that does not exist is unreachable.
+        private static void Report()
+        {
+            try
+            {
+                var cached = CraftingManager.NonScrapableRecipes;
+                for (int i = 0; i < _built.Count; i++)
+                {
+                    Recipe r = _built[i];
+                    bool inCache = false;
+                    if (cached != null)
+                        for (int k = 0; k < cached.Count; k++)
+                            if (ReferenceEquals(cached[k], r)) { inCache = true; break; }
+
+                    string groups = "?";
+                    try
+                    {
+                        ItemClass ic = ItemClass.GetForId(r.itemValueType);
+                        if (ic == null) groups = "NO ITEMCLASS";
+                        else
+                        {
+                            string[] g = ic.IsBlock() ? Block.list[ic.Id].GroupNames : ic.Groups;
+                            groups = (g == null || g.Length == 0) ? "NONE — hidden from every tab"
+                                                                  : string.Join("|", g);
+                        }
+                    }
+                    catch (Exception ge) { groups = "threw: " + ge.Message; }
+
+                    CMMConfig.D($"[CMM] Craftable '{r.GetName()}': inCache={inCache} "
+                              + $"area='{r.craftingArea}' groups={groups} "
+                              + $"learnable={r.IsLearnable} time={r.craftingTime:0}s "
+                              + $"ingredients={r.ingredients.Count}");
+                }
+                CMMConfig.D($"[CMM] Recipe list holds {CraftingManager.GetAllRecipes()?.Count ?? -1}; "
+                          + $"the crafting window reads {(cached != null ? cached.Count : -1)} of them.");
+            }
+            catch (Exception e) { Log.Warning("[CMM] Craftable report failed (" + e.Message + ")."); }
         }
 
         private static void Withdraw()
