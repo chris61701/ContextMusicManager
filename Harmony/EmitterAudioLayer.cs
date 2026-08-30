@@ -2669,9 +2669,37 @@ namespace CMM
         }
         private static float _declinedTuneAt = -999f, _declinedBorrowAt = -999f;
 
+        // SWITCHED OFF SINCE THIS BEGAN? Nothing used to ask. A tune in flight ran all of its
+        // phases regardless -- the borrow connected its mirror and went on publishing a station
+        // at a speaker the player had just turned OFF, so the audio was already there when they
+        // turned it back on. Reported as "a radio started playing audio immediately when it was
+        // turned on", and visible in the log as a swap landing two lines after the off.
+        //
+        // Off is a hard cut, so this is a hard cut.
+        private static bool SwitchedOff(Vector3i pos)
+        {
+            var snap = EmitterRegistry.Snapshot;
+            for (int i = 0; i < snap.Count; i++)
+            {
+                if (!snap[i].Pos.Equals(pos)) continue;
+                string pin;
+                // A pin that resolves to nothing IS the off state (EmitterTuner.SilentPin).
+                return EmitterTuner.TryPin(snap[i], out pin) && string.IsNullOrEmpty(pin);
+            }
+            return true;                     // gone from the registry: also nothing to play to
+        }
+
         private static void MaintainTune()
         {
             float now = CmmClock.Now;
+
+            if (_tunePhase != 0 && SwitchedOff(EmitterTuner.LastTunePos))
+            {
+                CmmMixer.Instance?.ClearEmitterRecv(_tuneSlot);
+                _slotArmedAt[_tuneSlot] = 0f;
+                CMMConfig.D($"[CMM] Tune on slot {_tuneSlot} cut — the speaker was switched off.");
+                _tunePhase = 0; _tuneSlot = -1;
+            }
 
             // ANY DIAL TURN ENDS THE CARRIER, before we work out which path this retune takes.
             // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
@@ -2932,6 +2960,13 @@ namespace CMM
             // Finish: hand the speaker back, then let the noise fall away rather than cutting it.
             if (_borrowSlot >= 0)
             {
+                if (SwitchedOff(_borrowPos))
+                {
+                    CMMConfig.D($"[CMM] Sweep borrow on slot {_borrowSlot} cut — the speaker was "
+                              + "switched off.");
+                    EndSweepBorrowNow();
+                    return;
+                }
                 // THE SWAP, UNDER THE NOISE. Signal is at zero by now, so changing which station
                 // this lane copies is inaudible -- the same handover the single-speaker path makes,
                 // except nothing has to start or stop because both stations are already playing.
