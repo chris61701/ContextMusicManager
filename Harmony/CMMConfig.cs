@@ -757,6 +757,11 @@ namespace CMM
         // how a set behaves: the dial passes through the same noise whatever you are tuning to.
         // The programme still STARTS on time underneath; this is only when it is revealed.
         public static int    WorldEmitterSweepMs = 250;
+        // How long (ms) the station you are LEAVING takes to sink under the static. The pocket
+        // radio's RadioTuneLeaveMs, for world speakers. It is NOT a fade-out: the station goes on
+        // playing at full level and the receiver buries it, which is the only version that sounds
+        // like a dial rather than one station being cut off and another started.
+        public static int    WorldEmitterLeaveMs = 700;
         // How fast a station drops away into static when you turn the dial. Short: turning a knob
         // is abrupt, and this is the part that should feel like an action.
         public static int    WorldEmitterSearchMs = 120;

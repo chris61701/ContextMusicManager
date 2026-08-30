@@ -571,7 +571,9 @@ namespace CMM
             // it read as a glitch rather than as lost settings. Loading here costs one early-out
             // per tick once the save is open.
             EmitterTuner.EnsureLoaded();
-            MaintainSweepBorrow();   // decided BEFORE the snapshot, so the exclusion lands this tick
+            // Decided BEFORE the snapshot, so this tick's point sets already reflect it.
+            MaintainTune();
+            if (_tunePhase == 0) MaintainSweepBorrow();
             GroupSnapshot();        // per-station nearest + culled point sets from the registry snapshot
             // AFTER GroupSnapshot so the landing voice is seeded from this tick's speaker
             // positions, and BEFORE the start/stop logic so a station that just landed a voice is
@@ -1173,6 +1175,13 @@ namespace CMM
                 // It also left stations owning a slot with no speakers at all, which is the
                 // float.MaxValue in "steals the slot of 'Rust Belt Rock' (34028230000...0.0m)".
                 bool borrowed = _borrowSlot >= 0 && e.Pos.Equals(_borrowPos);
+                // STILL ON THE STATION IT IS LEAVING, and still one of its speakers, until the
+                // handover. This is the pocket radio's rule -- "the station being left keeps
+                // playing... it is not faded and it is not stopped, the receiver buries it" -- and
+                // it is the half the emitter never had. The pin has already moved; resolving it
+                // here takes the old station away on the instant, which is the audio vanishing as
+                // the dial turns and the reason there was never anything under the hiss.
+                bool leaving = _tunePhase == 1 && e.Pos.Equals(EmitterTuner.LastTunePos);
                 // ...and from the instant the dial turned, before we have decided anything.
                 if (EmitterTuner.SweepHeld(e.Pos)) continue;
                 // The PLAYER'S choice outranks the derived one (EmitterTuner: look at a speaker,
@@ -1181,7 +1190,8 @@ namespace CMM
                 // nothing to invalidate, and clearing it back to Automatic exposes the pin that was
                 // always underneath rather than inventing a new one.
                 string pinned;
-                if (!EmitterTuner.TryPin(e, out pinned) &&
+                if (leaving) pinned = _tuneFrom;
+                else if (!EmitterTuner.TryPin(e, out pinned) &&
                     !_posPins.TryGetValue(e.Pos, out pinned))
                 {
                     pinned = _stations[e.StationHash % n].Name;
@@ -1191,6 +1201,10 @@ namespace CMM
                 // (silent) until the folder returns or the next world entry recomputes the pins.
                 if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st)) continue;
                 st.LastSeenAt = now;
+                // WHICH STATION THIS SPEAKER IS ON, as of this tick. A retune overwrites the pin
+                // before the audio layer ever sees it, so without this there is no record of where
+                // the speaker came FROM -- and the station being left is half of a dial turn.
+                _posStation[e.Pos] = st.Name;
                 // Render class rides per-point flags (bit0 = ham): a radioHam gets the HAM coloration
                 // (always slightly distorted, mono communications speaker) in the native render while
                 // shelf speakers get the (clean-by-default) speaker set. Name is the registry's interned
@@ -1511,7 +1525,11 @@ namespace CMM
             // because the two used to be seven seconds apart instead of simultaneous.
             bool retuned = changedStation
                         && CmmClock.Now - EmitterTuner.LastTuneAt < RetuneWindow
-                        && _borrowOwnsTune != EmitterTuner.LastTuneAt;
+                        && _borrowOwnsTune != EmitterTuner.LastTuneAt
+                        // ...and not while MaintainTune owns this slot's receiver. It is already
+                        // searching, deliberately, with the old station buried under it; arming
+                        // again here restarts the ramp and throws the leave away.
+                        && !(_tunePhase != 0 && slot == _tuneSlot);
             if (changedStation)
             {
                 // FLUSH ONLY WHEN THERE IS A STATION TO FLUSH. The ring can still hold a cushion of
@@ -2042,6 +2060,141 @@ namespace CMM
         // holds a stale deadline; one entry at a time because one station joins at a time.
         private static readonly Dictionary<string, float> _gainWaitUntil =
             new Dictionary<string, float>(StringComparer.Ordinal);
+
+        // ── TUNING, THE WAY THE POCKET RADIO DOES IT ────────────────────────────────────────
+        //
+        // PersonalRadio has ONE receiver, always in the path, and a dial turn is three moves
+        // through it: take the signal DOWN so the old station sinks under rising hiss while it
+        // goes on playing; swap the voice underneath, entirely hidden; take the signal UP so the
+        // new station rises out of the noise. Its own comment names what happens otherwise --
+        // "click, silence, then static, then a tune-in on a station you could already hear" --
+        // which is precisely what the emitters did, all day.
+        //
+        // The emitter could not copy it because its receiver lives on a SLOT (a station's lane,
+        // shared by up to eight speakers), not on a speaker, so hissing one speaker hissed
+        // everyone on that station. Hence the sweep borrow: hand the speaker a spare slot purely
+        // to own a receiver. But a borrowed slot carries NO VOICE, so the hiss had nothing under
+        // it -- no station sinking away, none rising -- and the arrival could only be the
+        // crossfade the pocket radio is deliberately not.
+        //
+        // The way out is that the premise is usually false. When the retuned speaker is the ONLY
+        // one on its station's slot -- one radio in a room, the ordinary case and the one players
+        // actually dial -- that slot IS the speaker's tuner. Nobody else is on it, so it can hiss
+        // freely, and it already carries the old station's audio. All three moves are then
+        // available exactly as the pocket radio makes them, on the lane the speaker is already
+        // listening to, with no borrow and no competition for slots at all.
+        //
+        // The borrow stays for the genuinely shared case, where there is no honest way to hiss one
+        // speaker without hissing the rest.
+        private static readonly Dictionary<Vector3i, string> _posStation =
+            new Dictionary<Vector3i, string>();
+        private static int    _tuneSlot = -1;
+        private static string _tuneFrom, _tuneTo;
+        private static float  _tuneSwapAt, _tuneGiveUp;
+        private static int    _tunePhase;         // 0 = idle, 1 = leaving, 2 = arriving
+
+        private static float LeaveRamp => CMMConfig.WorldEmitterLeaveMs / 1000f;
+
+        private static Station ByName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            for (int i = 0; i < _stations.Count; i++)
+                if (string.Equals(_stations[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                    return _stations[i];
+            return null;
+        }
+
+        private static void MaintainTune()
+        {
+            float now = CmmClock.Now;
+
+            if (_tunePhase == 1 && now >= _tuneSwapAt)
+            {
+                // ── HANDOVER, UNDER THE NOISE ───────────────────────────────────────────────
+                // The signal is at 0 by now, so none of this is audible: the old station retires
+                // and the new one is pinned to the SAME slot. That pinning is what keeps the
+                // receiver -- mid-search, at this speaker -- attached to the station it is
+                // searching for. Letting the new station find a lane of its own is exactly how
+                // the sweep and the arrival ended up on different slots.
+                Station from = ByName(_tuneFrom), to = ByName(_tuneTo);
+                if (from != null && from.Slot == _tuneSlot) StopStation(from, "handed over to the dial");
+                if (to != null && to.VoiceId == 0)
+                {
+                    to.Slot = _tuneSlot;
+                    _slotOwner[_tuneSlot] = to;
+                }
+                _tunePhase = 2;
+                CMMConfig.D($"[CMM] Tune: handover on slot {_tuneSlot} — '{_tuneFrom}' retires, "
+                          + $"'{_tuneTo}' takes the lane under the noise.");
+            }
+
+            if (_tunePhase == 2)
+            {
+                Station to = ByName(_tuneTo);
+                // ARRIVE ONLY ONCE THERE IS SOMETHING TO ARRIVE INTO. Waiting on the voice is the
+                // whole point: the noise covers the open and the level hold rather than the
+                // speaker sitting silent through them. The station comes up FIRST and the static
+                // then fades out from under it -- never the other way round, which is a crossfade.
+                if (to != null && to.VoiceId != 0 && to.Slot == _tuneSlot)
+                {
+                    CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
+                    CMMConfig.D($"[CMM] Tune: arriving on slot {_tuneSlot} — '{_tuneTo}' rises out "
+                              + $"of the noise over {CMMConfig.WorldEmitterArriveMs:0} ms.");
+                    _tunePhase = 0; _tuneSlot = -1;
+                }
+                else if (now >= _tuneGiveUp)
+                {
+                    CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
+                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — releasing slot {_tuneSlot}.");
+                    _tunePhase = 0; _tuneSlot = -1;
+                }
+                return;
+            }
+            if (_tunePhase == 1) return;   // still leaving
+
+            // ── BEGIN ───────────────────────────────────────────────────────────────────────
+            if (_handledTuneAt == EmitterTuner.LastTuneAt) return;
+            if (now - EmitterTuner.LastTuneAt > RetuneWindow) return;
+
+            string fromName;
+            if (!_posStation.TryGetValue(EmitterTuner.LastTunePos, out fromName)) return;
+            Station fromSt = ByName(fromName);
+            // Alone on the lane? Only then is this slot this speaker's tuner. PtCount is last
+            // tick's snapshot, taken while the speaker was still on it, which is the state we want.
+            if (fromSt == null || fromSt.Slot < 0 || fromSt.VoiceId == 0 || fromSt.PtCount != 1)
+                return;   // shared, or not playing — the borrow handles those
+
+            var snap = EmitterRegistry.Snapshot;
+            EmitterRegistry.Emitter e = default(EmitterRegistry.Emitter);
+            bool found = false;
+            for (int i = 0; i < snap.Count; i++)
+                if (snap[i].Pos.Equals(EmitterTuner.LastTunePos)) { e = snap[i]; found = true; break; }
+            if (!found) return;
+
+            string want;
+            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want)) return;
+            if (string.Equals(want, fromName, StringComparison.OrdinalIgnoreCase)) return;   // no change
+
+            _handledTuneAt = EmitterTuner.LastTuneAt;
+            // The blanket hold kept the speaker out of EVERY station; from here it stays on the
+            // one it is leaving instead, which is the entire point.
+            EmitterTuner.ReleaseSweepHold();
+
+            _tuneFrom = fromName; _tuneTo = want;
+            _tuneSlot = fromSt.Slot;
+            _tunePhase = 1;
+            // Leave, then a floor of static, then the swap. Anchored AFTER the leave for the same
+            // reason the pocket radio anchors it there: measured from the press, the fade eats
+            // most of the floor and leaves a fraction of the static anyone actually auditioned.
+            _tuneSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _tuneGiveUp = _tuneSwapAt + 6f;
+            // DOWN, not off. The old station plays on into this lane and sinks under the hiss.
+            CmmMixer.GetOrCreate().SetEmitterRecv(_tuneSlot, 0f, LeaveRamp);
+            _slotArmedAt[_tuneSlot] = now;
+            _slotLockAt[_tuneSlot] = 0f;
+            CMMConfig.D($"[CMM] Tune: leaving '{fromName}' on slot {_tuneSlot} over "
+                      + $"{CMMConfig.WorldEmitterLeaveMs:0} ms — it plays on, buried.");
+        }
 
         // Begin, hold and end the sweep borrow. Runs before GroupSnapshot so a borrow started
         // this tick excludes its speaker from the same tick's point sets — a tick of delay here

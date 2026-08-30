@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 45;
+        internal const int CurrentSchema = 46;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1000,6 +1000,11 @@ comes out from under the noise. A station already playing nearby opens in millis
 and without this, retuning to one produced no sweep at all. The programme still starts
 on time underneath; this only sets when it is revealed. 0 reveals it as soon as it opens."),
             I("WorldEmitterSweepMs",                 "CMMConfig.WorldEmitterSweepMs",               250, since: 45),
+            Cmt(@"How long (ms) the station you are LEAVING takes to sink under the static. Not a
+fade-out: it keeps playing at full level and the receiver buries it, which is the only
+version that sounds like turning a dial instead of cutting one station off and starting
+another. The pocket radio's RadioTuneLeaveMs, for world speakers."),
+            I("WorldEmitterLeaveMs",                 "CMMConfig.WorldEmitterLeaveMs",               700, since: 46),
             Cmt(@"How fast (ms) a station drops away into static when you turn the dial."),
             I("WorldEmitterSearchMs",                "CMMConfig.WorldEmitterSearchMs",              120, since: 45),
             Cmt(@"How long (ms) the station takes to come out from under the noise once the dial has
