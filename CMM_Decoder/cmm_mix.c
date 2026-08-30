@@ -660,6 +660,16 @@ typedef struct {
 } em_recv;
 static em_recv g_emRx[CMM_MAX_EMIT_VOICES];
 
+/* ── WHAT EACH LANE IS ACTUALLY DOING (v61) ───────────────────────────────────────────────
+ * The managed layer can see what it ASKED for and nothing about what came out, which is why
+ * "the static was not audible" and "the music came in hot" have both cost days: they are
+ * statements about level, and level was the one thing never logged. This is the dry lane's
+ * RMS after its receiver and before the master -- the last point where a lane is still one
+ * identifiable thing. */
+static float g_emLaneRms[CMM_MAX_EMIT_VOICES];
+
+
+
 /* ── LANE MIRRORS (v56) ───────────────────────────────────────────────────────────────────────
  * Which lane, if any, a slot takes its dry audio FROM instead of from voices of its own.
  * -1 = none, the ordinary case.
@@ -751,6 +761,19 @@ CMM_API void cmm_mix_set_emitter_tone(int slot, const float* hz, const float* le
 
 /* Sounding, or still fading out of it. */
 static int em_tone_live(int s) { return g_emToneAmp[s] > 0.0001f || g_emToneTgt[s] > 0.0f; }
+
+/* The accessor lives here, below the mirror and carrier state it reports on. */
+CMM_API float cmm_mix_emitter_lane_stat(int slot, int what) {
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return -1.0f;
+    switch (what) {
+        case 0: return g_emRx[slot].armed ? g_emRx[slot].sig : -1.0f;  /* <0 = not armed */
+        case 1: return g_emLaneRms[slot];                              /* linear RMS */
+        case 2: return g_emMirror[slot] >= 0 ? g_emMirrorAmp[slot] : -1.0f;
+        case 3: return em_tone_live(slot) ? g_emToneAmp[slot] : -1.0f;
+        default: return -1.0f;
+    }
+}
+
 
 /* dst takes its audio from src (src < 0 clears). Self-mirroring is refused; so is a src that is
  * itself a mirror, which keeps the copy one level deep and the ordering below trivially correct. */
@@ -1800,6 +1823,11 @@ static void pump_body(void) {
                         else                  cur = emMaster;
                         lane[i] *= cur;
                     }
+                }
+                {   /* the lane's own level, measured where it is still one thing */
+                    double sum = 0; int k;
+                    for (k = 0; k < n; k++) sum += (double)lane[k] * lane[k];
+                    g_emLaneRms[s] = n > 0 ? (float)sqrt(sum / n) : 0.0f;
                 }
                 cmm_out_write_emitter(dev, s, lane, n);
             }

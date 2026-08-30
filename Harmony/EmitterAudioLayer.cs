@@ -543,6 +543,7 @@ namespace CMM
                             // was ever instrumented. If `u` climbs, the dip is the audio pipeline
                             // and no occlusion setting will touch it.
                             $" | rings {RingHealth()}" +
+                            $"\n[CMM]   lanes: {LaneHealth()}" +
                             // The clamp counters, in the 1 Hz line, because they are the difference
                             // between "the model is quiet here" and "the model is switched off here"
                             // and I had to ask for them by hand three times before getting one.
@@ -777,6 +778,61 @@ namespace CMM
         }
 
         // Queued frames and starvation count for each live emitter slot, compactly.
+        // WHAT EVERY LANE IS DOING, ONCE A SECOND.
+        //
+        // Three reports have cost days between them -- "the static was not audible", "the music
+        // came in hot", "the music cut out immediately on a station change" -- and not one of
+        // them was answerable from the log, because everything logged was an INTENTION and all
+        // three are statements about LEVEL. This is the outcome:
+        //
+        //   sig   the receiver's signal. 0 = full static, 1 = locked, "-" = not armed.
+        //   lane  the dry lane's RMS in dBFS, after its receiver and before the master. This is
+        //         the number that answers "was the static audible" -- if sig is 0 and lane is
+        //         silent, the receiver produced nothing; if lane is healthy and the speaker is
+        //         still inaudible, it was lost downstream in the point gain.
+        //   pt    the published virtual distance for the nearest point, in blocks. At or above
+        //         Range the point is MUTED outright, which is how a search became inaudible
+        //         while everything upstream of it looked correct.
+        //   mir   mirror gain, when the lane carries a copy.
+        //   tone  carrier envelope, when it carries one.
+        //   voice the station on the lane and its track gain -- a jump rather than a ramp here
+        //         is "the music came in hot"; a drop to nothing is "the music cut out".
+        private static string LaneHealth()
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int s = 0; s < MaxSlots; s++)
+            {
+                float sig  = CmmMixer.EmitterLaneStat(s, 0);
+                float rms  = CmmMixer.EmitterLaneStat(s, 1);
+                float mir  = CmmMixer.EmitterLaneStat(s, 2);
+                float tone = CmmMixer.EmitterLaneStat(s, 3);
+                Station own = _slotOwner[s];
+                bool idle = sig < 0f && mir < 0f && tone < 0f && own == null && rms <= 0.000001f;
+                if (idle) continue;
+
+                if (sb.Length > 0) sb.Append("  ");
+                sb.Append('s').Append(s).Append(' ');
+                sb.Append("sig=").Append(sig < 0f ? "-" : sig.ToString("0.00"));
+                sb.Append(" lane=").Append(rms > 0.000001f
+                    ? (20f * Mathf.Log10(rms)).ToString("0.0") : "-inf");
+                if (s == _tuneSlot)   sb.Append(" TUNE");
+                if (s == _borrowSlot) sb.Append(" BORROW");
+                if (s == _deadAirSlot) sb.Append(" DEAD");
+                if (mir >= 0f)  sb.Append(" mir=").Append(mir.ToString("0.00"));
+                if (tone >= 0f) sb.Append(" tone=").Append(tone.ToString("0.00"));
+                if (own != null)
+                {
+                    sb.Append(" [").Append(own.Name).Append(" g=")
+                      .Append(own.VoiceGainApplied.ToString("0.00"));
+                    // The nearest published point, which is the one the player is standing at.
+                    if (own.PtCount > 0 && own.PtGain.Length > 0)
+                        sb.Append(" pt=").Append(own.PtGain[0].ToString("0.0"));
+                    sb.Append(']');
+                }
+            }
+            return sb.Length > 0 ? sb.ToString() : "all idle";
+        }
+
         private static string RingHealth()
         {
             var sb = new System.Text.StringBuilder();
@@ -1521,8 +1577,15 @@ namespace CMM
                 bool candIsSweepTarget = _borrowSlot >= 0 && _borrowTarget != null
                     && string.Equals(cand.Name, _borrowTarget, StringComparison.OrdinalIgnoreCase);
 
+                // A STATION CANNOT USE A TUNING LANE, so yielding one to it frees nothing and
+                // only kills the sweep. FreeSlot has only ever returned lanes below StationSlots,
+                // and since the lane split the borrow lives above them -- so this whole path
+                // became a pure loss the moment the pools were separated. Kept for the case the
+                // borrow is genuinely holding a STATION lane, which it can still do via
+                // TakeInaudibleSlot.
                 int free = FreeSlot();
-                if (free < 0 && _borrowSlot >= 0 && !candIsSweepTarget)
+                if (free < 0 && _borrowSlot >= 0 && _borrowSlot < CmmMixer.StationSlots
+                    && !candIsSweepTarget)
                 {
                     // A SWEEP NEVER COSTS SOMEBODY THEIR MUSIC. The borrow holds a slot with no
                     // owner, so a THIRD station starting while it is held finds nothing free and
@@ -2459,6 +2522,12 @@ namespace CMM
         // anything up, so it does not.
         private static void GoDeadAir(Vector3i pos, int preferredSlot)
         {
+            // ALREADY UP FOR THIS SPEAKER? THEN LEAVE IT ALONE. Two detectors can name the same
+            // dead station -- GroupSnapshot's, and the tune give-up's a second and a half later --
+            // and resetting the hunt on the second call dropped a settled carrier back to static
+            // and made it climb out again. Logged twice per broken station, heard as tone, hiss,
+            // tone.
+            if (_deadAirOn && _deadAirPos.Equals(pos) && _deadAirSlot >= 0) return;
             _deadAirPos = pos; _deadAirOn = true;
             // ...AND THE GRACE STARTS NOW. Left over from a previous episode, `now - stale > 2f`
             // is true on the very first tick, so the carrier was ended by a two-second deadline
@@ -2922,8 +2991,17 @@ namespace CMM
                     // this retune up the moment its lane frees.
                     if (_handledTuneAt != EmitterTuner.LastTuneAt)
                     {
+                        // WAITS WITH STATIC, NOT IN SILENCE. The running borrow already owns a
+                        // lane that is hissing at this very speaker, so the honest thing while the
+                        // next dial turn waits for it is to keep hissing -- ending the sweep early
+                        // would leave the speaker silent for the wait, measured at up to 560 ms
+                        // across twenty of these in one session.
+                        //
+                        // So the borrow holds its noise and simply does not finish: the release is
+                        // deferred until the new retune can be served.
+                        _borrowUntil = now + LeaveRamp;
                         EmitterTuner.ReleaseSweepHold();
-                        CMMConfig.D("[CMM] Sweep borrow busy — the new dial turn waits for the lane.");
+                        CMMConfig.D("[CMM] Sweep borrow busy — holding its noise until the lane frees.");
                     }
                     return;   // one borrow at a time
                 }
@@ -2996,8 +3074,18 @@ namespace CMM
             //
             // A target already voiced elsewhere is the one case with no better answer: its slot
             // carries other speakers, who must not be hissed.
-            if (target == null || target.VoiceId == 0)
-            { TuneDeclined("borrow", "the target is not playing anywhere — the start path sweeps it"); return; }
+            // A COLD TARGET IS NOT A REASON TO STAY SILENT. Declining here handed the retune to
+            // StartStation's arm -- which only fires when the station actually STARTS, measured
+            // at 1.64 s later. In between, the speaker is held out of every station, so a dial
+            // turn onto a station nothing is playing yet produced 1.7 s of nothing and then a
+            // sweep. Twice in fifteen retunes.
+            //
+            // A borrow works perfectly well with no target: the lane renders pure noise, which is
+            // what a set between stations sounds like, and the mirror is connected at the swap if
+            // there is anything to connect by then. So it takes the retune either way and the
+            // start path simply finds the receiver already searching.
+            if (target == null)
+            { TuneDeclined("borrow", "no such station"); return; }
 
             int slot = FreeTuneSlot();
             if (slot < 0)

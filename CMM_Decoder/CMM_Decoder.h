@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 60
+#define CMM_DECODER_ABI 61
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -491,6 +491,13 @@ CMM_API void cmm_mix_set_lane_mirror(int dst, int src);
  * one signal, so fading the point fades both. This fades only the programme, which is what
  * "the speaker fades, not the stream" requires. */
 CMM_API void cmm_mix_set_lane_mirror_gain(int slot, float gain, float rampSeconds);
+
+/* v61 — what a lane is ACTUALLY doing, as opposed to what it was asked to do.
+ * what: 0 = receiver signal (<0 when not armed), 1 = the dry lane's RMS after its receiver
+ * and before the master, 2 = mirror gain (<0 when not mirroring), 3 = carrier envelope
+ * (<0 when no carrier). Level was the one thing never logged, and "the static was not
+ * audible" and "the music came in hot" are both statements about level. */
+CMM_API float cmm_mix_emitter_lane_stat(int slot, int what);
 
 /* v57 — a steady off-air tone on one emitter lane, in place of both programme and hiss
  * (hz <= 0 clears). What a station that will not open gets instead of silence: a set that finds

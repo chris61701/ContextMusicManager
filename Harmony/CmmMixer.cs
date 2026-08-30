@@ -109,6 +109,8 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_lane_mirror_gain(int slot, float gain, float rampSeconds);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern float cmm_mix_emitter_lane_stat(int slot, int what);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_emitter_tone(int slot, float[] hz, float[] levels,
                                                             int count, float rampSeconds);
 
@@ -461,6 +463,14 @@ namespace CMM
         // This is exactly how the game died on a spawn where the mixer had never started: the
         // emitter layer's 1 Hz diagnostic line calls this for all 8 slots regardless of whether
         // anything is playing, so a session that only ever used vanilla audio still reached it.
+        // What a lane is actually doing: 0 = receiver signal, 1 = lane RMS, 2 = mirror gain,
+        // 3 = carrier envelope. Negative means "not applicable" for that lane.
+        public static float EmitterLaneStat(int slot, int what)
+        {
+            if (!_nativeStarted) return -1f;
+            try { return NativeMix.cmm_mix_emitter_lane_stat(slot, what); } catch { return -1f; }
+        }
+
         public static int EmitterRingStat(int slot, int what)
         {
             if (!_nativeStarted) return -1;      // no mixer, therefore no rings, and no lock to take
