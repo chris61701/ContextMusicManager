@@ -2999,6 +2999,17 @@ namespace CMM
                     // The hold still has to go, or the speaker sits out of every station for the
                     // full dead-man window. Released without being claimed, so the borrow can pick
                     // this retune up the moment its lane frees.
+                    // RE-AIM, DO NOT QUEUE. A press during a live borrow used to wait for the
+                    // lane -- 186 of those in one session of 25 retunes, in runs of ten -- and
+                    // waiting is the one thing the pocket radio explicitly does not do: "no
+                    // special case; the leave restarts from the current signal". The lane is
+                    // already hissing at this very speaker, so it is the right lane; only its
+                    // destination has changed.
+                    //
+                    // So the borrow keeps its noise, keeps its slot, and simply picks up the new
+                    // target: the mirror goes back to whatever the speaker is leaving, and the
+                    // swap is rescheduled from now. Nothing stops, nothing is flushed.
+                    if (_handledTuneAt != EmitterTuner.LastTuneAt && ReaimBorrow(now)) return;
                     if (_handledTuneAt != EmitterTuner.LastTuneAt)
                     {
                         // WAITS WITH STATIC, NOT IN SILENCE. The running borrow already owns a
@@ -3253,6 +3264,43 @@ namespace CMM
                       + "(no speakers — warm only).");
             StopStation(_slotOwner[best], "slot taken for a retune sweep");
             return FreeSlot();
+        }
+
+        // Point a live borrow at a new target without ending it. Returns false when it cannot,
+        // and the caller then falls back to holding the noise until the lane frees.
+        private static bool ReaimBorrow(float now)
+        {
+            if (_borrowSlot < 0 || _borrowReleaseAt > 0f) return false;   // not live, or ending
+            var snap = EmitterRegistry.Snapshot;
+            EmitterRegistry.Emitter e = default(EmitterRegistry.Emitter);
+            bool found = false;
+            for (int i = 0; i < snap.Count; i++)
+                if (snap[i].Pos.Equals(EmitterTuner.LastTunePos)) { e = snap[i]; found = true; break; }
+            // Only the speaker this borrow belongs to may re-aim it.
+            if (!found || !e.Pos.Equals(_borrowPos)) return false;
+
+            string want;
+            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want)) return false;
+            Station target = ByName(want);
+            if (target == null) return false;
+
+            _handledTuneAt  = EmitterTuner.LastTuneAt;
+            _borrowOwnsTune = EmitterTuner.LastTuneAt;
+            EmitterTuner.ReleaseSweepHold();
+
+            // Back to pure noise while the dial travels again, and the new target connects at
+            // the swap exactly as it would have on a fresh borrow.
+            CmmMixer.Instance?.SetLaneMirrorGain(_borrowSlot, 0f, 0f);
+            CmmMixer.Instance?.SetLaneMirror(_borrowSlot, -1);
+            CmmMixer.Instance?.SetEmitterRecv(_borrowSlot, 0f, LeaveRamp);
+            _borrowTarget   = target.Name;
+            _borrowMirrorTo = target.Slot;
+            _borrowSwapAt   = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _borrowUntil    = _borrowSwapAt + MinStatic;
+            _borrowGiveUp   = now + BorrowGiveUp;
+            CMMConfig.D($"[CMM] Sweep borrow re-aimed on slot {_borrowSlot} — now heading for "
+                      + $"'{want}'.");
+            return true;
         }
 
         // Give the slot back at once: the speaker rejoins its station on the next snapshot and

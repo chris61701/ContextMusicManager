@@ -1761,7 +1761,15 @@ static void pump_body(void) {
                  * voiceless armed slot starts from silence and the stage writes the hiss into it
                  * -- no stale audio, no special case. Unarmed and voiceless stays skipped, so an
                  * idle station's ring keeps its onset free of a cushion of zeros. */
-                if (!emActive[s] && !g_emRx[s].armed && !em_tone_live(s)) continue;
+                if (!emActive[s] && !g_emRx[s].armed && !em_tone_live(s)) {
+                    /* A SKIPPED LANE IS SILENT, AND MUST SAY SO. g_emLaneRms is only written
+                     * where a lane renders, so a skipped one held its last value for ever and
+                     * the readout reported -23.8 dBFS from a lane with no voice, no receiver,
+                     * no mirror and no carrier. A diagnostic that keeps reporting the past is
+                     * worse than none: it sends you looking for audio that stopped minutes ago. */
+                    g_emLaneRms[s] = 0.0f;
+                    continue;
+                }
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
                 static float toneBuf[BUS_MAXFRAMES];
                 int toneOn = 0;
