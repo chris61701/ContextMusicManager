@@ -1241,6 +1241,13 @@ namespace CMM
         private static Vector3i _deadAirPos;
         private static bool     _deadAirOn;
         private static float    _deadAirMissingAt;
+        private static float    _deadAirSince;
+        private static bool     _deadAirToneUp;
+        // How long the hunt runs before a dead station settles onto its carrier: the same span a
+        // real retune spends looking, so the two are indistinguishable until the moment one of
+        // them finds something.
+        private static float DeadAirHunt =>
+            LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f + ArriveRamp;
 
         private static void GroupSnapshot()
         {
@@ -2468,10 +2475,19 @@ namespace CMM
                     return;
                 }
             }
-            CMMConfig.D($"[CMM] Dead air: slot {_deadAirSlot} carries the off-air tone at {pos} — "
-                      + $"{CMMConfig.WorldEmitterOffAirHz:0} Hz at level "
-                      + $"{CMMConfig.WorldEmitterOffAirLevel:0.00}.");
-            GoOffAir(_deadAirSlot);
+            // SEARCH FIRST. A set that finds nothing does not go straight to the carrier -- it
+            // hunts, finds nothing, and settles. The tone appearing the instant a station is
+            // judged dead skips the only part that tells the player anything is being tried.
+            //
+            // So the lane starts as an ordinary search and MaintainDeadAir raises the tone once
+            // the hunt has run its course. Same span a real retune spends looking.
+            _deadAirSince = CmmClock.Now;
+            _deadAirToneUp = false;
+            CmmMixer.GetOrCreate().SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 0);
+            CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 1f, 0f);
+            CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 0f, SearchRamp);
+            CMMConfig.D($"[CMM] Dead air: slot {_deadAirSlot} searching at {pos} — "
+                      + "the carrier follows if nothing is found.");
         }
 
         // GIVE THE CARRIER'S LANE BACK. Separate from ClearOffAir because that one is about the
@@ -2515,9 +2531,29 @@ namespace CMM
             // Republished every tick so the tone tracks the listener's occlusion like any other
             // sound out of that speaker -- it is coming from the same box.
             _deadPts[0] = e.Pos.x + 0.5f; _deadPts[1] = e.Pos.y + 0.5f; _deadPts[2] = e.Pos.z + 0.5f;
-            _deadGain[0] = 0f;
             _deadFlags[0] = e.Name == "radioHam" ? 1 : 0;
+            // OCCLUDED, LIKE EVERYTHING ELSE THAT COMES OUT OF THAT BOX. This published 0, which
+            // is clear line -- no walls, no doors -- so the carrier arrived at full strength
+            // through geometry that muffles everything else the speaker does. One point, one ray,
+            // every tick: cheap, and it also stops the tone reading as a sound in the room rather
+            // than one coming from the radio.
+            _deadGain[0] = 0f;
+            World dw = GameManager.Instance?.World;
+            EntityPlayerLocal dp = dw?.GetPrimaryPlayer();
+            if (CMMConfig.WorldEmitterOcclusion && dw != null && dp != null)
+                EmitterAcoustics.ComputeOcclusion(ListenerWorldPos(dp), _deadPts, 1, _deadGain, dw);
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 1);
+
+            // ...and the tone only once the hunt is over.
+            if (!_deadAirToneUp && CmmClock.Now - _deadAirSince >= DeadAirHunt)
+            {
+                _deadAirToneUp = true;
+                CmmMixer.Instance?.ClearEmitterRecv(_deadAirSlot);   // an armed receiver outranks it
+                GoOffAir(_deadAirSlot);
+                CMMConfig.D($"[CMM] Dead air: nothing found — slot {_deadAirSlot} settles on the "
+                          + $"carrier, {CMMConfig.WorldEmitterOffAirHz:0} Hz at level "
+                          + $"{CMMConfig.WorldEmitterOffAirLevel:0.00}.");
+            }
         }
 
         private static int _deadAirSlot = -1;

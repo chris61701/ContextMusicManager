@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 50;
+        internal const int CurrentSchema = 51;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1015,11 +1015,12 @@ another. The pocket radio's RadioTuneLeaveMs, for world speakers."),
 not open. Silence reads as the mod having broken; a tone reads as a station that has
 stopped broadcasting for the night, which is what actually happened. Hz then level.
 0 Hz disables it and the speaker simply goes quiet."),
-            F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              1000f, since: 47),
+            F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              440f,  since: 47,
+                                                                                                     changedIn: 51, was: 1000f),
             F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             0f,    since: 48),
             F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             0f,    since: 48),
-            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.5f,  since: 47,
-                                                                                                     changedIn: 49, was: 0.05f),
+            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.15f, since: 47,
+                                                                                                     changedIn: 51, was: new object[] { 0.05f, 0.5f }),
             Cmt(@"How long (ms) the off-air carrier takes to fade in and out. A tone that snapped on
 was a click, which reads as a fault rather than as a station going off the air."),
             I("WorldEmitterOffAirFadeMs",            "CMMConfig.WorldEmitterOffAirFadeMs",          400,   since: 48),

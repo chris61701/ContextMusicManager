@@ -785,14 +785,21 @@ namespace CMM
         // Up to three partials sounded together — one frequency reads as a test signal, a chord
         // reads as a broadcast. 0 disables that partial; all three at 0 disables the carrier and
         // the speaker simply goes quiet.
-        public static float  WorldEmitterOffAirHz     = 1000f;
+        // 440, NOT 1000. The speaker model's cone resonance sits near 885 Hz and adds about 4 dB
+        // there, so a 1 kHz carrier landed straight in the one band this render path emphasises --
+        // which is also why turning your head made it rattle: a pure tone riding a moving pan is
+        // exposed in a way music never is, and doubly so at the resonance. 440 is below it, and is
+        // what a station actually leaves on when it goes off the air.
+        public static float  WorldEmitterOffAirHz     = 440f;
         public static float  WorldEmitterOffAirHz2    = 0f;
         public static float  WorldEmitterOffAirHz3    = 0f;
         // Sits alongside the tuning static, so it is scaled like it. 0.05 was a guess and it put
         // the carrier about 12 dB UNDER the hiss -- roughly -47 dBFS at two metres once distance
         // and WorldEmitterVolume were through with it, which is why it read as "the tone never
         // plays" when it had been playing the whole time.
-        public static float  WorldEmitterOffAirLevel  = 0.5f;
+        // Measured: 0.5 renders at -14.2 dBFS against the tuning static's -24.9, so the carrier
+        // was nearly 11 dB LOUDER than the hiss it replaces. It should sit just under it.
+        public static float  WorldEmitterOffAirLevel  = 0.15f;
         // It FADES. A carrier that snapped on was a click, which reads as a fault rather than as a
         // station going off the air.
         public static int    WorldEmitterOffAirFadeMs = 400;
