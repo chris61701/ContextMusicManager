@@ -1804,16 +1804,30 @@ namespace CMM
             // through the same noise either way, and the station is BURIED under it until you
             // settle, not withheld until you arrive. So the programme starts now, on time, and the
             // lock is scheduled for when the sweep has run its minimum.
-            float arrive = _emPendingFade + ArriveTail;
-            if (arrive < ArriveRamp) arrive = ArriveRamp;
-            float swept = CmmClock.Now - _slotArmedAt[_emDoneSlot];
-            float minSweep = CMMConfig.WorldEmitterSweepMs / 1000f;
-            if (_slotArmedAt[_emDoneSlot] > 0f && swept < minSweep)
+            // THE STATIC DOES NOT START LIFTING UNTIL THE MUSIC IS ALL THE WAY UP.
+            //
+            // It used to ramp 0 -> 1 over `fade + ArriveTail` STARTING when the voice landed, on
+            // the theory that a longer ramp than the fade keeps the hiss around longer. It does
+            // not: `signal` is not a volume. By half way the station is already largely out from
+            // under the noise, so at the moment the music finally reached full level the signal
+            // was already most of the way home and the hiss nearly gone. That is "static fades out
+            // before the music is at full volume" -- an overlap expressed as a ratio when what was
+            // asked for is a guarantee.
+            //
+            // So the deadline is the music, not a proportion of it: full level first, buried the
+            // whole way, and only then does the receiver lift. The minimum sweep still applies, so
+            // a station that opens instantly cannot skip the dial travel.
+            float full   = CmmClock.Now + _emPendingFade;
+            float minEnd = _slotArmedAt[_emDoneSlot] > 0f
+                         ? _slotArmedAt[_emDoneSlot] + CMMConfig.WorldEmitterSweepMs / 1000f
+                         : 0f;
+            float at = full > minEnd ? full : minEnd;
+            if (at > CmmClock.Now)
             {
-                _slotLockAt[_emDoneSlot] = _slotArmedAt[_emDoneSlot] + minSweep;
-                _slotLockRamp[_emDoneSlot] = arrive;
+                _slotLockAt[_emDoneSlot]   = at;
+                _slotLockRamp[_emDoneSlot] = ArriveRamp;
             }
-            else CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, arrive);
+            else CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, ArriveRamp);
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
@@ -2126,6 +2140,50 @@ namespace CMM
         private static void MaintainTune()
         {
             float now = CmmClock.Now;
+
+            // A DIAL TURN DURING A DIAL TURN. The pocket radio has nothing to resolve here: one
+            // receiver, one signal, and a fresh press just re-aims from wherever that signal
+            // happens to be ("interrupting a half-finished arrival fades from half and takes half
+            // as long"). This used to IGNORE the new tune while a phase was running -- but the pin
+            // had already moved, so in the arriving phase the snapshot handed the speaker straight
+            // to the new station on another lane, at full level, with the old one gone. A hard cut,
+            // and precisely the one reported when changing station mid tune-in.
+            //
+            // Re-aimed instead: same slot, same receiver, ramp back down from wherever it is, and
+            // the station now on the lane becomes the one being left. Nothing is stopped, nothing
+            // is flushed, and the crossfade under the noise happens again.
+            bool fresh = _handledTuneAt != EmitterTuner.LastTuneAt
+                      && now - EmitterTuner.LastTuneAt < RetuneWindow;
+            if (fresh && _tunePhase != 0 && _tuneSlot >= 0)
+            {
+                Station on = _slotOwner[_tuneSlot];
+                var snapR = EmitterRegistry.Snapshot;
+                EmitterRegistry.Emitter er = default(EmitterRegistry.Emitter);
+                bool foundR = false;
+                for (int i = 0; i < snapR.Count; i++)
+                    if (snapR[i].Pos.Equals(EmitterTuner.LastTunePos)) { er = snapR[i]; foundR = true; break; }
+                string wantR;
+                if (foundR && on != null && EmitterTuner.TryPin(er, out wantR)
+                    && !string.IsNullOrEmpty(wantR)
+                    && !string.Equals(wantR, on.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    Station toR = ByName(wantR);
+                    if (toR == null || toR.VoiceId == 0 || toR.Slot == _tuneSlot)
+                    {
+                        _handledTuneAt = EmitterTuner.LastTuneAt;
+                        EmitterTuner.ReleaseSweepHold();
+                        _tuneFrom = on.Name; _tuneTo = wantR;
+                        _tunePhase = 1;
+                        _tuneSwapAt = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
+                        _tuneGiveUp = _tuneSwapAt + CMMConfig.WorldEmitterLevelHoldMs / 1000f + 2f;
+                        _slotLockAt[_tuneSlot] = 0f;   // the arrive we were waiting on is off
+                        CmmMixer.GetOrCreate().SetEmitterRecv(_tuneSlot, 0f, LeaveRamp);
+                        CMMConfig.D($"[CMM] Tune: re-aimed mid-tune on slot {_tuneSlot} — "
+                                  + $"'{on.Name}' is now the one being left, for '{wantR}'.");
+                        return;
+                    }
+                }
+            }
 
             if (_tunePhase == 1 && now >= _tuneSwapAt)
             {
