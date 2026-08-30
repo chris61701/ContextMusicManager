@@ -133,7 +133,15 @@ namespace CMM
         // three seconds was short enough that a press could miss its own window and arrive silent.
         private const float RetuneWindow = 8f;
         private const float ReleaseRamp  = 0.45f;
-        private static float SearchGiveUp => CMMConfig.LoudnessStartHoldMs / 1000f + 4f;
+        // THE BACKSTOP, AND IT IS ONLY A BACKSTOP. Sized off LoudnessStartHoldMs -- the POCKET
+        // RADIO's three-second hold -- this was seven seconds, and a search that reached it ran for
+        // all of them: "the static feels like it goes on forever, 6-9 seconds at times". It also
+        // changed how the noise SOUNDS, which is the other half of that report. The wander is an
+        // AGC breathing as a signal fades, with a time constant meant for a receiver that sits
+        // between stations; over a 250 ms sweep you never hear it move, and over seven it wanders
+        // far enough down to vanish. The emitter has its own hold, and this is that plus room for
+        // an open.
+        private static float SearchGiveUp => CMMConfig.WorldEmitterLevelHoldMs / 1000f + 2f;
 
         // The station list lives on the shared catalog (RadioStation class, version-neutral); this
         // layer owns the emitter-side fields on it (VoiceId/Slot/points/acoustics).
@@ -1235,7 +1243,11 @@ namespace CMM
                 }
                 // Pinned to a REMOVED station ⇒ dead air: the radio contributes to no live station
                 // (silent) until the folder returns or the next world entry recomputes the pins.
-                if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st))
+                // NOT READY IS DEAD AIR TOO. Ready is `Order != null && Order.Length > 0`, so a
+                // station whose folder is empty is very much IN the catalog -- it resolves, it just
+                // has nothing to play. It therefore never took this branch, which is why the one
+                // station built to be broken was the one that never got the off-air tone.
+                if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st) || !st.Ready)
                 {
                     // SILENCED, OR PINNED TO A STATION THAT NO LONGER EXISTS. The speaker is on
                     // nothing, and _posStation must say so -- it is only ever WRITTEN below, so
@@ -2562,10 +2574,17 @@ namespace CMM
             // never about the target, it was about the speaker having somewhere to be.
             if (_handledTuneAt == EmitterTuner.LastTuneAt) return;
             if (now - EmitterTuner.LastTuneAt > RetuneWindow) return;
-            _handledTuneAt = EmitterTuner.LastTuneAt;
-            // Whatever we decide below, the blanket hold ends here — from now on the speaker is
-            // either excluded because the borrow owns it, or back in its station.
-            EmitterTuner.ReleaseSweepHold();
+            // THE HOLD ENDS WHEN SOMETHING IS ARMED, NOT WHEN WE DECIDE TO TRY. It used to end
+            // here, before the slot was acquired -- so on the path where no lane was spare the
+            // speaker was released into a station that is ALREADY PLAYING, at full level, with no
+            // receiver on it. Clean audio hops in; the arm that finally lands a tick later then
+            // takes SearchRamp (120 ms) to bury it. "Audio will play before the static, hop in,
+            // fade out in 50-100 ms, then static, then it comes back" -- that whole sequence, and
+            // the 120 ms is SearchRamp exactly.
+            //
+            // Nor is _handledTuneAt stamped up here any more: a retune that could not be served
+            // this tick has not been handled, and must be tried again when a lane frees, rather
+            // than counted as done and dropped.
             // A RETUNED SPEAKER IS A NEW SPEAKER, as far as arriving goes. The birth ramp already
             // fades in "a speaker that APPEARS while a station voice is already live... instead of
             // popping" -- but a speaker being retuned never appears. It has been in the registry
@@ -2575,10 +2594,8 @@ namespace CMM
             // already at full level and arrived there with no ramp at all. That is the clear audio
             // bleeding through before any static.
             //
-            // Re-stamping it makes the existing ramp apply wherever it lands, whether or not the
-            // borrow below manages to give it a sweep first.
-            _speakerFirstSeen[EmitterTuner.LastTunePos] = CmmClock.Now;
-
+            // Re-stamping it (below, once a lane is secured) makes the existing ramp apply
+            // wherever it lands.
             Vector3i pos = EmitterTuner.LastTunePos;
             var snap = EmitterRegistry.Snapshot;
             EmitterRegistry.Emitter e = default(EmitterRegistry.Emitter);
@@ -2609,9 +2626,15 @@ namespace CMM
             if (slot < 0) slot = TakeInaudibleSlot();
             if (slot < 0)
             {
-                CMMConfig.D("[CMM] Sweep borrow: no spare slot — retune lands without a sweep.");
+                // Not handled, not released: the speaker stays out of every station and we try
+                // again next tick. Held silent for a moment beats arriving clean and then being
+                // buried in front of the player.
+                CMMConfig.D("[CMM] Sweep borrow: no spare lane yet — holding the speaker for one more tick.");
                 return;
             }
+            _handledTuneAt = EmitterTuner.LastTuneAt;
+            EmitterTuner.ReleaseSweepHold();
+            _speakerFirstSeen[EmitterTuner.LastTunePos] = CmmClock.Now;
 
             _borrowSlot = slot;
             _borrowPos = pos;
