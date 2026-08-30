@@ -777,7 +777,17 @@ CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds)
         g_closeWhenIdle = 0;
         r->rng = 22222u + (unsigned)(slot * 2654435761u);
         r->nzLp = r->nzLp2 = r->clk = r->fA = r->fB = r->lp = 0.0f;
-        r->sig = signal;
+        /* FIRST ARM STARTS AT FULLY TUNED, not at the target -- the same fix the BUS receiver
+         * carries (see cmm_mix_set_receiver_signal) and the emitter one never got:
+         *
+         *   "Setting the signal to `sg` here and then computing the step against it -- now
+         *    equal -- made the step ZERO, so the very first arm always jumped and silently
+         *    ignored ratePerSec. A receiver nobody has tuned is by definition fully in."
+         *
+         * Every lane ClearEmitterRecv has ever reaped comes back through here, which is the
+         * ordinary case, so the ordinary retune SNAPPED to full static instead of sliding there
+         * over the leave. The station sinking away never happened at all. */
+        r->sig = 1.0f;
     }
     if (startingSearch) {
         /* RESEED THE WANDER ON EVERY SEARCH, not just the first. It is an AGC breathing as a
@@ -791,9 +801,18 @@ CMM_API void cmm_mix_set_emitter_recv(int slot, float signal, float rampSeconds)
     }
     r->sigTarget = signal;
     if (rampSeconds <= 0.0001f) { r->sig = signal; r->sigStep = 0.0f; return; }
+    /* A RATE, NOT A DURATION -- again matching the bus, and for the reason its own comment gives:
+     *
+     *   "Interrupting is the whole reason this is a rate rather than a duration. Press again half
+     *    way through a tune-in and the leave starts from a half -- not from full, which would
+     *    swell upward before falling, and not over a fixed 260 ms, which would drag."
+     *
+     * rampSeconds is read as the time for a FULL 0->1 traverse, so a half-finished ramp reverses
+     * in half the time instead of dragging out the whole span from wherever it happened to be. */
     float frames = rampSeconds * (float)g_busRate;
     if (frames < 1.0f) frames = 1.0f;
-    r->sigStep = (signal - r->sig) / frames;
+    float step = 1.0f / frames;
+    r->sigStep = (signal > r->sig) ? step : (signal < r->sig ? -step : 0.0f);
     if (r->sigStep == 0.0f) r->sig = signal;
 }
 

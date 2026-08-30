@@ -1650,7 +1650,15 @@ namespace CMM
             // middle and finish together. Left to itself this is the Radio context's fadeintime,
             // five seconds, which is a context changing rather than a dial settling -- and against
             // a 900 ms noise fade it left the hiss gone long before the station was up.
-            if (retuned) fadeIn = ArriveRamp;
+            // THE HANDOVER IS A RETUNE TOO. `retuned` is false by construction on the tune
+            // machine's path -- it excludes `_tunePhase != 0 && slot == _tuneSlot`, because the
+            // machine owns that lane's RECEIVER. But it does not own the station's FADE, and this
+            // line only ever ran for the other paths. So a handed-over station fell back to
+            // StartFade(), which resolves to the Radio context's fadeintime="5": the noise cleared
+            // in a second over music that was a fifth of the way up and still climbing for another
+            // four. Exactly the defect the comment above claims to have fixed.
+            bool ownedByTune = _tunePhase != 0 && slot == _tuneSlot;
+            if (retuned || ownedByTune) fadeIn = ArriveRamp;
 
             if (changedStation)
             {
@@ -1690,7 +1698,12 @@ namespace CMM
                     _slotArmedAt[slot] = CmmClock.Now;
                     _slotLockAt[slot] = 0f;   // a new sweep cancels the one it interrupted
                 }
-                else _slotArmedAt[slot] = 0f;
+                // ...AND DO NOT ERASE THE LEAVE'S OWN STAMP. `retuned` is false on the tune
+                // machine's lane, so this else-branch wiped the _slotArmedAt the leave had set --
+                // which is what the arrive's minimum-static deadline is measured from. minEnd
+                // became 0, the lock fired the instant the voice landed, and the static floor the
+                // leave had just spent 700 ms earning was thrown away.
+                else if (!ownedByTune) _slotArmedAt[slot] = 0f;
                 // ...and its speakers, so the noise has somewhere in the world to come from. The
                 // point set is already current — GroupSnapshot filled it earlier this tick.
                 // CLEAR LINE, NOT st.PtGain. PtGain is not a gain -- it is added VIRTUAL DISTANCE
@@ -2391,6 +2404,19 @@ namespace CMM
         private static readonly float[] _deadGain = new float[1];
         private static readonly int[] _deadFlags = new int[1];
 
+        // WHY A DIAL TURN GOT NO STATIC. Every declining branch in both handlers used to return
+        // in silence, so a log of a silent retune showed the dial click, then the station starting,
+        // with nothing at all in between -- which is why thirteen hours of logs never named the
+        // cause. One line each. They are rare enough to be free and the only thing that makes the
+        // next report diagnosable.
+        private static void TuneDeclined(string who, string why)
+        {
+            if (_declinedAt == EmitterTuner.LastTuneAt) return;   // once per press, not once per tick
+            _declinedAt = EmitterTuner.LastTuneAt;
+            CMMConfig.D($"[CMM] Tune declined by {who}: {why}.");
+        }
+        private static float _declinedAt = -999f;
+
         private static void MaintainTune()
         {
             float now = CmmClock.Now;
@@ -2553,12 +2579,18 @@ namespace CMM
             if (now - EmitterTuner.LastTuneAt > RetuneWindow) return;
 
             string fromName;
-            if (!_posStation.TryGetValue(EmitterTuner.LastTunePos, out fromName)) return;
+            if (!_posStation.TryGetValue(EmitterTuner.LastTunePos, out fromName))
+            { TuneDeclined("tune", "the speaker was on no station"); return; }
             Station fromSt = ByName(fromName);
             // Alone on the lane? Only then is this slot this speaker's tuner. PtCount is last
             // tick's snapshot, taken while the speaker was still on it, which is the state we want.
             if (fromSt == null || fromSt.Slot < 0 || fromSt.VoiceId == 0 || fromSt.PtCount != 1)
+            {
+                TuneDeclined("tune", fromSt == null ? "the station it was on is gone"
+                           : fromSt.VoiceId == 0 ? $"'{fromName}' is not playing"
+                           : $"'{fromName}' has {fromSt.PtCount} speakers on this lane, not 1");
                 return;   // shared, or not playing — the borrow handles those
+            }
 
             var snap = EmitterRegistry.Snapshot;
             EmitterRegistry.Emitter e = default(EmitterRegistry.Emitter);
@@ -2568,7 +2600,8 @@ namespace CMM
             if (!found) return;
 
             string want;
-            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want)) return;
+            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want))
+            { TuneDeclined("tune", "no pin resolves for this speaker (Automatic / Off)"); return; }
             if (string.Equals(want, fromName, StringComparison.OrdinalIgnoreCase)) return;   // no change
 
             // THE TARGET MUST BE ABLE TO COME TO THIS LANE. A station already voiced on ANOTHER
@@ -2582,7 +2615,8 @@ namespace CMM
             // That case is exactly what the sweep borrow is for, so leave it alone and let the
             // borrow have it -- _handledTuneAt is deliberately NOT stamped here.
             Station toSt = ByName(want);
-            if (toSt != null && toSt.VoiceId != 0 && toSt.Slot != fromSt.Slot) return;
+            if (toSt != null && toSt.VoiceId != 0 && toSt.Slot != fromSt.Slot)
+            { TuneDeclined("tune", $"'{want}' is already playing on lane {toSt.Slot} — over to the borrow"); return; }
 
             _handledTuneAt = EmitterTuner.LastTuneAt;
             // The blanket hold kept the speaker out of EVERY station; from here it stays on the
@@ -2659,10 +2693,20 @@ namespace CMM
                     // full 1.5 s dead-man window -- no station, no borrow, no static, silence at
                     // that radio. It rejoins its station instead and simply goes without a sweep,
                     // which is the same graceful failure as having no spare slot.
+                    // RELEASE THE HOLD, BUT DO NOT CLAIM THE RETUNE. Stamping _handledTuneAt is
+                    // terminal -- every other path tests it first -- so marking a press handled
+                    // here while giving it no sweep at all made it permanently silent. This was
+                    // the only one of the four stamp sites that did not arm anything, and its
+                    // window is the whole length of a borrow: press again inside it and the
+                    // station simply changed, with nothing in the log to say why.
+                    //
+                    // The hold still has to go, or the speaker sits out of every station for the
+                    // full dead-man window. Released without being claimed, so the borrow can pick
+                    // this retune up the moment its lane frees.
                     if (_handledTuneAt != EmitterTuner.LastTuneAt)
                     {
-                        _handledTuneAt = EmitterTuner.LastTuneAt;
                         EmitterTuner.ReleaseSweepHold();
+                        CMMConfig.D("[CMM] Sweep borrow busy — the new dial turn waits for the lane.");
                     }
                     return;   // one borrow at a time
                 }
@@ -2719,7 +2763,8 @@ namespace CMM
             if (!found) return;
 
             string want;
-            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want)) return;
+            if (!EmitterTuner.TryPin(e, out want) || string.IsNullOrEmpty(want))
+            { TuneDeclined("borrow", "no pin resolves for this speaker (Automatic / Off)"); return; }
             Station target = null;
             for (int i = 0; i < _stations.Count; i++)
                 if (string.Equals(_stations[i].Name, want, StringComparison.OrdinalIgnoreCase))
@@ -2734,7 +2779,8 @@ namespace CMM
             //
             // A target already voiced elsewhere is the one case with no better answer: its slot
             // carries other speakers, who must not be hissed.
-            if (target == null || target.VoiceId == 0) return;
+            if (target == null || target.VoiceId == 0)
+            { TuneDeclined("borrow", "the target is not playing anywhere — the start path sweeps it"); return; }
 
             int slot = FreeSlot();
             if (slot < 0) slot = TakeInaudibleSlot();
@@ -2743,7 +2789,7 @@ namespace CMM
                 // Not handled, not released: the speaker stays out of every station and we try
                 // again next tick. Held silent for a moment beats arriving clean and then being
                 // buried in front of the player.
-                CMMConfig.D("[CMM] Sweep borrow: no spare lane yet — holding the speaker for one more tick.");
+                TuneDeclined("borrow", "every lane is busy — holding the speaker for one more tick");
                 return;
             }
             _handledTuneAt = EmitterTuner.LastTuneAt;
