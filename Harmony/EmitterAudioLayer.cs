@@ -1377,7 +1377,22 @@ namespace CMM
                 // the dial turns and the reason there was never anything under the hiss.
                 bool leaving = _tunePhase == 1 && e.Pos.Equals(EmitterTuner.LastTunePos);
                 // ...and from the instant the dial turned, before we have decided anything.
-                if (EmitterTuner.SweepHeld(e.Pos)) continue;
+                // THE HOLD KEEPS A SPEAKER OUT OF THE POINT SETS. IT MUST NOT ALSO STOP US
+                // NOTICING IT LEFT.
+                //
+                // Skipping here, above the pin resolution, skipped the _posStation bookkeeping
+                // with it -- so switching a speaker off left _posStation still naming the station
+                // it had been on, for the whole 1.5 s hold. Turn it back on inside that window
+                // (measured at 518 ms) and the borrow read that stale name as "the station being
+                // left", took its leave branch, and mirrored that station AT FULL GAIN. The lane
+                // readout caught it: `s3 sig=0.09 mir=1.00` -- the mirror at full while the
+                // receiver had barely begun to fall.
+                //
+                // And the station being "left" is, on a turn-on, the station being turned ON to.
+                // So the audio of the last station arrived instantly, which is the report.
+                //
+                // The pin is resolved first now, and only the POINT is withheld.
+                bool held = EmitterTuner.SweepHeld(e.Pos);
                 // The PLAYER'S choice outranks the derived one (EmitterTuner: look at a speaker,
                 // press the tune key). Deliberately NOT written into _posPins: leaving the override
                 // outside the cache means retuning a building lands on the next decision tick with
@@ -1424,7 +1439,7 @@ namespace CMM
                     // "the station being left" and ran a whole leave against a station the speaker
                     // was not on: music bleeding in at full through the other lane before any ramp
                     // caught it, then fading in again from low. Both halves of that report.
-                    _posStation.Remove(e.Pos);
+                    _posStation.Remove(e.Pos);   // ...and this now happens even while held
                     // SWITCHED OFF IS NOT THE SAME AS TUNED TO NOTHING, and both landed here.
                     //
                     // An empty pin is the player having switched the speaker off: silence is
@@ -1455,6 +1470,7 @@ namespace CMM
                     else if (!_deadAirOn) GoDeadAir(e.Pos, -1);
                     continue;
                 }
+                if (held) continue;              // in no point set, but its station is recorded
                 st.LastSeenAt = now;
                 // Changed station? Then it fades in. See _joinedAt.
                 if (!_posStation.TryGetValue(e.Pos, out string wasOn)
