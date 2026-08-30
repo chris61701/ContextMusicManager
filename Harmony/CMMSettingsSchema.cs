@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 47;
+        internal const int CurrentSchema = 48;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1010,7 +1010,12 @@ not open. Silence reads as the mod having broken; a tone reads as a station that
 stopped broadcasting for the night, which is what actually happened. Hz then level.
 0 Hz disables it and the speaker simply goes quiet."),
             F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              1000f, since: 47),
+            F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             0f,    since: 48),
+            F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             0f,    since: 48),
             F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.05f, since: 47),
+            Cmt(@"How long (ms) the off-air carrier takes to fade in and out. A tone that snapped on
+was a click, which reads as a fault rather than as a station going off the air."),
+            I("WorldEmitterOffAirFadeMs",            "CMMConfig.WorldEmitterOffAirFadeMs",          400,   since: 48),
             Cmt(@"How fast (ms) a station drops away into static when you turn the dial."),
             I("WorldEmitterSearchMs",                "CMMConfig.WorldEmitterSearchMs",              120, since: 45),
             Cmt(@"How long (ms) the station takes to come out from under the noise once the dial has

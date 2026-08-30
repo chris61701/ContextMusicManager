@@ -765,8 +765,16 @@ namespace CMM
         // The off-air carrier: what a speaker sits on when the station it was tuned to will not
         // open. Silence reads as a fault; a tone reads as a station that has stopped broadcasting.
         // 0 Hz disables it and the speaker simply goes quiet.
-        public static float  WorldEmitterOffAirHz    = 1000f;
-        public static float  WorldEmitterOffAirLevel = 0.05f;
+        // Up to three partials sounded together — one frequency reads as a test signal, a chord
+        // reads as a broadcast. 0 disables that partial; all three at 0 disables the carrier and
+        // the speaker simply goes quiet.
+        public static float  WorldEmitterOffAirHz     = 1000f;
+        public static float  WorldEmitterOffAirHz2    = 0f;
+        public static float  WorldEmitterOffAirHz3    = 0f;
+        public static float  WorldEmitterOffAirLevel  = 0.05f;
+        // It FADES. A carrier that snapped on was a click, which reads as a fault rather than as a
+        // station going off the air.
+        public static int    WorldEmitterOffAirFadeMs = 400;
         // How fast a station drops away into static when you turn the dial. Short: turning a knob
         // is abrupt, and this is the part that should feel like an action.
         public static int    WorldEmitterSearchMs = 120;

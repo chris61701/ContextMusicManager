@@ -107,7 +107,8 @@ namespace CMM
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_lane_mirror(int dst, int src);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void cmm_mix_set_emitter_tone(int slot, float hz, float level);
+        internal static extern void cmm_mix_set_emitter_tone(int slot, float[] hz, float[] levels,
+                                                            int count, float rampSeconds);
 
         // v43 — per-slot ring health. The music ring's counters said "underruns 0" while the
         // radios were dropping out, because nothing watched these.
@@ -493,10 +494,10 @@ namespace CMM
         }
 
         // A steady off-air tone on one lane, in place of programme and hiss (hz <= 0 clears).
-        public void SetEmitterTone(int slot, float hz, float level)
+        public void SetEmitterTone(int slot, float[] hz, float[] levels, int count, float rampSeconds)
         {
             if (!_nativeStarted) return;
-            try { NativeMix.cmm_mix_set_emitter_tone(slot, hz, level); } catch { }
+            try { NativeMix.cmm_mix_set_emitter_tone(slot, hz, levels, count, rampSeconds); } catch { }
         }
 
         public void SetEmitterPoints(long id, float[] xyz, float[] gains, int[] flags, int count)

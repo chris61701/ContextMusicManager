@@ -1108,11 +1108,33 @@ namespace CMM
         // placement ramp can be tuned without dragging station-approach / radio-join fades along).
         private static void ApplyBirthFades(float[] pts, float[] gains, int count)
         {
-            if (count <= 0 || _speakerFirstSeen.Count == 0) return;
-            float dur = CMMConfig.WorldEmitterBirthFade >= 0f ? CMMConfig.WorldEmitterBirthFade : StartFade();
-            if (dur <= 0f) return;
+            if (count <= 0) return;
             float now = CmmClock.Now;
             float range = CMMConfig.WorldEmitterRange;
+
+            // ── JOINING A STATION IS NOT THE SAME EVENT AS BEING PLACED ───────────────────────
+            // A speaker that changes station has to fade in, always. It shares this mechanism
+            // (virtual distance decaying to the real occlusion) but NOT its duration: birth is
+            // about a block appearing in the world and defaults to 0 in every shipped config,
+            // which is why a retune arrived at full level -- "music comes in hot (not from 0)".
+            // The station it joins is very often already at full for other speakers, so there is
+            // no voice fade to ride either; the point itself is the only thing that can ramp.
+            float jdur = ArriveRamp;
+            if (jdur > 0f && _joinedAt.Count > 0)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    Vector3i key = SlotKey(pts, i);
+                    if (!_joinedAt.TryGetValue(key, out float j0)) continue;
+                    float jage = now - j0;
+                    if (jage >= jdur) continue;
+                    gains[i] += (1f - jage / jdur) * range;
+                }
+            }
+
+            if (_speakerFirstSeen.Count == 0) return;
+            float dur = CMMConfig.WorldEmitterBirthFade >= 0f ? CMMConfig.WorldEmitterBirthFade : StartFade();
+            if (dur <= 0f) return;
             for (int i = 0; i < count; i++)
             {
                 Vector3i key = SlotKey(pts, i);
@@ -1122,6 +1144,11 @@ namespace CMM
                 gains[i] += (1f - age / dur) * range;
             }
         }
+
+        // When each speaker last CHANGED station. Stamped in GroupSnapshot, which is the one place
+        // that knows -- and it is deliberately not stamped at the dial turn, because through the
+        // whole leave the speaker is still on the station it is leaving and must not duck.
+        private static readonly Dictionary<Vector3i, float> _joinedAt = new Dictionary<Vector3i, float>();
 
         // Mark every currently-tracked speaker's birth as already elapsed. Used when the FIRST
         // station voice starts fresh — its own fade-in covers the entrance, and stacking the birth
@@ -1212,9 +1239,16 @@ namespace CMM
                     // was not on: music bleeding in at full through the other lane before any ramp
                     // caught it, then fading in again from low. Both halves of that report.
                     _posStation.Remove(e.Pos);
+                    // Switched off, and the carrier is one of the things being switched off. It is
+                    // not a retune, so nothing on the tuning paths would ever have cleared it.
+                    ClearOffAir();
                     continue;
                 }
                 st.LastSeenAt = now;
+                // Changed station? Then it fades in. See _joinedAt.
+                if (!_posStation.TryGetValue(e.Pos, out string wasOn)
+                    || !string.Equals(wasOn, st.Name, StringComparison.OrdinalIgnoreCase))
+                    _joinedAt[e.Pos] = now;
                 // WHICH STATION THIS SPEAKER IS ON, as of this tick. A retune overwrites the pin
                 // before the audio layer ever sees it, so without this there is no record of where
                 // the speaker came FROM -- and the station being left is half of a dial turn.
@@ -2142,10 +2176,34 @@ namespace CMM
         // The lane sitting on the off-air carrier, if any. Cleared the instant a station lands on
         // it or the speaker is retuned, so the tone can never outlive the reason for it.
         private static int    _offAirSlot = -1;
-        internal static void ClearOffAir(int slot)
+        private static readonly float[] _offAirHz  = new float[3];
+        private static readonly float[] _offAirLvl = new float[3];
+
+        private static void GoOffAir(int slot)
         {
-            if (_offAirSlot < 0 || (slot >= 0 && slot != _offAirSlot)) return;
-            CmmMixer.Instance?.SetEmitterTone(_offAirSlot, 0f, 0f);
+            _offAirHz[0] = CMMConfig.WorldEmitterOffAirHz;
+            _offAirHz[1] = CMMConfig.WorldEmitterOffAirHz2;
+            _offAirHz[2] = CMMConfig.WorldEmitterOffAirHz3;
+            for (int i = 0; i < 3; i++) _offAirLvl[i] = CMMConfig.WorldEmitterOffAirLevel;
+            CmmMixer.Instance?.SetEmitterTone(slot, _offAirHz, _offAirLvl, 3,
+                                              CMMConfig.WorldEmitterOffAirFadeMs / 1000f);
+            _offAirSlot = slot;
+        }
+
+        // OFF THE CARRIER. `slot` < 0 means "wherever it is" -- the caller knows the reason has
+        // gone, not which lane it landed on.
+        //
+        // It used to take a slot and match on it, so anything that did not happen to land on the
+        // SAME lane left the tone sounding: changing station put the new one on another lane and
+        // the carrier played under it until some later retune happened to reuse that lane, and
+        // switching the radio off never cleared it at all. The reason is always a speaker, never a
+        // lane, so the default is now "clear it wherever it is".
+        internal static void ClearOffAir(int slot = -1)
+        {
+            if (_offAirSlot < 0) return;
+            if (slot >= 0 && slot != _offAirSlot) return;
+            CmmMixer.Instance?.SetEmitterTone(_offAirSlot, _offAirHz, _offAirLvl, 0,
+                                              CMMConfig.WorldEmitterOffAirFadeMs / 1000f);
             _offAirSlot = -1;
         }
         private static int    _tunePhase;         // 0 = idle, 1 = leaving, 2 = arriving
@@ -2164,6 +2222,12 @@ namespace CMM
         private static void MaintainTune()
         {
             float now = CmmClock.Now;
+
+            // ANY DIAL TURN ENDS THE CARRIER, before we work out which path this retune takes.
+            // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
+            // start -- left the tone sounding under the new station.
+            if (_handledTuneAt != EmitterTuner.LastTuneAt
+                && now - EmitterTuner.LastTuneAt < RetuneWindow) ClearOffAir();
 
             // A DIAL TURN DURING A DIAL TURN. The pocket radio has nothing to resolve here: one
             // receiver, one signal, and a fresh press just re-aims from wherever that signal
@@ -2284,10 +2348,8 @@ namespace CMM
                     // OFF AIR, NOT SILENT. A station that will not open used to leave the speaker
                     // quiet, which is indistinguishable from the mod having broken. A set that
                     // finds nothing sits on the carrier instead.
-                    CmmMixer.Instance?.SetEmitterTone(_tuneSlot, CMMConfig.WorldEmitterOffAirHz,
-                                                                 CMMConfig.WorldEmitterOffAirLevel);
+                    GoOffAir(_tuneSlot);
                     CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
-                    _offAirSlot = _tuneSlot;
                     CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — slot {_tuneSlot} goes off air.");
                     _tunePhase = 0; _tuneSlot = -1;
                 }
@@ -2661,7 +2723,13 @@ namespace CMM
 
                 if (_slotOwner[s] != null) continue;                    // a station holds it
                 if (_emStartPending && _emPendingSlot == s) continue;   // a start is on its way
-                if (_slotLastStation[s] == null) continue;              // already released
+                // ARMED COUNTS, EVEN WITH NO STATION BEHIND IT. This used to be
+                // `_slotLastStation[s] == null -> continue`, and a borrow lane has never held a
+                // station, so its receiver could not be released HERE by construction. If the
+                // borrow's own teardown was missed for any reason the hiss had nothing left that
+                // could ever turn it off -- static that plays until you change station or toggle
+                // the radio, which is exactly how it was reported.
+                if (_slotLastStation[s] == null && _slotArmedAt[s] <= 0f) continue;
                 // AND NOT WHILE IT IS LEGITIMATELY SEARCHING. The level hold returns before the
                 // decoder job is dispatched, so through the whole of it there is no owner AND no
                 // pending start -- the two conditions above -- and a sweep without this one would

@@ -680,17 +680,49 @@ static int g_emMirror[CMM_MAX_EMIT_VOICES];
  * open gets, rather than silence: a set that finds nothing does not go quiet, it sits on the
  * carrier. Same idea as a channel that has stopped broadcasting for the night. Positional like
  * everything else on a lane, which the SFX bus could never be. */
-static float g_emTone[CMM_MAX_EMIT_VOICES];      /* Hz, 0 = off */
-static float g_emToneLvl[CMM_MAX_EMIT_VOICES];
-static float g_emTonePh[CMM_MAX_EMIT_VOICES];
+#define EM_TONE_MAX 3
+static float g_emToneHz [CMM_MAX_EMIT_VOICES][EM_TONE_MAX];
+static float g_emToneLvl[CMM_MAX_EMIT_VOICES][EM_TONE_MAX];
+static float g_emTonePh [CMM_MAX_EMIT_VOICES][EM_TONE_MAX];
+static int   g_emToneN  [CMM_MAX_EMIT_VOICES];
+/* One envelope over the whole chord, so the partials never drift apart in level. */
+static float g_emToneAmp[CMM_MAX_EMIT_VOICES], g_emToneTgt[CMM_MAX_EMIT_VOICES];
+static float g_emToneStep[CMM_MAX_EMIT_VOICES];
 
-CMM_API void cmm_mix_set_emitter_tone(int slot, float hz, float level) {
+/* Up to EM_TONE_MAX partials sounded together (count <= 0, or every hz <= 0, fades to off).
+ * The envelope RAMPS: a carrier that snapped on was a click and read as a fault rather than as a
+ * station going off air. Phases reset only on a fade FROM silence, so retuning the chord while it
+ * sounds does not restart it mid-cycle. */
+CMM_API void cmm_mix_set_emitter_tone(int slot, const float* hz, const float* levels,
+                                      int count, float rampSeconds) {
+    int k;
     if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
-    if (hz <= 0.0f) { g_emTone[slot] = 0.0f; return; }
-    if (level < 0.0f) level = 0.0f; else if (level > 1.0f) level = 1.0f;
-    if (g_emTone[slot] <= 0.0f) g_emTonePh[slot] = 0.0f;   /* start at zero crossing, never a click */
-    g_emTone[slot] = hz; g_emToneLvl[slot] = level;
+    if (count > EM_TONE_MAX) count = EM_TONE_MAX;
+    if (count < 0) count = 0;
+
+    int live = 0;
+    for (k = 0; k < count; k++) if (hz && hz[k] > 0.0f) live++;
+
+    if (live == 0) { g_emToneTgt[slot] = 0.0f; }
+    else {
+        if (g_emToneAmp[slot] <= 0.0001f)
+            for (k = 0; k < EM_TONE_MAX; k++) g_emTonePh[slot][k] = 0.0f;   /* from a zero crossing */
+        for (k = 0; k < count; k++) {
+            g_emToneHz [slot][k] = hz ? hz[k] : 0.0f;
+            float l = levels ? levels[k] : 1.0f;
+            g_emToneLvl[slot][k] = l < 0.0f ? 0.0f : (l > 1.0f ? 1.0f : l);
+        }
+        g_emToneN[slot] = count;
+        g_emToneTgt[slot] = 1.0f;
+    }
+    if (rampSeconds <= 0.0001f) { g_emToneAmp[slot] = g_emToneTgt[slot]; g_emToneStep[slot] = 0.0f; return; }
+    float frames = rampSeconds * (float)g_busRate;
+    if (frames < 1.0f) frames = 1.0f;
+    g_emToneStep[slot] = (g_emToneTgt[slot] - g_emToneAmp[slot]) / frames;
 }
+
+/* Sounding, or still fading out of it. */
+static int em_tone_live(int s) { return g_emToneAmp[s] > 0.0001f || g_emToneTgt[s] > 0.0f; }
 
 /* dst takes its audio from src (src < 0 clears). Self-mirroring is refused; so is a src that is
  * itself a mirror, which keeps the copy one level deep and the ordering below trivially correct. */
@@ -1637,16 +1669,30 @@ static void pump_body(void) {
                  * voiceless armed slot starts from silence and the stage writes the hiss into it
                  * -- no stale audio, no special case. Unarmed and voiceless stays skipped, so an
                  * idle station's ring keeps its onset free of a cushion of zeros. */
-                if (!emActive[s] && !g_emRx[s].armed && g_emTone[s] <= 0.0f) continue;
+                if (!emActive[s] && !g_emRx[s].armed && !em_tone_live(s)) continue;
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
-                if (g_emTone[s] > 0.0f) {
+                if (em_tone_live(s)) {
                     /* OFF AIR. Replaces the lane outright -- programme and hiss both -- because it
                      * is not a layer over a station, it is what is there instead of one. */
-                    float inc = 6.28318531f * g_emTone[s] / (float)g_busRate;
+                    int k;
+                    float inc[EM_TONE_MAX];
+                    for (k = 0; k < g_emToneN[s] && k < EM_TONE_MAX; k++)
+                        inc[k] = 6.28318531f * g_emToneHz[s][k] / (float)g_busRate;
                     for (i = 0; i < n; i++) {
-                        lane[i] = sinf(g_emTonePh[s]) * g_emToneLvl[s];
-                        g_emTonePh[s] += inc;
-                        if (g_emTonePh[s] > 6.28318531f) g_emTonePh[s] -= 6.28318531f;
+                        float a = g_emToneAmp[s], v = 0.0f;
+                        if (g_emToneStep[s] != 0.0f) {
+                            a += g_emToneStep[s];
+                            if ((g_emToneStep[s] > 0.0f && a >= g_emToneTgt[s]) ||
+                                (g_emToneStep[s] < 0.0f && a <= g_emToneTgt[s])) { a = g_emToneTgt[s]; g_emToneStep[s] = 0.0f; }
+                            g_emToneAmp[s] = a;
+                        }
+                        for (k = 0; k < g_emToneN[s] && k < EM_TONE_MAX; k++) {
+                            if (g_emToneHz[s][k] <= 0.0f) continue;
+                            v += sinf(g_emTonePh[s][k]) * g_emToneLvl[s][k];
+                            g_emTonePh[s][k] += inc[k];
+                            if (g_emTonePh[s][k] > 6.28318531f) g_emTonePh[s][k] -= 6.28318531f;
+                        }
+                        lane[i] = v * a;
                     }
                 }
                 else
