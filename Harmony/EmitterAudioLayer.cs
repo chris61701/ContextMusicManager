@@ -1235,6 +1235,7 @@ namespace CMM
         //      !Ready was never going to catch it.
         private static Vector3i _deadAirPos;
         private static bool     _deadAirOn;
+        private static float    _deadAirMissingAt;
 
         private static void GroupSnapshot()
         {
@@ -2435,6 +2436,7 @@ namespace CMM
         private static void EndDeadAir()
         {
             _deadAirOn = false;
+            _deadAirMissingAt = 0f;
             if (_deadAirSlot < 0) return;
             ClearOffAir(_deadAirSlot);
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
@@ -2449,7 +2451,21 @@ namespace CMM
             if (_deadAirOn)
                 for (int i = 0; i < snap.Count; i++)
                     if (snap[i].Pos.Equals(_deadAirPos)) { at = i; break; }
-            if (at < 0 || _deadAirSlot < 0) { EndDeadAir(); return; }
+            // A MISS IS NOT AN ENDING. This tore the carrier down on any tick whose registry
+            // snapshot did not happen to contain the speaker -- measured at 2 ms after it was
+            // raised, twice, so the tone never sounded for longer than a tick. Whether the speaker
+            // is in THIS tick's snapshot is not the question; whether anything still wants dead
+            // air is, and that has explicit owners (a dial turn, an empty pin). A miss just means
+            // there is nothing to republish right now.
+            if (_deadAirSlot < 0) return;
+            if (at < 0)
+            {
+                // ...unless it stays missing, which means the speaker is gone for good.
+                if (_deadAirMissingAt <= 0f) _deadAirMissingAt = CmmClock.Now;
+                else if (CmmClock.Now - _deadAirMissingAt > 2f) EndDeadAir();
+                return;
+            }
+            _deadAirMissingAt = 0f;
 
             EmitterRegistry.Emitter e = snap[at];
             // Republished every tick so the tone tracks the listener's occlusion like any other
@@ -2913,10 +2929,22 @@ namespace CMM
             }
             else
             {
-                if (target.Slot >= 0) CmmMixer.GetOrCreate().SetLaneMirror(slot, target.Slot);
+                // NOTHING TO LEAVE MEANS NOTHING UNDER THE NOISE -- YET. Mirroring the TARGET here
+                // put its music on this lane from the very first sample, and the receiver only
+                // buries a programme by RadioRecvFloorDb (5 dB), so the station arrived at once,
+                // 5 dB down, with the hiss on top of it. That is "turning the radio on, the music
+                // comes in before the static, or at the same time as it" exactly -- and it is also
+                // why a search over a mirrored lane reads as "static, but barely".
+                //
+                // The mirror is deferred to the swap instead, the same moment the leave case uses.
+                // Until then this lane has no source at all and the receiver has only its own
+                // noise to render, which is what a set between stations actually sounds like.
+                CmmMixer.GetOrCreate().SetLaneMirror(slot, -1);
                 CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
-                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
-                _borrowMirrorTo = -1; _borrowSwapAt = 0f;
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 1f, 0f);          // nothing on it yet
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);  // ...and now searching
+                _borrowMirrorTo = target.Slot;
+                _borrowSwapAt = now + LeaveRamp;
             }
             _slotArmedAt[slot] = now;
             _slotLockAt[slot] = 0f;   // a new sweep cancels whatever this slot was still owed
