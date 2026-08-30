@@ -1589,6 +1589,10 @@ namespace CMM
             // A slot last used by a DIFFERENT station still holds its queued dry audio — flush it
             // (and the slot's render state) so nothing of the old station plays under this voice.
             ClearOffAir(slot);   // something real is landing here; the carrier is done
+            // A RETUNE FADES IN OVER THE ARRIVE, so the music rising and the noise falling are the
+            // same span and cross in the middle. A 200 ms advance fade under a 900 ms noise fade
+            // is what left the hiss sitting on top of a finished station.
+            if (_tunePhase != 0 && slot == _tuneSlot && fadeIn < ArriveRamp) fadeIn = ArriveRamp;
             bool changedStation =
                 !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
             // ONLY A HAND ON THE DIAL SEARCHES. A slot taking its FIRST station (world entry), a
@@ -1900,17 +1904,29 @@ namespace CMM
             // So the deadline is the music, not a proportion of it: full level first, buried the
             // whole way, and only then does the receiver lift. The minimum sweep still applies, so
             // a station that opens instantly cannot skip the dial travel.
-            float full   = CmmClock.Now + _emPendingFade;
+            // THEY RISE AND FALL TOGETHER, and finish together. Two readings of "the static is
+            // never gone until the music is at 100%" are possible and only one of them sounds
+            // right. Starting the fade-out AT full level satisfies the words, and buys 900 ms of
+            // hiss laid over a station that has already completely arrived -- measured at 2.27 s
+            // for a retune, against about 1.8 s on the pocket radio, with the extra second spent
+            // talking over the music. The radio does not do that: its arrive runs CONCURRENTLY
+            // with the station coming up, so the two cross and the noise is gone at the moment the
+            // music is there.
+            //
+            // So the ramp ENDS at full rather than beginning there. The station's own fade is what
+            // sets the length -- StartStation stretches it to ArriveRamp for a retune, so both
+            // sides of the crossover are the same span and land together. The minimum sweep still
+            // holds the start off if the dial has not travelled yet.
             float minEnd = _slotArmedAt[_emDoneSlot] > 0f
                          ? _slotArmedAt[_emDoneSlot] + CMMConfig.WorldEmitterSweepMs / 1000f
                          : 0f;
-            float at = full > minEnd ? full : minEnd;
-            if (at > CmmClock.Now)
+            float ramp = _emPendingFade > 0.05f ? _emPendingFade : ArriveRamp;
+            if (minEnd > CmmClock.Now)
             {
-                _slotLockAt[_emDoneSlot]   = at;
-                _slotLockRamp[_emDoneSlot] = ArriveRamp;
+                _slotLockAt[_emDoneSlot]   = minEnd;   // dial still travelling; start when it lands
+                _slotLockRamp[_emDoneSlot] = ramp;
             }
-            else CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, ArriveRamp);
+            else CmmMixer.Instance?.SetEmitterRecv(_emDoneSlot, 1f, ramp);
             CMMConfig.D($"[CMM] Station '{st.Name}' started (slot {_emDoneSlot}): " +
                         $"{Path.GetFileName(file)} (nearest speaker {st.NearestDist:0.0}m).");
 
