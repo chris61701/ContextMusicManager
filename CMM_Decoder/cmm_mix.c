@@ -1704,13 +1704,22 @@ static void pump_body(void) {
                  * idle station's ring keeps its onset free of a cushion of zeros. */
                 if (!emActive[s] && !g_emRx[s].armed && !em_tone_live(s)) continue;
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
-                /* AN ARMED RECEIVER OUTRANKS THE CARRIER. The tone REPLACES the lane outright,
-                 * so a lane still fading a carrier out -- or one whose fade froze because the
-                 * producer skipped this block -- rendered the tone instead of the search, and a
-                 * borrow that later took that lane got no static at all. Reported as the hiss
-                 * being permanently quiet after visiting the broken station, which is the one
-                 * thing that raises a carrier. Somebody tuning outranks nobody listening. */
-                if (em_tone_live(s) && !g_emRx[s].armed) {
+                static float toneBuf[BUS_MAXFRAMES];
+                int toneOn = 0;
+                /* THE CARRIER IS ADDED, NOT SUBSTITUTED.
+                 *
+                 * It used to REPLACE the lane, so the tone and the search could never overlap and
+                 * a set that found nothing had to cut from one to the other. What it should do --
+                 * and what a real receiver does -- is hold the hiss while it hunts, bring the
+                 * carrier up underneath it, and then let the hiss fall away, leaving the tone.
+                 * Three things at once, which substitution cannot express.
+                 *
+                 * Additive costs nothing and makes the whole sequence available: the receiver runs
+                 * first (at signal 0 that is pure noise, since a carrier lane has no voice), the
+                 * tone is summed on top, and taking the signal to 1 removes the noise and leaves
+                 * the tone alone. It also retires the "armed outranks the tone" special case,
+                 * which existed only because the two were fighting over one lane. */
+                if (em_tone_live(s)) {
                     /* OFF AIR. Replaces the lane outright -- programme and hiss both -- because it
                      * is not a layer over a station, it is what is there instead of one. */
                     int k;
@@ -1731,16 +1740,19 @@ static void pump_body(void) {
                             g_emTonePh[s][k] += inc[k];
                             if (g_emTonePh[s][k] > 6.28318531f) g_emTonePh[s][k] -= 6.28318531f;
                         }
-                        lane[i] = v * a;
+                        toneBuf[i] = v * a;
                     }
+                    toneOn = 1;
                 }
-                else
                 /* THE RECEIVER, BEFORE THE MASTER. Running it here rather than after means the
                  * hiss goes through everything the programme goes through -- distance, occlusion,
                  * the door model, the room reverb, the speaker's own coloration -- because from
                  * this point down the lane IS the speaker. Put it after the master and it would
                  * be a noise laid over the mix instead of a sound coming out of a radio. */
                 emitter_receiver_mono(s, lane, n);
+                /* ...and the carrier ON TOP of it, so the two can overlap: hiss while hunting,
+                 * tone rising underneath, then the hiss falling away to leave the tone. */
+                if (toneOn) for (i = 0; i < n; i++) lane[i] += toneBuf[i];
                 if (emStart == emMaster) {
                     for (i = 0; i < n; i++) lane[i] *= emMaster;
                 } else {

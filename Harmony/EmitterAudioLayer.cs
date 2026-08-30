@@ -1249,8 +1249,9 @@ namespace CMM
         // How long the hunt runs before a dead station settles onto its carrier: the same span a
         // real retune spends looking, so the two are indistinguishable until the moment one of
         // them finds something.
-        private static float DeadAirHunt =>
-            LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f + ArriveRamp;
+        // Long enough to read as a set genuinely hunting, short enough not to read as nothing
+        // happening. The static is at full for all of it.
+        private static float DeadAirHunt => CMMConfig.WorldEmitterSweepMs / 1000f + LeaveRamp;
 
         private static void GroupSnapshot()
         {
@@ -2487,8 +2488,11 @@ namespace CMM
             _deadAirSince = CmmClock.Now;
             _deadAirToneUp = false;
             CmmMixer.GetOrCreate().SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 0);
-            CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 1f, 0f);
-            CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 0f, SearchRamp);
+            // AT ONCE, AND THEN CONSTANT. There is no station to slide out of here -- the speaker
+            // is being pointed at a dead frequency -- so ramping in over the leave bought nothing
+            // but a hole. Nothing in a game feels worse than a control that appears to do nothing,
+            // and a quiet second after a dial turn reads as broken rather than as searching.
+            CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 0f, 0.04f);
             CMMConfig.D($"[CMM] Dead air: slot {_deadAirSlot} searching at {pos} — "
                       + "the carrier follows if nothing is found.");
         }
@@ -2551,8 +2555,13 @@ namespace CMM
             if (!_deadAirToneUp && CmmClock.Now - _deadAirSince >= DeadAirHunt)
             {
                 _deadAirToneUp = true;
-                CmmMixer.Instance?.ClearEmitterRecv(_deadAirSlot);   // an armed receiver outranks it
+                // THE TONE RISES UNDER THE HISS, AND THEN THE HISS GOES. Both live on this lane at
+                // once now (the carrier is summed with the receiver, not substituted for it), so
+                // the sequence is the one a real set makes: hunt, find nothing, settle. Taking the
+                // signal to 1 is what removes the noise -- a locked receiver over a lane with no
+                // voice is silence -- and leaves the carrier alone.
                 GoOffAir(_deadAirSlot);
+                CmmMixer.Instance?.SetEmitterRecv(_deadAirSlot, 1f, ArriveRamp);
                 CMMConfig.D($"[CMM] Dead air: nothing found — slot {_deadAirSlot} settles on the "
                           + $"carrier, {CMMConfig.WorldEmitterOffAirHz:0} Hz at level "
                           + $"{CMMConfig.WorldEmitterOffAirLevel:0.00}.");
