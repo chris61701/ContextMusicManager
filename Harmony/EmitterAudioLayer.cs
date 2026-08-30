@@ -1007,8 +1007,20 @@ namespace CMM
         // fade-in first (it inflates a new speaker's extra), then the movement rise limiter.
         private static void PostProcessGains(Station st)
         {
-            ApplyBirthFades(st.Pts, st.PtGain, st.PtCount);
+            // THE LIMITER FIRST, THE DELIBERATE FADES AFTER IT. Order matters, and having it the
+            // other way round is what made a station tuning in stutter.
+            //
+            // LimitOcclusionRise rate-limits RISES in virtual distance and keeps per-point history
+            // of what it published. A join or birth fade is expressed as a rise -- it adds a whole
+            // Range of distance and decays it to nothing -- so running it first fed the limiter a
+            // synthetic jump it then throttled, recorded the throttled value as the baseline, and
+            // let the following fall straight through. The two then fought over the same number on
+            // every tick of the arrival: a stepped, jumping level exactly while a station comes in.
+            //
+            // A fade is not an occlusion change. It is a decision, it is already a smooth ramp, and
+            // it must neither be limited nor enter the limiter's history.
             LimitOcclusionRise(st.Pts, st.PtGain, st.PtCount);
+            ApplyBirthFades(st.Pts, st.PtGain, st.PtCount);
         }
 
         // Rate-limit occlusion RISES (see _publishedExtra). Falls pass through untouched; door
