@@ -834,6 +834,11 @@ namespace CMM
                 if (s == _deadAirSlot) sb.Append(" DEAD");
                 if (mir >= 0f)  sb.Append(" mir=").Append(mir.ToString("0.00"));
                 if (tone >= 0f) sb.Append(" tone=").Append(tone.ToString("0.00"));
+                // THE TUNING LANES CARRY A POINT TOO, and until now nothing printed it: pt= was
+                // only reached when a STATION owned the slot, so the one number that answers
+                // "is the carrier occluded" was missing from every readout of the carrier.
+                if (own == null && s == _deadAirSlot) sb.Append(" pt=").Append(_deadGain[0].ToString("0.0"));
+                else if (own == null && s == _borrowSlot) sb.Append(" pt=").Append(_borrowGain[0].ToString("0.0"));
                 if (own != null)
                 {
                     sb.Append(" [").Append(own.Name).Append(" g=")
@@ -2762,11 +2767,7 @@ namespace CMM
             // through geometry that muffles everything else the speaker does. One point, one ray,
             // every tick: cheap, and it also stops the tone reading as a sound in the room rather
             // than one coming from the radio.
-            _deadGain[0] = 0f;
-            World dw = GameManager.Instance?.World;
-            EntityPlayerLocal dp = dw?.GetPrimaryPlayer();
-            if (CMMConfig.WorldEmitterOcclusion && dw != null && dp != null)
-                EmitterAcoustics.ComputeOcclusion(ListenerWorldPos(dp), _deadPts, 1, _deadGain, dw);
+            OccludeOnePoint(_deadPts, _deadGain);
             float dcap = CMMConfig.WorldEmitterRange * 0.75f;
             if (_deadGain[0] > dcap) _deadGain[0] = dcap;
             CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 1);
@@ -2794,6 +2795,27 @@ namespace CMM
         }
 
         private static int _deadAirSlot = -1;
+        // THE SAME MODEL THE STATIONS USE, for the tuning noise and the off-air carrier.
+        //
+        // These two called EmitterAcoustics.ComputeOcclusion -- the per-point RAY that the
+        // listener-anchored field replaced. So a speaker's music was occluded by one model and
+        // the sounds that speaker makes while it is BETWEEN stations by another, and the two do
+        // not agree: reported as the tone "not obeying occlusion", which it was, just not the
+        // occlusion everything else obeys. The log said so plainly once it was read the right
+        // way -- "field=0 legacy=0" with the ray's branch counter climbing.
+        //
+        // A declined field KEEPS THE GAIN IT HAD rather than falling back to the ray, for the
+        // reason the station path gives where it does the same: two inconsistent pictures in one
+        // tick is an audible step, and the field answers again a moment later.
+        private static void OccludeOnePoint(float[] pts, float[] gain)
+        {
+            if (!CMMConfig.WorldEmitterOcclusion) { gain[0] = 0f; return; }
+            World w = GameManager.Instance?.World;
+            EntityPlayerLocal p = w?.GetPrimaryPlayer();
+            if (w == null || p == null) { gain[0] = 0f; return; }
+            FieldOcclusion.ComputeOcclusion(ListenerWorldPos(p), pts, 1, gain);
+        }
+
         private static readonly float[] _deadPts = new float[3];
         private static readonly float[] _deadGain = new float[1];
         private static readonly int[] _deadFlags = new int[1];
@@ -3421,10 +3443,7 @@ namespace CMM
             // reintroduced it the moment I made the hiss respect geometry. One ray for one point
             // is cheap and cannot be stale.
             _borrowGain[0] = 0f;
-            World bw = GameManager.Instance?.World;
-            EntityPlayerLocal bp = bw?.GetPrimaryPlayer();
-            if (CMMConfig.WorldEmitterOcclusion && bw != null && bp != null)
-                EmitterAcoustics.ComputeOcclusion(ListenerWorldPos(bp), _borrowPts, 1, _borrowGain, bw);
+            OccludeOnePoint(_borrowPts, _borrowGain);
             // ...AND A SEARCH IS NEVER INAUDIBLE. Occlusion may muffle it as far as it likes, but
             // a dial being turned has to be heard or the control reads as dead. Capped short of
             // the range that mutes a point entirely.
