@@ -1571,8 +1571,18 @@ namespace CMM
                 // static rendered at exactly zero for the whole search. Nothing repaired it
                 // either: every occlusion path needs a voice or a committed slot, and a search has
                 // neither. The sweep borrow already got this right with _borrowGain[0] = 0f.
-                for (int k = 0; k < st.PtCount && k < st.PtGain.Length; k++) _searchGain[k] = 0f;
-                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, _searchGain, st.PtFlags, st.PtCount);
+                // ...EXCEPT ACROSS A HANDOVER, where the occlusion is not stale at all: it was
+                // just carried over from the station this speaker is leaving, for the same speaker
+                // in the same room. Publishing clear line there is a step UP in level for anyone
+                // listening from behind a wall, one tick before PostProcessGains puts it back.
+                bool tuned = _tunePhase != 0 && slot == _tuneSlot && _tuneGainValid;
+                float[] gains = st.PtGain;
+                if (!tuned)
+                {
+                    for (int k = 0; k < st.PtCount && k < st.PtGain.Length; k++) _searchGain[k] = 0f;
+                    gains = _searchGain;
+                }
+                CmmMixer.GetOrCreate().SetSlotPoints(slot, st.Pts, gains, st.PtFlags, st.PtCount);
                 // Claimed NOW, so the retries the hold causes do not re-flush and re-arm every
                 // tick, which would restart the search ramp four times a second and stop the
                 // noise ever settling into its wander.
@@ -2097,6 +2107,9 @@ namespace CMM
         private static int    _tuneSlot = -1;
         private static string _tuneFrom, _tuneTo;
         private static float  _tuneSwapAt, _tuneGiveUp;
+        // The handover carried the leaving station's occlusion onto the arriving one, so the
+        // changeover can publish that instead of clear line.
+        private static bool   _tuneGainValid;
         private static int    _tunePhase;         // 0 = idle, 1 = leaving, 2 = arriving
 
         private static float LeaveRamp => CMMConfig.WorldEmitterLeaveMs / 1000f;
@@ -2123,6 +2136,22 @@ namespace CMM
                 // searching for. Letting the new station find a lane of its own is exactly how
                 // the sweep and the arrival ended up on different slots.
                 Station from = ByName(_tuneFrom), to = ByName(_tuneTo);
+                // OCCLUSION BELONGS TO THE SPEAKER, NOT THE STATION. Carried across the handover
+                // because it is the same speaker in the same room: a wall between it and the
+                // listener does not care which station is playing. Without this the changeover
+                // republishes CLEAR LINE (see the note in StartStation) and the speaker jumps to
+                // fully unoccluded for a tick before PostProcessGains puts it back -- a step up in
+                // level exactly where the stations change hands, which is the volume pop.
+                _tuneGainValid = false;
+                if (from != null && to != null && from.PtCount > 0
+                    && from.PtGain.Length > 0 && to.PtGain.Length > 0)
+                {
+                    int n = from.PtCount;
+                    if (n > to.PtGain.Length) n = to.PtGain.Length;
+                    if (n > from.PtGain.Length) n = from.PtGain.Length;
+                    for (int k = 0; k < n; k++) to.PtGain[k] = from.PtGain[k];
+                    _tuneGainValid = n > 0;
+                }
                 if (from != null && from.Slot == _tuneSlot) StopStation(from, "handed over to the dial");
                 if (to != null && to.VoiceId == 0)
                 {
