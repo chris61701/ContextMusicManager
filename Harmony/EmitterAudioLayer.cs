@@ -1187,11 +1187,21 @@ namespace CMM
         // The index in the registry snapshot of a speaker tuned to a station that does not
         // resolve, or -1. One is enough: a lane for each would spend the whole budget on stations
         // that are not playing.
-        private static int _deadAirAt = -1;
+        // The speaker sitting on the carrier, if any. A POSITION, not a snapshot index and not a
+        // lane: it is a property of the speaker, and the two things that can put it there disagree
+        // about everything else.
+        //
+        //   1. GroupSnapshot -- the pin names a station that does not resolve, or resolves to one
+        //      with no tracks at all.
+        //   2. The tune give-up -- the station is perfectly Ready and simply will not OPEN. This
+        //      is the one that matters in practice: a folder with broken files has tracks, so it
+        //      is Ready, so detector 1 cannot see it. "Broken FM" is exactly that, and testing
+        //      !Ready was never going to catch it.
+        private static Vector3i _deadAirPos;
+        private static bool     _deadAirOn;
 
         private static void GroupSnapshot()
         {
-            _deadAirAt = -1;
             int n = _stations.Count;
             for (int i = 0; i < n; i++)
             {
@@ -1273,8 +1283,8 @@ namespace CMM
                     // the folder is gone or empty, "Broken FM". That speaker is tuned to a dead
                     // frequency, which is precisely what the carrier is for, and clearing it here
                     // was why the tone never played for the one station built to be broken.
-                    if (string.IsNullOrEmpty(pinned)) { ClearOffAir(); _deadAirAt = -1; }
-                    else _deadAirAt = i;
+                    if (string.IsNullOrEmpty(pinned)) { ClearOffAir(); _deadAirOn = false; }
+                    else { _deadAirPos = e.Pos; _deadAirOn = true; }
                     continue;
                 }
                 st.LastSeenAt = now;
@@ -2331,7 +2341,11 @@ namespace CMM
         private static void MaintainDeadAir()
         {
             var snap = EmitterRegistry.Snapshot;
-            if (_deadAirAt < 0 || _deadAirAt >= snap.Count)
+            int at = -1;
+            if (_deadAirOn)
+                for (int i = 0; i < snap.Count; i++)
+                    if (snap[i].Pos.Equals(_deadAirPos)) { at = i; break; }
+            if (at < 0)
             {
                 if (_deadAirSlot >= 0)
                 {
@@ -2343,7 +2357,7 @@ namespace CMM
                 return;
             }
 
-            EmitterRegistry.Emitter e = snap[_deadAirAt];
+            EmitterRegistry.Emitter e = snap[at];
             if (_deadAirSlot < 0)
             {
                 int slot = FreeSlot();
@@ -2373,7 +2387,7 @@ namespace CMM
             // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
             // start -- left the tone sounding under the new station.
             if (_handledTuneAt != EmitterTuner.LastTuneAt
-                && now - EmitterTuner.LastTuneAt < RetuneWindow) ClearOffAir();
+                && now - EmitterTuner.LastTuneAt < RetuneWindow) { ClearOffAir(); _deadAirOn = false; }
 
             // AFTER that clear, never before it. Landing on a dead station IS a dial turn, so
             // running this first meant the carrier was raised and then wiped in the same tick by
@@ -2507,7 +2521,13 @@ namespace CMM
                     // The lane also has to be given back. The handover pinned a !Ready station to
                     // it, and nothing ever stops a station that never started, so it would be held
                     // for ever.
+                    // THE SECOND DETECTOR. This station is Ready -- it has tracks -- they just do
+                    // not open, so GroupSnapshot's test cannot see it and this is the only place
+                    // that knows. Hand the speaker to MaintainDeadAir, which owns the carrier and
+                    // republishes the point every tick; releasing the lane here without doing that
+                    // left the speaker with no point at all, which is silence rather than a tone.
                     if (to != null && to.Slot == _tuneSlot) { _slotOwner[_tuneSlot] = null; to.Slot = -1; }
+                    _deadAirPos = EmitterTuner.LastTunePos; _deadAirOn = true;
                     CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
                     CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — slot {_tuneSlot} goes off air.");
                     _tunePhase = 0; _tuneSlot = -1;
