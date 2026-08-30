@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 46;
+        internal const int CurrentSchema = 47;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1005,6 +1005,12 @@ fade-out: it keeps playing at full level and the receiver buries it, which is th
 version that sounds like turning a dial instead of cutting one station off and starting
 another. The pocket radio's RadioTuneLeaveMs, for world speakers."),
             I("WorldEmitterLeaveMs",                 "CMMConfig.WorldEmitterLeaveMs",               700, since: 46),
+            Cmt(@"The OFF-AIR CARRIER: what a speaker sits on when the station it was tuned to will
+not open. Silence reads as the mod having broken; a tone reads as a station that has
+stopped broadcasting for the night, which is what actually happened. Hz then level.
+0 Hz disables it and the speaker simply goes quiet."),
+            F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              1000f, since: 47),
+            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.05f, since: 47),
             Cmt(@"How fast (ms) a station drops away into static when you turn the dial."),
             I("WorldEmitterSearchMs",                "CMMConfig.WorldEmitterSearchMs",              120, since: 45),
             Cmt(@"How long (ms) the station takes to come out from under the noise once the dial has

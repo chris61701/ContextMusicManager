@@ -675,6 +675,23 @@ static em_recv g_emRx[CMM_MAX_EMIT_VOICES];
  * source lane are untouched, which is the whole requirement. */
 static int g_emMirror[CMM_MAX_EMIT_VOICES];
 
+/* ── OFF-AIR TONE (v57) ───────────────────────────────────────────────────────────────────────
+ * A steady tone on one lane, in place of both programme and hiss. What a station that will not
+ * open gets, rather than silence: a set that finds nothing does not go quiet, it sits on the
+ * carrier. Same idea as a channel that has stopped broadcasting for the night. Positional like
+ * everything else on a lane, which the SFX bus could never be. */
+static float g_emTone[CMM_MAX_EMIT_VOICES];      /* Hz, 0 = off */
+static float g_emToneLvl[CMM_MAX_EMIT_VOICES];
+static float g_emTonePh[CMM_MAX_EMIT_VOICES];
+
+CMM_API void cmm_mix_set_emitter_tone(int slot, float hz, float level) {
+    if (slot < 0 || slot >= CMM_MAX_EMIT_VOICES) return;
+    if (hz <= 0.0f) { g_emTone[slot] = 0.0f; return; }
+    if (level < 0.0f) level = 0.0f; else if (level > 1.0f) level = 1.0f;
+    if (g_emTone[slot] <= 0.0f) g_emTonePh[slot] = 0.0f;   /* start at zero crossing, never a click */
+    g_emTone[slot] = hz; g_emToneLvl[slot] = level;
+}
+
 /* dst takes its audio from src (src < 0 clears). Self-mirroring is refused; so is a src that is
  * itself a mirror, which keeps the copy one level deep and the ordering below trivially correct. */
 CMM_API void cmm_mix_set_lane_mirror(int dst, int src) {
@@ -1620,8 +1637,19 @@ static void pump_body(void) {
                  * voiceless armed slot starts from silence and the stage writes the hiss into it
                  * -- no stale audio, no special case. Unarmed and voiceless stays skipped, so an
                  * idle station's ring keeps its onset free of a cushion of zeros. */
-                if (!emActive[s] && !g_emRx[s].armed) continue;
+                if (!emActive[s] && !g_emRx[s].armed && g_emTone[s] <= 0.0f) continue;
                 float* lane = g_emitterMono + (size_t)s * BUS_MAXFRAMES;
+                if (g_emTone[s] > 0.0f) {
+                    /* OFF AIR. Replaces the lane outright -- programme and hiss both -- because it
+                     * is not a layer over a station, it is what is there instead of one. */
+                    float inc = 6.28318531f * g_emTone[s] / (float)g_busRate;
+                    for (i = 0; i < n; i++) {
+                        lane[i] = sinf(g_emTonePh[s]) * g_emToneLvl[s];
+                        g_emTonePh[s] += inc;
+                        if (g_emTonePh[s] > 6.28318531f) g_emTonePh[s] -= 6.28318531f;
+                    }
+                }
+                else
                 /* THE RECEIVER, BEFORE THE MASTER. Running it here rather than after means the
                  * hiss goes through everything the programme goes through -- distance, occlusion,
                  * the door model, the room reverb, the speaker's own coloration -- because from

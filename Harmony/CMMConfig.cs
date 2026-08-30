@@ -762,6 +762,11 @@ namespace CMM
         // playing at full level and the receiver buries it, which is the only version that sounds
         // like a dial rather than one station being cut off and another started.
         public static int    WorldEmitterLeaveMs = 700;
+        // The off-air carrier: what a speaker sits on when the station it was tuned to will not
+        // open. Silence reads as a fault; a tone reads as a station that has stopped broadcasting.
+        // 0 Hz disables it and the speaker simply goes quiet.
+        public static float  WorldEmitterOffAirHz    = 1000f;
+        public static float  WorldEmitterOffAirLevel = 0.05f;
         // How fast a station drops away into static when you turn the dial. Short: turning a knob
         // is abrupt, and this is the part that should feel like an action.
         public static int    WorldEmitterSearchMs = 120;

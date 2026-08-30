@@ -236,7 +236,7 @@ typedef struct cmm_decoder cmm_decoder;
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
  *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 56
+#define CMM_DECODER_ABI 57
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -477,6 +477,12 @@ CMM_API int  cmm_out_emitter_stat(cmm_out* o, int slot, int what);
  * speaker on it while the copy belongs to a single speaker being retuned. Sample-aligned by
  * construction, so the two never comb. Copied after the voices land and before any receiver runs. */
 CMM_API void cmm_mix_set_lane_mirror(int dst, int src);
+
+/* v57 — a steady off-air tone on one emitter lane, in place of both programme and hiss
+ * (hz <= 0 clears). What a station that will not open gets instead of silence: a set that finds
+ * nothing sits on the carrier rather than going quiet. Positional, like everything else on a
+ * lane — which the SFX bus can never be. */
+CMM_API void cmm_mix_set_emitter_tone(int slot, float hz, float level);
 
 /* Request a flush: the next audio callback discards all queued frames, snapping the
  * cushion to empty (then it refills tight). Only raises a flag — safe from the

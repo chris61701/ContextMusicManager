@@ -99,6 +99,9 @@ namespace CMM
         private static int _borrowSlot = -1;
         private static Vector3i _borrowPos;
         private static float _borrowUntil, _borrowReleaseAt, _borrowGiveUp;
+        // The lane this borrow swaps its mirror to once the leave has finished, and when.
+        private static int   _borrowMirrorTo = -1;
+        private static float _borrowSwapAt;
         private static string _borrowTarget;
         // A station that never opens must not hold a slot for ever. Comfortably past the level
         // hold plus a decode plus a retry.
@@ -1199,7 +1202,18 @@ namespace CMM
                 }
                 // Pinned to a REMOVED station ⇒ dead air: the radio contributes to no live station
                 // (silent) until the folder returns or the next world entry recomputes the pins.
-                if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st)) continue;
+                if (!RadioStationCatalog.ByName.TryGetValue(pinned, out Station st))
+                {
+                    // SILENCED, OR PINNED TO A STATION THAT NO LONGER EXISTS. The speaker is on
+                    // nothing, and _posStation must say so -- it is only ever WRITTEN below, so
+                    // leaving it kept the station this speaker played before it was switched off,
+                    // for as long as it stayed off. Turning it back on then read that stale name as
+                    // "the station being left" and ran a whole leave against a station the speaker
+                    // was not on: music bleeding in at full through the other lane before any ramp
+                    // caught it, then fading in again from low. Both halves of that report.
+                    _posStation.Remove(e.Pos);
+                    continue;
+                }
                 st.LastSeenAt = now;
                 // WHICH STATION THIS SPEAKER IS ON, as of this tick. A retune overwrites the pin
                 // before the audio layer ever sees it, so without this there is no record of where
@@ -1506,6 +1520,7 @@ namespace CMM
 
             // A slot last used by a DIFFERENT station still holds its queued dry audio — flush it
             // (and the slot's render state) so nothing of the old station plays under this voice.
+            ClearOffAir(slot);   // something real is landing here; the carrier is done
             bool changedStation =
                 !string.Equals(_slotLastStation[slot], st.Name, StringComparison.OrdinalIgnoreCase);
             // ONLY A HAND ON THE DIAL SEARCHES. A slot taking its FIRST station (world entry), a
@@ -2124,6 +2139,15 @@ namespace CMM
         // The handover carried the leaving station's occlusion onto the arriving one, so the
         // changeover can publish that instead of clear line.
         private static bool   _tuneGainValid;
+        // The lane sitting on the off-air carrier, if any. Cleared the instant a station lands on
+        // it or the speaker is retuned, so the tone can never outlive the reason for it.
+        private static int    _offAirSlot = -1;
+        internal static void ClearOffAir(int slot)
+        {
+            if (_offAirSlot < 0 || (slot >= 0 && slot != _offAirSlot)) return;
+            CmmMixer.Instance?.SetEmitterTone(_offAirSlot, 0f, 0f);
+            _offAirSlot = -1;
+        }
         private static int    _tunePhase;         // 0 = idle, 1 = leaving, 2 = arriving
 
         private static float LeaveRamp => CMMConfig.WorldEmitterLeaveMs / 1000f;
@@ -2257,8 +2281,14 @@ namespace CMM
                 }
                 else if (now >= _tuneGiveUp)
                 {
+                    // OFF AIR, NOT SILENT. A station that will not open used to leave the speaker
+                    // quiet, which is indistinguishable from the mod having broken. A set that
+                    // finds nothing sits on the carrier instead.
+                    CmmMixer.Instance?.SetEmitterTone(_tuneSlot, CMMConfig.WorldEmitterOffAirHz,
+                                                                 CMMConfig.WorldEmitterOffAirLevel);
                     CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
-                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — releasing slot {_tuneSlot}.");
+                    _offAirSlot = _tuneSlot;
+                    CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — slot {_tuneSlot} goes off air.");
                     _tunePhase = 0; _tuneSlot = -1;
                 }
                 return;
@@ -2306,6 +2336,7 @@ namespace CMM
             // one it is leaving instead, which is the entire point.
             EmitterTuner.ReleaseSweepHold();
 
+            ClearOffAir(-1);
             _tuneFrom = fromName; _tuneTo = want;
             _tuneSlot = fromSt.Slot;
             _tunePhase = 1;
@@ -2335,6 +2366,16 @@ namespace CMM
             // Finish: hand the speaker back, then let the noise fall away rather than cutting it.
             if (_borrowSlot >= 0)
             {
+                // THE SWAP, UNDER THE NOISE. Signal is at zero by now, so changing which station
+                // this lane copies is inaudible -- the same handover the single-speaker path makes,
+                // except nothing has to start or stop because both stations are already playing.
+                if (_borrowSwapAt > 0f && now >= _borrowSwapAt)
+                {
+                    if (_borrowMirrorTo >= 0) CmmMixer.Instance?.SetLaneMirror(_borrowSlot, _borrowMirrorTo);
+                    CMMConfig.D($"[CMM] Sweep borrow: slot {_borrowSlot} swaps its copy to lane "
+                              + $"{_borrowMirrorTo} under the noise.");
+                    _borrowSwapAt = 0f; _borrowMirrorTo = -1;
+                }
                 // Not until the station it is joining can actually be heard. Waiting here is the
                 // whole point: the noise covers the decode instead of the speaker sitting silent
                 // through it.
@@ -2453,7 +2494,7 @@ namespace CMM
             // speaker back to. Handing it back to a station with no voice is the cut this exists to
             // remove — the speaker would rejoin something silent and wait out the decode in the
             // clear. Capped, because a station that never opens must not hold a slot for ever.
-            _borrowUntil = now + CMMConfig.WorldEmitterSweepMs / 1000f;
+            _borrowUntil = now + LeaveRamp + CMMConfig.WorldEmitterSweepMs / 1000f;
             _borrowGiveUp = now + BorrowGiveUp;
             _borrowReleaseAt = 0f;
             // One point, clear line. The occlusion the station computes for this speaker belongs to
@@ -2461,16 +2502,50 @@ namespace CMM
             // second of unoccluded hiss from a radio you are standing at is not worth a second
             // acoustics pass.
             _borrowPts[0] = pos.x + 0.5f; _borrowPts[1] = pos.y + 0.5f; _borrowPts[2] = pos.z + 0.5f;
-            _borrowGain[0] = 0f;
+            // OCCLUDED LIKE EVERY OTHER SOUND THIS SPEAKER MAKES. This published 0, and 0 is not a
+            // gain -- it is added virtual distance, so it meant CLEAR LINE: no walls, no doors.
+            // Every other sound from the speaker was occluded properly and the tuning hiss alone
+            // ignored geometry, so from behind a wall the music was muffled and quiet while the
+            // static arrived at full strength, as though it came from somewhere else entirely.
+            //
+            // The value belongs to the speaker, not the station, so the one the station it is
+            // leaving computed for this very point is correct and current.
+            _borrowGain[0] = PointGain(ByName(_posStation.TryGetValue(pos, out string pg) ? pg : null), pos);
             _borrowFlags[0] = e.Name == "radioHam" ? 1 : 0;
             // AND THE MUSIC UNDERNEATH IT. The borrow used to render noise over an EMPTY lane,
             // which is why the shared case could never sound like the pocket radio: there was no
             // station to duck away and none to rise out of the hiss. The target is already decoded
             // on its own lane, so this one takes a copy and runs its own receiver over that -- one
             // decode, sample-aligned, and every other speaker on the source lane is untouched.
-            if (target.Slot >= 0) CmmMixer.GetOrCreate().SetLaneMirror(slot, target.Slot);
-            CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
-            CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+            // THE LANE FOLLOWS THE SPEAKER, AND IT STARTS WHERE THE SPEAKER IS. Mirroring the
+            // TARGET immediately was "it comes in way too quickly": the station being tuned to is
+            // already at full level somewhere else, so the copy arrived at full the instant the
+            // borrow began and the only thing left to happen was the hiss lifting off it. No
+            // station going away, no station coming in -- just a curtain pulled off a finished
+            // picture.
+            //
+            // So the borrow opens on the station the speaker is LEAVING, at the signal it is
+            // already locked at, and takes the same three moves as everywhere else: ramp the
+            // receiver down over that station, swap the mirror to the target while the signal is
+            // at zero and nothing can be heard, then ramp up. The mirror makes it free -- both
+            // stations are already decoded, and this lane only ever holds a copy.
+            Station leave = ByName(_posStation.TryGetValue(pos, out string ls) ? ls : null);
+            if (leave != null && leave.Slot >= 0 && leave.VoiceId != 0)
+            {
+                CmmMixer.GetOrCreate().SetLaneMirror(slot, leave.Slot);
+                CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 1f, 0f);          // locked on what it has
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, LeaveRamp);   // ...and now leaving it
+                _borrowMirrorTo = target.Slot;
+                _borrowSwapAt = now + LeaveRamp;
+            }
+            else
+            {
+                if (target.Slot >= 0) CmmMixer.GetOrCreate().SetLaneMirror(slot, target.Slot);
+                CmmMixer.GetOrCreate().SetSlotPoints(slot, _borrowPts, _borrowGain, _borrowFlags, 1);
+                CmmMixer.GetOrCreate().SetEmitterRecv(slot, 0f, SearchRamp);
+                _borrowMirrorTo = -1; _borrowSwapAt = 0f;
+            }
             _slotArmedAt[slot] = now;
             _slotLockAt[slot] = 0f;   // a new sweep cancels whatever this slot was still owed
             CMMConfig.D($"[CMM] Sweep borrow: slot {slot} sweeps {e.Name} at {pos} onto '{want}' "
@@ -2524,6 +2599,21 @@ namespace CMM
         // A clear-line virtual-distance array for a slot that is searching: the noise is not the
         // station and does not inherit the station's occlusion history.
         private static readonly float[] _searchGain = new float[RadioStation.MaxPoints];
+
+        // The occlusion a station last computed for one speaker of its own, as added virtual
+        // distance. 0 (clear line) when the station has no point there -- the honest default for a
+        // speaker nothing has flooded yet.
+        private static float PointGain(Station st, Vector3i pos)
+        {
+            if (st == null || st.PtCount <= 0) return 0f;
+            float x = pos.x + 0.5f, y = pos.y + 0.5f, z = pos.z + 0.5f;
+            for (int i = 0; i < st.PtCount && i < st.PtGain.Length; i++)
+            {
+                int o = i * 3;
+                if (st.Pts[o] == x && st.Pts[o + 1] == y && st.Pts[o + 2] == z) return st.PtGain[i];
+            }
+            return 0f;
+        }
 
         private static readonly float[] _borrowPts = new float[3];
         private static readonly float[] _borrowGain = new float[1];
@@ -2641,7 +2731,11 @@ namespace CMM
             {
                 Station st = _stations[i];
                 if (st.VoiceTrack != null) dst.Add(st.VoiceTrack);
-                if (!st.Ready || st.NearestDist == float.MaxValue) continue;
+                // MUST TRACK THE PREWARM SOURCE BELOW. Anything measured but absent from the keep
+                // set is evicted straight after being measured, so the two gates move together --
+                // widening one alone would measure every station's next tracks and then throw the
+                // results away.
+                if (!st.Ready) continue;
                 if (st.OnAir != null) dst.Add(st.OnAir);
                 for (int k = 1; k <= ahead && k < st.Order.Length; k++)
                     dst.Add(st.Order[(st.OnAirIdx + k) % st.Order.Length]);
@@ -2660,7 +2754,14 @@ namespace CMM
             for (int i = 0; i < _stations.Count; i++)
             {
                 Station st = _stations[i];
-                if (!st.Ready || st.NearestDist == float.MaxValue) continue;
+                // EVERY READY STATION, not just the ones already being heard. The NearestDist test
+                // made the premeasured set exactly "the stations you are already listening to" --
+                // and the one you are about to dial to is, by definition, never in it. So every
+                // first tune to a cold station paid a full measurement while the player sat in
+                // static, which reads as the retune being slow. The schedule is deterministic, so
+                // what a station plays next is knowable with no speaker anywhere near it. Cheap and
+                // dedup'd: RequestPrewarm no-ops on measured and in-flight files.
+                if (!st.Ready) continue;
                 // Idle: track the broadcast virtually — UNLESS this station has just decided what
                 // to play next and is still trying to start it. See AdvanceStation above.
                 if (st.VoiceId == 0 && !OnAirPinned(st)) ResolveOnAir(st, B);
