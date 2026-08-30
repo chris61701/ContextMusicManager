@@ -793,8 +793,11 @@ namespace CMM
         // exposed in a way music never is, and doubly so at the resonance. 440 is below it, and is
         // what a station actually leaves on when it goes off the air.
         public static float  WorldEmitterOffAirHz     = 440f;
-        public static float  WorldEmitterOffAirHz2    = 147f;
-        public static float  WorldEmitterOffAirHz3    = 880f;
+        public static float  WorldEmitterOffAirHz2    = 523.25f;
+        public static float  WorldEmitterOffAirHz3    = 659.25f;
+        // +/- this many Hz on the carrier root, seeded per station so each dead channel keeps its
+        // own pitch. The other two notes transpose with it. 0 = every carrier on the same note.
+        public static float  WorldEmitterOffAirVarianceHz = 200f;
         // Sits alongside the tuning static, so it is scaled like it. 0.05 was a guess and it put
         // the carrier about 12 dB UNDER the hiss -- roughly -47 dBFS at two metres once distance
         // and WorldEmitterVolume were through with it, which is why it read as "the tone never

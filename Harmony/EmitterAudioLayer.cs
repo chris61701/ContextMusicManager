@@ -2511,16 +2511,55 @@ namespace CMM
         private static int    _offAirSlot = -1;
         private static readonly float[] _offAirHz  = new float[3];
         private static readonly float[] _offAirLvl = new float[3];
-        // Fundamental, body, edge. Fixed rather than configurable: the two extra partials exist to
-        // give the carrier a shape, and their BALANCE is what makes it read as one sound instead
-        // of three -- the knobs that matter are which frequencies, and how loud the whole thing is.
-        private static readonly float[] _offAirWeights = { 1.00f, 0.40f, 0.22f };
+        // Root, third, fifth. Near-even on purpose: the carrier is a CHORD now, and the earlier
+        // 1.00/0.40/0.22 put the upper two 8 and 13 dB down -- enough to colour the tone, not
+        // enough to be heard as notes. The fifth carries a little more than the third because it
+        // muddies less. Fixed rather than configurable: the balance is what makes the three read
+        // as one instrument; the knobs that matter are the pitches and the level of the whole.
+        private static readonly float[] _offAirWeights = { 1.00f, 0.75f, 0.85f };
+        // A carrier below this is a rumble, not a station. Only reachable by winding Variance up
+        // past the root itself.
+        private const float MinCarrierHz = 40f;
 
         private static void GoOffAir(int slot)
         {
-            _offAirHz[0] = CMMConfig.WorldEmitterOffAirHz;
-            _offAirHz[1] = CMMConfig.WorldEmitterOffAirHz2;
-            _offAirHz[2] = CMMConfig.WorldEmitterOffAirHz3;
+            // EVERY DEAD STATION ON ITS OWN FREQUENCY.
+            //
+            // One carrier pitch for every off-air station makes them sound like one fault rather
+            // than like several channels with nothing on them. Variance shifts the ROOT by up to
+            // its own value either way, and the other two notes come with it -- transposed by the
+            // ratio the configured chord already has, so whatever interval is in the file is the
+            // interval you hear at any root. 0 disables it and the configured pitches are used
+            // exactly.
+            //
+            // Seeded from the STATION, not from chance: the same station lands on the same
+            // frequency every time, on every client and across restarts, so a dead channel has an
+            // identity you can learn rather than a pitch that moves under you each time you tune
+            // to it. The seed is the catalog's own per-name value -- the one the broadcast
+            // schedule anchors on -- so no new notion of station identity is invented here.
+            float cfgRoot = CMMConfig.WorldEmitterOffAirHz;
+            float root    = cfgRoot;
+            float vary    = CMMConfig.WorldEmitterOffAirVarianceHz;
+            if (vary > 0f && cfgRoot > 0f)
+            {
+                uint seed;
+                if (_posStation.TryGetValue(_deadAirPos, out string dn) && !string.IsNullOrEmpty(dn)
+                    && RadioStationCatalog.ByName.TryGetValue(dn, out RadioStation ds))
+                    seed = ds.Seed;
+                else
+                    seed = (uint)(_deadAirPos.x * 73856093 ^ _deadAirPos.y * 19349663
+                                                           ^ _deadAirPos.z * 83492791);
+                // The catalog's avalanche, so neighbouring seeds do not give neighbouring pitches.
+                uint x = seed;
+                x *= 2654435761u; x ^= x >> 15;
+                x *= 2246822519u; x ^= x >> 13;
+                root = cfgRoot + ((x & 0xFFFFu) / 32767.5f - 1f) * vary;
+                if (root < MinCarrierHz) root = MinCarrierHz;
+            }
+            float transpose = cfgRoot > 0f ? root / cfgRoot : 1f;
+            _offAirHz[0] = root;
+            _offAirHz[1] = CMMConfig.WorldEmitterOffAirHz2 * transpose;
+            _offAirHz[2] = CMMConfig.WorldEmitterOffAirHz3 * transpose;
             // WEIGHTED, AND THE SET NORMALISED TO THE FUNDAMENTAL'S OLD LOUDNESS.
             //
             // Every partial used to be handed the SAME level, so a carrier with three of them was
@@ -2541,6 +2580,10 @@ namespace CMM
             CmmMixer.Instance?.SetEmitterTone(slot, _offAirHz, _offAirLvl, 3,
                                               CMMConfig.WorldEmitterOffAirFadeMs / 1000f);
             _offAirSlot = slot;
+            CMMConfig.D($"[CMM] Off-air carrier on slot {slot}: {_offAirHz[0]:0.0} / {_offAirHz[1]:0.0}"
+                      + $" / {_offAirHz[2]:0.0} Hz"
+                      + (vary > 0f ? $" (root {root - cfgRoot:+0.0;-0.0} Hz off {cfgRoot:0.0})" : "")
+                      + $", level {CMMConfig.WorldEmitterOffAirLevel:0.00}.");
         }
 
         // OFF THE CARRIER. `slot` < 0 means "wherever it is" -- the caller knows the reason has

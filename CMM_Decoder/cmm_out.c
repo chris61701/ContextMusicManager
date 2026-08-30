@@ -140,6 +140,18 @@ struct cmm_out {
                                      * station's buffered audio never plays under the new one. */
         /* Per-chunk dry scratch for the interleaved sample loop (filled from rb each chunk). */
         float buf[512];
+        /* THE DRY GAINS AS LAST APPLIED, per class (callback-thread only).
+         *
+         * Point positions are slewed at audio rate and so is occlusion, so a source that MOVES is
+         * smooth -- but the pan is a projection of the bearing onto the LISTENER's right vector,
+         * and the listener's basis is not slewed at all. Turning your head therefore moved these
+         * gains by a whole block's worth in one sample, once per callback: a step train at the
+         * callback rate, heard as ticking when you turn quickly near a speaker.
+         *
+         * Interpolating from here to the block's target spreads that change across the block
+         * instead of putting it at the edge. It adds no latency -- the head still arrives where it
+         * arrives, on the same block -- which is why this rather than a slew on the basis. */
+        float gLsm[2], gRsm[2];
     } emSlots[CMM_MAX_EMIT_VOICES];
     volatile float emLisPos[3];
     volatile float emLisRight[3];
@@ -799,6 +811,32 @@ static void cmm_out_render(cmm_out* o, float* outBase, ma_uint32 frameCount)
          * (it carries around corners/through walls — the "it bounced / next room" cue), so it MUST
          * render even when every dry is fully occluded to silence. Rings are drained (and residual
          * discarded) regardless, keeping them in lockstep with the music ring. */
+        /* One increment per slot per class for the whole block. Computed from frameCount, not
+         * from the chunk, so the ramp is continuous across the 512-frame chunk boundaries. */
+        float gLcur[CMM_MAX_EMIT_VOICES][2], gLinc[CMM_MAX_EMIT_VOICES][2];
+        float gRcur[CMM_MAX_EMIT_VOICES][2], gRinc[CMM_MAX_EMIT_VOICES][2];
+        {
+            float invN = frameCount > 0 ? 1.0f / (float)frameCount : 0.0f;
+            int c;
+            for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
+                struct cmm_emit_slot* sl = &o->emSlots[s];
+                for (c = 0; c < 2; c++) {
+                    gLcur[s][c] = sl->gLsm[c];  gLinc[s][c] = (gL[s][c] - sl->gLsm[c]) * invN;
+                    gRcur[s][c] = sl->gRsm[c];  gRinc[s][c] = (gR[s][c] - sl->gRsm[c]) * invN;
+                    /* A CLASS STILL RENDERS WHILE IT IS FADING OUT. Keying audibility on the
+                     * TARGET alone meant a class whose gain had just reached zero was dropped on
+                     * the sample it stopped being wanted, with whatever it was still applying left
+                     * hanging -- the same step this ramp exists to remove, at the other end. */
+                    if (!clsAud[s][c] && (sl->gLsm[c] != 0.0f || sl->gRsm[c] != 0.0f)
+                        && sl->ptCount > 0) {
+                        clsAud[s][c] = 1;
+                        audible[s] = 1;
+                        anyAudible = 1;
+                    }
+                }
+            }
+        }
+
         int render = anyAudible || wetOn || locOn;
 
         ma_uint32 base = 0;
@@ -896,8 +934,8 @@ static void cmm_out_render(cmm_out* o, float* outBase, ma_uint32 frameCount)
                             xc[c] = x;
                             if (clsAud[s][c]) {
                                 sl->lpf[c] += coef[s][c] * (x - sl->lpf[c]);   /* one-pole distance/occlusion low-pass */
-                                op[f * o->channels]     += sl->lpf[c] * gL[s][c];
-                                op[f * o->channels + 1] += sl->lpf[c] * gR[s][c];
+                                op[f * o->channels]     += sl->lpf[c] * gLcur[s][c];
+                                op[f * o->channels + 1] += sl->lpf[c] * gRcur[s][c];
                                 /* LOCAL bus input: the muffled arriving dry × its applied attenuation, so
                                  * occlusion/distance/water/hard-stop govern it exactly as the dry. */
                                 locIn += sl->lpf[c] * aLvl[s][c];
@@ -908,6 +946,10 @@ static void cmm_out_render(cmm_out* o, float* outBase, ma_uint32 frameCount)
                          * at the seal-gated, depth-graded level the managed side computed for THIS
                          * station. */
                         if (carrying) carryIn += xc[domCls[s]] * sl->revSendSm;
+                        /* Advance both classes whether or not they rendered, so the ramp keeps
+                         * step with the block rather than with whichever class was audible. */
+                        gLcur[s][0] += gLinc[s][0]; gRcur[s][0] += gRinc[s][0];
+                        gLcur[s][1] += gLinc[s][1]; gRcur[s][1] += gRinc[s][1];
                     }
                     if (wetOn) {
                         float wl, wr;
@@ -932,6 +974,10 @@ static void cmm_out_render(cmm_out* o, float* outBase, ma_uint32 frameCount)
         for (s = 0; s < CMM_MAX_EMIT_VOICES; s++) {
             o->emSlots[s].lpfCoef[0] = coef[s][0];
             o->emSlots[s].lpfCoef[1] = coef[s][1];
+            /* Land exactly on the target, so rounding across the block can never accumulate and
+             * a slot that rendered nothing this block still starts the next one from the truth. */
+            o->emSlots[s].gLsm[0] = gL[s][0]; o->emSlots[s].gLsm[1] = gL[s][1];
+            o->emSlots[s].gRsm[0] = gR[s][0]; o->emSlots[s].gRsm[1] = gR[s][1];
         }
         /* Clip-guard the summed output (music + emitters can exceed unity). */
         if (render) {

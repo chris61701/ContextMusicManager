@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 52;
+        internal const int CurrentSchema = 53;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1017,10 +1017,16 @@ stopped broadcasting for the night, which is what actually happened. Hz then lev
 0 Hz disables it and the speaker simply goes quiet."),
             F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              440f,  since: 47,
                                                                                                      changedIn: 51, was: 1000f),
-            F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             147f,  since: 48,
-                                                                                                     changedIn: 52, was: 0f),
-            F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             880f,  since: 48,
-                                                                                                     changedIn: 52, was: 0f),
+            F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             523.25f, since: 48,
+                                                                                                     changedIn: 53, was: new object[] { 0f, 147f }),
+            F("WorldEmitterOffAirHz3",               "CMMConfig.WorldEmitterOffAirHz3",             659.25f, since: 48,
+                                                                                                     changedIn: 53, was: new object[] { 0f, 880f }),
+            Cmt(@"How far (Hz) a station's carrier may sit from OffAirHz, either way. Seeded from the
+station's NAME, so a dead channel keeps the same frequency every time you tune to it,
+on every client and across restarts -- it is a property of that station, not a dice
+roll. The other two notes transpose with the root, so the chord you configured is the
+chord you hear at any pitch. 0 = every off-air station on the same note."),
+            F("WorldEmitterOffAirVarianceHz",        "CMMConfig.WorldEmitterOffAirVarianceHz",      200f,  since: 53),
             F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.15f, since: 47,
                                                                                                      changedIn: 51, was: new object[] { 0.05f, 0.5f }),
             Cmt(@"How long (ms) the off-air carrier takes to fade in and out. A tone that snapped on

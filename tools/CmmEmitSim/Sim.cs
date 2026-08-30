@@ -161,7 +161,12 @@ namespace CMM
             for (int i = i0 + 1; i < Tape.Count && Tape[i].T <= to; i++)
             {
                 float a = Db(Tape[i - 1].Rms), b = Db(Tape[i].Rms);
-                if (a <= floorDb && b <= floorDb) continue;      // both silent: not a step anyone hears
+                // BOTH ends must be audible. A sound STARTING is a step from digital silence by
+                // construction, so counting it would flag every onset in every scenario; a
+                // dropout is the same coin's other face and LongestHole is what measures that.
+                // What is left is the thing actually being asked about: a level that jumps while
+                // you are already listening to it.
+                if (a <= floorDb || b <= floorDb) continue;
                 float d = Math.Abs(b - a);
                 if (d > worst) { worst = d; stepAt = Tape[i].T; }
             }
