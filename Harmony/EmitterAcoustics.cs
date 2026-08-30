@@ -2327,9 +2327,60 @@ namespace CMM
             {
                 Vector3i parent = _doorPrune[i];
                 DoorAnim da = _doors[parent];
-                if (UpdateDoor(world, parent, ref da)) _doors[parent] = da;   // still animating
-                else _doors.Remove(parent);                                    // settled / unreadable → binary resumes
+                if (UpdateDoor(world, parent, ref da)) { _doors[parent] = da; continue; }   // still animating
+                _doors.Remove(parent);                                         // settled / unreadable → binary resumes
+                // WHAT THE DOORWAY LOOKS LIKE ONCE IT HAS STOPPED MOVING.
+                //
+                // Every door instrument we have runs only DURING a swing -- DoorTrace and EarTrace
+                // are both gated on AnyDoorAnimating -- so the state that actually matters, the
+                // one the field keeps for the next several minutes, has never been printed. That
+                // is why "close a door, open it, and the sound never comes back through it" could
+                // be watched all the way to open=1.000 travel=1.000 and then lose the thread.
+                //
+                // One line per cell, once, at rest.
+                if (CMMConfig.DebugLogging) DumpDoorAtRest(world, parent);
             }
+        }
+
+        // One line per cell of a door that has just settled: what the world says, what we would
+        // charge it, and whether the remembered leaf plate claims to reach it. Between them these
+        // three say whether an open doorway is being published as air.
+        private static void DumpDoorAtRest(World world, Vector3i parent)
+        {
+            try
+            {
+                BlockValue pv = world.GetBlock(parent);
+                Block pb = pv.Block;
+                if (pb == null) return;
+                bool held = _leafPlanes.ContainsKey(parent);
+                var sb = new System.Text.StringBuilder();
+                sb.Append("[CMM] DoorRest ").Append(pb.GetBlockName()).Append(" at ").Append(parent)
+                  .Append(held ? "  leaf REMEMBERED" : "  leaf not remembered");
+                int shown = 0;
+                for (int dy = 0; dy <= 2 && shown < 8; dy++)
+                for (int dx = -1; dx <= 1 && shown < 8; dx++)
+                for (int dz = -1; dz <= 1 && shown < 8; dz++)
+                {
+                    Vector3i c = new Vector3i(parent.x + dx, parent.y + dy, parent.z + dz);
+                    BlockValue bv = world.GetBlock(c.x, c.y, c.z);
+                    Block b = bv.Block;
+                    if (b == null || !IsSwingingLeaf(b, bv.type)) continue;
+                    Vector3i par = bv.ischild && b.multiBlockPos != null
+                                 ? b.multiBlockPos.GetParentPos(c, bv) : c;
+                    if (!par.Equals(parent)) continue;
+                    bool blocked;
+                    try { blocked = b.IsMovementBlocked(world, c, bv, BlockFace.None); } catch { blocked = false; }
+                    float loss = CellLoss(bv, world, c.x, c.y, c.z);
+                    bool absent = LeafKnownAbsentFromCell(c, parent, bv.type);
+                    sb.Append(System.Environment.NewLine + "[CMM]   ").Append(c).Append(bv.ischild ? " child" : " parent")
+                      .Append("  blocked=").Append(blocked ? "Y" : "n")
+                      .Append("  loss=").Append(loss.ToString("0.000"))
+                      .Append("  leafAbsent=").Append(absent ? "Y" : "n");
+                    shown++;
+                }
+                CMMConfig.D(sb.ToString());
+            }
+            catch { }
         }
 
         // Advance one tracked door from its Animator. Returns false when it should stop being tracked (swing
