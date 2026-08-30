@@ -1170,8 +1170,14 @@ namespace CMM
         // over ALL tracked distances (start/stop/steal ranking) plus the culled point set of its
         // nearest in-Range speakers (what the native voice sums). Allocation-free steady-state
         // (a pin allocates once per new hash).
+        // The index in the registry snapshot of a speaker tuned to a station that does not
+        // resolve, or -1. One is enough: a lane for each would spend the whole budget on stations
+        // that are not playing.
+        private static int _deadAirAt = -1;
+
         private static void GroupSnapshot()
         {
+            _deadAirAt = -1;
             int n = _stations.Count;
             for (int i = 0; i < n; i++)
             {
@@ -1239,9 +1245,18 @@ namespace CMM
                     // was not on: music bleeding in at full through the other lane before any ramp
                     // caught it, then fading in again from low. Both halves of that report.
                     _posStation.Remove(e.Pos);
-                    // Switched off, and the carrier is one of the things being switched off. It is
-                    // not a retune, so nothing on the tuning paths would ever have cleared it.
-                    ClearOffAir();
+                    // SWITCHED OFF IS NOT THE SAME AS TUNED TO NOTHING, and both landed here.
+                    //
+                    // An empty pin is the player having switched the speaker off: silence is
+                    // correct, and the carrier is one of the things being switched off (not a
+                    // retune, so no tuning path would ever have cleared it).
+                    //
+                    // A pin that names a station which no longer resolves is the OTHER thing --
+                    // the folder is gone or empty, "Broken FM". That speaker is tuned to a dead
+                    // frequency, which is precisely what the carrier is for, and clearing it here
+                    // was why the tone never played for the one station built to be broken.
+                    if (string.IsNullOrEmpty(pinned)) { ClearOffAir(); _deadAirAt = -1; }
+                    else _deadAirAt = i;
                     continue;
                 }
                 st.LastSeenAt = now;
@@ -1289,6 +1304,12 @@ namespace CMM
         // schedule's timeline and re-entry rejoins seamlessly).
         // Sync-audit cadence (shared across all voiced stations; see MaintainPlayingStations).
         private static float _nextAuditAt;
+
+        // How many measurements may be in flight before a station NOBODY is listening to stops
+        // adding more. Deliberately small: the point of premeasuring every station is that the one
+        // you dial to next is ready, and that goal is served by a slow trickle just as well as by
+        // a stampede -- while the stampede actively harms the track playing right now.
+        private const int SpeculativeMeasureCap = 2;
 
         private static void MaintainPlayingStations(EntityPlayerLocal player)
         {
@@ -1438,7 +1459,8 @@ namespace CMM
 
         // Both slot rules live in EmitterSlots so they can be tested; see the header there.
         private static int FreeSlot() =>
-            EmitterSlots.FreeSlot(_slotOwner, _emStartPending, _emPendingSlot, _borrowSlot);
+            EmitterSlots.FreeSlot(_slotOwner, _emStartPending, _emPendingSlot,
+                                  _borrowSlot >= 0 ? _borrowSlot : _deadAirSlot);
 
         // ── Pause resync ────────────────────────────────────────────────────────────────────────
         // Set from the unpause edge (OnGamePauseChanged, pauses > 1 s); consumed by the next tick.
@@ -2219,9 +2241,52 @@ namespace CMM
             return null;
         }
 
+        // A speaker tuned to a station that does not resolve sits on the carrier. It needs a lane
+        // of its own to do that -- there is no station behind it by definition -- which is the same
+        // shape as the sweep borrow, held for as long as the pin stays dead rather than for a
+        // sweep. Released the moment the pin resolves again or the speaker is switched off.
+        private static void MaintainDeadAir()
+        {
+            var snap = EmitterRegistry.Snapshot;
+            if (_deadAirAt < 0 || _deadAirAt >= snap.Count)
+            {
+                if (_deadAirSlot >= 0)
+                {
+                    ClearOffAir(_deadAirSlot);
+                    CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _emptyPts, _emptyGain, _emptyFlags, 0);
+                    CMMConfig.D($"[CMM] Dead air on slot {_deadAirSlot} ends — the pin resolves again.");
+                    _deadAirSlot = -1;
+                }
+                return;
+            }
+
+            EmitterRegistry.Emitter e = snap[_deadAirAt];
+            if (_deadAirSlot < 0)
+            {
+                int slot = FreeSlot();
+                if (slot < 0) return;   // every lane busy: a dead station is the first thing to go without
+                _deadAirSlot = slot;
+                CMMConfig.D($"[CMM] Dead air: slot {slot} carries the off-air tone for {e.Name} at {e.Pos}.");
+                GoOffAir(slot);
+            }
+            // Republished every tick so the tone tracks the listener's occlusion like any other
+            // sound out of that speaker -- it is coming from the same box.
+            _deadPts[0] = e.Pos.x + 0.5f; _deadPts[1] = e.Pos.y + 0.5f; _deadPts[2] = e.Pos.z + 0.5f;
+            _deadGain[0] = 0f;
+            _deadFlags[0] = e.Name == "radioHam" ? 1 : 0;
+            CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 1);
+        }
+
+        private static int _deadAirSlot = -1;
+        private static readonly float[] _deadPts = new float[3];
+        private static readonly float[] _deadGain = new float[1];
+        private static readonly int[] _deadFlags = new int[1];
+
         private static void MaintainTune()
         {
             float now = CmmClock.Now;
+
+            MaintainDeadAir();
 
             // ANY DIAL TURN ENDS THE CARRIER, before we work out which path this retune takes.
             // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
@@ -2713,6 +2778,7 @@ namespace CMM
                 // borrow. StopStation never cleared it and neither did the borrow's arm — only
                 // StartStation's did. Both now do, below; this guard is the belt to that braces.
                 if (s == _borrowSlot) continue;                         // a speaker is sweeping on it
+                if (s == _deadAirSlot) continue;                        // a speaker is off air on it
 
                 // A lock held back so the dial had time to travel (see the start-completion path).
                 if (_slotLockAt[s] > 0f && CmmClock.Now >= _slotLockAt[s])
@@ -2834,9 +2900,22 @@ namespace CMM
                 // to play next and is still trying to start it. See AdvanceStation above.
                 if (st.VoiceId == 0 && !OnAirPinned(st)) ResolveOnAir(st, B);
                 if (ahead == 0 || st.OnAir == null) continue;
+                // NEED FIRST, SPECULATION SECOND. RequestPrewarm starts a coroutine per file with
+                // no queue, so widening this loop to every station (so the one you are about to
+                // dial to is already measured) also let ~30 decode-bound measurements start at
+                // once -- and the track actually playing was one of thirty rather than the only
+                // one. It came in unnormalized and crawled up to level, or never got there.
+                //
+                // A station with a speaker on it is a need: something is playing it now, or is one
+                // step from it. Everything else is speculation and waits for a quiet moment.
+                bool needed = st.NearestDist != float.MaxValue;
+                if (!needed && ContextMusicManager.LoudnessInFlight >= SpeculativeMeasureCap) continue;
                 ContextMusicManager.RequestPrewarm(st.OnAir);
                 for (int k = 1; k <= ahead && k < st.Order.Length; k++)
+                {
+                    if (!needed && ContextMusicManager.LoudnessInFlight >= SpeculativeMeasureCap) break;
                     ContextMusicManager.RequestPrewarm(st.Order[(st.OnAirIdx + k) % st.Order.Length]);
+                }
             }
         }
 

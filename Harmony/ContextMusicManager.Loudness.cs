@@ -261,6 +261,12 @@ namespace CMM
         // dedup'd (cache + in-flight), settles into whatever live voice ends up playing it. No-op if
         // off, already measured, or already in flight. Used by the N-ahead look-ahead on both the main
         // context player and the world-emitter station.
+        // How many measurements are running right now. RequestPrewarm starts a COROUTINE PER FILE
+        // with no queue and no cap, which is fine for a handful and ruinous for a sweep: measuring
+        // is decode-bound, so thirty at once starves the one track somebody is waiting to hear.
+        // Callers that speculate rather than need should check this first.
+        internal static int LoudnessInFlight => _loudnessInFlight.Count;
+
         internal static void RequestPrewarm(string file)
         {
             if (!CMMConfig.LoudnessNormalizationEnabled || string.IsNullOrEmpty(file)) return;
