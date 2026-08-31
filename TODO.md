@@ -108,6 +108,32 @@ about once.
   each should play. Chris flags this as the long one, and that it must write to the MODPACK's
   settings rather than somewhere of its own. Worth sequencing after the per-pack files above,
   since that item decides where settings legitimately live.
+  - **"Add new context" is the centre of it** (Chris, 2026-08-31): pick conditions — storm,
+    biome, enemies, POI tier, a specific POI, day/night/horde night — point it at a folder, done.
+    No XML, no Lua. *"The mod will finally earn its name at that point."*
+  - **The vocabulary already exists.** Every condition on that list is already a field of the
+    snapshot `context.lua` receives, documented in `Config/context.api.md`: `isBloodMoon`,
+    `hour`, `biome`, `rainfall` / `snowfall` / `windSpeed`, `poiTier`, `poiName` (type) vs
+    `poiId` (instance), `poiEnemiesRemaining`, and `enemies` with `cmm.count`. So the condition
+    picker is not new detection work — it is a UI over a surface that is already there and
+    already documented. **Generate the picker's field list FROM that surface**, or the two drift
+    the first time a field is added and the panel starts offering conditions that do not exist.
+  - **The panel must write DATA, not Lua.** The decision layer was deliberately externalised into
+    a user-editable, hot-reloaded `context.lua` with an embedded-default fallback (see
+    `lua-decision-layer`). A panel that GENERATES script is a one-way door: the moment somebody
+    hand-edits the file it can no longer safely rewrite it, and the mod's most-recommended
+    customisation becomes the thing that breaks the UI. So: conditions are a declarative rule
+    list in XML, and `context.lua` gains ONE generic evaluator that walks it. People who want to
+    write Lua still write Lua; the panel never touches the script.
+  - **Priority is the part that will make user contexts feel broken.** Resolution is
+    detection → priority stack → fallback chain (`context-resolution-model`). A new context with
+    no place in that stack either never wins or always wins, and both read as "my context does
+    not work". The panel has to expose where it sits, in language that is not the word
+    "priority" — probably "before/after" against the existing list.
+  - **Editing a context is editing a live system.** `contexts.xml` is hot-reloaded and the
+    coverage panel reads it live, so a half-written rule from a UI in progress must not reach the
+    resolver. Write atomically and validate before publishing — the same stance the config writer
+    already takes.
 - [ ] **Unions: contexts that share music.** `Combat_Forest_Low` ∪ `Combat_Low`, so the generic
   pool stays in circulation instead of being shadowed the moment a specific folder exists. Note
   this is NOT the fallback chain — a fallback is what plays when a context is EMPTY; a union is
