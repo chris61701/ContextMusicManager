@@ -16,7 +16,11 @@ Still on v1.0.5 — no release until these are worked out (list set 2026-07-11):
   an independent signal per station slot; shelf speakers keep the clean speaker set. The flag
   bits 1-2 are reserved for the stereo-pair channel split (next item).
 - [ ] **Speakers in mono** — unless another speaker is nearby, in which case each plays one
-  channel (a natural stereo pair). *(conceptualized 2026-07-13, design settled, not built:)*
+  channel (a natural stereo pair). *(conceptualized 2026-07-13, design settled, not built —*
+  ***SUPERSEDED 2026-08-31**: Chris asked for an explicit Left / Right / Mono choice on the tuner
+  instead of proximity pairing. See the 1.0.6 list below. The flag-bit design recorded here is
+  also known to be wrong — channel cannot live on a point, because L and R are already crushed to
+  mono by then; see `stereo-emitter-lanes`.)*
   - Lone speakers are ALREADY mono (the mixer downmixes each station to a mono slot lane);
     only the pair split is new.
   - Signal: keep each slot's L and R through to the output callback (stereo slot ring;
@@ -54,6 +58,62 @@ Still on v1.0.5 — no release until these are worked out (list set 2026-07-11):
 
 De-prioritized for this release: multiplayer testing, and cross-version (A20/A21/2.6)
 verification — emitters are excluded there anyway.
+
+## 1.0.6 — the list Chris set on 2026-08-31
+
+All **(not started)** unless noted. Recorded as asked for, with the mechanism each one lands on
+where that is already known, because most of these touch something that has already been thought
+about once.
+
+- [ ] **A volume control per emitter.** Not a global trim — this speaker, quieter than that one.
+  `EmitterTuner`'s override store is already per-position and persisted per save
+  (`Cache/emitters.xml`), so it is the natural home: the pin becomes a pin plus a level. Applies
+  at the point gain, NOT at the lane — a lane is shared by every speaker on that station, so
+  putting it there would turn one radio down everywhere. Same trap as the music fades
+  (`emitter-tuning-spec`).
+- [ ] **Ability to pick an emitter up.** Two halves. The block half is ordinary
+  (`OnBlockDestroyedBy` → drop the item). The half that will bite: **every per-speaker setting is
+  keyed by world position** — the pin, and the new volume above. Pick a radio up and put it down
+  three blocks over and it inherits whatever the last radio at that spot was set to, or loses its
+  own. Decide deliberately whether settings travel with the item (needs an ItemValue property) or
+  belong to the location.
+- [ ] **Left / Right / Mono per speaker**, so a stereo field can be built anywhere in a base.
+  **This supersedes the automatic-pairing item in the 1.0.5 list above** — Chris asked for it as
+  an explicit radial-menu choice rather than proximity pairing. Read `stereo-emitter-lanes` first:
+  the reserved per-point flag bits 1-2 are **in the wrong place** and cannot work, because L and R
+  are crushed to mono at `cmm_mix.c:1342` before a point is ever seen. Channel is a property of
+  the LANE, and a stereo pair is therefore ONE tuner with two outputs. The menu is the small half.
+- [ ] **A cap on how many radios play at once.** With one station, all of them currently play the
+  same thing, which sounds like a fault rather than a base. Wants to be a count, not a radius, and
+  the selection already exists in spirit — `SelectAndVoice` is K-nearest over `StationSlots`. The
+  question this raises and should answer on purpose: which radios go quiet, and does the answer
+  stay stable as the player walks (a set that reshuffles per tick is a stutter).
+- [ ] **Per-context frequency: dead air between tracks.** A forest theme plays, then a few minutes
+  of nothing, then another. Per context, so combat can stay continuous while ambient breathes.
+  Lands on the advance path rather than the picker — the track ends, and the next start is
+  deferred rather than chosen differently. Note that a context CHANGE mid-gap must interrupt the
+  gap, or walking into combat during forest silence gives no music at all.
+- [ ] **A radial menu for contexts** — disable any context, set its frequency, and so on, in game.
+  The tuner already proves the pattern: answer the four `Block` virtuals and the game draws its
+  own radial (`EmitterActivationHook`). What contexts lack is a block to look at, so this needs a
+  different entry point (a keybind opening the vanilla radial, most likely).
+- [ ] **Per-music-pack settings files.** A pack ships its own `settings.xml` / `radio.xml` /
+  `contexts.xml` / `context.lua` and CMM reads and adapts to them. **Only applies when exactly one
+  installed pack carries its own** — two packs with opinions is a conflict with no right answer, so
+  the rule is to take neither. Fits the addon-root scan that already merges pack `Music` folders
+  (`cmm roots`). The hard part is not reading them, it is that the player's OWN chosen values must
+  survive a pack's defaults — the schema migration already draws exactly that line (a value equal
+  to a former default is fair game, anything else is theirs) and this must use the same rule.
+- [ ] **A settings panel: everything in one place** — every mod setting, every context, and when
+  each should play. Chris flags this as the long one, and that it must write to the MODPACK's
+  settings rather than somewhere of its own. Worth sequencing after the per-pack files above,
+  since that item decides where settings legitimately live.
+- [ ] **Unions: contexts that share music.** `Combat_Forest_Low` ∪ `Combat_Low`, so the generic
+  pool stays in circulation instead of being shadowed the moment a specific folder exists. Note
+  this is NOT the fallback chain — a fallback is what plays when a context is EMPTY; a union is
+  two non-empty pools drawn from together. The rotation is the thing to be careful with: a bag per
+  context is what makes "every track before any repeat" true (`TrackNoRepeatMemory`), and a union
+  needs one bag over the combined pool or the promise breaks at the seam.
 
 ## Audio engine — the remaining list (set 2026-08-21)
 
