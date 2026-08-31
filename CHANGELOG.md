@@ -283,6 +283,21 @@ they now behave, rather than as a history of how they got there.
 
 ### Fixed
 
+- **A track that will not decode now says so** *(post-RC4)*. A file that is present and readable
+  but that nothing can decode was recorded as unplayable and skipped from then on — correct
+  behaviour, and completely silent. Every other instrument agreed with the silence: the file is
+  on disk, so the coverage panel counted it; the playlist entry resolved, so the missing-entry
+  report said nothing; and the station had other tracks, so the "no playable tracks" warning
+  never fired. The track simply never played, and there was no way to find out. Found by probing
+  a real 3,381-track library through the shipping decoder: 25 of them are Apple Lossless inside
+  an `.m4a` container, which is not a supported format. Each such file now gets one warning
+  naming it, capped at twelve before it summarises, and a drive that has merely gone away still
+  says nothing — that distinction already existed and is what this is built on.
+- **The crafting diagnostic worked everywhere except Alpha 20** *(post-RC4)*, which is the one
+  version it was written for. It read a recipe cache that A20 does not have, three lines below a
+  comment explaining that A20 does not have it. The recipes themselves were always installed
+  correctly; what was lost was the report that tells "the recipe is installed" apart from "the
+  player can see it", plus a spurious retry for something that had not failed.
 - **Tuning a speaker to a dead station gave static, a pause, then more static** *(RC4)*. Two
   things were raising the off-air carrier: the tone's own upkeep, which works out every tick who
   is listening to a station that cannot play, and a second, older trigger that fired the moment a
