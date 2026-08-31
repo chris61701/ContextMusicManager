@@ -151,6 +151,11 @@ namespace CMM
             CMMConfig.WorldEmitterSource  = "Radio";
             CMMConfig.WorldEmitterOcclusion = false;          // clear line: the levels here are the tuning's
             CMMConfig.LoudnessNormalizationEnabled = false;   // known levels; loudness has its own harness
+            // PINNED, not inherited. The shipped default is deliberately quiet (0.04), and every
+            // level here -- the distance walk especially -- is calibrated against a carrier the
+            // ear can measure. Taking the shipped value would silently retune the assertions
+            // whenever it is tuned, which is the harness measuring the config rather than the code.
+            CMMConfig.WorldEmitterOffAirLevel = 0.15f;
             CMMConfig.DebugLogging = true;
         }
 

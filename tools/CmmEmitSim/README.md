@@ -84,7 +84,7 @@ a result.
 
 ## Two known flakes
 
-`retune-cold` and `rapid-switch` each fail roughly one run in four, and NEITHER is a regression --
+`retune-cold`, `rapid-switch` and `turn-on` each fail roughly one run in four, and NONE is a regression --
 both flake identically on `main` (measured: `rapid-switch` 3/12 before a change, 1/10 after). Do
 not read one red run as a break; re-run it.
 

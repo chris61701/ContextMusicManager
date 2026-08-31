@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 55;
+        internal const int CurrentSchema = 56;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -1029,7 +1029,11 @@ another. The pocket radio's RadioTuneLeaveMs, for world speakers."),
             Cmt(@"The OFF-AIR CARRIER: what a speaker sits on when the station it was tuned to will
 not open. Silence reads as the mod having broken; a tone reads as a station that has
 stopped broadcasting for the night, which is what actually happened. Hz then level.
-0 Hz disables it and the speaker simply goes quiet."),
+0 Hz disables it and the speaker simply goes quiet.
+
+The level is deliberately low. A carrier is something you notice when you walk past a
+speaker, not something you listen to -- it was tuned against a bug that was quietly
+attenuating it, and once that was fixed it sat far louder than a dead channel should."),
             F("WorldEmitterOffAirHz",                "CMMConfig.WorldEmitterOffAirHz",              440f,  since: 47,
                                                                                                      changedIn: 51, was: 1000f),
             F("WorldEmitterOffAirHz2",               "CMMConfig.WorldEmitterOffAirHz2",             523.25f, since: 48,
@@ -1042,8 +1046,8 @@ on every client and across restarts -- it is a property of that station, not a d
 roll. The other two notes transpose with the root, so the chord you configured is the
 chord you hear at any pitch. 0 = every off-air station on the same note."),
             F("WorldEmitterOffAirVarianceHz",        "CMMConfig.WorldEmitterOffAirVarianceHz",      200f,  since: 53),
-            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.15f, since: 47,
-                                                                                                     changedIn: 51, was: new object[] { 0.05f, 0.5f }),
+            F("WorldEmitterOffAirLevel",             "CMMConfig.WorldEmitterOffAirLevel",           0.04f, since: 47,
+                                                                                                     changedIn: 56, was: new object[] { 0.05f, 0.5f, 0.15f }),
             Cmt(@"How long (ms) the off-air carrier takes to fade in and out. A tone that snapped on
 was a click, which reads as a fault rather than as a station going off the air."),
             I("WorldEmitterOffAirFadeMs",            "CMMConfig.WorldEmitterOffAirFadeMs",          400,   since: 48),

@@ -161,6 +161,11 @@ they now behave, rather than as a history of how they got there.
 
 ### Changed
 
+- **The off-air tone is quieter by default** *(RC4)*. `WorldEmitterOffAirLevel` drops from 0.15 to
+  0.04. It was set while an occlusion bug was quietly attenuating everything a speaker emitted,
+  and once that was fixed the carrier sat far louder than a dead channel should — a tone is
+  something you notice walking past a speaker, not something you sit and listen to. A value you
+  chose yourself is kept.
 - **The static from world speakers is half as loud** *(RC4)*. It was set against the hiss from
   the radio in your pocket, which reaches your ears through a different path entirely — a world
   speaker's noise arrives before distance, occlusion and the room are applied, so the same number

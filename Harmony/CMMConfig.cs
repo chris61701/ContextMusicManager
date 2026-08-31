@@ -814,7 +814,7 @@ namespace CMM
         // plays" when it had been playing the whole time.
         // Measured: 0.5 renders at -14.2 dBFS against the tuning static's -24.9, so the carrier
         // was nearly 11 dB LOUDER than the hiss it replaces. It should sit just under it.
-        public static float  WorldEmitterOffAirLevel  = 0.15f;
+        public static float  WorldEmitterOffAirLevel  = 0.04f;
         // It FADES. A carrier that snapped on was a click, which reads as a fault rather than as a
         // station going off the air.
         public static int    WorldEmitterOffAirFadeMs = 400;
