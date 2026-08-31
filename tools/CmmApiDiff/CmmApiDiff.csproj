@@ -27,4 +27,7 @@
     <PackageReference Include="System.Reflection.Metadata" Version="8.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="allowed-missing.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

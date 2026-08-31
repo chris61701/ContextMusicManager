@@ -111,7 +111,7 @@ namespace CMM
             return r;
         }
 
-        // CraftingManager.PostInit() re-caches        // CraftingManager.PostInit() re-caches what depends on the recipe list, and it is 2.6+
+        // CraftingManager.PostInit() re-caches what depends on the recipe list, and it is 2.6+
         // ONLY -- A20 assigns the result of a private cacheNonScrapableRecipes() to a differently
         // shaped field instead. Bound by name, so its absence is a skipped refresh rather than a
         // MissingMethodException the moment somebody joins an A20 game.
@@ -123,6 +123,32 @@ namespace CMM
         // these two recipes are not part of.
         private static MethodInfo _postInit;
         private static bool _postInitBound;
+
+        // THE CACHE THE CRAFTING WINDOW READS, and A20 does not have it either.
+        //
+        // Report() read `CraftingManager.NonScrapableRecipes` as a typed field access -- three
+        // lines under a comment that says, correctly, "ours is bound by name because A20 lacks
+        // it". The binding was done for PostInit and not for the field the same paragraph names.
+        //
+        // It is caught rather than fatal, because Report() is called from inside Tick()'s try and
+        // a missing member throws where the method is entered. But what it costs on A20 is the
+        // whole diagnostic -- the one that exists to tell "the recipe is installed" apart from
+        // "the player can see it" -- plus a failure count and a backoff for something that is not
+        // a failure. Bound by name, its absence is a line in the log saying so.
+        private static FieldInfo _nonScrapable;
+        private static bool _nonScrapableBound;
+
+        private static IList<Recipe> CachedRecipes()
+        {
+            if (!_nonScrapableBound)
+            {
+                _nonScrapableBound = true;
+                _nonScrapable = AccessTools.Field(typeof(CraftingManager), "NonScrapableRecipes");
+            }
+            if (_nonScrapable == null) return null;
+            try { return _nonScrapable.GetValue(null) as IList<Recipe>; }
+            catch { return null; }
+        }
 
         private static void Refresh()
         {
@@ -275,7 +301,7 @@ namespace CMM
         {
             try
             {
-                var cached = CraftingManager.NonScrapableRecipes;
+                IList<Recipe> cached = CachedRecipes();
                 for (int i = 0; i < _built.Count; i++)
                 {
                     Recipe r = _built[i];
@@ -283,6 +309,10 @@ namespace CMM
                     if (cached != null)
                         for (int k = 0; k < cached.Count; k++)
                             if (ReferenceEquals(cached[k], r)) { inCache = true; break; }
+                    // "no cache on this version" is not the same answer as "not in the cache",
+                    // and on A20 the second would be a lie.
+                    string cacheState = cached == null ? "no cache on this version"
+                                      : inCache ? "in the cache" : "NOT in the cache";
 
                     string groups = "?";
                     try
@@ -298,7 +328,7 @@ namespace CMM
                     }
                     catch (Exception ge) { groups = "threw: " + ge.Message; }
 
-                    CMMConfig.D($"[CMM] Craftable '{r.GetName()}': inCache={inCache} "
+                    CMMConfig.D($"[CMM] Craftable '{r.GetName()}': {cacheState} "
                               + $"area='{r.craftingArea}' groups={groups} "
                               + $"learnable={r.IsLearnable} time={r.craftingTime:0}s "
                               + $"ingredients={r.ingredients.Count}");

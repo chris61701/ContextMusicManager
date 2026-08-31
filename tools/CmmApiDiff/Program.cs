@@ -41,6 +41,11 @@ internal static class Program
         List<Ref> refs = ReadReferences(modPath);
         Console.WriteLine($"{Path.GetFileName(modPath)} references {refs.Count} member(s) from other assemblies.");
 
+        // KNOWN-AND-GATED, so the tool can be green and therefore worth running. See the file.
+        Dictionary<string, string> allowed = ReadAllowList(out string allowPath);
+        if (allowed.Count > 0)
+            Console.WriteLine($"{allowed.Count} member(s) allow-listed as gated ({Path.GetFileName(allowPath)}).");
+
         int failures = 0;
         for (int i = 1; i < args.Length; i++)
         {
@@ -49,25 +54,32 @@ internal static class Program
 
             HashSet<string> have = ReadDeclared(target);
             var missing = new List<Ref>();
+            var gated = new List<Ref>();
             foreach (Ref r in refs)
             {
                 // Only members from the GAME's own assembly can differ per version; BCL and
                 // Unity references are pinned by the build and are not what this is looking for.
                 if (!LooksLikeGameScope(r.Scope)) continue;
-                if (!have.Contains(r.Key)) missing.Add(r);
+                if (have.Contains(r.Key)) continue;
+                if (allowed.ContainsKey(Display(r))) gated.Add(r); else missing.Add(r);
             }
 
             string name = Path.GetFileName(Path.GetDirectoryName(target)) + "/" + Path.GetFileName(target);
+            // Reported either way. A gated member is not a problem, but it IS the thing that
+            // becomes one the day somebody calls it from outside the gate, so it stays visible.
+            string gatedNote = gated.Count == 0 ? "" : $"  ({gated.Count} gated, allow-listed)";
             if (missing.Count == 0)
             {
-                Console.WriteLine($"\n-- {name}: ok, every referenced member exists");
+                Console.WriteLine($"\n-- {name}: ok, every referenced member exists{gatedNote}");
+                foreach (Ref r in gated.OrderBy(m => m.Type).ThenBy(m => m.Name))
+                    Console.WriteLine($"     gated  {Display(r)}  — {allowed[Display(r)]}");
                 continue;
             }
 
             failures++;
-            Console.WriteLine($"\n-- {name}: {missing.Count} MISSING");
+            Console.WriteLine($"\n-- {name}: {missing.Count} MISSING{gatedNote}");
             foreach (Ref r in missing.OrderBy(m => m.Type).ThenBy(m => m.Name))
-                Console.WriteLine($"     {r.Type}.{r.Name}({r.Params})");
+                Console.WriteLine($"     {Display(r)}");
         }
 
         Console.WriteLine();
@@ -75,6 +87,33 @@ internal static class Program
             ? "PASS - the mod calls nothing these versions do not have."
             : $"FAIL - {failures} version(s) are missing something the mod calls.");
         return failures == 0 ? 0 : 1;
+    }
+
+    // How a member is written in this tool's output, and therefore in the allow list. One
+    // formatter, so the two can never disagree about spacing.
+    static string Display(Ref r) => $"{r.Type}.{r.Name}({r.Params})";
+
+    // name | reason. Missing file = empty list, which fails everything, which is the safe way
+    // round: an allow list that quietly vanished must not silently start passing things.
+    static Dictionary<string, string> ReadAllowList(out string path)
+    {
+        var d = new Dictionary<string, string>(StringComparer.Ordinal);
+        path = Path.Combine(AppContext.BaseDirectory, "allowed-missing.txt");
+        if (!File.Exists(path))
+        {
+            // Running from the repo rather than from an output folder.
+            string alt = Path.Combine("tools", "CmmApiDiff", "allowed-missing.txt");
+            if (File.Exists(alt)) path = alt; else return d;
+        }
+        foreach (string raw in File.ReadAllLines(path))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith("#")) continue;
+            int bar = line.IndexOf('|');
+            if (bar <= 0) continue;
+            d[line.Substring(0, bar).Trim()] = line.Substring(bar + 1).Trim();
+        }
+        return d;
     }
 
     sealed class Ref

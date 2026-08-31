@@ -1,0 +1,21 @@
+# Members the mod references that OLDER GAME VERSIONS DO NOT HAVE, and does not call there.
+#
+# One line per member, as CmmApiDiff prints it, then a reason. A member is only allowed here if
+# every path that reaches it is behind a runtime gate that is FALSE on the versions missing it --
+# not merely "we think it is fine". The gate for all of these is EmitterCompat.RuntimeSupported,
+# which requires ReleaseType "V" and Major >= 2, so it is false on Alpha 20 and Alpha 21, and the
+# world-emitter layer never runs there at all. Nothing deeper is ever invoked, so no token in it
+# is ever resolved.
+#
+# Anything NOT on this list is a failure, which is the whole point: this file is what lets the
+# tool go green, and a green tool is one somebody runs. It always failed before -- five entries
+# that were fine and one, CraftingManager.NonScrapableRecipes, that was NOT (CraftingGate runs on
+# every version) -- and a tool that always fails hides the one line that matters.
+#
+# To add a line: prove the gate, then write down which gate.
+
+Block.get_Properties()                        | EmitterCompat.Probe binds this only after RuntimeSupported's version test; A20/A21 never reach it
+Prefab.get_PrefabName()                       | EmitterRegistry (the whole file is behind RuntimeSupported). ContextResolver, which DOES run everywhere, binds the same member reflectively for exactly this reason
+TEFeatureAbs.get_blockValue()                 | EmitterAcoustics / EmitterDoorHook; the door hook resolves its target type by name and skips itself when TEFeatureDoor is absent, which it is before 3.0
+TEFeatureAbs.ToWorldPos()                     | EmitterDoorHook, same gate and the same skip
+WorldBase.ChunkCache(field:ChunkCluster)      | EmitterAcoustics' flood, behind RuntimeSupported
