@@ -1467,6 +1467,16 @@ namespace CMM
                 {
                     pinned = _stations[e.StationHash % n].Name;
                     _posPins[e.Pos] = pinned;
+                    // WHY THIS RADIO IS ON THIS STATION. Nothing said, on any version -- the
+                    // census counts speakers and the catalog lists stations, and the assignment
+                    // between them was invisible, so "all my radios ended up on the same one" was
+                    // not a question the log could answer. Printed once per speaker, at the moment
+                    // it is decided and cached, with the arithmetic that decided it.
+                    //
+                    // poi 0 means the position hash (a radio you placed); anything else is the
+                    // building's id, which is what makes every speaker in one POI share a station.
+                    CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → '{pinned}' "
+                              + $"(poi {e.PoiId}, hash {e.StationHash} % {n} = {e.StationHash % n}).");
                 }
                 // Pinned to a REMOVED station ⇒ dead air: the radio contributes to no live station
                 // (silent) until the folder returns or the next world entry recomputes the pins.
@@ -2799,19 +2809,45 @@ namespace CMM
             _deadAirMissingAt = 0f;
 
             EmitterRegistry.Emitter e = snap[at];
-            // Republished every tick so the tone tracks the listener's occlusion like any other
-            // sound out of that speaker -- it is coming from the same box.
-            _deadPts[0] = e.Pos.x + 0.5f; _deadPts[1] = e.Pos.y + 0.5f; _deadPts[2] = e.Pos.z + 0.5f;
-            _deadFlags[0] = e.Name == "radioHam" ? 1 : 0;
+            // EVERY SPEAKER ON THE DEAD STATION, NOT JUST THE ONE THAT FOUND IT.
+            //
+            // The carrier is one lane and the lane carried ONE point, so of several radios tuned
+            // to a station that will not open, exactly one sounded and the rest were silent --
+            // and breaking that one handed the carrier to the next, which then ran the whole hunt
+            // again before settling. Reported as radios queueing for a tone.
+            //
+            // A lane takes N points; a station lane already publishes one per speaker. So the
+            // carrier does too, and they all sound it, each with its own occlusion, exactly as
+            // they would if the station were playing.
+            string deadName = _posStation.TryGetValue(e.Pos, out string dn0) ? dn0 : null;
+            int dc = 0;
+            for (int i = 0; i < snap.Count && dc < MaxDeadPts; i++)
+            {
+                EmitterRegistry.Emitter de = snap[i];
+                // The one that found it always counts; the others must be on the same station and
+                // not be mid-retune (a speaker being swept belongs to the sweep, not to this).
+                if (!de.Pos.Equals(e.Pos))
+                {
+                    if (deadName == null) continue;
+                    if (!_posStation.TryGetValue(de.Pos, out string dn) || dn != deadName) continue;
+                    if (EmitterTuner.SweepHeld(de.Pos) || de.Pos.Equals(_borrowPos)) continue;
+                }
+                _deadPts[dc * 3] = de.Pos.x + 0.5f;
+                _deadPts[dc * 3 + 1] = de.Pos.y + 0.5f;
+                _deadPts[dc * 3 + 2] = de.Pos.z + 0.5f;
+                _deadFlags[dc] = de.Name == "radioHam" ? 1 : 0;
+                dc++;
+            }
+            if (dc == 0) return;
             // OCCLUDED, LIKE EVERYTHING ELSE THAT COMES OUT OF THAT BOX. This published 0, which
             // is clear line -- no walls, no doors -- so the carrier arrived at full strength
             // through geometry that muffles everything else the speaker does. One point, one ray,
             // every tick: cheap, and it also stops the tone reading as a sound in the room rather
             // than one coming from the radio.
-            OccludeOnePoint(_deadPts, _deadGain);
+            OccludePoints(_deadPts, _deadGain, dc);
             float dcap = CMMConfig.WorldEmitterRange * 0.75f;
-            if (_deadGain[0] > dcap) _deadGain[0] = dcap;
-            CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 1);
+            for (int i = 0; i < dc; i++) if (_deadGain[i] > dcap) _deadGain[i] = dcap;
+            CmmMixer.Instance?.SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, dc);
 
             // ...and the tone only once the hunt is over.
             if (!_deadAirToneUp && CmmClock.Now - _deadAirSince >= DeadAirHunt)
@@ -2865,13 +2901,16 @@ namespace CMM
         // A declined field KEEPS THE GAIN IT HAD rather than falling back to the ray, for the
         // reason the station path gives where it does the same: two inconsistent pictures in one
         // tick is an audible step, and the field answers again a moment later.
-        private static void OccludeOnePoint(float[] pts, float[] gain)
+        private static void OccludeOnePoint(float[] pts, float[] gain) => OccludePoints(pts, gain, 1);
+
+        private static void OccludePoints(float[] pts, float[] gain, int count)
         {
-            if (!CMMConfig.WorldEmitterOcclusion) { gain[0] = 0f; return; }
+            if (count <= 0) return;
+            if (!CMMConfig.WorldEmitterOcclusion) { for (int i = 0; i < count; i++) gain[i] = 0f; return; }
             World w = GameManager.Instance?.World;
             EntityPlayerLocal p = w?.GetPrimaryPlayer();
-            if (w == null || p == null) { gain[0] = 0f; return; }
-            FieldOcclusion.ComputeOcclusion(ListenerWorldPos(p), pts, 1, gain);
+            if (w == null || p == null) { for (int i = 0; i < count; i++) gain[i] = 0f; return; }
+            FieldOcclusion.ComputeOcclusion(ListenerWorldPos(p), pts, count, gain);
             // ...AND THROUGH THE SAME RATE LIMITER THE STATIONS GET.
             //
             // Taking the field's answer raw is why the carrier VANISHED on a door. The readout
@@ -2884,12 +2923,14 @@ namespace CMM
             // sweep were publishing the same field's raw output with nothing smoothing it, which
             // is half of "one model for everything" -- the model was shared, the treatment of its
             // answer was not.
-            LimitOcclusionRise(pts, gain, 1);
+            LimitOcclusionRise(pts, gain, count);
         }
 
-        private static readonly float[] _deadPts = new float[3];
-        private static readonly float[] _deadGain = new float[1];
-        private static readonly int[] _deadFlags = new int[1];
+        // As many speakers as a station lane can carry: a dead station is still a station.
+        private const int MaxDeadPts = 16;
+        private static readonly float[] _deadPts = new float[MaxDeadPts * 3];
+        private static readonly float[] _deadGain = new float[MaxDeadPts];
+        private static readonly int[] _deadFlags = new int[MaxDeadPts];
 
         // WHY A DIAL TURN GOT NO STATIC. Every declining branch in both handlers used to return
         // in silence, so a log of a silent retune showed the dial click, then the station starting,
