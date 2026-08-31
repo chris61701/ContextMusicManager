@@ -2635,10 +2635,26 @@ namespace CMM
             float vary    = CMMConfig.WorldEmitterOffAirVarianceHz;
             if (vary > 0f && cfgRoot > 0f)
             {
+                // FROM THE PIN, NOT FROM _posStation. _posStation records which station a speaker
+                // is HEARD on, and the dead branch REMOVES its entry and returns before the line
+                // that writes it -- so a speaker on the carrier is by construction absent, this
+                // lookup always missed, and the seed always fell through to the POSITION hash.
+                //
+                // The pitch was therefore per-SPEAKER, not per-station: it changed the moment a
+                // different radio took the carrier, which is the whole property the setting exists
+                // to provide. Reported as the tone changing pitch when another one is tuned.
+                //
+                // The NAME is hashed rather than the catalog's seed, because a station whose
+                // folder has gone is not in the catalog at all -- and a dead frequency keeping its
+                // note across the folder disappearing and coming back is exactly the point.
                 uint seed;
-                if (_posStation.TryGetValue(_deadAirPos, out string dn) && !string.IsNullOrEmpty(dn)
-                    && RadioStationCatalog.ByName.TryGetValue(dn, out RadioStation ds))
-                    seed = ds.Seed;
+                string pinName = PinnedNameAt(_deadAirPos);
+                if (!string.IsNullOrEmpty(pinName))
+                {
+                    seed = 2166136261u;
+                    for (int i = 0; i < pinName.Length; i++)
+                    { seed ^= char.ToLowerInvariant(pinName[i]); seed *= 16777619u; }
+                }
                 else
                     seed = (uint)(_deadAirPos.x * 73856093 ^ _deadAirPos.y * 19349663
                                                            ^ _deadAirPos.z * 83492791);
@@ -2997,6 +3013,18 @@ namespace CMM
         // turned on", and visible in the log as a swap landing two lines after the off.
         //
         // Off is a hard cut, so this is a hard cut.
+        // The station a speaker is TUNED to, live or dead: the player's own choice first, then
+        // whatever the layer derived for it. Distinct from _posStation, which is where a speaker
+        // is currently HEARD -- a speaker on a dead station has the first and not the second.
+        internal static string PinnedNameAt(Vector3i pos)
+        {
+            var snap = EmitterRegistry.Snapshot;
+            for (int i = 0; i < snap.Count; i++)
+                if (snap[i].Pos.Equals(pos) && EmitterTuner.TryPin(snap[i], out string pin))
+                    return pin;
+            return _posPins.TryGetValue(pos, out string derived) ? derived : null;
+        }
+
         private static bool SwitchedOff(Vector3i pos)
         {
             var snap = EmitterRegistry.Snapshot;
@@ -3022,11 +3050,32 @@ namespace CMM
                 _tunePhase = 0; _tuneSlot = -1;
             }
 
-            // ANY DIAL TURN ENDS THE CARRIER, before we work out which path this retune takes.
-            // Doing it inside a path meant the paths that do not run it -- the borrow, and a plain
-            // start -- left the tone sounding under the new station.
+            // A DIAL TURN ON *THIS* SPEAKER, not on any speaker anywhere.
+            //
+            // This ended the carrier on every retune in the world, which was right while the
+            // carrier served one radio and is wrong now that it serves a group: tuning one of two
+            // radios on a dead station tore the tone down for BOTH, and the survivor then had to
+            // hunt its way back -- reported as "I tune one and they both go to static".
+            //
+            // The carrier is a station as far as the others are concerned, and retuning one
+            // speaker off a station has never disturbed the rest. Only a turn on the speaker that
+            // OWNS the lane ends it, and even then only when nobody else is left on that station;
+            // otherwise ownership passes to a speaker that is, and the tone never stops.
             if (_handledTuneAt != EmitterTuner.LastTuneAt
-                && now - EmitterTuner.LastTuneAt < RetuneWindow) EndDeadAir("the dial moved");
+                && now - EmitterTuner.LastTuneAt < RetuneWindow
+                && _deadAirOn && EmitterTuner.LastTunePos.Equals(_deadAirPos))
+            {
+                Vector3i heir = default(Vector3i); bool haveHeir = false;
+                for (int i = 0; i < _deadGroup.Count; i++)
+                    if (!_deadGroup[i].Pos.Equals(_deadAirPos))
+                    { heir = _deadGroup[i].Pos; haveHeir = true; break; }
+                if (haveHeir)
+                {
+                    _deadAirPos = heir;   // same station, same pitch: only the owner moved
+                    CMMConfig.D($"[CMM] Dead air: the owner was retuned — the carrier passes to {heir}.");
+                }
+                else EndDeadAir("the speaker on it was retuned");
+            }
 
             // AFTER that clear, never before it. Landing on a dead station IS a dial turn, so
             // running this first meant the carrier was raised and then wiped in the same tick by
