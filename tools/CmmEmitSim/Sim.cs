@@ -50,6 +50,24 @@ namespace CMM
         }
 
         internal readonly List<Sample> Tape = new List<Sample>();
+        // Main-thread cost of every tick in this run, in milliseconds, in order.
+        internal readonly List<float> TickMs = new List<float>();
+
+        // Percentile over the ticks recorded so far. p=1 is the worst single tick.
+        internal float TickPct(double p, int from = 0)
+        {
+            if (TickMs.Count <= from) return 0f;
+            var v = TickMs.GetRange(from, TickMs.Count - from);
+            v.Sort();
+            int i = (int)Math.Round(p * (v.Count - 1));
+            return v[i < 0 ? 0 : i >= v.Count ? v.Count - 1 : i];
+        }
+        internal float TickMean(int from = 0)
+        {
+            if (TickMs.Count <= from) return 0f;
+            double s = 0; for (int i = from; i < TickMs.Count; i++) s += TickMs[i];
+            return (float)(s / (TickMs.Count - from));
+        }
         private string _pendingNote;
 
         internal static float Db(float lin) => lin > 1e-9f ? 20f * (float)Math.Log10(lin) : -140f;
@@ -68,7 +86,15 @@ namespace CMM
             _t += 1f / 60f;
             CmmClock.Set(_t);
 
+            // THE COST OF THE TICK, on the thread the game would be running it on. This is the
+            // number a stutter is made of: EmitterAudioLayer.Tick() is called from Unity's frame
+            // loop, so whatever it spends here the frame waits for. Recorded per step rather than
+            // averaged, because a mean hides the one 40 ms tick that is the whole complaint.
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             EmitterAudioLayer.Tick();
+            float tickMs = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - t0)
+                                   * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+            TickMs.Add(tickMs);
 
             // Collect one frame's worth, waiting on the producer rather than reading a hole it
             // has not filled yet. ONE buffer, one call shape: the earlier version allocated a

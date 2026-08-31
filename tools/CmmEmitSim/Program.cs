@@ -51,11 +51,13 @@ namespace CMM
             var names = new string[] { "turn-on", "retune-shared", "retune-cold",
                                        "rapid-switch", "off-mid-tune", "broken-station",
                                        "distance-tone", "distance-music", "dead-group",
-                                       "dead-tune", "pool-vanishes" };
+                                       "dead-tune", "pool-vanishes",
+                                       "warp-speed", "dial-storm", "speaker-farm" };
             var runs  = new Action[] { Turn_On, Retune_To_Live_Station, Retune_To_Cold_Station,
                                        Rapid_Switching, Off_Mid_Tune, Broken_Station,
                                        Distance_Tone, Distance_Music, Dead_Group,
-                                       Dead_Tune, Pool_Vanishes };
+                                       Dead_Tune, Pool_Vanishes,
+                                       Warp_Speed, Dial_Storm, Speaker_Farm };
 
             for (int i = 0; i < names.Length; i++)
             {
@@ -84,7 +86,7 @@ namespace CMM
         static readonly string[] Scenarios =
             { "turn-on", "retune-shared", "retune-cold", "rapid-switch", "off-mid-tune",
               "broken-station", "distance-tone", "distance-music", "dead-group",
-              "dead-tune", "pool-vanishes" };
+              "dead-tune", "pool-vanishes", "warp-speed", "dial-storm", "speaker-farm" };
 
         // The parent: run each scenario in its own process, relay its output, add up the verdicts.
         static int RunEach(string[] args)
@@ -770,6 +772,174 @@ namespace CMM
             _sim.Run(8f);
             Check(sc, ToneOn() > 0.5f, "and the carrier takes over",
                   ToneOn() < 0f ? "no tone" : "tone " + ToneOn().ToString("0.00"));
+        }
+
+        // -- STRESS ------------------------------------------------------------------------------
+        //
+        // The eleven above ask whether it works. These three ask what happens when it is used
+        // harder than it was designed for, and they report the MAIN-THREAD COST of every tick
+        // alongside the audio, because a state machine can be perfectly correct and still be a
+        // stutter.
+
+        static void Perf(string sc, int from, float meanBudget, float p99Budget, float maxBudget)
+        {
+            float mean = _sim.TickMean(from), p50 = _sim.TickPct(0.50, from);
+            float p99 = _sim.TickPct(0.99, from), max = _sim.TickPct(1.0, from);
+            Console.WriteLine("   perf  tick mean " + mean.ToString("0.000") + " ms, p50 "
+                              + p50.ToString("0.000") + ", p99 " + p99.ToString("0.000")
+                              + ", worst " + max.ToString("0.000") + " ms over "
+                              + (_sim.TickMs.Count - from) + " ticks");
+            Check(sc, mean <= meanBudget, "the average tick stays cheap",
+                  mean.ToString("0.000") + " ms, budget " + meanBudget.ToString("0.0"));
+            Check(sc, p99 <= p99Budget, "and so does the 99th percentile",
+                  p99.ToString("0.000") + " ms, budget " + p99Budget.ToString("0.0"));
+            // A frame is 16.7 ms at 60 fps, so a single tick over that IS a dropped frame.
+            Check(sc, max <= maxBudget, "no single tick drops a frame",
+                  max.ToString("0.000") + " ms, budget " + maxBudget.ToString("0.0"));
+        }
+
+        // -- COMING INTO RANGE AT WARP SPEED -----------------------------------------------------
+        //
+        // A gyrocopter crosses a speaker's whole range in a fraction of a second, and everything
+        // the emitter layer does is deliberately rate-limited: the acoustic field is flooded from
+        // the listener a few times a second, occlusion RISES are rate-limited, the spatialiser
+        // slews its virtual distance, and a station starts when its nearest speaker comes inside
+        // range. Move faster than all of those and the question is whether the result is a fast
+        // fade or a click.
+        //
+        // Teleports rather than a smooth ride, because that is the harder case and it is what a
+        // laggy client and a fast-travel actually do to the listener position.
+        static void Warp_Speed()
+        {
+            const string sc = "warp-speed";
+            Place(A);
+            MoveListener(12.5f);
+            Dial(A, "Alpha FM");
+            if (!WaitAudible(14f)) { Fail(sc, "Alpha FM never became audible"); return; }
+            _sim.Run(2f);
+            int perfFrom = _sim.TickMs.Count;
+
+            // Each pass crosses the speaker from well outside range to point blank and out the
+            // far side, in fewer steps each time -- 120 blocks in two frames at the end, which is
+            // 3,600 blocks per second.
+            int[] steps = { 24, 12, 6, 3, 1 };
+            float worst = 0f; string worstAt = "none";
+            foreach (int n in steps)
+            {
+                _sim.Note("pass in " + n + " step(s) each way (" + (120 / n) + " blocks per frame)");
+                int mark = _sim.Tape.Count;
+                for (int i = 0; i <= n; i++) { MoveListener(70.5f - 120f * i / n); _sim.Step(); }
+                for (int i = 0; i <= n; i++) { MoveListener(-49.5f + 120f * i / n); _sim.Step(); }
+                _sim.Run(1.0f);
+                float at;
+                float step = _sim.BiggestStepDb(_sim.Tape[mark].T, _sim.Now, Floor, out at);
+                if (step > worst) { worst = step; worstAt = n + " step(s), t=" + at.ToString("0.00") + "s"; }
+            }
+
+            // A CROSSING IS A FADE, NOT A CUT. The budget is generous, because the speaker really
+            // does go from point blank to inaudible -- but a click is a discontinuity between two
+            // frames that are BOTH audible, and that is what this measures.
+            Check(sc, worst <= 20f, "crossing a speaker at any speed is a fade, not a click",
+                  "worst " + worst.ToString("0.0") + " dB between frames (" + worstAt + "), budget 20");
+
+            // AND IT STILL PLAYS AFTERWARDS. The real risk of thrashing the range boundary is a
+            // station that stops and never comes back, or a lane leaked on every crossing.
+            MoveListener(12.5f);
+            _sim.Run(3f);
+            float back = _sim.MeanDb(_sim.Now - 1.5f, _sim.Now);
+            Check(sc, back > Floor + 15f, "and the station is still there when you stop",
+                  back.ToString("0.0") + " dBFS");
+            Perf(sc, perfFrom, 2.0f, 6.0f, 16.7f);
+        }
+
+        // -- THE DIAL STORM ----------------------------------------------------------------------
+        //
+        // rapid-switch presses five times at 0.45 s. This presses forty times, as little as one
+        // frame apart, walks through Off and Automatic, and includes the dead station -- so the
+        // tune machine, the sweep borrow, the carrier and the slot allocator are all being asked
+        // to change their minds faster than any of their own timers.
+        //
+        // The question is not whether it sounds good; nobody dials like this. It is whether it
+        // comes out the other side CORRECT: on a station, audible, with no lane left hissing and
+        // no runaway cost.
+        static void Dial_Storm()
+        {
+            const string sc = "dial-storm";
+            Place(A); Place(B);
+            Dial(A, "Alpha FM"); Dial(B, "Gamma FM");
+            if (!WaitAudible(14f)) { Fail(sc, "nothing became audible"); return; }
+            _sim.Run(2f);
+            int perfFrom = _sim.TickMs.Count;
+
+            string[] wheel = { "Alpha FM", "Beta FM", "Gamma FM", "Broken FM",
+                               EmitterTuner.CmdOff, "Beta FM", "Alpha FM", EmitterTuner.CmdAuto };
+            _sim.Note("40 presses, one every 1-8 frames, across both speakers");
+            for (int i = 0; i < 40; i++)
+            {
+                Dial(i % 3 == 0 ? B : A, wheel[i % wheel.Length]);
+                _sim.Run((1 + (i % 8)) / 60f);
+            }
+            _sim.Note("the dial settles on Beta FM");
+            Dial(A, "Beta FM"); Dial(B, "Beta FM");
+            _sim.Run(12f);
+
+            // NOTHING LEFT SEARCHING. Every lane a press borrowed must have been handed back.
+            int hissing = 0, stations = 0;
+            var last = _sim.Tape[_sim.Tape.Count - 1];
+            for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++)
+            {
+                if (last.Sig[s] >= 0f && last.Sig[s] < 0.98f) hissing++;
+                if (s < CmmMixer.StationSlots && last.Pts[s] > 0f) stations++;
+            }
+            Check(sc, hissing == 0, "no lane is left hissing once the dial stops",
+                  hissing + " lane(s) with the receiver still searching");
+            Check(sc, stations >= 1, "the speakers end up on a station",
+                  stations + " station lane(s) carrying points");
+
+            float settled = _sim.MeanDb(_sim.Now - 2f, _sim.Now);
+            Check(sc, settled > Floor + 10f, "and it is audible", settled.ToString("0.0") + " dBFS");
+            float at;
+            float hole = _sim.LongestHole(_sim.Now - 8f, _sim.Now, Floor, out at) * 1000f;
+            Check(sc, hole <= 250f, "with no silence after it settles",
+                  hole <= 0.5f ? "none" : hole.ToString("0") + " ms at t=" + at.ToString("0.00") + "s");
+            Perf(sc, perfFrom, 2.0f, 6.0f, 16.7f);
+        }
+
+        // -- A BASE FULL OF SPEAKERS -------------------------------------------------------------
+        //
+        // Forty speakers is a horde base with a radio in every room. The point sets are capped
+        // (MaxPoints per station, MaxDeadPts for the carrier), the occlusion pass runs per point,
+        // and only three lanes can hold a station -- so this asks whether the caps degrade or
+        // break, and what forty speakers cost on the frame thread.
+        static void Speaker_Farm()
+        {
+            const string sc = "speaker-farm";
+            string[] st = { "Alpha FM", "Beta FM", "Gamma FM", "Broken FM" };
+            for (int i = 0; i < 40; i++)
+            {
+                var p = new Vector3i(4 + (i % 8) * 3, 64 + (i / 16), 4 + ((i / 8) % 5) * 3);
+                Place(p);
+                Dial(p, st[i % st.Length]);
+            }
+            MoveListener(12.5f);
+            if (!WaitAudible(20f)) { Fail(sc, "forty speakers and nothing played"); return; }
+            _sim.Run(6f);
+            int perfFrom = _sim.TickMs.Count;
+            _sim.Run(8f);
+
+            var last = _sim.Tape[_sim.Tape.Count - 1];
+            int pts = 0;
+            for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++) if (last.Pts[s] > 0) pts += (int)last.Pts[s];
+            Console.WriteLine("   lanes " + pts + " point(s) rendering across all lanes");
+            Check(sc, pts >= 3, "the lanes carry the speakers they can", pts + " point(s)");
+
+            float lvl = _sim.MeanDb(_sim.Now - 3f, _sim.Now);
+            Check(sc, lvl > Floor + 10f, "forty speakers are audible", lvl.ToString("0.0") + " dBFS");
+            float at;
+            float step = _sim.BiggestStepDb(_sim.Now - 7f, _sim.Now, Floor, out at);
+            Check(sc, step <= 14f, "and steady once settled", step.ToString("0.0") + " dB worst step");
+            // The headline number: what a horde base pays on every single frame.
+            Perf(sc, perfFrom, 4.0f, 10.0f, 16.7f);
         }
 
         // -- the tape, for a human --------------------------------------------------------------
