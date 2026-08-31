@@ -462,6 +462,21 @@ namespace CMM
             IntPtr dec = AudioDecoder.OpenNativeHandle(file, out int kind, out _, out int r, out long total);
             if (dec != IntPtr.Zero) { frames = total; rate = r; AudioDecoder.CloseNativeHandle(dec, kind); }
             if (frames <= 0 && !RootReachable(file)) return 0;   // transient — do not poison
+            // A FILE THAT IS THERE AND WILL NOT DECODE, SAID OUT LOUD, ONCE.
+            //
+            // Everything below this line quietly records Frames = 0, every chain walk then skips
+            // the track, and the station carries on -- which is the right BEHAVIOUR and a silent
+            // one. The track simply never plays, for the rest of time, and nothing anywhere says
+            // so: the file is on disk, so the coverage panel counts it; the playlist resolves, so
+            // the missing-entry report does not mention it; and the station has other tracks, so
+            // the "no playable tracks" warning never fires.
+            //
+            // Found by probing a real 3,381-track library: 25 of them are ALAC in an .m4a
+            // container, which this decoder does not handle. Nobody could have known.
+            //
+            // RootReachable is already the line between "the drive went away" and "this file is
+            // genuinely undecodable", and only the second is worth a word.
+            if (frames <= 0) ReportUndecodable(file);
             // Stamp with what the file looked like when opened, NOT re-statted after: a file being
             // written while we read it would otherwise be recorded against a stamp it no longer
             // has, and the mismatch would never resolve.
@@ -555,6 +570,35 @@ namespace CMM
             lock (_lenLock)
                 _len[file] = new LenEntry { Frames = 0, Rate = 0, Size = now.Size, Mtime = now.Mtime };
         }
+
+        // Files already named, so a re-probe after a catalog rebuild does not say it twice, and
+        // a cap so a folder full of the wrong thing is one summary rather than five hundred lines.
+        private static readonly HashSet<string> _saidUndecodable =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private const int MaxUndecodableNamed = 12;
+        private static int _undecodableCount;
+
+        private static void ReportUndecodable(string file)
+        {
+            lock (_lenLock)
+            {
+                if (!_saidUndecodable.Add(file)) return;
+                _undecodableCount++;
+                if (_undecodableCount <= MaxUndecodableNamed)
+                    Log.Warning($"[CMM] '{Path.GetFileName(file)}' is there but nothing could decode it — "
+                              + "it will be skipped every time the station reaches it. Check the format "
+                              + "(an .m4a holding ALAC rather than AAC is the common one); `cmm roots` "
+                              + "says where the file came from.");
+                else if (_undecodableCount == MaxUndecodableNamed + 1)
+                    Log.Warning($"[CMM] more than {MaxUndecodableNamed} tracks will not decode — "
+                              + "no longer naming them individually. This usually means a whole folder "
+                              + "is in a format the decoder does not handle.");
+            }
+        }
+
+        // How many distinct tracks have been found undecodable this session. Zero is the normal
+        // answer, and a non-zero one is worth putting in front of somebody.
+        internal static int UndecodableCount => _undecodableCount;
 
         // File.Exists, treating a transient IO error as "present" so a hiccup doesn't needlessly
         // interrupt playback — same stance as the context watch's ping.
