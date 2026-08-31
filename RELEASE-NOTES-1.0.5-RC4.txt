@@ -1,0 +1,28 @@
+World speakers now work on 2.6, not only 3.x. The capability check demanded a door type that only exists from 3.0, which is a check for doors standing in for a whole subsystem, so every speaker on 2.6 was silent. 2.6 gets stations, tuning, the acoustic field, reverb, the tuner menu and the craftable blocks. Alpha 20 and 21 still get the personal radio instead.
+Tune a speaker by looking at it. Hold the activate key on any speaker and the game's own radial menu opens with Automatic, every station, and Silent. The mod draws nothing; it answers the four questions the game already asks of every block you look at, so the prompt, the hold timing, the radial and the mouse tracking are the vanilla ones.
+Craft your own. A shelf speaker (2 electrical parts, 3 polymers, 2 wood, 1 duct tape) and a ham radio (2 electrical parts, 2 mechanical parts, 6 polymers, 2 duct tape). Single-player only, and the recipes are withdrawn the moment somebody joins, because the blocks they make are only heard by the machine that placed them.
+Every radio remembers its own station, saved with the world, so a base full of speakers stays the way you set it.
+A station with nothing playable sits on its own note rather than going silent. It is a minor chord, and the root moves per station, seeded from the station's name, so a dead channel keeps the same pitch on every client and across restarts.
+A radio you place starts silent instead of joining a station at full volume, and a station that starts while you are standing there fades in rather than appearing.
+Fragmented MP4 now plays. That is the container half of most podcast files.
+Changing station on a world speaker was rebuilt around the pocket radio's timings, so both tune the same way: the station you leave sinks under rising static rather than being cut, and the new one is revealed from under the noise instead of arriving on top of it.
+Static from world speakers is half as loud. It had been set against the hiss from the radio in your pocket, which reaches your ears by a different path. The personal radio is untouched.
+The off-air tone is quieter, at 0.04 rather than 0.15. It was levelled while a bug was attenuating it, and once that was fixed it sat far louder than a dead channel should.
+Door timing follows the measured open area of the doorway rather than a fraction of the animation, so a garage door and a closet door behave consistently, and only hinged doors are treated as swinging.
+A large POI is one building for station purposes, so its speakers agree rather than splitting across the tiles it is made of.
+World speakers went quiet in the middle of a station change. The crossover had only one side: the old sound faded out over a full second with nothing under it and the new one appeared at full a moment later.
+Ticking and popping when you turned your head near a speaker. The stereo position was worked out once per audio block and applied flat across it.
+Tuning a speaker to a dead station gave static, a pause, then more static. Two separate things were raising the off-air tone and each was tearing down the other's work, ten times a second for the length of the dial turn. It is one unbroken hiss now, settling onto the tone.
+Static formed over the off-air tone and stayed there. The hiss now clears as the tone rises.
+World speakers could go silent for the rest of the session. Each time the station list rebuilt, a speaker holding one of the three audio slots without having started yet never gave it back.
+Removing a station's music left it playing anyway, to the end of the song.
+Re-encoding a radio track put the station out of step, and on a server put players on the same station onto different songs.
+Starting a world speaker froze the game briefly, 403 ms in the worst case measured, now under nine.
+Death and spawn stingers were delayed by up to three seconds, waiting for a loudness measurement that could never arrive for audio that short.
+Music could stop after a track ended, until you walked into a different context, if the next track had been deleted, moved or was unreadable.
+A briefly disconnected drive could take a station off the air permanently, or leave a context looking empty for the rest of the session.
+Replacing a music file kept the old file's volume, and a file only partly read before a drive dropped out could set a wrong volume permanently.
+A track that could not be read was retried once a second, forever, re-reading the whole file each time.
+Playlists exported by VLC resolved to nothing and said nothing about it. Playlists losing individual tracks are now visible in the coverage panel, which shows 9 of 12, 3 missing, and lists them.
+Cache/loudness.xml grew far larger than intended. It is meant to hold only the tracks you have adjusted, banned or favourited, and was gaining an entry for every track played.
+Long tracks are measured a second in rather than nine, so a podcast no longer plays at a guess for its first several seconds.

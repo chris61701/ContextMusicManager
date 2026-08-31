@@ -94,10 +94,15 @@ namespace CMM
                 string[] p = line.Split('|');
                 if (p.Length == 3) baseRows[p[0]] = new Row { Kind = p[1], Default = p[2] };
             }
+            // An unreadable stamp must not read as "everything is new since 0", which would pass
+            // every check silently. Fall back to the current schema, which fails loudly instead.
+            if (baseSchema <= 0) baseSchema = cur;
 
             var byName = new Dictionary<string, SettingDef>(StringComparer.Ordinal);
             foreach (SchemaEntry e in CMMSettingsIO.AllEntries())
                 if (e.Setting != null) byName[e.Setting.Name] = e.Setting;
+
+            Console.WriteLine($"  baseline schema {baseSchema} ({baseRows.Count} settings), code at {cur}.");
 
             var changed = new List<string>();
             var added = new List<string>();
@@ -124,13 +129,24 @@ namespace CMM
                 SettingDef s = byName[name];
                 Row b = baseRows[name];
                 string now = live[name].Default;
-                if (s.DefaultChangedIn != cur)
+                // AGAINST THE BASELINE'S SCHEMA, NOT THE CURRENT ONE.
+                //
+                // This asked for DefaultChangedIn == CurrentSchema, which is right only if the
+                // baseline is regenerated on every single bump. It is not: the baseline is the
+                // last RELEASED schema, and a release cycle runs a dozen bumps deep -- 43 here
+                // while the code sat at 56. So every legitimate change made during the cycle
+                // failed, eighteen of them, and a guard that always fails is a guard nobody reads.
+                //
+                // The invariant that actually protects a user is the migration's own test
+                // (CMMSettingsFile: `s.DefaultChangedIn > fileSchema`), and the oldest file in the
+                // wild is stamped at the baseline. So: strictly greater than the baseline.
+                if (s.DefaultChangedIn <= baseSchema)
                 {
                     fail++;
                     Console.WriteLine($"  FAIL  {name}: default {b.Default} → {now} but DefaultChangedIn is "
-                                    + $"{s.DefaultChangedIn}, not {cur}. Bump CurrentSchema and pass "
-                                    + $"changedIn: {cur}, was: {b.Default} — otherwise this change reaches "
-                                    + "nobody who already has a config file.");
+                                    + $"{s.DefaultChangedIn}, which is not past the released schema "
+                                    + $"{baseSchema}. Pass changedIn: {cur}, was: {b.Default} — otherwise "
+                                    + "this change reaches nobody who already has a config file.");
                 }
                 else if (!AnyFormerDefaultMatches(s, b.Default))
                 {
@@ -146,13 +162,14 @@ namespace CMM
             foreach (string name in added)
             {
                 SettingDef s = byName[name];
-                if (s.Since != cur)
+                if (s.Since <= baseSchema)
                 {
                     fail++;
-                    Console.WriteLine($"  FAIL  {name}: new setting with since: {s.Since}, expected {cur}. "
-                                    + "Existing files would never have it backfilled.");
+                    Console.WriteLine($"  FAIL  {name}: new setting with since: {s.Since}, which is not past "
+                                    + $"the released schema {baseSchema}. Existing files would never have it "
+                                    + "backfilled.");
                 }
-                else Console.WriteLine($"  ok    {name}: new in schema {cur}");
+                else Console.WriteLine($"  ok    {name}: new in schema {s.Since}");
             }
 
             foreach (string name in removed)

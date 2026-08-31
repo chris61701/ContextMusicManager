@@ -89,6 +89,12 @@ namespace CMM
         internal static CmmMixer Instance => null;
         internal bool TryGetState(long id, out double pos, out double len, out bool playing)
         { pos = 0; len = 0; playing = false; return false; }
+        // MIRRORED FROM THE REAL ONE, because EmitterSlots (linked here for the slot rules) reads
+        // them. They went in when the six lanes were split into three for stations and three for
+        // tuning, and these two harnesses stopped BUILDING at that moment -- silently, because
+        // nothing runs them unless somebody asks. Keep them in step with Harmony/CmmMixer.cs.
+        internal const int MaxEmitterSlots = 6;
+        internal const int StationSlots    = 3;
     }
 
     internal static class ContextMusicManager

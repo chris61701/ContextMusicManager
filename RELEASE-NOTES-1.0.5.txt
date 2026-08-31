@@ -1,0 +1,104 @@
+Context Music Manager 1.0.5
+
+Everything below is measured against 1.0.4b.
+
+
+NEW
+
+- Music through in-world speakers. Radios, jukeboxes and speaker blocks play your Radio music
+  where they physically stand, so a POI you are clearing has music coming out of the room
+  instead of out of your head. Works on 2.6 and 3.x.
+- A real acoustic model, not a distance fade. Sound routes through doorways and around corners
+  rather than through walls, and reverb is graded by how much survives the bounces - a stone
+  cave carries it, a wood room kills it.
+- Personal radio on Alt+PgUp / Alt+PgDn, which walk Off - station - station - Off, so two keys
+  give on, off, next and previous. Works on every supported version, alphas included.
+- Radio stations are the subfolders of your Radio folder, each on a shared world clock, so
+  everyone on a server hears the same song at the same moment and tuning in joins a broadcast
+  already in progress.
+- Changing station sounds like tuning a radio. The station you leave sinks under rising static
+  rather than being cut, and the new one arrives distorted before opening out.
+- Craft a shelf speaker or a ham radio, place it, then look at it and hold the activate key to
+  pick its station from the game's own radial menu.
+- A station with nothing playable sits on its own note rather than going silent, seeded from
+  the station's name so a dead channel keeps its pitch on every client and across restarts.
+- Music packs can ship as their own mods. CMM reads the Music folder of every installed mod as
+  well as your own, so a soundtrack survives updating CMM and works with MO2, Vortex and
+  Wabbajack.
+- Playlist sources: a context can point at an .m3u or .m3u8 instead of a folder, so one
+  playlist draws from anywhere on disk without moving or copying anything.
+- Context HUD on Alt+Numpad9 - what is playing, why, and where it came from.
+- Coverage panel on Alt+Numpad8 - which contexts have music, which are empty, and what each
+  empty one falls back to.
+- Now Playing overlay on Alt+Keypad7.
+- Ban a track with Alt+Delete, undo with Alt+End, favourite with Alt+Insert, and cycle fight
+  music with Alt+Home.
+- Next and Prev walk the history of what you actually heard in that context, like a music
+  player, instead of rolling a fresh random track.
+- Per-section switches for vanilla Dynamic Music, so you can silence Combat or Suspense without
+  turning the whole thing off.
+- Console commands: cmm roots, cmm scan, cmm rotation, cmm acoustics, cmm emitters, cmm sfx.
+- The radio dial has recorded sounds, in the mod's Sounds folder - swap them for anything.
+
+
+CHANGED
+
+- A big library finally sounds like one. Every track now plays before any track repeats; the
+  old behaviour excluded exactly one track, so something could come back after three.
+- Your config files are yours. settings.xml, radio.xml and contexts.xml are written on first
+  run rather than shipped, so updating adds only what is new and leaves your settings alone.
+  Previously every update reset everything you had chosen.
+- The per-context Music folders are created by the mod where your music actually lives, not
+  only inside the mod folder, and contexts you add yourself get folders too.
+- World speakers follow the Ambient slider rather than Music, because a radio playing out of a
+  block is an environmental sound.
+- An infested POI now carries its ordinary tier music underneath it instead of excluding it.
+- A huge music folder becomes playable long before the scan finishes.
+- Favourites are scaled to folder size, so marking one means roughly the same thing in a
+  library of fifty tracks and one of five thousand.
+- CMM's keys go inert while the F1 console is open.
+
+
+FIXED
+
+- The game's Overall Volume slider now works on CMM's music. Turning the master to zero used
+  to silence the whole game except this mod.
+- Installing on a dedicated server no longer freezes joining players. CMM is client-side only
+  and now detects a server and stays inert.
+- FLAC files with an ID3 tag would not play at all. In one 9,839-file library, 146 were
+  affected - and because tagging tools work an album at a time, they arrive in whole albums.
+- Speakers stopped being detected, often for the rest of the session, because block ids are
+  reassigned on every world load. The second world of a session went silent.
+- Live edits went unnoticed on exFAT, FAT, SD cards and many network shares. Adding, removing
+  or renaming tracks now registers there too.
+- Music no longer starts at the wrong volume and slides into place a second later, and tracks
+  that had not been measured yet no longer play 8-12 dB too loud.
+- Long tracks started at the wrong volume and stayed there for their whole length.
+- Death and spawn stingers were delayed by up to three seconds, waiting for a measurement that
+  could never arrive.
+- Radio music was quietly distorted. The receiver's drive stage never fully switched off, so
+  every fully-tuned station carried 2-7% distortion.
+- Starting a world speaker froze the game briefly - 403 ms in the worst case. Now under 9 ms.
+- World speakers went quiet in the middle of a station change, and ticked when you turned your
+  head near one.
+- Tuning a speaker to a dead station gave static, a pause, then more static. It is one hiss
+  now, settling onto the tone.
+- Removing a station's music left it playing anyway, to the end of the song.
+- Large video files stalled the decoder. A 2 GB mp4 took over 25 seconds to open and now takes
+  0.7; a 20 GB mkv took about 130 seconds and now takes 0.2.
+- The radio kept playing after you switched it off, and switching it on lost your place in the
+  track underneath.
+- A briefly disconnected drive could take a station off the air permanently, or leave a context
+  looking empty for the rest of the session.
+- Music could stop after a track ended if the next one had been deleted or moved, until you
+  walked into a different context.
+- Replacing a music file kept the old file's volume, and re-encoding a radio track put the
+  station out of step for everyone.
+- Leaving a world kept its acoustics in memory, up to about 43 MB.
+- A hint of the main-menu theme could be heard while paused, and a track ending during a pause
+  unmuted everything.
+- Near a trader, the vanilla fallback could hold the wrong music for minutes, and with the
+  trader disabled a fight played exploration music.
+- Wrong or missing context music on Turkish and Azerbaijani system locales.
+- On Alpha 20 and 21 the mod read the wrong game option, and in some cases failed to load at
+  all.
