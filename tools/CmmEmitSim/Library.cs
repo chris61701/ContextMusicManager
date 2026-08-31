@@ -52,6 +52,16 @@ namespace CMM
             { w.Write(System.Text.Encoding.ASCII.GetBytes("RIFF")); w.Write(junk.Length); w.Write(junk); }
         }
 
+        // Give the broken station something it can actually play. Used to prove the carrier ends
+        // when a folder is fixed -- nothing signals that, so the only correct behaviour is for the
+        // dead set to stop containing anybody.
+        internal static void Repair(string root)
+        {
+            string dir = Path.Combine(root, "Radio", "Broken FM");
+            Directory.CreateDirectory(dir);
+            Tone(Path.Combine(dir, "02 repaired 300Hz.wav"), 300f, 45f);
+        }
+
         private static void Tone(string path, float hz, float seconds)
         {
             int rate = 48000, ch = 2;

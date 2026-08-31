@@ -595,7 +595,21 @@ namespace CMM
 
             // DESTROY THE ONE THAT IS LEFT ON IT... by taking the OTHER away first, so whichever
             // holds the lane, the survivor is the one being asked about.
-            _sim.Note("destroy A (whatever it was doing)");
+            // TUNE IT BACK ON. A speaker JOINING the station must not disturb the one already
+            // hearing it -- the give-up used to raise the carrier again for its own position and
+            // drop the first speaker to static.
+            _sim.Note("tune A back onto Broken FM while B is on it");
+            Dial(A, "Broken FM");
+            _sim.Run(6f);
+            float joinHole = _sim.LongestHole(_sim.Now - 5.5f, _sim.Now, Floor, out at) * 1000f;
+            Check(sc, ToneOn() > 0.5f, "the tone survives a speaker joining the station",
+                  "tone " + ToneOn().ToString("0.00"));
+            Check(sc, joinHole <= 400f, "and the one already on it is not dropped to hunt again",
+                  joinHole <= 0.5f ? "none" : joinHole.ToString("0") + " ms of silence");
+            Check(sc, CarrierPoints() >= 2, "both are served again", CarrierPoints() + " point(s)");
+
+            // DESTROY THE ONE HOLDING THE LANE. The other keeps the tone, promptly.
+            _sim.Note("destroy A");
             for (int i = 0; i < EmitterRegistry.Snapshot.Count; i++)
                 if (EmitterRegistry.Snapshot[i].Pos.Equals(A)) { EmitterRegistry.Snapshot.RemoveAt(i); break; }
             _sim.Run(4f);
@@ -603,6 +617,18 @@ namespace CMM
                   "tone " + ToneOn().ToString("0.00"));
             Check(sc, CarrierPoints() >= 1, "and is still serving the one that is left",
                   CarrierPoints() + " point(s)");
+
+            // THE STATION COMES BACK. Nothing signals this -- a folder gains a playable file and
+            // the catalog notices -- so the carrier has to end because the set empties, not
+            // because anything told it to.
+            _sim.Note("Broken FM gains a playable track");
+            Library.Repair(Path.Combine(Path.GetTempPath(), "CmmEmitSim"));
+            UnityEngine.Time.realtimeSinceStartup += 60f;
+            RadioStationCatalog.ForceRebuild();
+            RadioStationCatalog.EnsureCatalog();
+            _sim.Run(12f);
+            Check(sc, ToneOn() < 0f, "the tone stops once the station can play",
+                  ToneOn() < 0f ? "carrier down" : "tone still " + ToneOn().ToString("0.00"));
         }
 
         // -- the tape, for a human --------------------------------------------------------------

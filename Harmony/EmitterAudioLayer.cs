@@ -616,6 +616,11 @@ namespace CMM
             MaintainTune();
             if (_tunePhase == 0) MaintainSweepBorrow();
             GroupSnapshot();        // per-station nearest + culled point sets from the registry snapshot
+            // AFTER GroupSnapshot, because it reads THIS tick's set of speakers on a dead station.
+            // It used to run inside MaintainTune, before the set existed, so it always worked from
+            // the previous tick -- which is survivable while the carrier serves one speaker and is
+            // not once it serves a group that changes as you tune.
+            MaintainDeadAir();
             // AFTER GroupSnapshot so the landing voice is seeded from this tick's speaker
             // positions, and BEFORE the start/stop logic so a station that just landed a voice is
             // not started a second time.
@@ -1507,9 +1512,8 @@ namespace CMM
                 // most likely to want it. Reading the catalog's own verdict here makes the carrier
                 // independent of how the speaker arrived.
                 RadioStationCatalog.ByName.TryGetValue(pinned, out Station st);
-                bool poolDead = st != null && st.VoiceId == 0 && st.OnAir == null
-                             && st.LastMiss == ResolveMiss.NoUsableTracks;
-                if (st == null || !st.Ready || poolDead)
+                // ONE QUESTION, ASKED ONCE. See StationCanPlay.
+                if (!StationCanPlay(pinned, st))
                 {
                     // SILENCED, OR PINNED TO A STATION THAT NO LONGER EXISTS. The speaker is on
                     // nothing, and _posStation must say so -- it is only ever WRITTEN below, so
@@ -2843,88 +2847,89 @@ namespace CMM
             _deadAirSlot = -1;
         }
 
+        // ── THE CARRIER IS A STATION, AND IT IS DERIVED ─────────────────────────────────────
+        //
+        // This used to be a machine with an OWNER and a pile of triggers that ended it: a dial
+        // turn anywhere, the owner leaving the registry, a give-up naming a different speaker.
+        // Every one of them was correct for one speaker and wrong for a group, and each was
+        // reported separately -- retuning one sent both to static, breaking one sent the rest to
+        // static, tuning a second radio ONTO the station killed the tone for the first, and a
+        // station that started working again went on playing the tone for ever because nothing
+        // was watching for that.
+        //
+        // They are all the same defect: nothing derived the carrier's existence from the world.
+        // So now nothing remembers it either. GroupSnapshot rebuilds, every tick, the set of
+        // speakers whose pinned station cannot produce sound. This reads that set and nothing
+        // else:
+        //
+        //     empty        -> there is no carrier
+        //     non-empty    -> there is one, on that station, serving exactly those speakers
+        //
+        // The owner is the first member, recomputed every tick, and exists only to seed the pitch
+        // and name a position in the log. Losing it is not an event. A station coming back to life
+        // empties the set on the tick the catalog notices, and the carrier ends because the set is
+        // empty -- not because anything told it to.
         private static void MaintainDeadAir()
         {
-            var snap = EmitterRegistry.Snapshot;
-            int at = -1;
-            if (_deadAirOn)
-                for (int i = 0; i < snap.Count; i++)
-                    if (snap[i].Pos.Equals(_deadAirPos)) { at = i; break; }
-            // A MISS IS NOT AN ENDING. This tore the carrier down on any tick whose registry
-            // snapshot did not happen to contain the speaker -- measured at 2 ms after it was
-            // raised, twice, so the tone never sounded for longer than a tick. Whether the speaker
-            // is in THIS tick's snapshot is not the question; whether anything still wants dead
-            // air is, and that has explicit owners (a dial turn, an empty pin). A miss just means
-            // there is nothing to republish right now.
-            if (_deadAirSlot < 0) return;
-            if (at < 0)
+            // NOTHING TUNED TO A DEAD STATION MEANS NO CARRIER. The one ending, and it needs no
+            // trigger: a retune, a destroyed speaker, a station that started working and a folder
+            // that came back all reach it the same way.
+            if (_deadGroup.Count == 0)
             {
-                // THE OWNER LEFT, NOT THE BROADCAST. Breaking the radio that happened to hold the
-                // lane ended the carrier for every OTHER radio tuned to that station, and the
-                // survivors then hunted their way back from silence -- reported as "when one is
-                // destroyed it goes to static instead of just going mute".
-                //
-                // Ownership is bookkeeping, not the thing being listened to. Exactly the same
-                // reasoning as a retune on the owner, so it takes the same path: hand the lane to
-                // a speaker that is still there and still on that station, and the tone does not
-                // even flicker. Only when nobody is left does the carrier actually end.
-                for (int i = 0; i < _deadGroup.Count; i++)
-                {
-                    if (_deadGroup[i].Pos.Equals(_deadAirPos)) continue;
-                    _deadAirPos = _deadGroup[i].Pos;
-                    _deadAirMissingAt = 0f;
-                    CMMConfig.D("[CMM] Dead air: the owner is gone — the carrier passes to "
-                              + _deadAirPos + ".");
-                    return;
-                }
-                // ...unless it stays missing, which means the speaker is gone for good.
-                if (_deadAirMissingAt <= 0f) _deadAirMissingAt = CmmClock.Now;
-                else if (CmmClock.Now - _deadAirMissingAt > 2f) EndDeadAir("its speaker left the registry");
+                if (_deadAirOn) EndDeadAir("nothing is tuned to a dead station");
                 return;
             }
-            _deadAirMissingAt = 0f;
 
-            // EVERY SPEAKER ON THE DEAD STATION, NOT JUST THE ONE THAT FOUND IT.
-            //
-            // The carrier is one lane and the lane carried ONE point, so of several radios tuned
-            // to a station that will not open, exactly one sounded. Break it and the carrier
-            // passed to the next, which ran the whole hunt again before settling -- radios
-            // queueing for a tone. A lane takes N points and a station lane already publishes one
-            // per speaker, so the carrier does too, each with its own occlusion.
-            //
-            // The set is gathered in GroupSnapshot, where the pin has just been resolved. It was
-            // built HERE at first, off _posStation -- and _posStation is written only on the LIVE
-            // station path, which this branch never reaches, so a speaker on a dead station is by
-            // construction absent from it. The gather found nobody but itself and the queueing
-            // carried on unchanged.
-            // THE SPEAKER THAT OWNS THE CARRIER IS ALWAYS FIRST, and the group is what it adds.
-            //
-            // GoDeadAir has two callers -- GroupSnapshot's dead-pin branch, which gathers the
-            // group, and the tune machine's give-up, which does not. Publishing only the group
-            // meant a carrier raised by the give-up had no points at all and never sounded, which
-            // is every "tuned to a station that will not open" case that goes through the machine.
-            // The owner is the floor; the group is an addition to it, never a replacement.
-            EmitterRegistry.Emitter owner = snap[at];
+            string want = _deadNames.Count > 0 ? _deadNames[0] : null;
+            // A DIFFERENT DEAD STATION IS A DIFFERENT CARRIER -- different pitch, and the hunt
+            // belongs to it. Only an actual change of identity restarts anything.
+            if (_deadAirOn && !string.Equals(_deadAirName, want, StringComparison.OrdinalIgnoreCase))
+                EndDeadAir("the dead station changed to '" + (want ?? "-") + "'");
+
+            if (!_deadAirOn)
+            {
+                if (_deadAirSlot < 0)
+                {
+                    _deadAirSlot = FreeTuneSlot();
+                    if (_deadAirSlot < 0)
+                    {
+                        CMMConfig.D("[CMM] Dead air: no tuning lane spare — the carrier waits.");
+                        return;
+                    }
+                }
+                _deadAirOn = true;
+                _deadAirName = want;
+                _deadAirSince = CmmClock.Now;
+                _deadAirToneUp = false;
+                _deadAirPos = _deadGroup[0].Pos;
+                // SEARCH FIRST. A set that finds nothing does not go straight to the carrier -- it
+                // hunts, finds nothing, and settles. The tone appearing the instant a station is
+                // judged dead skips the only part that tells the player anything is being tried.
+                CmmMixer.Instance?.SetEmitterRecv(_deadAirSlot, 0f, 0.04f);
+                _slotArmedAt[_deadAirSlot] = CmmClock.Now;
+                CMMConfig.D($"[CMM] Dead air: slot {_deadAirSlot} searching for '{want}' at "
+                          + $"{_deadAirPos} ({_deadGroup.Count} speaker(s)) — the carrier follows "
+                          + "if nothing is found.");
+            }
+
+            // DERIVED, NOT REMEMBERED. The owner names a position for the pitch seed and the log;
+            // it is whoever is first in this tick's set, so a speaker being retuned or destroyed
+            // simply stops being it.
+            _deadAirPos = _deadGroup[0].Pos;
+
+            // Every speaker on the station, each with its own occlusion -- exactly what a station
+            // lane publishes for its own speakers.
             int dc = 0;
-            _deadPts[0] = owner.Pos.x + 0.5f; _deadPts[1] = owner.Pos.y + 0.5f;
-            _deadPts[2] = owner.Pos.z + 0.5f;
-            _deadFlags[0] = owner.Name == "radioHam" ? 1 : 0;
-            dc = 1;
             for (int i = 0; i < _deadGroup.Count && dc < MaxDeadPts; i++)
             {
                 EmitterRegistry.Emitter de = _deadGroup[i];
-                if (de.Pos.Equals(owner.Pos)) continue;
                 _deadPts[dc * 3] = de.Pos.x + 0.5f;
                 _deadPts[dc * 3 + 1] = de.Pos.y + 0.5f;
                 _deadPts[dc * 3 + 2] = de.Pos.z + 0.5f;
                 _deadFlags[dc] = de.Name == "radioHam" ? 1 : 0;
                 dc++;
             }
-            // OCCLUDED, LIKE EVERYTHING ELSE THAT COMES OUT OF THAT BOX. This published 0, which
-            // is clear line -- no walls, no doors -- so the carrier arrived at full strength
-            // through geometry that muffles everything else the speaker does. One point, one ray,
-            // every tick: cheap, and it also stops the tone reading as a sound in the room rather
-            // than one coming from the radio.
+
             OccludePoints(_deadPts, _deadGain, dc);
             float dcap = CMMConfig.WorldEmitterRange * 0.75f;
             for (int i = 0; i < dc; i++) if (_deadGain[i] > dcap) _deadGain[i] = dcap;
@@ -2970,6 +2975,50 @@ namespace CMM
         }
 
         private static int _deadAirSlot = -1;
+        // Which dead station the live carrier belongs to. A change of identity is the ONLY
+        // thing that restarts the hunt; everything else about the group is derived per tick.
+        private static string _deadAirName;
+        // STATIONS THAT WOULD NOT OPEN, and when we last found that out. Keyed by NAME because
+        // that is what the fact is about: every speaker tuned to it is on dead air, whether or not
+        // it was the one that asked.
+        // The verdict, and the track list it was reached against. The list is the important half:
+        // a station judged dead cannot prove itself alive, because nothing will try it again while
+        // the verdict stands -- so without a way to notice the POOL changing, fixing a folder left
+        // the tone playing until the timer ran out. A catalog rebuild replaces Order, so a
+        // different array means the verdict was about a different station to the one there now.
+        private struct DeadVerdict { public float At; public string[] Pool; }
+        private static readonly Dictionary<string, DeadVerdict> _deadStations =
+            new Dictionary<string, DeadVerdict>(StringComparer.OrdinalIgnoreCase);
+        // The backstop, for a pool that has not changed and a give-up that may have been a
+        // transient (a drive that blinked). Not the mechanism -- the pool check is.
+        private const float GiveUpMemory = 30f;
+
+        // ── CAN THIS STATION MAKE A SOUND? ONE ANSWER, ONE PLACE ────────────────────────────
+        //
+        // This was three predicates in three places that did not agree, which is most of why the
+        // carrier kept ending under speakers that were still tuned to a dead frequency. The worst
+        // of them was poolDead: it reads st.OnAir, and the catalog fills OnAir in with the
+        // filename of a track that will not decode -- so merely ATTEMPTING a dead station made it
+        // look alive to every other speaker on it.
+        //
+        // A live voice is proof and outranks everything. Otherwise: a station the catalog has
+        // condemned is dead, and so is one the tune machine has just failed to open, until it
+        // proves otherwise by actually playing.
+        internal static bool StationCanPlay(string name, Station st)
+        {
+            if (st == null || !st.Ready) return false;
+            if (st.VoiceId != 0) { _deadStations.Remove(name); return true; }   // it is playing: proof
+            if (st.LastMiss == ResolveMiss.NoUsableTracks) return false;
+            if (!_deadStations.TryGetValue(name, out DeadVerdict v)) return true;
+            // The pool it was judged against has been rebuilt, or the verdict has simply aged out:
+            // either way it gets another chance, and a real failure re-records it within seconds.
+            if (!ReferenceEquals(v.Pool, st.Order) || CmmClock.Now - v.At >= GiveUpMemory)
+            {
+                _deadStations.Remove(name);
+                return true;
+            }
+            return false;
+        }
         // THE SAME MODEL THE STATIONS USE, for the tuning noise and the off-air carrier.
         //
         // These two called EmitterAcoustics.ComputeOcclusion -- the per-point RAY that the
@@ -3083,7 +3132,18 @@ namespace CMM
                 _tunePhase = 0; _tuneSlot = -1;
             }
 
-            // A DIAL TURN ON *THIS* SPEAKER, not on any speaker anywhere.
+            // NO DIAL-TURN TEARDOWN AT ALL ANY MORE.
+            //
+            // Every version of this was wrong, in a different way each time: ending the carrier on
+            // any retune anywhere, then only on the owner's, then handing ownership to an heir.
+            // The carrier is derived from "who is tuned to a station that cannot play" -- a retune
+            // changes that set and MaintainDeadAir sees the new one on the same tick. There is
+            // nothing to tear down and nothing to hand over.
+            //
+            // Kept as a comment rather than deleted because the shape keeps coming back: if the
+            // tone ever needs ending in response to an EVENT, the answer is almost certainly that
+            // the set is being computed wrongly instead.
+            /* was: A DIAL TURN ON *THIS* SPEAKER, not on any speaker anywhere.
             //
             // This ended the carrier on every retune in the world, which was right while the
             // carrier served one radio and is wrong now that it serves a group: tuning one of two
@@ -3108,13 +3168,8 @@ namespace CMM
                     CMMConfig.D($"[CMM] Dead air: the owner was retuned — the carrier passes to {heir}.");
                 }
                 else EndDeadAir("the speaker on it was retuned");
-            }
+            } */
 
-            // AFTER that clear, never before it. Landing on a dead station IS a dial turn, so
-            // running this first meant the carrier was raised and then wiped in the same tick by
-            // the very retune that called for it -- which is why the one station built to be
-            // broken still made no sound.
-            MaintainDeadAir();
 
 
             // A DIAL TURN DURING A DIAL TURN. The pocket radio has nothing to resolve here: one
@@ -3283,9 +3338,20 @@ namespace CMM
                     // left the speaker with no point at all, which is silence rather than a tone.
                     if (to != null && to.Slot == _tuneSlot) { _slotOwner[_tuneSlot] = null; to.Slot = -1; }
                     CmmMixer.Instance?.SetEmitterRecv(_tuneSlot, 1f, ArriveRamp);
-                    // It already holds a tuning lane and already knows the speaker -- hand both
-                    // straight over rather than making the carrier rediscover them.
-                    GoDeadAir(EmitterTuner.LastTunePos, _tuneSlot);
+                    // A FACT ABOUT THE STATION, NOT ABOUT THIS SPEAKER.
+                    //
+                    // Recorded against the SPEAKER at first, which is half a thought: "this
+                    // station would not open" is true for every radio tuned to it, and the one
+                    // that happened to ask is not special. So a second radio dialled onto a dead
+                    // station knew nothing, and worse -- ASKING made the station look alive to
+                    // everyone else, because the catalog resolves an OnAir filename for a track
+                    // that will not decode, which is what poolDead reads. Every other speaker fell
+                    // out of the dead set and the carrier ended for all of them.
+                    {
+                        RadioStationCatalog.ByName.TryGetValue(_tuneTo, out RadioStation dst);
+                        _deadStations[_tuneTo] = new DeadVerdict
+                        { At = CmmClock.Now, Pool = dst != null ? dst.Order : null };
+                    }
                     CMMConfig.D($"[CMM] Tune: '{_tuneTo}' never opened — slot {_tuneSlot} goes off air.");
                     _tunePhase = 0; _tuneSlot = -1;
                 }
@@ -3342,7 +3408,17 @@ namespace CMM
             // one it is leaving instead, which is the entire point.
             EmitterTuner.ReleaseSweepHold();
 
-            ClearOffAir(-1);
+            // NO BLANKET ClearOffAir(-1) HERE ANY MORE.
+            //
+            // "Clear the carrier wherever it is" was right when the carrier served one speaker:
+            // that speaker was retuning, so its tone was over. Serving a group it is a speaker
+            // silencing everybody else's tone by touching its own dial -- the carrier lane stayed
+            // armed and simply went quiet, which is why the log showed no ending and the tone was
+            // gone anyway.
+            //
+            // Nothing needs to clear it. The retuned speaker leaves the dead set on this tick;
+            // if that empties the set MaintainDeadAir ends the carrier, and if it does not, the
+            // remaining speakers are still owed the tone.
             _tuneFrom = fromName; _tuneTo = want;
             _tuneSlot = fromSt.Slot;
             _tunePhase = 1;
