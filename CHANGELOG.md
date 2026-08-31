@@ -2,12 +2,36 @@
 
 All notable changes to Context Music Manager are documented here.
 
-## 1.0.5
+## 1.0.5a — unreleased
 
-**Release candidates:** RC1 — 2026-08-23 · RC2 — 2026-08-26 · RC3 — 2026-08-27 ·
-RC4 — 2026-08-30.
-Everything in this section ships in 1.0.5; the RC line above is only there so a tester can tell
-which build they are holding. Items added after RC2 are marked *(RC3)* or *(RC4)*.
+Revisions since 1.0.5 shipped. ModInfo carries `1.0.5.1`, because the game runs
+`Version.TryParse` over that field and warns in every user's log for anything non-numeric —
+1.0.2a, 1.0.2b, 1.0.3a and the RC builds all tripped it. The letter is the name people read;
+the fourth component is the number the game reads.
+
+### Fixed
+
+- **A track that will not decode now says so**. A file that is present and readable
+  but that nothing can decode was recorded as unplayable and skipped from then on — correct
+  behaviour, and completely silent. Every other instrument agreed with the silence: the file is
+  on disk, so the coverage panel counted it; the playlist entry resolved, so the missing-entry
+  report said nothing; and the station had other tracks, so the "no playable tracks" warning
+  never fired. The track simply never played, and there was no way to find out. Found by probing
+  a real 3,381-track library through the shipping decoder: 25 of them are Apple Lossless inside
+  an `.m4a` container, which is not a supported format. Each such file now gets one warning
+  naming it, capped at twelve before it summarises, and a drive that has merely gone away still
+  says nothing — that distinction already existed and is what this is built on.
+- **The crafting diagnostic worked everywhere except Alpha 20**, which is the one
+  version it was written for. It read a recipe cache that A20 does not have, three lines below a
+  comment explaining that A20 does not have it. The recipes themselves were always installed
+  correctly; what was lost was the report that tells "the recipe is installed" apart from "the
+  player can see it", plus a spurious retry for something that had not failed.
+
+## 1.0.5 — released 2026-08-31
+
+Shipped as **RC4**, built 2026-08-30. The candidates before it — RC1 (2026-08-23),
+RC2 (2026-08-26), RC3 (2026-08-27) — were testing builds only; the *(RC3)* / *(RC4)* tags below
+say which one an item first appeared in, and every one of them is in the release.
 
 Everything below is measured against **1.0.4b**. Several large features arrive whole in this
 release — world speakers, the personal radio, music packs, the overlay — and are described as
@@ -283,21 +307,6 @@ they now behave, rather than as a history of how they got there.
 
 ### Fixed
 
-- **A track that will not decode now says so** *(post-RC4)*. A file that is present and readable
-  but that nothing can decode was recorded as unplayable and skipped from then on — correct
-  behaviour, and completely silent. Every other instrument agreed with the silence: the file is
-  on disk, so the coverage panel counted it; the playlist entry resolved, so the missing-entry
-  report said nothing; and the station had other tracks, so the "no playable tracks" warning
-  never fired. The track simply never played, and there was no way to find out. Found by probing
-  a real 3,381-track library through the shipping decoder: 25 of them are Apple Lossless inside
-  an `.m4a` container, which is not a supported format. Each such file now gets one warning
-  naming it, capped at twelve before it summarises, and a drive that has merely gone away still
-  says nothing — that distinction already existed and is what this is built on.
-- **The crafting diagnostic worked everywhere except Alpha 20** *(post-RC4)*, which is the one
-  version it was written for. It read a recipe cache that A20 does not have, three lines below a
-  comment explaining that A20 does not have it. The recipes themselves were always installed
-  correctly; what was lost was the report that tells "the recipe is installed" apart from "the
-  player can see it", plus a spurious retry for something that had not failed.
 - **Tuning a speaker to a dead station gave static, a pause, then more static** *(RC4)*. Two
   things were raising the off-air carrier: the tone's own upkeep, which works out every tick who
   is listening to a station that cannot play, and a second, older trigger that fired the moment a

@@ -22,20 +22,24 @@
      it does for anything non-numeric: 1.0.2a, 1.0.2b, 1.0.3a and 1.0.5RC1/2/3 all tripped it.
      The game keeps the raw text separately as VersionString, so the mod list still displayed
      them correctly — which is why it went unnoticed for months. Point releases therefore go in
-     a FOURTH numeric component (1.0.5 -> 1.0.5.1), not a letter suffix. -->
+     a FOURTH numeric component (1.0.5 -> 1.0.5.1), not a letter suffix.
+
+     1.0.5.1 IS the build published as "1.0.5a". 1.0.5 shipped as RC4 on 2026-08-30 and is the
+     release; everything after it is a revision, and the letter is what the mod pages call it
+     while this field stays a number the game can parse. -->
 <xml>
   <Name value="ContextMusicManager"/>
   <DisplayName value="Context Music Manager"/>
   <Author value="Velasha"/>
   <Description value="Plays custom music based on context."/>
   <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
-  <Version value="1.0.5"/>
+  <Version value="1.0.5.1"/>
   <!-- Alpha 20 only reads this nested block (see header). Keep Version matched above. -->
   <ModInfo xmlns="urn:cmm-legacy">
     <Name value="ContextMusicManager"/>
     <Description value="Plays custom music based on context."/>
     <Author value="Velasha"/>
-    <Version value="1.0.5"/>
+    <Version value="1.0.5.1"/>
     <Website value="https://www.nexusmods.com/7daystodie/mods/10649"/>
   </ModInfo>
 </xml>
