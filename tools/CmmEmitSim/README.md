@@ -64,6 +64,9 @@ Every assertion is one of the user's reports, stated as a number:
 | `switching off mid-tune goes quiet and stays quiet` | the hard cut of step 15 |
 | `a station that will not open sits on the carrier` | step 8 |
 
+| `the carrier is raised once for the whole dial turn` | "static, a little silence, then more static before the tone" |
+| `the song stops when its pool goes away` | the playlist is removed and the song plays on |
+
 `--csv` writes the full tape per scenario: ear dBFS per frame, plus `sig` / lane dBFS / mirror
 gain / tone envelope for all six lanes, with the presses annotated.
 
@@ -78,6 +81,17 @@ parent run spawns a child per scenario and adds up the verdicts. `--only <name>`
 It matters: `off-mid-tune` passed alone and failed after `rapid-switch`, purely because the
 previous scenario's audio was still draining. A result that depends on what ran before it is not
 a result.
+
+## Two known flakes
+
+`retune-cold` and `rapid-switch` each fail roughly one run in four, and NEITHER is a regression --
+both flake identically on `main` (measured: `rapid-switch` 3/12 before a change, 1/10 after). Do
+not read one red run as a break; re-run it.
+
+`rapid-switch` is worth a look one day rather than a widened budget: the hole is 367-400 ms and it
+lands at t=2.75 s **every time**, with a decision log byte-identical to the passing runs. Same
+presses, same timestamps, different audio -- so it is below the state machine, in the producer or
+the capture.
 
 ## What is NOT deterministic
 

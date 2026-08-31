@@ -1376,7 +1376,6 @@ namespace CMM
         //      !Ready was never going to catch it.
         private static Vector3i _deadAirPos;
         private static bool     _deadAirOn;
-        private static float    _deadAirMissingAt;
         private static float    _deadAirSince;
         private static bool     _deadAirToneUp;
         // How long the hunt runs before a dead station settles onto its carrier: the same span a
@@ -1555,10 +1554,15 @@ namespace CMM
                     // speaker. That is the two-millisecond death: MaintainTune raised the tone and
                     // GroupSnapshot, running immediately after it in the same tick, killed it on
                     // behalf of a radio in another building.
+                    // NOTHING TO DO FOR A SWITCHED-OFF SPEAKER. This used to end the carrier
+                    // when the speaker whose position it happened to be stamped with was
+                    // switched off -- one more trigger of the kind MaintainDeadAir was written
+                    // to make unnecessary. Switching a speaker off takes it out of the dead
+                    // set, and if that empties the set the carrier ends because the set is
+                    // empty. If it does not, the others are still owed the tone, and ending it
+                    // here took it away from them for a tick before it came back.
                     if (string.IsNullOrEmpty(pinned))
                     {
-                        if (_deadAirOn && _deadAirPos.Equals(e.Pos))
-                            EndDeadAir("this speaker was switched off");
                     }
                     // FIRST COME, AND THEN LEFT ALONE. There is one carrier and this loop can
                     // see many off-air speakers -- nine buildings are restored on this save --
@@ -1594,11 +1598,31 @@ namespace CMM
                             // FOR EVER, from the moment it was first tuned. Dialling a second
                             // radio onto the dead station is exactly what puts it there, so the
                             // group could never contain more than the one that arrived first.
-                            bool onBorrow = _borrowSlot >= 0 && e.Pos.Equals(_borrowPos);
+                            // ...AND ONLY WHILE THE BORROW IS STILL COVERING IT. Once the
+                            // borrow starts its arrive the noise is on its way out, and the
+                            // station lane's own test a few lines below has always released the
+                            // speaker at exactly that point (`_borrowReleaseAt <= 0f`). This one
+                            // held it until the borrow ENDED, a full arrive later -- so a dial
+                            // turn onto a dead station lifted the hiss off a lane with nothing
+                            // under it, sat in silence, and only then did the carrier begin its
+                            // own hunt from scratch. Static, a little silence, more static, tone.
+                            bool onBorrow = _borrowSlot >= 0 && _borrowReleaseAt <= 0f
+                                            && e.Pos.Equals(_borrowPos);
                             if (_deadGroup.Count < MaxDeadPts && !onBorrow)
                                 _deadGroup.Add(e);
                         }
-                        if (!_deadAirOn) GoDeadAir(e.Pos, -1);
+                        // AND NOTHING RAISES THE CARRIER FROM HERE.
+                        //
+                        // `if (!_deadAirOn) GoDeadAir(e.Pos, -1)` was the last latch left over
+                        // from the version that had an owner, and it fought the derived one every
+                        // tick: it claimed a lane and armed the hiss for a speaker that
+                        // MaintainDeadAir -- running immediately after, on this same tick -- then
+                        // found was not in the dead set at all, because the borrow above excludes
+                        // it. So the carrier was raised and killed on every tick for the whole
+                        // length of a sweep. Ten of each in one second, in the log, each one a
+                        // 40 ms hiss up and a 450 ms fade down on a second lane.
+                        //
+                        // The set is the whole input. Building it is this loop's only job here.
                     }
                     continue;
                 }
@@ -2421,6 +2445,31 @@ namespace CMM
             {
                 Station st = _stations[i];
                 if (!old.TryGetValue(st.Name, out Station prev)) continue;
+                // THE TRACK HAS TO STILL BE ON THE STATION.
+                //
+                // A rebuild that merely RESHUFFLES the pool leaves the airing track playing to
+                // its end, which is the whole reason this migration exists. A rebuild that
+                // REMOVES it is a different fact entirely: the broadcast this voice belongs to
+                // no longer exists.
+                //
+                // Nothing else could see that. The file is still on disk, so the vanished-file
+                // interrupt does not fire; the station is still in the catalog (it kept its
+                // folder), so the release below does not fire either; and the sync audit says
+                // `paper UNRESOLVED` beside the voice every five seconds while the song plays on.
+                // Reported as "the station is fixed with a playlist, and then the playlist is
+                // removed, and it just keeps on playing the song" -- and the log has it: the
+                // catalog goes from `Broken FM(73)` to `Broken FM(1)` and 07.Lost Highway.flac
+                // carries on for another half minute.
+                //
+                // Left where it is, `prev` keeps its voice, so ReleaseAfterRebuild stops it and
+                // hands the slot back; the station is then started fresh off the paper schedule
+                // if it still can be, and goes to the carrier if it cannot.
+                if (prev.VoiceId != 0 && !PoolHolds(st, prev.VoiceTrack))
+                {
+                    Log.Out($"[CMM] Station '{st.Name}': '{System.IO.Path.GetFileName(prev.VoiceTrack)}' "
+                          + $"is no longer in the pool ({st.Order?.Length ?? 0} track(s)) — stopping it.");
+                    continue;
+                }
                 st.VoiceId = prev.VoiceId; st.VoiceTrack = prev.VoiceTrack;
                 st.VoiceGainApplied = prev.VoiceGainApplied;
                 st.Slot = prev.Slot;
@@ -2441,6 +2490,19 @@ namespace CMM
             if (reclaimed > 0)
                 Log.Warning($"[CMM] {reclaimed} emitter slot(s) were still held by a station that no "
                           + "longer exists after a catalog rebuild — reclaimed.");
+        }
+
+        // Is this track still part of the station's broadcast? By full path, the same key the
+        // schedule and the length cache use. A voice with no track name is between tracks and has
+        // nothing to check.
+        private static bool PoolHolds(Station st, string track)
+        {
+            if (string.IsNullOrEmpty(track)) return true;
+            string[] pool = st != null ? st.Order : null;
+            if (pool == null) return false;
+            for (int i = 0; i < pool.Length; i++)
+                if (string.Equals(pool[i], track, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         // ── Listener / tuning / reverb pushes ───────────────────────────────────────────────────
@@ -2777,74 +2839,19 @@ namespace CMM
         }
 
         // A speaker tuned to a station that does not resolve sits on the carrier. It needs a lane
-        // of its own to do that -- there is no station behind it by definition -- which is the same
-        // shape as the sweep borrow, held for as long as the pin stays dead rather than for a
-        // sweep. Released the moment the pin resolves again or the speaker is switched off.
-        // RAISE THE CARRIER, on a named lane if the caller already owns one.
-        //
-        // The previous shape asked MaintainDeadAir to find the speaker in the registry snapshot
-        // and allocate a lane for itself, and it had two silent exits: the lookup failing, and
-        // _deadAirSlot being left non-negative. ClearOffAir() cleared _offAirSlot but never
-        // _deadAirSlot, so after ONE dial turn the stale lane index made every later carrier skip
-        // the raise entirely -- no tone, and no log line either way.
-        //
-        // The give-up already holds a lane and already knows the speaker. It does not need to look
-        // anything up, so it does not.
-        private static void GoDeadAir(Vector3i pos, int preferredSlot)
-        {
-            // ALREADY UP FOR THIS SPEAKER? THEN LEAVE IT ALONE. Two detectors can name the same
-            // dead station -- GroupSnapshot's, and the tune give-up's a second and a half later --
-            // and resetting the hunt on the second call dropped a settled carrier back to static
-            // and made it climb out again. Logged twice per broken station, heard as tone, hiss,
-            // tone.
-            if (_deadAirOn && _deadAirPos.Equals(pos) && _deadAirSlot >= 0) return;
-            _deadAirPos = pos; _deadAirOn = true;
-            // ...AND THE GRACE STARTS NOW. Left over from a previous episode, `now - stale > 2f`
-            // is true on the very first tick, so the carrier was ended by a two-second deadline
-            // that had already expired before it was raised.
-            _deadAirMissingAt = 0f;
-            if (_deadAirSlot < 0)
-            {
-                _deadAirSlot = preferredSlot >= CmmMixer.StationSlots ? preferredSlot : FreeTuneSlot();
-                if (_deadAirSlot < 0)
-                {
-                    CMMConfig.D("[CMM] Dead air: no tuning lane spare — the carrier waits.");
-                    _deadAirOn = false;
-                    return;
-                }
-            }
-            // SEARCH FIRST. A set that finds nothing does not go straight to the carrier -- it
-            // hunts, finds nothing, and settles. The tone appearing the instant a station is
-            // judged dead skips the only part that tells the player anything is being tried.
-            //
-            // So the lane starts as an ordinary search and MaintainDeadAir raises the tone once
-            // the hunt has run its course. Same span a real retune spends looking.
-            _deadAirSince = CmmClock.Now;
-            _deadAirToneUp = false;
-            CmmMixer.GetOrCreate().SetSlotPoints(_deadAirSlot, _deadPts, _deadGain, _deadFlags, 0);
-            // AT ONCE, AND THEN CONSTANT. There is no station to slide out of here -- the speaker
-            // is being pointed at a dead frequency -- so ramping in over the leave bought nothing
-            // but a hole. Nothing in a game feels worse than a control that appears to do nothing,
-            // and a quiet second after a dial turn reads as broken rather than as searching.
-            CmmMixer.GetOrCreate().SetEmitterRecv(_deadAirSlot, 0f, 0.04f);
-            // STAMPED, so the idle sweep can reap this lane if anything ever loses track of it.
-            // Without it _slotLastStation is null AND _slotArmedAt is 0, which is exactly the
-            // "already released, nothing to do" test -- so a carrier lane could never be caught
-            // by the one mechanism that exists to catch what every other path forgets.
-            _slotArmedAt[_deadAirSlot] = CmmClock.Now;
-            CMMConfig.D($"[CMM] Dead air: slot {_deadAirSlot} searching at {pos} — "
-                      + "the carrier follows if nothing is found.");
-        }
+        // (The carrier's own raise lives in MaintainDeadAir, which derives it from the dead set.
+        // GoDeadAir -- the version that took a position and a preferred lane -- is gone: it was
+        // the last caller-driven entry point, and having two ways to raise one carrier is what
+        // let one of them raise it every tick while the other tore it down again.)
 
         // GIVE THE CARRIER'S LANE BACK. Separate from ClearOffAir because that one is about the
         // TONE and this one is about the LANE, and conflating them is what stranded the index.
         private static void EndDeadAir(string why)
         {
             _deadAirOn = false;
-            _deadAirMissingAt = 0f;
             if (_deadAirSlot < 0) return;
             CMMConfig.D($"[CMM] Dead air ending on slot {_deadAirSlot}: {why}.");
-            // AND DISARM THE RECEIVER. GoDeadAir arms one; this cleared the tone and the points
+            // AND DISARM THE RECEIVER. The raise arms one; this cleared the tone and the points
             // and left the hiss running for ever on a lane nothing owned -- measured at
             // -20.8 dBFS for a whole session, with no TUNE, BORROW or DEAD tag beside it.
             // RAMPED OUT, NOT CUT. ClearEmitterRecv snaps the signal to 1 -- a receiver that was
@@ -2852,7 +2859,7 @@ namespace CMM
             // broken station is a common enough gesture to hear it often.
             //
             // The lane is raised instead and left to ReleaseIdleReceivers, which fades and then
-            // clears it properly. That sweep can only see it because GoDeadAir stamps
+            // clears it properly. That sweep can only see it because the raise stamps
             // _slotArmedAt -- so this deliberately does NOT clear the stamp on the way out.
             CmmMixer.Instance?.SetEmitterRecv(_deadAirSlot, 1f, ReleaseRamp);
             ClearOffAir(_deadAirSlot);
@@ -3487,6 +3494,16 @@ namespace CMM
                 // The lane's own point is the only thing that can fade it, so it does: muted at
                 // the swap, up to the speaker's real occlusion over the arrive.
 
+                // IS THE DESTINATION A STATION AT ALL? Everything below waits for the target to
+                // get a voice, and for a station that cannot open that is a wait for nothing: the
+                // borrow sat on its noise for the whole give-up -- four seconds, measured -- with
+                // a carrier for that very station sometimes already sounding a few blocks away.
+                //
+                // A speaker tuned to a station that will not play belongs to the carrier, and the
+                // carrier is where this hands it. So the moment that is known, the sweep stops
+                // being a sweep TOWARDS something and becomes an ordinary leave.
+                bool deadTarget = !StationCanPlay(_borrowTarget, ByName(_borrowTarget));
+
                 if (_borrowSwapAt > 0f && now >= _borrowSwapAt)
                 {
                     // RESOLVED HERE, NOT AT THE BEGIN. This used to swap to a slot number captured
@@ -3508,7 +3525,7 @@ namespace CMM
                         // milliseconds of hiss, which is what the hiss is for. The give-up cap
                         // still applies underneath, so a station that never opens is not waited on
                         // for ever -- it falls through to the carrier like any other dead one.
-                        if (now < _borrowGiveUp) return;
+                        if (!deadTarget && now < _borrowGiveUp) return;
                     }
                     else
                     {
@@ -3536,7 +3553,7 @@ namespace CMM
                 // whole point: the noise covers the decode instead of the speaker sitting silent
                 // through it.
                 if (_borrowReleaseAt <= 0f && now >= _borrowUntil && now < _borrowGiveUp
-                    && !TargetAudible()) return;
+                    && !deadTarget && !TargetAudible()) return;
                 if (_borrowReleaseAt <= 0f && now >= _borrowUntil)
                 {
                     // THE HANDOFF IS A CROSSOVER. The speaker is about to rejoin the station's

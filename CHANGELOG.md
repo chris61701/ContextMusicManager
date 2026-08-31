@@ -269,6 +269,26 @@ they now behave, rather than as a history of how they got there.
 
 ### Fixed
 
+- **Tuning a speaker to a dead station gave static, a pause, then more static** *(RC4)*. Two
+  things were raising the off-air carrier: the tone's own upkeep, which works out every tick who
+  is listening to a station that cannot play, and a second, older trigger that fired the moment a
+  speaker with a dead pin was seen. While a speaker is mid-tune it belongs to neither, so the
+  second trigger claimed a lane and started hissing, the first found nobody to serve and tore it
+  straight back down, and the pair repeated every tick for the length of the sweep — 42 of each in
+  one dial turn on the bench, ten a second in a game log. The tone now has one way to be raised.
+  Two related delays went with it: the speaker rejoins the group as soon as its sweep starts
+  finishing rather than after it has completely finished, and a sweep towards a station already
+  known not to open no longer waits out its full four-second deadline first. A dial turn onto a
+  broken station is now one unbroken hiss that settles onto the tone, about two and a half seconds
+  from the press.
+- **Removing a station's music left it playing anyway** *(RC4)*. Repairing a broken station by
+  dropping a playlist into it works, and taking that playlist away again did not: the song carried
+  on to its end. Nothing could see it. The file was still on disk, so the vanished-file check did
+  not fire; the station still existed, because its folder was still there; and the only trace was
+  a `paper UNRESOLVED` note beside the voice in the log every few seconds. A playing track is now
+  checked against the station it belongs to after any change on disk, and stopped if the station
+  no longer carries it — after which the speaker gets the off-air tone, like any other station
+  that cannot play.
 - **World speakers went quiet in the middle of a station change** *(RC4)*. Changing station on a
   speaker is meant to be a crossover: the static covers the change while the new station rises
   under it. It only ever had one side. The speaker was held out of every station until the

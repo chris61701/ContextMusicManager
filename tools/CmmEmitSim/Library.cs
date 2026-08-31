@@ -62,6 +62,17 @@ namespace CMM
             Tone(Path.Combine(dir, "02 repaired 300Hz.wav"), 300f, 45f);
         }
 
+        // ...AND TAKE IT AWAY AGAIN. A station is fixed by dropping a playlist or a track into
+        // it and broken again by removing that -- and the second half is not the mirror image of
+        // the first. Repairing ends the carrier because the dead SET empties, which nothing has
+        // to notice; breaking has to stop a voice that is playing perfectly well right now.
+        internal static void Unrepair(string root)
+        {
+            string dir = Path.Combine(root, "Radio", "Broken FM");
+            foreach (string f in Directory.GetFiles(dir, "02 repaired*"))
+                File.Delete(f);
+        }
+
         private static void Tone(string path, float hz, float seconds)
         {
             int rate = 48000, ch = 2;

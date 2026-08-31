@@ -50,10 +50,12 @@ namespace CMM
 
             var names = new string[] { "turn-on", "retune-shared", "retune-cold",
                                        "rapid-switch", "off-mid-tune", "broken-station",
-                                       "distance-tone", "distance-music", "dead-group" };
+                                       "distance-tone", "distance-music", "dead-group",
+                                       "dead-tune", "pool-vanishes" };
             var runs  = new Action[] { Turn_On, Retune_To_Live_Station, Retune_To_Cold_Station,
                                        Rapid_Switching, Off_Mid_Tune, Broken_Station,
-                                       Distance_Tone, Distance_Music, Dead_Group };
+                                       Distance_Tone, Distance_Music, Dead_Group,
+                                       Dead_Tune, Pool_Vanishes };
 
             for (int i = 0; i < names.Length; i++)
             {
@@ -81,7 +83,8 @@ namespace CMM
 
         static readonly string[] Scenarios =
             { "turn-on", "retune-shared", "retune-cold", "rapid-switch", "off-mid-tune",
-              "broken-station", "distance-tone", "distance-music", "dead-group" };
+              "broken-station", "distance-tone", "distance-music", "dead-group",
+              "dead-tune", "pool-vanishes" };
 
         // The parent: run each scenario in its own process, relay its output, add up the verdicts.
         static int RunEach(string[] args)
@@ -226,6 +229,21 @@ namespace CMM
 
         // -- the assertions --------------------------------------------------------------------
         const float Floor = -55f;    // below this the ear has nothing
+
+        // HOW MANY TIMES DID IT DECIDE THIS? A state machine that flaps says so in its own log,
+        // and the flap is invisible in the audio when the two lanes overlap -- which is exactly
+        // how ten carrier raises in one second went unheard as anything but "a little silence".
+        static int Said(string needle, float from)
+        {
+            int n = 0;
+            foreach (string line in SimLog.Lines)
+            {
+                if (line.IndexOf(needle, StringComparison.Ordinal) < 0) continue;
+                float t;
+                if (float.TryParse(line.Substring(0, 7).Trim(), out t) && t >= from) n++;
+            }
+            return n;
+        }
 
         static void Fail(string sc, string why)
         { _fail++; _failures.Add(sc + ": " + why); Console.WriteLine("   FAIL  " + why); }
@@ -631,6 +649,124 @@ namespace CMM
                   ToneOn() < 0f ? "carrier down" : "tone still " + ToneOn().ToString("0.00"));
         }
 
+        // -- DIALLING ONTO A STATION THAT WILL NOT PLAY ------------------------------------------
+        //
+        // "There's static, a little silence, then more static before the tone."
+        //
+        // Two noises with a hole between them, and they are two different lanes: the sweep
+        // borrow's, which covers the dial turn, and the carrier's, which starts its own hunt from
+        // scratch once the borrow has finished. Between them the borrow's arrive lifts the hiss
+        // off a lane with nothing under it -- there is nothing to arrive ONTO, because the station
+        // will not open -- and the speaker is in no group at all until the borrow lets go.
+        //
+        // Stated as the ear hears it: from the press to the settled carrier there is ONE noise.
+        static void Dead_Tune()
+        {
+            const string sc = "dead-tune";
+            // TWO SPEAKERS, so the one being tuned is NOT alone on its station's lane and the
+            // dial turn takes the SWEEP BORROW rather than the tune machine. That is the path the
+            // game log shows, and the only one the defect lives on: the borrow holds the speaker
+            // out of every group for the whole of its arrive, so the carrier could see nothing to
+            // serve while a second entry point kept raising it anyway.
+            Place(A); Place(B);
+            Dial(A, "Alpha FM");
+            Dial(B, "Alpha FM");
+            if (!WaitAudible()) Fail(sc, "Alpha FM never became audible");
+            _sim.Run(1.5f);
+
+            float press = _sim.Now;
+            _sim.Note("press: A, Alpha FM -> Broken FM (nothing in it will decode)");
+            Dial(A, "Broken FM");
+            _sim.Run(14f);
+
+            // The carrier is the destination, so it has to actually get there.
+            float tone = ToneOn();
+            Check(sc, tone > 0.5f, "the dial turn ends on the carrier",
+                  tone < 0f ? "no tone on any lane" : "tone " + tone.ToString("0.00"));
+
+            // THE REPORT, AS A COUNT. Raised once, ended never -- anything more is the carrier
+            // being torn down and rebuilt under the player, which is what the second static was.
+            int raises = Said("Dead air: slot", press);
+            int ends   = Said("Dead air ending", press);
+            Check(sc, raises == 1, "the carrier is raised once for the whole dial turn",
+                  raises + " raise(s)");
+            Check(sc, ends == 0, "and never torn down while a speaker is still on it",
+                  ends + " teardown(s)");
+
+            // ...and it does not sit on its noise waiting for a voice that is not coming. The
+            // give-up is four seconds; a station already known not to open is known at the swap.
+            float settled = float.NaN;
+            for (int i = _sim.IndexAt(press); i < _sim.Tape.Count; i++)
+            {
+                float t = -1f;
+                for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++)
+                    if (_sim.Tape[i].Tone[s] > t) t = _sim.Tape[i].Tone[s];
+                if (t > 0.95f) { settled = _sim.Tape[i].T - press; break; }
+            }
+            Check(sc, !float.IsNaN(settled) && settled < 4f, "and gets there without waiting out the give-up",
+                  float.IsNaN(settled) ? "never settled" : settled.ToString("0.00") + " s after the press, want < 4");
+
+            LeavesWithProgramme(sc, press);
+            NoStep(sc, press + 0.2f, _sim.Now - 0.5f, 14f);
+        }
+
+        // -- THE POOL GOES AWAY WHILE IT IS PLAYING ----------------------------------------------
+        //
+        // "If the station is fixed with a playlist, and then the playlist is removed, it just
+        // keeps on playing the song."
+        //
+        // Repairing is the easy direction: the dead set empties and the carrier ends because
+        // nothing is in it. This is the other one, and it is not symmetric -- a voice that is
+        // playing perfectly well has to be STOPPED, and the file it is playing still exists, so
+        // the airing-file-vanished interrupt cannot see it either. The only fact is that the
+        // station is no longer in the catalog.
+        static void Pool_Vanishes()
+        {
+            const string sc = "pool-vanishes";
+            string root = Path.Combine(Path.GetTempPath(), "CmmEmitSim");
+            _sim.Note("Broken FM gains a playable track");
+            Library.Repair(root);
+            UnityEngine.Time.realtimeSinceStartup += 60f;
+            RadioStationCatalog.ForceRebuild();
+            RadioStationCatalog.EnsureCatalog();
+
+            Place(A);
+            Dial(A, "Broken FM");
+            if (!WaitAudible(14f)) { Fail(sc, "the repaired station never played"); return; }
+            _sim.Run(3f);
+            float playing = _sim.MeanDb(_sim.Now - 1.0f, _sim.Now);
+            Check(sc, playing > Floor + 15f, "the repaired station is playing",
+                  playing.ToString("0.0") + " dBFS");
+
+            _sim.Note("the playlist is removed while it plays");
+            Library.Unrepair(root);
+            UnityEngine.Time.realtimeSinceStartup += 60f;
+            RadioStationCatalog.ForceRebuild();
+            RadioStationCatalog.EnsureCatalog();
+            _sim.Run(4f);
+
+            // The station SURVIVES -- its folder still holds the file that will not decode, so it
+            // is still in the catalog with a pool of one. That is the case the game is in, and it
+            // is why nothing existing could see the defect: the release path only fires for a
+            // station that disappeared entirely.
+            RadioStationCatalog.ByName.TryGetValue("Broken FM", out RadioStation bf);
+            Check(sc, bf != null && bf.Order != null && bf.Order.Length == 1,
+                  "the station survives with a pool that no longer holds the track",
+                  bf == null ? "gone from the catalog" : bf.Order.Length + " track(s)");
+
+            // THE REPORT, and it has to be asked of the VOICE rather than of the ear: the carrier
+            // that replaces the song sits at almost exactly the song's level here, so a level
+            // measurement cannot tell "it stopped" from "it never stopped".
+            Check(sc, bf != null && bf.VoiceId == 0, "the song stops when its pool goes away",
+                  bf == null ? "no station" : bf.VoiceId == 0 ? "voice released"
+                              : "still playing " + Path.GetFileName(bf.VoiceTrack ?? "?"));
+
+            // ...and what a speaker pinned to a station that cannot play is owed.
+            _sim.Run(8f);
+            Check(sc, ToneOn() > 0.5f, "and the carrier takes over",
+                  ToneOn() < 0f ? "no tone" : "tone " + ToneOn().ToString("0.00"));
+        }
+
         // -- the tape, for a human --------------------------------------------------------------
         static void DumpCsv(string root, string name)
         {
@@ -639,14 +775,16 @@ namespace CMM
             {
                 w.Write("t,earDb,peak");
                 for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++)
-                    w.Write(",sig" + s + ",lane" + s + "Db,mir" + s + ",tone" + s);
+                    w.Write(",sig" + s + ",lane" + s + "Db,mir" + s + ",tone" + s
+                            + ",pts" + s + ",app" + s);
                 w.WriteLine(",note");
                 foreach (var x in _sim.Tape)
                 {
                     w.Write(x.T.ToString("0.000") + "," + Sim.Db(x.Rms).ToString("0.0") + "," + x.Peak.ToString("0.000"));
                     for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++)
                         w.Write("," + x.Sig[s].ToString("0.00") + "," + Sim.Db(x.LaneRms[s]).ToString("0.0")
-                                + "," + x.Mir[s].ToString("0.00") + "," + x.Tone[s].ToString("0.00"));
+                                + "," + x.Mir[s].ToString("0.00") + "," + x.Tone[s].ToString("0.00")
+                                + "," + x.Pts[s].ToString("0") + "," + x.App[s].ToString("0.000"));
                     w.WriteLine("," + (x.Note ?? ""));
                 }
             }

@@ -39,6 +39,13 @@ namespace CMM
             public float[] LaneRms;    // per lane: dry lane RMS after its receiver
             public float[] Mir;        // per lane: mirror gain, -1 = no mirror connected
             public float[] Tone;       // per lane: carrier envelope, -1 = silent
+            // CONSUMER TRUTH, not what the layer meant to publish. A speaker can be in NO point
+            // set for a tick -- held between two machines, or dropped by one before the other
+            // picks it up -- and every lane-level reading stays perfectly healthy while the ear
+            // hears nothing. That is a whole class of report ("a little silence") and the tape
+            // could not see it.
+            public float[] Pts;        // per lane: points the native mixer is rendering
+            public float[] App;        // per lane: applied dry gain for the nearest point
             public string Note;        // scenario annotation, if any
         }
 
@@ -99,6 +106,7 @@ namespace CMM
                 Peak = peak,
                 Sig = new float[slots], LaneRms = new float[slots],
                 Mir = new float[slots], Tone = new float[slots],
+                Pts = new float[slots], App = new float[slots],
                 Note = _pendingNote
             };
             _pendingNote = null;
@@ -108,6 +116,8 @@ namespace CMM
                 s.LaneRms[k] = CmmMixer.EmitterLaneStat(k, 1);
                 s.Mir[k]     = CmmMixer.EmitterLaneStat(k, 2);
                 s.Tone[k]    = CmmMixer.EmitterLaneStat(k, 3);
+                s.Pts[k]     = CmmMixer.EmitterLaneStat(k, 4);
+                s.App[k]     = CmmMixer.EmitterLaneStat(k, 5);
             }
             Tape.Add(s);
         }
