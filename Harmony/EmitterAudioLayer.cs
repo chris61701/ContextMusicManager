@@ -2844,6 +2844,24 @@ namespace CMM
             if (_deadAirSlot < 0) return;
             if (at < 0)
             {
+                // THE OWNER LEFT, NOT THE BROADCAST. Breaking the radio that happened to hold the
+                // lane ended the carrier for every OTHER radio tuned to that station, and the
+                // survivors then hunted their way back from silence -- reported as "when one is
+                // destroyed it goes to static instead of just going mute".
+                //
+                // Ownership is bookkeeping, not the thing being listened to. Exactly the same
+                // reasoning as a retune on the owner, so it takes the same path: hand the lane to
+                // a speaker that is still there and still on that station, and the tone does not
+                // even flicker. Only when nobody is left does the carrier actually end.
+                for (int i = 0; i < _deadGroup.Count; i++)
+                {
+                    if (_deadGroup[i].Pos.Equals(_deadAirPos)) continue;
+                    _deadAirPos = _deadGroup[i].Pos;
+                    _deadAirMissingAt = 0f;
+                    CMMConfig.D("[CMM] Dead air: the owner is gone — the carrier passes to "
+                              + _deadAirPos + ".");
+                    return;
+                }
                 // ...unless it stays missing, which means the speaker is gone for good.
                 if (_deadAirMissingAt <= 0f) _deadAirMissingAt = CmmClock.Now;
                 else if (CmmClock.Now - _deadAirMissingAt > 2f) EndDeadAir("its speaker left the registry");
