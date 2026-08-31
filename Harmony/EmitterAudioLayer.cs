@@ -1385,6 +1385,13 @@ namespace CMM
 
         private static void GroupSnapshot()
         {
+            // REBUILT EVERY TICK, like the station point sets right below. Without this the dead
+            // group accumulated: the same speaker added again on every pass until it hit the cap,
+            // holding positions of speakers that had since been destroyed or retuned. The
+            // dead-group scenario caught it on its first run -- one point on the lane when two
+            // speakers were on the station, then eight when only one was left.
+            _deadGroup.Clear();
+            _deadNames.Clear();
             int n = _stations.Count;
             for (int i = 0; i < n; i++)
             {
@@ -1562,7 +1569,15 @@ namespace CMM
                             // A speaker the BORROW is sweeping is a different matter: it is
                             // already rendering on its own lane, and putting it on this one too
                             // would sound it twice.
-                            if (_deadGroup.Count < MaxDeadPts && !e.Pos.Equals(_borrowPos))
+                            // _borrowSlot, NOT just _borrowPos. _borrowPos keeps the last
+                            // borrowed position after the borrow ends -- it is never cleared,
+                            // because every other reader of it is already guarded by the slot --
+                            // so testing the position alone excluded that speaker from the group
+                            // FOR EVER, from the moment it was first tuned. Dialling a second
+                            // radio onto the dead station is exactly what puts it there, so the
+                            // group could never contain more than the one that arrived first.
+                            bool onBorrow = _borrowSlot >= 0 && e.Pos.Equals(_borrowPos);
+                            if (_deadGroup.Count < MaxDeadPts && !onBorrow)
                                 _deadGroup.Add(e);
                         }
                         if (!_deadAirOn) GoDeadAir(e.Pos, -1);

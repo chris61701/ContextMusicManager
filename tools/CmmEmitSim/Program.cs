@@ -50,10 +50,10 @@ namespace CMM
 
             var names = new string[] { "turn-on", "retune-shared", "retune-cold",
                                        "rapid-switch", "off-mid-tune", "broken-station",
-                                       "distance-tone", "distance-music" };
+                                       "distance-tone", "distance-music", "dead-group" };
             var runs  = new Action[] { Turn_On, Retune_To_Live_Station, Retune_To_Cold_Station,
                                        Rapid_Switching, Off_Mid_Tune, Broken_Station,
-                                       Distance_Tone, Distance_Music };
+                                       Distance_Tone, Distance_Music, Dead_Group };
 
             for (int i = 0; i < names.Length; i++)
             {
@@ -81,7 +81,7 @@ namespace CMM
 
         static readonly string[] Scenarios =
             { "turn-on", "retune-shared", "retune-cold", "rapid-switch", "off-mid-tune",
-              "broken-station", "distance-tone", "distance-music" };
+              "broken-station", "distance-tone", "distance-music", "dead-group" };
 
         // The parent: run each scenario in its own process, relay its output, add up the verdicts.
         static int RunEach(string[] args)
@@ -539,6 +539,70 @@ namespace CMM
             float drop = Walk(sc, "Alpha FM", false);
             Check(sc, drop > 12f, "a station gets quieter with distance",
                   drop.ToString("0.0") + " dB over 2.5 -> 40 blocks, want > 12");
+        }
+
+        // -- SEVERAL SPEAKERS ON ONE DEAD STATION ------------------------------------------------
+        //
+        // Not an edge case: a base has several speakers and sooner or later some of them are on a
+        // station that will not open. The carrier was written for exactly ONE speaker and every
+        // assumption from that leaked out somewhere different -- only one sounded, retuning one
+        // sent both to static, breaking one sent the rest to static, and the pitch moved when the
+        // lane changed hands. Four separate reports, one missing scenario.
+        //
+        // Everything here is about what the OTHER speaker hears while something happens to the
+        // first one, which is the property none of those fixes had a test for.
+        static float ToneOn()
+        {
+            float t = -1f;
+            var last = _sim.Tape[_sim.Tape.Count - 1];
+            for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++) if (last.Tone[s] > t) t = last.Tone[s];
+            return t;
+        }
+
+        // Points the CONSUMER holds on the carrier's lane: how many speakers it is really serving.
+        static int CarrierPoints()
+        {
+            var last = _sim.Tape[_sim.Tape.Count - 1];
+            for (int s = 0; s < CmmMixer.MaxEmitterSlots; s++)
+                if (last.Tone[s] >= 0f) return (int)CmmMixer.EmitterLaneStat(s, 4);
+            return 0;
+        }
+
+        static void Dead_Group()
+        {
+            const string sc = "dead-group";
+            Place(A); Place(B);
+            Dial(A, "Broken FM");
+            Dial(B, "Broken FM");
+            _sim.Run(10f);                                  // hunt, give up, settle on the carrier
+
+            Check(sc, ToneOn() > 0.5f, "the carrier comes up for a dead station",
+                  "tone " + ToneOn().ToString("0.00"));
+            Check(sc, CarrierPoints() >= 2, "it serves BOTH speakers, not one",
+                  CarrierPoints() + " point(s) on the lane");
+
+            // RETUNE ONE. The other is not involved and must not hear it.
+            _sim.Note("retune A away; B stays on Broken FM");
+            float before = _sim.MeanDb(_sim.Now - 1.0f, _sim.Now);
+            Dial(A, "Alpha FM");
+            _sim.Run(4f);
+            float at;
+            float hole = _sim.LongestHole(_sim.Now - 3.5f, _sim.Now, Floor, out at) * 1000f;
+            Check(sc, ToneOn() > 0.5f, "the tone survives retuning the other speaker",
+                  "tone " + ToneOn().ToString("0.00"));
+            Check(sc, hole <= 250f, "and does not go through a hole doing it",
+                  hole <= 0.5f ? "none" : hole.ToString("0") + " ms");
+
+            // DESTROY THE ONE THAT IS LEFT ON IT... by taking the OTHER away first, so whichever
+            // holds the lane, the survivor is the one being asked about.
+            _sim.Note("destroy A (whatever it was doing)");
+            for (int i = 0; i < EmitterRegistry.Snapshot.Count; i++)
+                if (EmitterRegistry.Snapshot[i].Pos.Equals(A)) { EmitterRegistry.Snapshot.RemoveAt(i); break; }
+            _sim.Run(4f);
+            Check(sc, ToneOn() > 0.5f, "the tone survives destroying the other speaker",
+                  "tone " + ToneOn().ToString("0.00"));
+            Check(sc, CarrierPoints() >= 1, "and is still serving the one that is left",
+                  CarrierPoints() + " point(s)");
         }
 
         // -- the tape, for a human --------------------------------------------------------------
