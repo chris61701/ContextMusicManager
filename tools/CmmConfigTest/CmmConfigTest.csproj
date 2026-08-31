@@ -35,6 +35,7 @@
     <Compile Include="XmlHealth.cs" />
     <Compile Include="ContextTests.cs" />
     <Compile Include="UpgradeMatrix.cs" />
+    <Compile Include="RealUpgrade.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsSchema.cs" Link="linked\CMMSettingsSchema.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsIO.cs"     Link="linked\CMMSettingsIO.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsWriter.cs" Link="linked\CMMSettingsWriter.cs" />

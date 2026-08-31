@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CMMSettings>
+
+  <!-- How loud CMM tracks play relative to the game's music slider (0.0–1.0) -->
+  <VolumeModifier>0.5</VolumeModifier>
+
+  <!-- Where to look for music. Relative paths start from the mod folder; absolute paths go anywhere.
+       Relative example:  <MusicPath>Music</MusicPath>  (default — resolves to ..\Mods\ContextMusicManager\Music)
+       Absolute example:  <MusicPath>D:\MyMusic\7Days</MusicPath> -->
+  <MusicPath>Music</MusicPath>
+
+  <!-- ── Loudness normalization (EBU R128) ──────────────────────────────
+       When enabled, each track is measured once (integrated LUFS) and played back
+       at a per-track gain so quiet and loud tracks sit at a consistent perceived
+       level. Measurements are cached in Cache/loudness.xml (keyed by file content,
+       so renames/moves keep their value). A track is measured on demand the first
+       time it's needed (plus a look-ahead of the current context's next track); on
+       the menu, one track per context is pre-measured so each context has a ready,
+       normalized track the first time it's switched to.
+         LoudnessTargetLufs  – reference level. Sits below 0 so most corrections are
+                               attenuations; AudioSource volume can't exceed 1.0, so
+                               very quiet tracks boost only as far as VolumeModifier
+                               leaves headroom (≈2× at the 0.5 default).
+         LoudnessMaxBoostDb  – cap on how much a quiet track may be boosted (dB).
+                               Attenuation is uncapped. -->
+  <LoudnessNormalizationEnabled>true</LoudnessNormalizationEnabled>
+  <LoudnessTargetLufs>-18.0</LoudnessTargetLufs>
+  <LoudnessMaxBoostDb>12.0</LoudnessMaxBoostDb>
+
+  <!-- Fade between outgoing and incoming context instead of cutting immediately -->
+  <CrossfadeEnabled>true</CrossfadeEnabled>
+  <CrossFadeDuration>2.0</CrossFadeDuration>
+
+  <!-- Fade duration when a track ends naturally and transitions to the next -->
+  <TrackTransitionFadeDuration>5.0</TrackTransitionFadeDuration>
+
+  <!-- How often to scan for active context changes (seconds) -->
+  <ContextScanCooldown>0.1</ContextScanCooldown>
+  <!-- How often to check whether cached context data is stale (seconds) -->
+  <StalenessCheckInterval>5.0</StalenessCheckInterval>
+  <!-- How often to poll for natural track-end detection (seconds) -->
+  <TrackEndPollInterval>0.25</TrackEndPollInterval>
+
+  <!-- Track pick order within a context folder: Random, RandomNoRepeat, Sequential -->
+  <GlobalTrackOrder>RandomNoRepeat</GlobalTrackOrder>
+
+  <!-- ── Disable parts of the game's Dynamic Music System (DMS) ───────────
+       Switch off individual vanilla DMS sections (true = disabled). A disabled
+       section hands back to your CMM music instead of the game's — falling to
+       vanilla Exploration, or silence if that's off too, only when you have
+       nothing for it. Never affects your own CMM tracks. Hot-reloaded. -->
+  <DisabledVanillaSections>
+    <Exploration>false</Exploration>
+    <Suspense>false</Suspense>
+    <Combat>false</Combat>
+    <Bloodmoon>false</Bloodmoon>
+    <HomeDay>false</HomeDay>
+    <HomeNight>false</HomeNight>
+    <TraderJoel>false</TraderJoel>
+    <TraderJen>false</TraderJen>
+    <TraderRekt>false</TraderRekt>
+    <TraderBob>false</TraderBob>
+    <TraderHugh>false</TraderHugh>
+  </DisabledVanillaSections>
+
+  <!-- ── Context detection tuning ───────────────────────────────────────
+       Max distance (game units) an enemy is counted toward combat/tension state. -->
+  <EnemyDetectRange>30</EnemyDetectRange>
+  <!-- Multiplayer: max distance (game units) another player counts as "with you".
+       An enemy aggroed onto a party member / friend within this range counts as your
+       combat, and allies within it scale combat intensity. No effect in single-player. -->
+  <PlayerDetectRange>30</PlayerDetectRange>
+  <!-- Multiplayer squad-shared combat: how close (game units) another player must be for
+       an enemy fighting THEM to put you into combat too. A separate radius from
+       PlayerDetectRange (which governs the ally/stranger proximity counts), so "sharing a
+       squadmate's fight" and "who counts as near you" are tuned independently.
+       CombatShareRequireAlly: when true, only party members / ACL friends share combat;
+       set false to share combat with ANY nearby player. No effect in single-player. -->
+  <CombatShareRange>30</CombatShareRange>
+  <CombatShareRequireAlly>false</CombatShareRequireAlly>
+  <!-- Distance (game units) from your bedroll or land claim that counts as "home". -->
+  <HomeDetectRange>70</HomeDetectRange>
+  <!-- Health fraction (0.0–1.0) below which combat escalates to Low_Health_Panic. -->
+  <PlayerHealthDangerThresholdPercent>0.30</PlayerHealthDangerThresholdPercent>
+  <!-- CombatExitDelay: with no nearby aggro for this many seconds, stop playing combat
+       music. CombatCooldown: how long after that the encounter's tier stays remembered —
+       re-aggro within this window resumes the latched intensity instead of restarting at
+       the bottom tier; past it the next fight starts fresh. -->
+  <CombatExitDelay>2.0</CombatExitDelay>
+  <CombatCooldown>10.0</CombatCooldown>
+
+  <!-- Enemy-count thresholds, passed to the decision script as cfg.combatLowThreshold
+       / cfg.combatHighThreshold. The default context.lua tiers combat via its own
+       weighted scoring (COMBAT_TIERS / TYPE_WEIGHTS / STATE_MULTS) and ignores these,
+       so they only take effect in a custom script that reads them. -->
+  <CombatLowEnemyThreshold>1</CombatLowEnemyThreshold>
+  <CombatHighEnemyThreshold>4</CombatHighEnemyThreshold>
+
+  <!-- ── Playback keybinds ───────────────────────────────────────────────
+       Live controls for whatever music is playing (menu or in-game):
+         Next / Prev track  – skip within the current context's folder. "Prev"
+                              steps back to the one track it remembers (one-deep),
+                              if that file still exists; otherwise it picks a new one.
+         Volume up / down   – nudges the CURRENT track's per-track volume trim
+                              (saved in Cache/loudness.xml, persists across sessions).
+                              Only audible while LoudnessNormalizationEnabled is true.
+       Keys use Unity KeyCode names (RightArrow, LeftArrow, F7, Keypad6, ...).
+       By default all four require Alt held so they don't collide with game or chat
+       input. Ctrl is NOT used because it's the game's crouch toggle; Alt is unbound
+       in 7D2D. Set the Require flags as you like for other bindings. -->
+  <KeybindsEnabled>true</KeybindsEnabled>
+  <KeybindRequireCtrl>false</KeybindRequireCtrl>
+  <KeybindRequireAlt>true</KeybindRequireAlt>
+  <KeyNextTrack>RightArrow</KeyNextTrack>
+  <KeyPrevTrack>LeftArrow</KeyPrevTrack>
+  <KeyVolumeUp>UpArrow</KeyVolumeUp>
+  <KeyVolumeDown>DownArrow</KeyVolumeDown>
+  <!-- Per-press change to the current track's volume trim (linear factor). -->
+  <UserTrimStep>0.1</UserTrimStep>
+
+  <!-- ── Native audio output ring buffer ─────────────────────────────────
+       Music plays through CMM's OWN audio output + mixer thread (miniaudio,
+       in CMM_Decoder.dll), so decode, mixing and output all run on threads
+       CMM owns, off Unity's main and audio threads. It plays to the same
+       default device and shares the game's music-volume slider.
+         NativeOutputRingMs – tight output cushion (ms) kept in normal play; also
+                              the volume/crossfade latency, so kept small (~200ms).
+         NativeOutputMaxRingMs – ceiling (ms) the cushion can ADAPTIVELY grow to
+                              when the CPU is starved (world-gen / other apps) or
+                              while loading, then snaps back tight on a context
+                              change. 15000 ≈ 5.8 MB native ring. -->
+  <NativeOutputRingMs>200</NativeOutputRingMs>
+  <NativeOutputMaxRingMs>15000</NativeOutputMaxRingMs>
+
+  <!-- Set to false to silence verbose [CMM] console output.
+       Log.Warning and Log.Error always emit regardless of this flag. -->
+  <DebugLogging>false</DebugLogging>
+
+    <!-- ── Perf instrumentation (see CMMPerf) ─────────────────────────────
+       When true, the context-change hot path is timed per phase. Each scan tick
+       times the poll/resolve/gate; each transition logs a "[CMM PERF] TX" wall +
+       GC line; any synchronous span over PerfSpikeMs logs a "SPIKE" line the
+       instant it happens, and StalenessCheckLoop dumps rolling per-phase stats.
+       Leave off for normal play; turn on to diagnose stutters. -->
+  <PerfTiming>false</PerfTiming>
+  <!-- Log a SPIKE line for any single synchronous span at/over this many ms. -->
+  <PerfSpikeMs>1.5</PerfSpikeMs>
+  <!-- Per-frame stutter watchdog. A frame is flagged in a "[CMM PERF] STUTTER" line
+       (GC gen0/1/2 delta, transition in flight, live coroutine count) when it runs
+       longer than the device's rolling baseline × PerfFrameSpikeFactor AND clears
+       PerfFrameSpikeFloorMs. RELATIVE to baseline because on a 30 fps machine an
+       absolute cut-off just logs the normal framerate. A stutter that is always
+       tx=idle with GC=0 is NOT caused by this mod. Factor 2.5 / floor 50 ms is a
+       good start; lower the factor to ~2 to be more sensitive. -->
+  <PerfFrameSpikeFactor>2.5</PerfFrameSpikeFactor>
+  <PerfFrameSpikeFloorMs>50</PerfFrameSpikeFloorMs>
+
+</CMMSettings>
