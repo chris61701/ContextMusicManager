@@ -67,6 +67,15 @@ they now behave, rather than as a history of how they got there.
   play your Radio music where they physically stand, so a POI you are clearing has music
   coming out of the room rather than out of your head. Several stations sound at once, and
   every speaker broadcasting the same station is heard as one source in the right place.
+  - **On 2.6 as well as 3.x.** The capability check required a composite tile-entity door —
+    a type that only exists from 3.0 — as a belt-and-braces test, which is a check for DOORS
+    standing in for a whole subsystem: every speaker on 2.6 was silent because that game
+    models doors differently. Doors are recorded as a capability now rather than required, so
+    2.6 gets stations, tuning, the acoustic field, reverb, the tuner menu and the craftable
+    blocks. What it does not get is doors modulating what you hear as they swing — 2.6 has no
+    swing state to read, so a shut door muffles the moment it shuts rather than across the
+    animation. Alpha 20 and 21 have the speaker blocks but not the world APIs the layer needs,
+    so the feature stays off there and the personal radio covers them instead.
   - **A real acoustic model, not a distance fade.** One acoustic field is flooded out from
     the listener several times a second and read by every speaker, so sound routes through
     doorways and around corners instead of through walls. Because the field is anchored to
