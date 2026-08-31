@@ -16,6 +16,9 @@ namespace CMM
             bool echo = Array.IndexOf(args, "--echo") >= 0;
             bool csv  = Array.IndexOf(args, "--csv")  >= 0;
             string only = Arg(args, "--only");
+            // --reverb is one process, not one per scenario: it walks seven rooms itself and the
+            // whole point is that they are measured on the same rig in the same run.
+            if (Array.IndexOf(args, "--reverb") >= 0) only = only ?? "__reverb";
 
             // ONE PROCESS PER SCENARIO. EmitterAudioLayer is a static singleton with twelve-second
             // grace timers, a pending-start latch and a native mixer that cmm_mix_start_ex will not
@@ -47,6 +50,36 @@ namespace CMM
             Console.WriteLine("  stations: " + RadioStationCatalog.Stations.Count
                               + " (" + string.Join(", ", Names().ToArray()) + ")");
             Console.WriteLine();
+
+            // A MEASURING INSTRUMENT, NOT A SCENARIO. It reports numbers and writes audio; it has
+            // no pass or fail, because "is this reverb right" is not a question a budget answers.
+            if (Array.IndexOf(args, "--reverb") >= 0)
+            {
+                // NOTHING BETWEEN THE IMPULSE AND THE ROOM. Every one of these shapes the level
+                // over time, and this instrument measures level over time -- a birth fade under a
+                // decay is indistinguishable from a room that gets louder.
+                CMMConfig.WorldEmitterBirthFade = 0f;
+                CMMConfig.WorldEmitterFade = 0f;
+                CMMConfig.WorldEmitterColorDrive = 0f;
+                CMMConfig.WorldEmitterColorStatic = 0f;
+                CMMConfig.WorldEmitterColorVoice = 0f;
+                CMMConfig.WorldEmitterReverbEnabled = true;
+                CMMConfig.WorldEmitterReverbWet = 1f;      // the LEVEL lever wide open; the rule still decides wet
+                CMMConfig.WorldEmitterReverbDecay = 1f;    // and the TAIL lever, so `room` reaches the reverb unscaled
+                // AND NO HISS. A world speaker's receiver keeps a faint noise bed even when fully
+                // locked, which is right for a radio and fatal for this instrument: the Schroeder
+                // integral cannot fall below a floor, so every room reported a twenty-second decay
+                // -- including an open field the rule had asked for wet 0.06. The `noise` column
+                // reports what is left, so if this ever stops working the table says so instead of
+                // quietly measuring the hiss.
+                CMMConfig.WorldEmitterStaticTrim = 0f;
+                CMMConfig.RadioRecvNoise = 0f;
+
+                int rc = ReverbLab.Run(root, Array.IndexOf(args, "--accept") >= 0);
+                try { CmmMixer.Instance?.StopAllNow(); } catch { }
+                System.Threading.Thread.Sleep(150);
+                return rc;
+            }
 
             var names = new string[] { "turn-on", "retune-shared", "retune-cold",
                                        "rapid-switch", "off-mid-tune", "broken-station",
@@ -132,7 +165,7 @@ namespace CMM
             return fail.Count == 0 ? 0 : 1;
         }
 
-        static string Arg(string[] a, string k)
+        internal static string Arg(string[] a, string k)
         { int i = Array.IndexOf(a, k); return i >= 0 && i + 1 < a.Length ? a[i + 1] : null; }
 
         static List<string> Names()
@@ -201,6 +234,13 @@ namespace CMM
                 Console.WriteLine("   note  did not reach silence before this scenario: "
                                   + residue.ToString("0.0") + " dBFS");
         }
+
+        // ── what the reverb lab borrows ──────────────────────────────────────────────────────
+        // It drives the same rig, so it uses the same three doors rather than its own copies of
+        // them: a clean sim, a speaker, and a real dial press.
+        internal static Sim FreshSim() { Reset(); return _sim; }
+        internal static void PlaceAt(Vector3i pos) => Place(pos);
+        internal static void DialTo(Vector3i pos, string cmd) => Dial(pos, cmd);
 
         // A PRESS IS THE REAL ONE. EmitterTuner.Apply is what the radial menu invokes, so a
         // scenario turning a dial takes the same path a player does -- the pin write, the silent

@@ -57,12 +57,25 @@ namespace CMM
         internal static bool  OcclusionStep(World world, float budgetMs) => true;
         internal static void  OcclusionFinish(Vector3 ear, float[] pts, int count, float[] extra, World world)
         { for (int i = 0; i < count; i++) extra[i] = 0f; }
+        // THE ROOM IS AN INPUT, NOT A MODEL. A voxel probe needs a world; what the reverb does
+        // with its answer does not. So the probe is four settable numbers -- a scenario says
+        // "you are in a 60-block stone cavern" the way it says "the speaker is at 10,64,10" --
+        // and the ANSWER comes from the shipped rule.
+        internal static float ProbeAvgDist = 3f, ProbeRoomSize = 5f, ProbeReflect = 0.5f, ProbeOpenFrac = 0.2f;
+        internal static bool  ProbeRoofed = true;
+
         internal static void  ProbeRoom(Vector3 ear, World world, out float avgDist, out float roomSize,
                                         out float reflect, out float openFrac, out bool roofed)
-        { avgDist = 3f; roomSize = 5f; reflect = 0.5f; openFrac = 0.2f; roofed = true; }
+        { avgDist = ProbeAvgDist; roomSize = ProbeRoomSize; reflect = ProbeReflect;
+          openFrac = ProbeOpenFrac; roofed = ProbeRoofed; }
+
+        // THE REAL ONE. This was `wet = 0.2f; room = 0.2f; damp = 0.45f;` -- three constants
+        // standing in for the mapping from a room to a reverb, which meant the harness that
+        // renders emitter audio had never once exercised it. It lives in ReverbModel now
+        // precisely so this line can be a call rather than a copy.
         internal static void  ComputeReverb(float roomSize, float reflect, float openFrac, bool roofed,
                                             out float wet, out float room, out float damp)
-        { wet = 0.2f; room = 0.2f; damp = 0.45f; }
+            => ReverbModel.ComputeReverb(roomSize, reflect, openFrac, roofed, out wet, out room, out damp);
     }
 
     // ── THE NATIVE FIELD ─────────────────────────────────────────────────────────────────────

@@ -52,6 +52,7 @@
     <Compile Include="..\..\Harmony\CMMConfig.cs"           Link="linked\CMMConfig.cs" />
     <Compile Include="..\..\Harmony\RadioStationCatalog.cs" Link="linked\RadioStationCatalog.cs" />
     <Compile Include="..\..\Harmony\EmitterSlots.cs"        Link="linked\EmitterSlots.cs" />
+    <Compile Include="..\..\Harmony\ReverbModel.cs"         Link="linked\ReverbModel.cs" />
     <Compile Include="..\..\Harmony\RadioBadge.cs"          Link="linked\RadioBadge.cs" />
     <Compile Include="..\..\Harmony\PlaylistSource.cs"      Link="linked\PlaylistSource.cs" />
     <Compile Include="..\..\Harmony\SourceScan.cs"          Link="linked\SourceScan.cs" />

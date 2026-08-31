@@ -185,6 +185,7 @@
     <Compile Include="Harmony\CMMConfigLoader.cs" />
     <Compile Include="Harmony\CMMSettingsSchema.cs" />
     <Compile Include="Harmony\ResumePolicy.cs" />
+    <Compile Include="Harmony\ReverbModel.cs" />
     <Compile Include="Harmony\EmitterSlots.cs" />
     <Compile Include="Harmony\RadioDial.cs" />
     <Compile Include="Harmony\RadioBadge.cs" />

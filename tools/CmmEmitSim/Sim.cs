@@ -53,6 +53,19 @@ namespace CMM
         // Main-thread cost of every tick in this run, in milliseconds, in order.
         internal readonly List<float> TickMs = new List<float>();
 
+        // RAW SAMPLES, off by default.
+        //
+        // The tape holds one RMS per FRAME, which is a 60 Hz view -- fine for "is it audible",
+        // "did it step" and "was there a hole", which is everything the scenarios ask. It cannot
+        // answer anything about the shape of a decay: Freeverb's comb delays are 25-37 ms and a
+        // 16.7 ms sampling interval cannot resolve them, so the reverb lab measured the same
+        // 67 ms repeat in six different rooms and it was an artefact of the tape, not the reverb.
+        //
+        // With this on, Step also keeps the mono sum of the capture at the real 48 kHz, and the
+        // lab's autocorrelation and Schroeder integral run on that instead.
+        internal bool RawCapture;
+        internal readonly List<float> Raw = new List<float>();
+
         // Percentile over the ticks recorded so far. p=1 is the worst single tick.
         internal float TickPct(double p, int from = 0)
         {
@@ -123,6 +136,8 @@ namespace CMM
                 float a = v < 0 ? -v : v;
                 if (a > peak) peak = a;
             }
+            if (RawCapture)
+                for (int i = 0; i < got; i++) Raw.Add(0.5f * (_buf[i * 2] + _buf[i * 2 + 1]));
 
             int slots = CmmMixer.MaxEmitterSlots;
             var s = new Sample

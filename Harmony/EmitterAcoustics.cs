@@ -3189,31 +3189,10 @@ namespace CMM
             return false;
         }
 
-        // SurfaceCategory → acoustic reflectivity (0 = dead/absorptive, 1 = hard/reflective), cached.
-        // Distinct from transmission loss: glass blocks little sound but reflects a lot; cloth absorbs both.
-        private static readonly Dictionary<string, float> _reflectCache = new Dictionary<string, float>();
-        private static float MaterialReflect(string cat)
-        {
-            if (string.IsNullOrEmpty(cat)) return 0.6f;
-            if (_reflectCache.TryGetValue(cat, out float v)) return v;
-            string c = cat.ToLowerInvariant();
-            float r;
-            if (c.Contains("metal") || c.Contains("iron") || c.Contains("steel"))            r = 0.95f;
-            else if (c.Contains("stone") || c.Contains("concrete") || c.Contains("brick")
-                     || c.Contains("cobble") || c.Contains("rock") || c.Contains("cinder"))   r = 0.9f;
-            else if (c.Contains("glass"))                                                     r = 0.85f;
-            else if (c.Contains("plastic") || c.Contains("polymer") || c.Contains("rubber"))   r = 0.6f;
-            else if (c.Contains("wood") || c.Contains("lumber"))                              r = 0.45f;
-            else if (c.Contains("dirt") || c.Contains("earth") || c.Contains("soil")
-                     || c.Contains("sand") || c.Contains("gravel") || c.Contains("clay")
-                     || c.Contains("snow"))                                                    r = 0.3f;
-            else if (c.Contains("cloth") || c.Contains("organic") || c.Contains("plant")
-                     || c.Contains("hay") || c.Contains("leaves") || c.Contains("wool")
-                     || c.Contains("cotton"))                                                  r = 0.15f;
-            else                                                                              r = 0.6f;
-            _reflectCache[cat] = r;
-            return r;
-        }
+        // MOVED TO ReverbModel, and for the same reason as the rule below. Reading a
+        // SurfaceCategory off a block is this file's job; turning a category NAME into a number
+        // is arithmetic over a string, and nothing that needed a World could ever test it here.
+        private static float MaterialReflect(string cat) => ReverbModel.MaterialReflect(cat);
 
         // ── Sweep/debug accessors (EmitterAcousticsSweep only) ──────────────────────────────────────
         // The acoustics sweep exporter needs the model's raw ingredients — per-cell loss, the settled
@@ -3242,25 +3221,14 @@ namespace CMM
         // Map the room estimate → reverb params (all 0..1). wet: how much reverb — enclosed + reflective
         // spaces are wet, open/dead ones are dry. room: size → tail length (bigger space, longer decay).
         // damp: HF damping — absorptive materials dull and shorten the tail.
+        // MOVED TO ReverbModel. The rule is arithmetic over a size, a reflectivity, an openness
+        // and a roof -- there is no world in it -- and it lived in here, where nothing without a
+        // World and a BlockValue can compile. So no test had ever driven it, and the one harness
+        // that renders emitter audio faked it with three constants. Kept as a forwarder because
+        // the geometry that FEEDS it is this file's job and every call site is here.
         internal static void ComputeReverb(float roomSize, float reflect, float openFrac, bool roofed,
                                            out float wet, out float room, out float damp)
-        {
-            float enclosure = 1f - openFrac;                              // 0 = wide open, 1 = sealed room
-            float roof = roofed ? 1f : 0.5f;                             // open sky dries it — softly, not a 3× cliff on one up-ray
-            // LEVEL: enclosed × reflective (no size penalty — a small stone room still rings). Linear in
-            // enclosure (was enclosure², which crushed partially-open big spaces).
-            wet  = Mathf.Clamp01(enclosure * reflect * roof);
-            // TAIL LENGTH. A ray probe only measures the longest SIGHTLINE, which underestimates a winding or
-            // tight tunnel: no straight line is long even though the sealed stone space rings for ages (the
-            // length is hidden around the bends). So blend two cues and take the max: (1) sightline size — a
-            // big open cavern gets its long tail here; (2) a "trapped" term — a fully ENCLOSED, hard
-            // (reflective / low-absorption) space rings regardless of how far you can see, so a narrow sealed
-            // stone tunnel finally gets a real tail. Absorptive (cloth/dirt) or open spaces stay dry.
-            float sizeTail = (roomSize - 2f) / 18f;                                // long-sightline halls
-            float trapTail = enclosure * Mathf.Clamp01((reflect - 0.4f) / 0.5f);   // sealed + hard ⇒ rings even if narrow
-            room = Mathf.Clamp01(Mathf.Max(sizeTail, 0.6f * trapTail));
-            damp = Mathf.Clamp01(0.25f + 0.7f * (1f - reflect));          // dead materials → darker/shorter tail
-        }
+            => ReverbModel.ComputeReverb(roomSize, reflect, openFrac, roofed, out wet, out room, out damp);
     }
 }
 #endif
