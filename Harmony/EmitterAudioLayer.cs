@@ -1477,6 +1477,19 @@ namespace CMM
                 else if (!EmitterTuner.TryPin(e, out pinned) &&
                     !_posPins.TryGetValue(e.Pos, out pinned))
                 {
+                    // A RADIO YOU PLACED STARTS OFF. You put it there to choose what it plays, and
+                    // having it join whatever its coordinates hashed to -- at full volume, the
+                    // moment it lands -- is the mod making that choice for you. PoiId 0 is the
+                    // position hash, which is exactly "nobody built this into a POI".
+                    if (CMMConfig.WorldEmitterPlacedStartsOff && e.PoiId == 0)
+                    {
+                        EmitterTuner.SeedSilent(e);
+                        pinned = "";
+                        CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → starts switched off "
+                                  + "(placed by a player; tune it from the radial).");
+                    }
+                    else
+                    {
                     pinned = _stations[e.StationHash % n].Name;
                     _posPins[e.Pos] = pinned;
                     // WHY THIS RADIO IS ON THIS STATION. Nothing said, on any version -- the
@@ -1489,6 +1502,7 @@ namespace CMM
                     // building's id, which is what makes every speaker in one POI share a station.
                     CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → '{pinned}' "
                               + $"(poi {e.PoiId}, hash {e.StationHash} % {n} = {e.StationHash % n}).");
+                    }
                 }
                 // Pinned to a REMOVED station ⇒ dead air: the radio contributes to no live station
                 // (silent) until the folder returns or the next world entry recomputes the pins.

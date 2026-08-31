@@ -262,6 +262,22 @@ namespace CMM
             _page[key] = ((page + dir) % pages + pages) % pages;   // wraps both ways
         }
 
+        // START A SPEAKER OFF, WITHOUT IT COUNTING AS A DIAL TURN.
+        //
+        // A radio you place should not start playing at you -- you put it there to choose what it
+        // plays. Apply() cannot be used for this: it stamps LastTuneAt and holds the speaker out
+        // of the point sets, which is the searching noise a real press deserves and this must not
+        // make. The pin is written and persisted exactly as a press would leave it, so "Turn On"
+        // behaves normally afterwards and the choice survives a reload.
+        internal static void SeedSilent(EmitterRegistry.Emitter e)
+        {
+            EnsureLoaded();
+            string key = GroupKey(e);
+            if (_pins.ContainsKey(key)) return;      // already has a choice, seeded or made
+            _pins[key] = SilentPin;
+            Save();
+        }
+
         internal static void Apply(EmitterRegistry.Emitter e, string cmd)
         {
             EnsureLoaded();

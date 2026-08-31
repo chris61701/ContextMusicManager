@@ -145,7 +145,11 @@ namespace CMM
         // Placement ("birth") ramp for a speaker that APPEARS while its station is already
         // playing (just placed, or streamed in with a chunk). < 0 ⇒ inherit the start fade
         // (the Radio context's fadeintime, else WorldEmitterFade). 0 = pop in instantly.
-        public static float  WorldEmitterBirthFade = 0f;
+        public static float  WorldEmitterBirthFade = 1.5f;
+        // A speaker a PLAYER placed starts switched off, so it plays what you choose rather than
+        // whatever its position hashed to. POI speakers are unaffected: a building's radios are
+        // scenery and are meant to be on when you walk in.
+        public static bool   WorldEmitterPlacedStartsOff = true;
         // Broadcast anchor window (seconds). Station schedules re-anchor at every multiple of this:
         // a join walks track lengths forward from the current window's anchor (~window/4min header
         // opens, pool-size independent). Longer = rarer re-anchor jumps, slightly costlier joins.

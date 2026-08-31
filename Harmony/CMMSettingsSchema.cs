@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 54;
+        internal const int CurrentSchema = 55;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -507,7 +507,14 @@ what STARTS the station's voice (the placed radio is its first audible speaker n
 -1 = inherit the station start fade (the Radio context's fadeintime, else WorldEmitterFade).
 0 = pop in at full volume instantly. Tune this to make placing radios feel snappier without
 changing station-approach fade-ins or the personal radio's world-entry join."),
-            F("WorldEmitterBirthFade",               "CMMConfig.WorldEmitterBirthFade",             0f),
+            F("WorldEmitterBirthFade",               "CMMConfig.WorldEmitterBirthFade",             1.5f, since: 1,
+                                                                                                     changedIn: 55, was: 0f),
+            Cmt(@"A speaker a PLAYER placed starts SWITCHED OFF, so it plays what you choose rather than
+whatever its position happened to hash to. Tune it from the radial menu the way you would
+any other. Speakers that come with a POI are unaffected -- a building's radios are scenery
+and are meant to be playing when you walk in. false restores the old behaviour, where a
+placed speaker joined a station the moment it was seen."),
+            B("WorldEmitterPlacedStartsOff",         "CMMConfig.WorldEmitterPlacedStartsOff",       true, since: 55),
             Cmt(@"Broadcast anchor window, seconds (min 300; default 3600 = 1 h). Station schedules re-anchor
 at every multiple of this: the song lineup jumps to a fresh deterministic point once per
 window (a playing song still finishes first — nothing is ever cut). Longer = rarer jumps
