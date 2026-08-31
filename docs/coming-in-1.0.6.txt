@@ -1,0 +1,11 @@
+Add a new context from inside the game. Pick the conditions - a storm, a biome, enemies nearby, a POI tier, one specific POI, day, night, horde night - point it at a folder, and it plays. No XML, no Lua.
+A settings panel with everything in one place: every setting, every context, and when each one should play.
+A radial menu for contexts, so you can disable one or change how often it plays without leaving the game.
+Unions: contexts can share folders, so a general pool stays in circulation alongside the specific one instead of being shadowed by it.
+Per-context frequency, with a set stretch of dead air between tracks. The forest theme plays, and then you get a few minutes to breathe.
+Music packs can ship their own settings and the mod adapts to them, so a pack arrives sounding the way its author intended. Applies only when exactly one installed pack brings its own.
+A volume control on every speaker, so one radio can sit under another instead of all of them competing.
+Left, right or mono on every speaker, so you can build a real stereo field anywhere you happen to be.
+Pick a speaker back up and put it somewhere else.
+A cap on how many radios play at once, so a base full of speakers tuned to one station stops sounding like the same song a dozen times over.
+Linux support. The native audio engine currently ships as a Windows library, which is the only thing keeping the mod on Windows; a Linux build is the plan for 1.0.6.
