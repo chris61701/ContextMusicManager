@@ -403,8 +403,8 @@ namespace CMM
             try { n = pi.prefab != null ? pi.prefab.PrefabName : null; } catch { }
             if (string.IsNullOrEmpty(n)) try { n = pi.name; } catch { }
             n = n ?? "";
-            t = n.IndexOf("rwg_tile", StringComparison.OrdinalIgnoreCase) >= 0
-             || n.IndexOf("part_",    StringComparison.OrdinalIgnoreCase) >= 0;
+            t = n.IndexOf("rwg_tile", System.StringComparison.OrdinalIgnoreCase) >= 0
+             || n.IndexOf("part_",    System.StringComparison.OrdinalIgnoreCase) >= 0;
             _tileIds[pi.id] = t;
             return t;
         }

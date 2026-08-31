@@ -1539,7 +1539,34 @@ namespace CMM
                     // see many off-air speakers -- nine buildings are restored on this save --
                     // so `!_deadAirPos.Equals(e.Pos)` meant every one of them seized it from the
                     // last, every tick, re-raising the tone forever and never sounding.
-                    else if (!_deadAirOn) GoDeadAir(e.Pos, -1);
+                    else
+                    {
+                        // EVERY SPEAKER ON THIS DEAD STATION, GATHERED WHERE THE PIN IS KNOWN.
+                        //
+                        // The first attempt at this collected them in MaintainDeadAir off
+                        // _posStation -- and _posStation is written only on the LIVE-station path
+                        // a few lines below, which this branch never reaches. A speaker on a dead
+                        // station is by construction absent from it, so the gather found exactly
+                        // the one speaker it started with and the queueing carried on.
+                        //
+                        // The pin is resolved right here, so this is where the set is built.
+                        if (_deadNames.Count == 0 || _deadNames[0] == pinned)
+                        {
+                            if (_deadNames.Count == 0) _deadNames.Add(pinned);
+                            // NOT SweepHeld. The tuner holds a speaker for a second and a half
+                            // after a dial turn, and landing on a dead station IS a dial turn --
+                            // so excluding held speakers excluded the very one that had just
+                            // called for the carrier, and with it the only member of the group.
+                            // The carrier then published nothing and never sounded at all.
+                            //
+                            // A speaker the BORROW is sweeping is a different matter: it is
+                            // already rendering on its own lane, and putting it on this one too
+                            // would sound it twice.
+                            if (_deadGroup.Count < MaxDeadPts && !e.Pos.Equals(_borrowPos))
+                                _deadGroup.Add(e);
+                        }
+                        if (!_deadAirOn) GoDeadAir(e.Pos, -1);
+                    }
                     continue;
                 }
                 if (held) continue;              // in no point set, but its station is recorded
@@ -2808,37 +2835,42 @@ namespace CMM
             }
             _deadAirMissingAt = 0f;
 
-            EmitterRegistry.Emitter e = snap[at];
             // EVERY SPEAKER ON THE DEAD STATION, NOT JUST THE ONE THAT FOUND IT.
             //
             // The carrier is one lane and the lane carried ONE point, so of several radios tuned
-            // to a station that will not open, exactly one sounded and the rest were silent --
-            // and breaking that one handed the carrier to the next, which then ran the whole hunt
-            // again before settling. Reported as radios queueing for a tone.
+            // to a station that will not open, exactly one sounded. Break it and the carrier
+            // passed to the next, which ran the whole hunt again before settling -- radios
+            // queueing for a tone. A lane takes N points and a station lane already publishes one
+            // per speaker, so the carrier does too, each with its own occlusion.
             //
-            // A lane takes N points; a station lane already publishes one per speaker. So the
-            // carrier does too, and they all sound it, each with its own occlusion, exactly as
-            // they would if the station were playing.
-            string deadName = _posStation.TryGetValue(e.Pos, out string dn0) ? dn0 : null;
+            // The set is gathered in GroupSnapshot, where the pin has just been resolved. It was
+            // built HERE at first, off _posStation -- and _posStation is written only on the LIVE
+            // station path, which this branch never reaches, so a speaker on a dead station is by
+            // construction absent from it. The gather found nobody but itself and the queueing
+            // carried on unchanged.
+            // THE SPEAKER THAT OWNS THE CARRIER IS ALWAYS FIRST, and the group is what it adds.
+            //
+            // GoDeadAir has two callers -- GroupSnapshot's dead-pin branch, which gathers the
+            // group, and the tune machine's give-up, which does not. Publishing only the group
+            // meant a carrier raised by the give-up had no points at all and never sounded, which
+            // is every "tuned to a station that will not open" case that goes through the machine.
+            // The owner is the floor; the group is an addition to it, never a replacement.
+            EmitterRegistry.Emitter owner = snap[at];
             int dc = 0;
-            for (int i = 0; i < snap.Count && dc < MaxDeadPts; i++)
+            _deadPts[0] = owner.Pos.x + 0.5f; _deadPts[1] = owner.Pos.y + 0.5f;
+            _deadPts[2] = owner.Pos.z + 0.5f;
+            _deadFlags[0] = owner.Name == "radioHam" ? 1 : 0;
+            dc = 1;
+            for (int i = 0; i < _deadGroup.Count && dc < MaxDeadPts; i++)
             {
-                EmitterRegistry.Emitter de = snap[i];
-                // The one that found it always counts; the others must be on the same station and
-                // not be mid-retune (a speaker being swept belongs to the sweep, not to this).
-                if (!de.Pos.Equals(e.Pos))
-                {
-                    if (deadName == null) continue;
-                    if (!_posStation.TryGetValue(de.Pos, out string dn) || dn != deadName) continue;
-                    if (EmitterTuner.SweepHeld(de.Pos) || de.Pos.Equals(_borrowPos)) continue;
-                }
+                EmitterRegistry.Emitter de = _deadGroup[i];
+                if (de.Pos.Equals(owner.Pos)) continue;
                 _deadPts[dc * 3] = de.Pos.x + 0.5f;
                 _deadPts[dc * 3 + 1] = de.Pos.y + 0.5f;
                 _deadPts[dc * 3 + 2] = de.Pos.z + 0.5f;
                 _deadFlags[dc] = de.Name == "radioHam" ? 1 : 0;
                 dc++;
             }
-            if (dc == 0) return;
             // OCCLUDED, LIKE EVERYTHING ELSE THAT COMES OUT OF THAT BOX. This published 0, which
             // is clear line -- no walls, no doors -- so the carrier arrived at full strength
             // through geometry that muffles everything else the speaker does. One point, one ray,
@@ -2928,6 +2960,12 @@ namespace CMM
 
         // As many speakers as a station lane can carry: a dead station is still a station.
         private const int MaxDeadPts = 16;
+        // Rebuilt every GroupSnapshot: the speakers on the dead station the carrier is serving,
+        // and that station's name. One name, because there is one carrier lane -- speakers on a
+        // SECOND dead station keep waiting for it, which is the honest limit rather than a
+        // silent mis-assignment.
+        private static readonly List<EmitterRegistry.Emitter> _deadGroup = new List<EmitterRegistry.Emitter>();
+        private static readonly List<string> _deadNames = new List<string>();
         private static readonly float[] _deadPts = new float[MaxDeadPts * 3];
         private static readonly float[] _deadGain = new float[MaxDeadPts];
         private static readonly int[] _deadFlags = new int[MaxDeadPts];
