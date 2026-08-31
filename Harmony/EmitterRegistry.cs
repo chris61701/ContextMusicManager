@@ -393,12 +393,47 @@ namespace CMM
         // Which oversized POI, if any, contains `p`. The mirror of InsideScannablePoi: that one
         // answers "will the scan claim this block", this one answers "is it in a building whose
         // scan will never run", which is the case that needs a station identity from somewhere.
+        // Tiles and prefab parts are scenery containers, not places. Cached per id: this is asked
+        // once per placed block per sweep and a prefab's name never changes.
+        private static readonly Dictionary<int, bool> _tileIds = new Dictionary<int, bool>();
+        private static bool IsTileOrPart(PrefabInstance pi)
+        {
+            if (_tileIds.TryGetValue(pi.id, out bool t)) return t;
+            string n = null;
+            try { n = pi.prefab != null ? pi.prefab.PrefabName : null; } catch { }
+            if (string.IsNullOrEmpty(n)) try { n = pi.name; } catch { }
+            n = n ?? "";
+            t = n.IndexOf("rwg_tile", StringComparison.OrdinalIgnoreCase) >= 0
+             || n.IndexOf("part_",    StringComparison.OrdinalIgnoreCase) >= 0;
+            _tileIds[pi.id] = t;
+            return t;
+        }
+
         private static bool InsideOversizedPoi(Vector3i p, out int poiId)
         {
             poiId = 0;
             foreach (PrefabInstance pi in _prefabScratch)
             {
                 if (!_oversizedIds.Contains(pi.id)) continue;
+                // A TILE IS THE GROUND, NOT A BUILDING.
+                //
+                // This exists so a speaker inside a building too big to scan still joins that
+                // building's station. RWG TILES are also prefabs, they are also far past the scan
+                // volume, and their bounding box is the whole 150x150 block of world the town sits
+                // on -- so every radio a player placed anywhere in the area was handed the tile's
+                // id, which means one id, one hash, one station. Thirteen radios spread over forty
+                // blocks of open ground all reported
+                //
+                //     poi 3271, hash 382985367 % 17 = 0    (rwg_tile_gateway_straight.3271)
+                //
+                // and every one of them landed on the same station. Identical hash because it was
+                // never their position being hashed.
+                //
+                // Matched by name because that is how the GAME identifies a tile -- PrefabName
+                // contains "rwg_tile" in six places in its own source, including the RWG decorator
+                // and the region loader. `part_` catches prefab PARTS (part_driveway and friends),
+                // which are pieces of a tile rather than places in their own right.
+                if (IsTileOrPart(pi)) continue;
                 Vector3i b = pi.boundingBoxPosition, sz = pi.boundingBoxSize;
                 if (p.x < b.x || p.x >= b.x + sz.x) continue;
                 if (p.z < b.z || p.z >= b.z + sz.z) continue;
@@ -667,6 +702,7 @@ namespace CMM
             _poiCache.Clear();
             _poiScanTime.Clear();
             _oversizedIds.Clear();
+            _tileIds.Clear();          // prefab ids are per world, like every other id here
             _placedCache.Clear();
             _placedPoiId.Clear();
 
