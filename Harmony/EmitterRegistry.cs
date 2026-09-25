@@ -58,6 +58,23 @@ namespace CMM
         private static int StationHashFromPos(Vector3i p) =>
             (int)(((uint)(p.x * 73856093 ^ p.y * 19349663 ^ p.z * 83492791) * 2654435761u) & 0x7fffffff);
 
+        // WHICH SPEAKERS ARE ACTIVE BY DEFAULT (WorldEmitterActiveByDefaultPercent). A fixed bucket
+        // 0..99 per block position, so the same radios are dark on every visit and on every MP
+        // client, and lowering the percent only ever switches more off. Salted and fully mixed (murmur3 finalizer)
+        // so it is independent of StationHash -- otherwise the dark radios would cluster on some
+        // stations. Derived every time it is asked, never stored: a player's pin outranks it, and
+        // that is the only thing that does.
+        internal static int ActiveBucket(Vector3i p)
+        {
+            uint h = (uint)(p.x * 73856093 ^ p.y * 19349663 ^ p.z * 83492791) ^ 0x5bd1e995u;
+            h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+            return (int)(h % 100u);
+        }
+
+        // POI speakers only: one a player placed is theirs, and WorldEmitterPlacedStartsOff decides it.
+        internal static bool ActiveByDefault(Emitter e)
+            => e.PoiId == 0 || ActiveBucket(e.Pos) < CMMConfig.WorldEmitterActiveByDefaultPercent;
+
         // Scan + cache a POI once we come within this many blocks of its bounding box; drop it from
         // the cache once we're farther than this. MUST cover the station's whole audible reach: this
         // was a flat 64 while WorldEmitterRange was 100 (reverb ×1.5 ⇒ 150), so POI speakers were

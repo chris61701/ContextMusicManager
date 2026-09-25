@@ -150,6 +150,11 @@ namespace CMM
         // whatever its position hashed to. POI speakers are unaffected: a building's radios are
         // scenery and are meant to be on when you walk in.
         public static bool   WorldEmitterPlacedStartsOff = true;
+        // Percent (0..100) of POI speakers that are ACTIVE BY DEFAULT; the rest start switched off.
+        // Per SPEAKER, derived from its block position every tick (EmitterRegistry.ActiveByDefault)
+        // -- never stored, so changing it lands on the next tick, and any choice made on the radial
+        // outranks it.
+        public static int    WorldEmitterActiveByDefaultPercent = 10;
         // Broadcast anchor window (seconds). Station schedules re-anchor at every multiple of this:
         // a join walks track lengths forward from the current window's anchor (~window/4min header
         // opens, pool-size independent). Longer = rarer re-anchor jumps, slightly costlier joins.

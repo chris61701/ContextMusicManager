@@ -1473,35 +1473,45 @@ namespace CMM
                 // always underneath rather than inventing a new one.
                 string pinned;
                 if (leaving) pinned = _tuneFrom;
-                else if (!EmitterTuner.TryPin(e, out pinned) &&
-                    !_posPins.TryGetValue(e.Pos, out pinned))
+                else if (!EmitterTuner.TryPin(e, out pinned))
                 {
-                    // A RADIO YOU PLACED STARTS OFF. You put it there to choose what it plays, and
-                    // having it join whatever its coordinates hashed to -- at full volume, the
-                    // moment it lands -- is the mod making that choice for you. PoiId 0 is the
-                    // position hash, which is exactly "nobody built this into a POI".
-                    if (CMMConfig.WorldEmitterPlacedStartsOff && e.PoiId == 0)
+                    if (!_posPins.TryGetValue(e.Pos, out pinned))
                     {
-                        EmitterTuner.SeedSilent(e);
-                        pinned = "";
-                        CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → starts switched off "
-                                  + "(placed by a player; tune it from the radial).");
+                        // A RADIO YOU PLACED STARTS OFF. You put it there to choose what it plays, and
+                        // having it join whatever its coordinates hashed to -- at full volume, the
+                        // moment it lands -- is the mod making that choice for you. PoiId 0 is the
+                        // position hash, which is exactly "nobody built this into a POI".
+                        if (CMMConfig.WorldEmitterPlacedStartsOff && e.PoiId == 0)
+                        {
+                            EmitterTuner.SeedSilent(e);
+                            pinned = "";
+                            CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → starts switched off "
+                                      + "(placed by a player; tune it from the radial).");
+                        }
+                        else
+                        {
+                        pinned = _stations[e.StationHash % n].Name;
+                        _posPins[e.Pos] = pinned;
+                        // WHY THIS RADIO IS ON THIS STATION. Nothing said, on any version -- the
+                        // census counts speakers and the catalog lists stations, and the assignment
+                        // between them was invisible, so "all my radios ended up on the same one" was
+                        // not a question the log could answer. Printed once per speaker, at the moment
+                        // it is decided and cached, with the arithmetic that decided it.
+                        //
+                        // poi 0 means the position hash (a radio you placed); anything else is the
+                        // building's id, which is what makes every speaker in one POI share a station.
+                        CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → '{pinned}' "
+                                  + $"(poi {e.PoiId}, hash {e.StationHash} % {n} = {e.StationHash % n})"
+                                  + (!EmitterRegistry.ActiveByDefault(e)
+                                        ? $", starts switched off (bucket {EmitterRegistry.ActiveBucket(e.Pos)} not below active-by-default {CMMConfig.WorldEmitterActiveByDefaultPercent}%)."
+                                        : "."));
+                        }
                     }
-                    else
-                    {
-                    pinned = _stations[e.StationHash % n].Name;
-                    _posPins[e.Pos] = pinned;
-                    // WHY THIS RADIO IS ON THIS STATION. Nothing said, on any version -- the
-                    // census counts speakers and the catalog lists stations, and the assignment
-                    // between them was invisible, so "all my radios ended up on the same one" was
-                    // not a question the log could answer. Printed once per speaker, at the moment
-                    // it is decided and cached, with the arithmetic that decided it.
-                    //
-                    // poi 0 means the position hash (a radio you placed); anything else is the
-                    // building's id, which is what makes every speaker in one POI share a station.
-                    CMMConfig.D($"[CMM] Station pick: {e.Name} at {e.Pos} → '{pinned}' "
-                              + $"(poi {e.PoiId}, hash {e.StationHash} % {n} = {e.StationHash % n}).");
-                    }
+                    // NOT ACTIVE BY DEFAULT (WorldEmitterActiveByDefaultPercent). Asked AFTER the derive, so the
+                    // automatic station is still cached in _posPins -- that is what "Turn On" pins it
+                    // to. Not seeded as a silent pin: derived every tick, so a changed percent lands
+                    // on the next one, and only a choice on the radial (TryPin, above) outranks it.
+                    if (pinned.Length > 0 && !EmitterRegistry.ActiveByDefault(e)) pinned = "";
                 }
                 // Pinned to a REMOVED station ⇒ dead air: the radio contributes to no live station
                 // (silent) until the folder returns or the next world entry recomputes the pins.

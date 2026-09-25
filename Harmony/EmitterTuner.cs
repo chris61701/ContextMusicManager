@@ -109,6 +109,9 @@ namespace CMM
                 if (!RadioStationCatalog.ByName.ContainsKey(station)) return station + " - off air";
                 return station;
             }
+            // Not active by default (WorldEmitterActiveByDefaultPercent) reads as OFF, so the radial offers
+            // "Turn On" -- the audio layer is holding it silent, whatever it has cached.
+            if (!EmitterRegistry.ActiveByDefault(e)) return SilentLabel;
             station = EmitterAudioLayer.PinnedStationAt(e.Pos);
             return string.IsNullOrEmpty(station) ? "tuning" : station;
         }
@@ -295,6 +298,13 @@ namespace CMM
             {
                 string back;
                 if (_beforeOff.TryGetValue(key, out back) && back != SilentLabel)
+                {
+                    _pins[key] = back; label = back;
+                }
+                // NOT ACTIVE BY DEFAULT: Automatic IS off for this speaker, so clearing the pin would
+                // leave it exactly where it was. Pin the station it would have played instead.
+                else if (!EmitterRegistry.ActiveByDefault(e)
+                         && !string.IsNullOrEmpty(back = EmitterAudioLayer.PinnedStationAt(e.Pos)))
                 {
                     _pins[key] = back; label = back;
                 }

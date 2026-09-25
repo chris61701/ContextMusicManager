@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 56;
+        internal const int CurrentSchema = 58;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -465,6 +465,14 @@ version 3.0+ — on older versions they are inert and this setting (plus the aco
 WorldEmitter* settings below) is ignored. The RADIO STATIONS themselves and the
 personal radio dial (KeyRadioNext/KeyRadioPrev) work on EVERY supported version."),
             B("WorldEmitterEnabled",                 "CMMConfig.WorldEmitterEnabled",               true),
+            Cmt(@"Percent (0-100) of the speakers that come WITH a POI that are ACTIVE BY DEFAULT; the rest
+start switched off, so the world is not wall-to-wall radio. Chosen per speaker from its
+position: the same radios on every visit and for every player in multiplayer, and a building
+can have one radio playing among ones that are dark. Tune one from the radial to turn it on;
+your choice is kept. Lowering the number only ever switches more off. 100 = every POI speaker
+plays. Speakers you place are governed by WorldEmitterPlacedStartsOff instead."),
+            I("WorldEmitterActiveByDefaultPercent",  "CMMConfig.WorldEmitterActiveByDefaultPercent", 10, since: 57,
+              changedIn: 58, was: 90),
             Cmt(@"The Radio source. Names a context (its Source/fadeintime/volume then apply), or is a raw
 folder / .m3u / absolute path.
 STATIONS: every SUBFOLDER of that folder is one radio station — the folder name is the
