@@ -1,0 +1,1756 @@
+<title>Context Music Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+
+<style>
+:root{
+  --ground:#E7E9E4; --panel:#F4F5F1; --panel-2:#DEE1D9;
+  --ink:#171A16; --ink-2:#41473F; --muted:#666D62; --faint:#8A9184;
+  --rule:#C6CABF; --rule-soft:#D6DACF;
+  --amber:#A96410; --amber-lamp:#C8811E;
+  --probe:#1C6360;
+  --fault:#9A3B27;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#111310; --panel:#191C17; --panel-2:#20241D;
+    --ink:#E6E8E1; --ink-2:#BFC4B8; --muted:#949B8C; --faint:#6E7568;
+    --rule:#2D322A; --rule-soft:#242821;
+    --amber:#E2A648; --amber-lamp:#E2A648;
+    --probe:#5FB0A8;
+    --fault:#D3735A;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#111310; --panel:#191C17; --panel-2:#20241D;
+  --ink:#E6E8E1; --ink-2:#BFC4B8; --muted:#949B8C; --faint:#6E7568;
+  --rule:#2D322A; --rule-soft:#242821;
+  --amber:#E2A648; --amber-lamp:#E2A648;
+  --probe:#5FB0A8;
+  --fault:#D3735A;
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4","Iowan Old Style",Georgia,serif;
+  font-size:18px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px 120px;}
+h1,h2,h3,h4,.disp{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;text-wrap:balance;}
+code,kbd,.mono,.log,.stat b,.tick{font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;}
+
+header.mast{padding:72px 0 0;}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--amber);margin:0 0 22px;
+}
+h1{
+  font-size:clamp(38px,6.4vw,74px); line-height:.98; font-weight:700;
+  letter-spacing:-.022em; margin:0 0 22px; max-width:15ch;
+}
+.standfirst{font-size:21px;line-height:1.5;color:var(--ink-2);max-width:60ch;margin:0 0 34px;}
+.standfirst em{color:var(--ink);font-style:italic;}
+
+.scale{
+  height:7px;margin:44px 0 40px;border-top:1px solid var(--rule);
+  background-image:repeating-linear-gradient(to right,var(--rule) 0 1px,transparent 1px 24px);
+  background-size:100% 6px;background-repeat:no-repeat;background-position:0 0;
+  opacity:.85;
+}
+.scale.tall{height:10px;background-size:100% 9px;}
+
+.stats{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+  gap:1px;background:var(--rule);border:1px solid var(--rule);margin:8px 0 0;
+}
+.stat{background:var(--panel);padding:16px 18px 14px;}
+.stat b{display:block;font-size:26px;font-weight:500;letter-spacing:-.02em;color:var(--ink);
+  font-variant-numeric:tabular-nums;line-height:1.1;}
+.stat span{display:block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;
+  letter-spacing:.11em;text-transform:uppercase;color:var(--muted);margin-top:7px;}
+
+.shell{display:block;}
+@media (min-width:1120px){
+  .shell{display:grid;grid-template-columns:212px minmax(0,1fr);gap:56px;align-items:start;}
+  nav.toc{position:sticky;top:36px;max-height:calc(100vh - 72px);overflow-y:auto;padding-right:6px;}
+}
+nav.toc{font-family:"IBM Plex Mono",monospace;font-size:12px;line-height:1.5;}
+nav.toc .grp{color:var(--faint);letter-spacing:.12em;text-transform:uppercase;font-size:10px;
+  margin:22px 0 9px;}
+nav.toc a{display:block;color:var(--muted);text-decoration:none;padding:3px 0 3px 10px;
+  border-left:2px solid transparent;margin-left:-12px;}
+nav.toc a:hover{color:var(--ink);border-left-color:var(--amber);}
+@media (max-width:1119px){nav.toc{display:none;}}
+
+section{padding-top:14px;}
+.actnum{
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--amber);display:flex;gap:14px;align-items:baseline;
+  flex-wrap:wrap;margin:0 0 12px;
+}
+.actnum .dates{color:var(--faint);letter-spacing:.08em;}
+h2{font-size:clamp(28px,3.6vw,40px);line-height:1.06;letter-spacing:-.02em;font-weight:700;
+  margin:0 0 20px;max-width:20ch;}
+h3{font-size:23px;line-height:1.2;letter-spacing:-.012em;font-weight:600;margin:44px 0 14px;max-width:32ch;}
+h4{font-size:16.5px;line-height:1.3;font-weight:600;margin:30px 0 10px;letter-spacing:-.004em;}
+p{margin:0 0 18px;max-width:66ch;}
+p.lede{font-size:19.5px;color:var(--ink-2);}
+ul,ol{max-width:66ch;padding-left:22px;margin:0 0 20px;}
+li{margin:0 0 9px;}
+strong{font-weight:600;}
+a{color:var(--amber);text-decoration:none;border-bottom:1px solid var(--rule);}
+a:hover{border-bottom-color:var(--amber);}
+:focus-visible{outline:2px solid var(--amber);outline-offset:3px;}
+
+code{font-size:.86em;background:var(--panel-2);padding:1px 5px;border-radius:2px;color:var(--ink);}
+
+.log{
+  border-left:2px solid var(--amber-lamp);background:var(--panel);
+  padding:14px 18px;margin:0 0 22px;max-width:66ch;
+  font-size:13.5px;line-height:1.65;color:var(--ink-2);
+}
+.log div{padding:2px 0;}
+.log div::before{content:"\203A\00a0";color:var(--amber);}
+.log .d{color:var(--faint);}
+
+.why{border-left:2px solid var(--probe);padding:2px 0 2px 20px;margin:28px 0;max-width:66ch;}
+.why .tag{color:var(--probe);}
+.why h4{margin-top:0;}
+.why p:last-child{margin-bottom:0;}
+
+blockquote{
+  margin:26px 0;padding:0 0 0 22px;border-left:2px solid var(--rule);
+  max-width:62ch;font-size:19px;line-height:1.5;color:var(--ink);font-style:italic;
+}
+blockquote p:last-child{margin-bottom:0;}
+
+.tw{overflow-x:auto;margin:0 0 26px;}
+table{border-collapse:collapse;width:100%;min-width:520px;font-size:14.5px;
+  font-family:"IBM Plex Mono",monospace;}
+th{text-align:left;font-weight:500;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);border-bottom:1px solid var(--rule);padding:0 16px 8px 0;white-space:nowrap;}
+td{padding:9px 16px 9px 0;border-bottom:1px solid var(--rule-soft);vertical-align:top;color:var(--ink-2);}
+td:first-child{color:var(--ink);}
+td.nw{white-space:nowrap;}
+td.num,th.num{font-variant-numeric:tabular-nums;text-align:right;padding-right:22px;}
+tbody tr:last-child td{border-bottom:none;}
+
+.panel{background:var(--panel);border:1px solid var(--rule);padding:22px 24px;margin:26px 0;max-width:66ch;}
+.panel h4{margin-top:0;}
+.panel p:last-child,.panel ul:last-child{margin-bottom:0;}
+.panel.fault{border-left:2px solid var(--fault);}
+.panel.fault .tag{color:var(--fault);}
+.tag{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.15em;
+  text-transform:uppercase;color:var(--muted);display:block;margin-bottom:9px;}
+
+.split{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule);
+  border:1px solid var(--rule);margin:26px 0;max-width:66ch;}
+.split > div{background:var(--panel);padding:18px 20px;}
+.split h4{margin:0 0 8px;}
+.split p{font-size:15.5px;margin:0;color:var(--ink-2);}
+@media (max-width:600px){.split{grid-template-columns:1fr;}}
+
+footer{border-top:1px solid var(--rule);margin-top:60px;padding-top:26px;
+  font-size:14px;color:var(--muted);max-width:66ch;}
+
+html{scroll-behavior:smooth;}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto;}}
+@media (max-width:640px){
+  body{font-size:17px;}
+  .wrap{padding:0 20px 80px;}
+  header.mast{padding-top:44px;}
+}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">Development history &middot; 2026-06-02 &rarr; 2026-08-30</p>
+  <h1>Context Music Manager</h1>
+  <p class="standfirst">A 7 Days to Die mod that set out to play your own music, and ended up
+  shipping a native audio engine, a calibrated acoustic model for sound inside a voxel world,
+  and a radio with stations, static and a dial that clicks. <em>623 commits in ninety days.</em></p>
+
+  <div class="stats">
+    <div class="stat"><b>623</b><span>Commits</span></div>
+    <div class="stat"><b>90</b><span>Days</span></div>
+    <div class="stat"><b>696</b><span>Tracked files</span></div>
+    <div class="stat"><b>53.9k</b><span>Lines C#</span></div>
+    <div class="stat"><b>16.4k</b><span>Lines C</span></div>
+    <div class="stat"><b>300</b><span>Lines Lua</span></div>
+    <div class="stat"><b>28</b><span>Dev tools</span></div>
+    <div class="stat"><b>62</b><span>Audio ABI revs</span></div>
+    <div class="stat"><b>56</b><span>Config schemas</span></div>
+    <div class="stat"><b>202</b><span>Settings</span></div>
+    <div class="stat"><b>71</b><span>Contexts</span></div>
+    <div class="stat"><b>4</b><span>Games, one DLL</span></div>
+  </div>
+</header>
+
+<div class="scale tall"></div>
+
+<div class="shell">
+<nav class="toc" aria-label="Contents">
+  <div class="grp">Front</div>
+  <a href="#thesis">The short version</a>
+  <a href="#reading">How to read this</a>
+  <div class="grp">The narrative</div>
+  <a href="#act1">I &middot; A weekend mod</a>
+  <a href="#act2">II &middot; Becoming software</a>
+  <a href="#act3">III &middot; The engine goes native</a>
+  <a href="#act4">IV &middot; Music in the world</a>
+  <a href="#act5">V &middot; The acoustics rebuild</a>
+  <a href="#act6">VI &middot; The library</a>
+  <a href="#act7">VII &middot; The last week</a>
+  <div class="grp">The machine</div>
+  <a href="#arch">How it works today</a>
+  <a href="#resolve">The resolve tick</a>
+  <a href="#audio">The audio path</a>
+  <a href="#field">The acoustic field</a>
+  <a href="#emitters">The emitter layer</a>
+  <a href="#radio">The radio</a>
+  <a href="#config">Config &amp; schema</a>
+  <a href="#compat">Four games, one binary</a>
+  <a href="#instruments">The instruments</a>
+  <div class="grp">Reading it back</div>
+  <a href="#principles">Principles it follows</a>
+  <a href="#failures">Recurring failure modes</a>
+  <a href="#future">Where it's going</a>
+  <a href="#timeline">Timeline</a>
+</nav>
+
+<main>
+
+<section id="thesis">
+<h2>The short version</h2>
+
+<p class="lede">Context Music Manager began as a weekend mod that played your own music instead
+of the game's. It now ships a purpose-built native audio engine, a calibrated acoustic model
+for sound travelling through a voxel world, and an in-game radio you can craft, place, tune
+and hear from the next room.</p>
+
+<p>The through-line is a single adversary: <strong>the game's frame loop</strong>. Unity's audio
+system, the garbage collector and the main thread are all hostile to continuous music. Almost
+every major architectural decision in the project is another step away from them &mdash; and the
+payoff is not a feature you can screenshot. It's an absence. No stutter.</p>
+
+<p>The second through-line is <strong>measurement</strong>. Twenty-eight purpose-built tools exist
+in this repository for no reason other than to find out whether something is true. Several major
+features exist only because a harness proved the previous version wrong, and at least three times
+the project discovered it had spent weeks tuning something nobody had actually heard.</p>
+
+<p>The third, which only becomes visible in the last fortnight, is <strong>derivation over
+ownership</strong>. Again and again a bug turns out to be a piece of state that someone latched
+&mdash; a cached block id, an owner of a lane, a decision written down at the moment it was made
+&mdash; where the correct answer was to ask the world afresh every tick. It is now written into the
+project's own notes as a rule.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="reading">
+<h2>How to read this</h2>
+
+<p>Everything set in plain text is drawn from the repository: 623 commit subjects and bodies,
+<code>CHANGELOG.md</code>, <code>TODO.md</code>, <code>ModInfo.xml</code>, the source comments
+(which in this codebase are frequently the design record), and the project's own design notes in
+<code>docs/</code>.</p>
+
+<p>Lines in the amber log style are <strong>verbatim commit subjects</strong> &mdash; the machine's
+own record of what happened:</p>
+
+<div class="log">
+  <div>Nothing told the field a block had changed <span class="d">&mdash; Aug 25</span></div>
+  <div>The ghost: a station's advance decision was overwritten every tick <span class="d">&mdash; Aug 29</span></div>
+</div>
+
+<p>Blocks marked with the teal rule are <strong>analysis</strong> &mdash; an outside reading of what
+a decision was solving for, and, where the request asked for it, speculation about intent. They are
+inference, not testimony, and the author may disagree with any of them.</p>
+
+<div class="why">
+  <span class="tag">Why &mdash; analysis</span>
+  <p>Blocks like this one are the inferred reasoning. Everything else is the record.</p>
+</div>
+</section>
+
+<div class="scale"></div>
+
+<section id="act1">
+<div class="actnum"><span>Act I</span><span class="dates">June 2 &ndash; June 17 &middot; 18 commits</span></div>
+<h2>A weekend mod</h2>
+
+<p>The first two commits are <em>"Add .gitattributes and .gitignore"</em> and <em>"Add project
+files"</em> &mdash; a Visual Studio C# class library targeting a game's Harmony patching system.
+What follows is exactly what you'd expect from someone scratching an itch: caching on day two,
+crossfading on day two, and a toggle for each on day three.</p>
+
+<p>By <strong>day four</strong> the real problem has surfaced, and it isn't playback:</p>
+
+<div class="log">
+  <div>Fixes in logic to address contexts changing too quickly <span class="d">&mdash; Jun 5</span></div>
+  <div>Fixed Vehicle Contexts <span class="d">&mdash; Jun 5</span></div>
+</div>
+
+<p>This is the problem the whole project is actually about, found on day four and never fully
+put down. A music system driven by game state is a <em>debouncing</em> problem before it is an
+audio problem. The game's notion of "you are in combat" flickers; a naive mapping from state to
+track produces music that changes every two seconds, which is worse than no music at all.</p>
+
+<p><strong>June 6</strong> is the first big day, and the commit message reads like a week's work:
+POI detection, sleeper detection, POI tiers 1&ndash;5, infested and cleared states, blood-moon
+combat, low-health &mdash; and the contexts move from a list into a dictionary. Buried in the same
+message:</p>
+
+<blockquote><p>Hot Loading (removing/adding files while game running) went from an unintended
+glitch to intentional feature</p></blockquote>
+
+<div class="why">
+  <span class="tag">Why &mdash; the glitch that became a contract</span>
+  <p>Promoting hot-reload from bug to feature looks like a throwaway line, and it isn't. It
+  committed the project to a promise &mdash; <em>you can reorganise your music while the game is
+  running</em> &mdash; that reached down into the architecture three weeks later.</p>
+  <p>If a track is playing from an open file handle, its folder is pinned. You cannot move it.
+  Honouring the promise is why <strong>June 29</strong> reads <em>"Buffer audio files into native
+  memory on open to avoid locking music folders"</em>: read the file into off-GC native memory,
+  close the handle immediately, and the folder is free. Files over a size cap still stream, which
+  is the honest compromise.</p>
+  <p>One casual user-facing promise, made in week one, forced a memory-management decision in week
+  four. This pattern repeats throughout the project, and it is the clearest early sign that the
+  author was designing for users rather than for a demo.</p>
+</div>
+
+<h3>The NAudio detour</h3>
+
+<p>Three commits in a row are <em>"Commiting before rewrite before implement NAudio"</em>,
+<em>"Before adding NAudio. Didn't get around to it last time"</em> and finally, on
+<strong>June 10</strong>, <em>"NAudio System added &mdash; issues with resume and load time"</em>.
+Unity's own audio clip loading was too slow and too coarse; NAudio is the standard managed answer.</p>
+
+<p>It will be removed entirely eighteen days later. Its NuGet packages are still sitting in
+<code>packages/</code> today &mdash; NAudio, NAudio.Vorbis, NVorbis, CSCore, Concentus,
+BunLabs.NAudio.Flac &mdash; a small archaeological layer of every managed decoder that was tried
+before the answer turned out to be "none of them."</p>
+
+<p>The act closes with two commits that are almost apologetic in their honesty:</p>
+
+<div class="log">
+  <div>Update before major changes. Spawn/Death PlayOnce don't work until they've been played once. Lag during title screen on load still. Ogg files still don't resume <span class="d">&mdash; Jun 14</span></div>
+  <div>After Several Upgrades &mdash; Flacs don't lock up, menu music still iffy <span class="d">&mdash; Jun 17</span></div>
+</div>
+
+<p>Every one of those three named defects &mdash; deferred one-shots, load-time stalls, seek-resume
+on compressed formats &mdash; gets a permanent architectural answer later. The Ogg resume bug in
+particular resurfaces in August as the root cause of a completely different symptom (silence in
+traders on Alpha 20) and is finally traced to Opus resume re-seeking mid-file into a premature
+end-of-stream.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="act2">
+<div class="actnum"><span>Act II</span><span class="dates">June 20 &ndash; June 29 &middot; 40 commits</span></div>
+<h2>Becoming software</h2>
+
+<p class="lede">Ten days that turn a mod into an engineering project. The code is modularised into
+partial classes, the configuration moves into XML, the decision logic moves out of the DLL
+entirely, and the mod starts shipping as one binary for four different games.</p>
+
+<h3>One binary, four game versions <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; June 23, v1.0.1</span></h3>
+
+<p>7 Days to Die changed its API repeatedly across Alpha 20, Alpha 21, 2.6 and 3.x. The project's
+own audit lists <strong>ten distinct divergences</strong>, and the dangerous thing about them is
+that per-version compilation <em>hides</em> them:</p>
+
+<div class="tw"><table>
+<thead><tr><th>Divergence</th><th>Shape</th><th>Why a compile can't see it</th></tr></thead>
+<tbody>
+<tr><td class="nw">TraderInfo.IsOpen</td><td>property on A20/A21/2.6, <strong>field</strong> on 3.0</td><td>Both compile as <code>x.IsOpen</code></td></tr>
+<tr><td class="nw">Prefab.PrefabName</td><td>same split, different boundary</td><td>Identical at the call site</td></tr>
+<tr><td class="nw">GetPOIAtPosition()</td><td>1, 2 or 3 parameters</td><td>C# bakes default arguments in at the caller</td></tr>
+<tr><td class="nw">Rainfall</td><td><code>...Percent()</code> on 3.0, <code>...Value()</code> on alphas</td><td>Plain rename &mdash; missing method at JIT</td></tr>
+<tr><td class="nw">EnumGamePrefs</td><td>ordinals drift: 170 &rarr; 175</td><td>Enums bake in as integer constants</td></tr>
+<tr><td class="nw">GetWorldPrefabs</td><td>fills your list on 3.x, <strong>returns</strong> one on 2.6</td><td>Found in August, not June</td></tr>
+</tbody>
+</table></div>
+
+<p>The <code>EnumGamePrefs</code> one is the nastiest in the list. A binary compiled against 3.0
+that reads <code>OptionsDynamicMusicEnabled</code> on Alpha 20 does not throw &mdash; it silently
+reads <em>a different setting</em>. The fix is <code>GamePrefsCompat</code>, which resolves the
+enum member by <em>name</em> at runtime.</p>
+
+<p>The project found these by decompiling all four games and diffing member <em>shapes</em>
+&mdash; not by reading source or counting <code>#if</code> blocks, neither of which can see a
+field/property split. By August this had been automated into a tool.</p>
+
+<div class="why">
+  <span class="tag">Why &mdash; the support burden, not the elegance</span>
+  <p>Shipping four downloads is easy. What's expensive is everything after: four sets of release
+  notes, four chances to grab the wrong file, and a bug queue where the first question is always
+  "which version did you install?" One file that loads everywhere converts a permanent support tax
+  into a one-time engineering cost.</p>
+  <p>The tell that this was the reasoning is <strong>July 2</strong>: <em>"Runtime-generate the cmm
+  console command (removes the last per-version fork)."</em> Nobody removes the <em>last</em> fork
+  for performance. You do it because a single remaining fork means you still have four build
+  outputs, and the whole point was to have one.</p>
+</div>
+
+<p>The same instinct produced one of the more elegant hacks in the repository. Two generations of
+the game's mod loader disagree about the shape of <code>ModInfo.xml</code>: Alpha 20 wants a nested
+<code>&lt;ModInfo&gt;</code> element, everything since wants flat fields. The shipped file satisfies
+both at once, because A20's loader matches on the element's <em>qualified name</em> while the newer
+loader routes on a <em>namespace-sensitive</em> XLinq query. Putting the legacy block in a default
+namespace makes it invisible to the new loader and perfectly visible to the old one.</p>
+
+<h3>The music logic leaves the DLL <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; June 26</span></h3>
+
+<p>In a single day: <code>BuildSnapshot()</code> is extracted from <code>ResolveContext()</code>, a
+MoonSharp interpreter is embedded, the resolver is ported to Lua, cut over, and the C# version is
+deleted.</p>
+
+<div class="log">
+  <div>Extract BuildSnapshot() from ResolveContext()</div>
+  <div>Add ScriptHost: MoonSharp-hosted Lua decision layer</div>
+  <div>Rename GameSnapshot/snap to GameState/gameState</div>
+  <div>Cut context resolution over to context.lua</div>
+  <div>Drop the built-in C# resolver; embed context.lua as the baseline</div>
+</div>
+
+<p>The entire policy &mdash; priorities, the weighted combat-threat model, day/night rules, biome
+rules, fallback chains &mdash; now lives in <code>Config/context.lua</code>, 300 lines. It
+hot-reloads on save. It runs sandboxed with no file or OS access. A pristine copy is embedded in
+the assembly and used automatically if the on-disk file is missing or fails to compile, so a broken
+edit <strong>cannot</strong> take the audio down. Delete the file and the default returns.</p>
+
+<div class="why">
+  <span class="tag">Why &mdash; this is the part that is a matter of taste</span>
+  <p>Everything else in the mod has a right answer. Does the FLAC decode? Does the crossfade click?
+  Those are correct or they aren't.</p>
+  <p><em>When should combat music start</em> has no right answer. It depends on how you play, your
+  difficulty, and your temperament. Any value the author picks will be wrong for a large fraction of
+  users &mdash; and each of those users would otherwise be a bug report that can only be closed by
+  shipping a new build.</p>
+  <p>Moving the policy into a hot-reloading script converts the most contentious surface in the
+  project from "file an issue and wait for a release" into "edit a file, alt-tab back." The
+  embedded-fallback detail is what makes it safe to hand players a live wire: the worst outcome of a
+  bad edit is that the default comes back.</p>
+  <p>Note also the <em>deletion</em> of the C# resolver. Keeping it as a fallback would have created
+  two implementations of one policy that could disagree &mdash; a failure mode the project runs into
+  for real, at enormous cost, two months later in the acoustics work.</p>
+</div>
+
+<h3>Loudness normalization <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; June 26, v1.0.3</span></h3>
+
+<p>EBU R128 measures every track once and caches the result by content hash, so tracks from
+different albums play at a consistent perceived level.</p>
+
+<div class="why">
+  <span class="tag">Why &mdash; it's load-bearing for the core promise</span>
+  <p>The mod's pitch is "play your own library." A personal library spans decades of mastering
+  practice &mdash; a 1994 CD rip next to a 2019 loudness-war master is a 12 dB jump. Without
+  normalization, the headline feature actively produces a <em>worse</em> experience than the game's
+  own curated soundtrack. R128 isn't a nicety here; it's what makes "your music" viable at all.</p>
+</div>
+
+<h3>Biome combat music, and the two-clocks insight <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; June 26, v1.0.2a/b</span></h3>
+
+<p>Fight in the wasteland, get wasteland combat music. Two details show unusual care. The biome
+<strong>locks when the fight starts</strong> and holds for the whole continuous fight, so running
+across a border mid-battle doesn't swap the track. But if you break off and re-engage somewhere new,
+it <strong>re-locks to the new biome while keeping the intensity tier</strong> you'd escalated to.
+Leave a fight in the wasteland at Boss intensity, re-enter in the desert: you get the desert track,
+still at Boss.</p>
+
+<div class="why">
+  <span class="tag">Why &mdash; two clocks, running at different rates</span>
+  <p>Naively, "which music" is one question. It's two. <em>Where you are</em> changes at walking
+  speed; <em>how bad it is</em> changes over the arc of a fight and shouldn't reset because you
+  stepped across a line on a map. Treating them as one variable produces either music that flickers
+  with your footsteps or music that ignores where you are.</p>
+  <p>The same insight produces <code>warmgroup</code> the same week &mdash; day and night versions of
+  a context share a warm-up timer, so switching between <code>Home</code> and <code>Home_Night</code>
+  doesn't restart the dwell and leave a gap where the wrong track cuts in.</p>
+</div>
+</section>
+
+<div class="scale"></div>
+
+<section id="act3">
+<div class="actnum"><span>Act III</span><span class="dates">June 28 &ndash; July 3 &middot; 57 commits</span></div>
+<h2>The engine goes native</h2>
+
+<p class="lede">The largest technical arc in the project, and the one with the clearest payoff.</p>
+
+<p><strong>The problem.</strong> Music played through Unity competes with the game for the main
+thread and is frozen by garbage collection. A GC pause is stop-the-world for <em>all</em> managed
+threads, so there is no managed opt-out &mdash; you cannot fix this with better C#. On a horde
+night, when GC pressure and chunk streaming peak simultaneously, the ring buffer underruns and you
+hear it.</p>
+
+<p><strong>The answer was to leave, in stages.</strong> Each stage removes one more thing that can
+be suspended:</p>
+
+<div class="tw"><table>
+<thead><tr><th class="num">Stage</th><th>Date</th><th>What moved out of managed code</th></tr></thead>
+<tbody>
+<tr><td class="num">1</td><td class="nw">Jun 28</td><td><strong>Decoding</strong> &rarr; <code>CMM_Decoder.dll</code>. NAudio removed entirely.</td></tr>
+<tr><td class="num">2</td><td class="nw">Jun 29</td><td><strong>Buffering</strong> &rarr; off-GC native memory; file handles close immediately.</td></tr>
+<tr><td class="num">3</td><td class="nw">Jun 30</td><td><strong>Output</strong> &rarr; miniaudio on the mod's own thread. The Unity <code>AudioSource</code> path is deleted the same day.</td></tr>
+<tr><td class="num">4</td><td class="nw">Jul 1</td><td><strong>The mixer</strong> &rarr; the per-sample producer loop, rewritten in C.</td></tr>
+<tr><td class="num">5</td><td class="nw">Jul 1</td><td><strong>Loudness</strong> &rarr; R128 analysis follows it native.</td></tr>
+<tr><td class="num">6</td><td class="nw">Jul&ndash;Aug</td><td><strong>Housekeeping</strong> &rarr; advance, config reload, file watching move onto <code>CmmScheduler</code>, off Unity's frame loop.</td></tr>
+</tbody>
+</table></div>
+
+<p>The split the project settled on is the load-bearing design decision of the whole codebase:</p>
+
+<div class="split">
+  <div><h4>C# stays the brain</h4><p>Which file, when. Fades, resume, loudness bookkeeping,
+  auto-advance, cooldowns, context policy. Infrequent, and GC-tolerant.</p></div>
+  <div><h4>C becomes the hands</h4><p>Decode &rarr; convert &rarr; gain &rarr; sum &rarr; write.
+  Never touches the managed heap. Never suspended.</p></div>
+</div>
+
+<div class="why">
+  <span class="tag">Why &mdash; the boundary is drawn at frequency, not at subject</span>
+  <p>The obvious way to split a codebase is by topic &mdash; "all audio in C, all game logic in C#."
+  That is not what happened. Decoders are still <em>opened</em> in C#, off-thread, once per track;
+  the handle and format kind are then handed to <code>cmm_mix_add</code> and the mixer reads
+  natively from there.</p>
+  <p>The line is drawn at <em>how often the code runs</em>. Anything on the per-sample path is
+  native. Anything that happens once per track can stay managed, because a GC pause during a
+  <em>decision</em> is invisible &mdash; you have hundreds of milliseconds of buffered audio to
+  absorb it. A GC pause during the mix loop is a click.</p>
+  <p>That's a more disciplined boundary than "rewrite it in C," and it's why the C# side is still
+  ~37,000 lines in the mod proper. The rewrite was surgical.</p>
+</div>
+
+<h4>What it buys, concretely</h4>
+<ul>
+<li><strong>Music survives loading freezes.</strong> Because the engine owns its threads, tracks
+keep playing &mdash; <em>and keep advancing to the next track</em> &mdash; while the game's main
+thread is stalled loading a world.</li>
+<li><strong>Crossfades stop being clobbered.</strong> The old system had exactly two channels. If a
+new context fired mid-crossfade it had to steal one and hard-cut. The native mixer holds
+<strong>four music voices</strong> (with array headroom to 20 for emitter and effect voices), so
+ambient &rarr; tension &rarr; combat in two seconds is one continuous handoff.</li>
+<li><strong>Eviction is inaudible.</strong> Past four voices, the mixer drops the <em>most-faded</em>
+one &mdash; already nearly silent at the tail of its fade. The incoming track is never sacrificed.</li>
+</ul>
+
+<div class="why">
+  <span class="tag">Why four voices, and why the quietest one</span>
+  <p>Four isn't an audio-engineering number. It's a <em>game</em> number: it's how many context
+  changes 7 Days to Die can throw at you before the first fade finishes. The mixer is sized to the
+  game's rate of change, not to a mixing convention.</p>
+  <p>The eviction rule is the sharper decision. When you must drop something, the question is which
+  loss the player will notice. The tail of an old fade is near-silent &mdash; nobody hears it go. The
+  incoming track is the one the player is <em>waiting for</em>; cutting it is the loudest possible
+  failure. "Sacrifice the quietest, never the newest" reads as obvious once stated, which is usually
+  the sign of a rule someone learned the hard way.</p>
+</div>
+
+<div class="panel fault">
+  <span class="tag">Defect of the act</span>
+  <h4>Race-free native file reads: normalize FLACs of any size</h4>
+  <p>Concurrent native file-opens were crossing each other's C-runtime <code>FILE*</code> buffers,
+  so <code>drflac_open</code> returned NULL. FLAC tracks were then silently left un-normalized,
+  playing too loud or too quiet with no error logged anywhere. The fix was to decode off raw Win32
+  handles rather than the CRT. A size cap that had been papering over it was removed at the same
+  time, so <em>all</em> sizes normalize.</p>
+</div>
+</section>
+
+<div class="scale"></div>
+
+<section id="act4">
+<div class="actnum"><span>Act IV</span><span class="dates">July 4 &ndash; July 18 &middot; 21 commits</span></div>
+<h2>Music in the world</h2>
+
+<p class="lede">Until now the music was in your ears. Now it comes out of objects.</p>
+
+<p><strong>World emitters (July 4).</strong> Radios, jukeboxes and speaker blocks play music
+<em>where they physically stand</em>, through a native spatializer and reverb. A POI you're clearing
+has music coming from a corner of it.</p>
+
+<p><strong>Doors (July 8).</strong> Sound routes through doorways and around corners rather than
+through walls. Opening, closing or damaging a door changes what gets through.</p>
+
+<p><strong>The personal radio (July 10).</strong> <code>Alt+PgUp</code> / <code>Alt+PgDn</code> step
+through stations. Stations are subfolders of the Radio source &mdash; the folder name <em>is</em> the
+station name. Everyone on a server hears the same song at the same moment, and a station keeps
+broadcasting while you're away, so tuning back in drops you into whatever is playing now, mid-track.</p>
+
+<div class="why">
+  <span class="tag">Why "a station is a folder" is the best small decision in the project</span>
+  <p>There is no station manifest, no registration XML, no UI to define one. Make a folder, name it,
+  put music in it.</p>
+  <p>Compare the alternative: a <code>stations.xml</code> listing name, path and ordering. It would
+  work, and it would be worse in every way that matters. It's a second source of truth that can
+  disagree with the disk. It breaks when someone renames a folder. It needs its own migration when
+  the schema changes. It needs documentation, and eventually a UI.</p>
+  <p>Choosing the filesystem as the data model means the feature has no configuration surface at all
+  &mdash; and therefore no configuration bugs. The same instinct shows up again in August, when
+  add-on music packs turn out to need no registration file either: the convention is simply
+  <code>&lt;mod&gt;/Music</code>.</p>
+</div>
+
+<h3>The sync problem, and its answer</h3>
+
+<p>The world emitters and the personal radio drifted audibly apart. The measured cause is lovely:
+<strong>the game's <code>worldTime</code> advances at roughly 0.89&times; realtime</strong>, while
+audio decoders run at exactly 1.0&times;. Every voice outran the worldTime-based schedule by about
+<strong>7 seconds per minute</strong>, and different consumers re-synchronised at different moments.</p>
+
+<p>The fix was to stop trusting game time. The broadcast clock (<code>CmmClock</code>) is anchored to
+<code>worldTime</code> at world entry, then runs at realtime rate, freezes during single-player pause,
+and carries worldTime jumps. A second round handled 3.0 saving the world synchronously on the pause
+edge &mdash; a ~2.5 second stall &mdash; by attributing clock intervals to their starting pause state
+and accumulating resync debt for sub-second pauses.</p>
+
+<div class="why">
+  <span class="tag">Why this is harder than it looks</span>
+  <p>"Everyone hears the same song" sounds like a networking problem and is actually a <em>clock</em>
+  problem. There is no message you can send that fixes a schedule computed from a clock running at
+  the wrong rate; you'd just be re-syncing to the same drift every time. Finding that
+  <code>worldTime</code> runs at 0.89&times; requires instrumenting and <em>measuring</em>, not
+  reasoning &mdash; and the project built <code>[CMM SYNC]</code> audit logging specifically to do
+  it.</p>
+</div>
+
+<p><strong>July 18</strong> closes the act with the least glamorous and most important fix in it:
+installing the mod on a dedicated server had been freezing joining players at the loading screen.
+The answer was a general one &mdash; a dedicated-server inert gate, a <code>CmmGuard</code>
+convention that wraps every Harmony patch body so a throw inside one can never take the game down,
+and producer-owned device lifecycle so a headless process never opens an audio device at all.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="act5">
+<div class="actnum"><span>Act V</span><span class="dates">August 13 &ndash; August 23 &middot; ~250 commits</span></div>
+<h2>The acoustics rebuild</h2>
+
+<p class="lede">The most unusual stretch of the project. Roughly 250 commits in eleven days, almost
+all on one question: what does sound do inside a voxel world?</p>
+
+<p>There is a three-week gap in the log before it &mdash; July 18 to August 8 &mdash; and the work
+resumes with a retarget to game build 3.1.0 b14 and the discovery that the game's <em>Overall</em>
+volume slider had never reached the mod at all, because CMM's audio leaves through its own output
+device rather than Unity's. Turning the master to zero silenced the entire game <em>except</em> this
+mod.</p>
+
+<p>Then the acoustics. The existing occlusion model worked, but nobody could say whether it was
+<em>right</em> &mdash; it was uncalibrated. So it was rebuilt from a written specification, with
+reference scenarios, an automated acceptance gate, and offline audio rendering so changes could be
+listened to rather than argued about. The commit log reads like a research notebook:</p>
+
+<div class="log">
+  <div>synth + scenarios: controlled geometry finds three defects in the NEW model</div>
+  <div>ref: the unifying principle &mdash; transmitted and diffracted sound RADIATES</div>
+  <div>ref: write the model down &mdash; the document whose absence cost a day</div>
+  <div>The gate was wrong: passivity replaces reach, and the calibration was in the wrong place</div>
+  <div>The renderer was evaluating a DIFFERENT MODEL than the gates, and summing coherent copies</div>
+  <div>Four routed-leg formulations measured; the orphan gate may itself be wrong</div>
+</div>
+
+<p>The model that emerged is genuinely sophisticated: portal graphs seeded from air pockets around a
+speaker, Dijkstra routing between rooms, Fresnel-disc transmission treated as an area integral, a
+diffuse field coupled through apertures, per-arrival delay producing cave echoes, and bottom-up
+region segmentation that discovers rooms and corridors with no grid. It was then ported to native C
+in five stages, each verified against the reference, finishing at <strong>0.02 dB agreement</strong>.</p>
+
+<p>And then it was replaced.</p>
+
+<h3>August 20 &mdash; one field, centred on the listener</h3>
+
+<p>The trigger was blunt. The user A/B'd the models in-game and reported the new one <em>"completely
+broken on native, works on legacy"</em> &mdash; and added a requirement that killed the whole
+per-speaker approach: <strong>it must handle moving sources, because zombies get sound later.</strong></p>
+
+<blockquote><p>There is ONE pair of ears and there may be fifty noise-makers, some walking. So
+compute nothing per source: flood ONE field from the listener a few times a second; a source looks up
+where it stands. Attenuation is symmetric, so a listener-anchored field answers for a source
+exactly.</p></blockquote>
+
+<p>Measured: <strong>0.11 &micro;s per source lookup.</strong> Two tuning knobs total.</p>
+
+<div class="why">
+  <span class="tag">Why this is the best decision in the project, and why it hurt</span>
+  <p>The topological model was <em>more correct</em>. It reached exact parity in native C. It
+  modelled diffraction and reverb coupling properly. And it lost.</p>
+  <p>It lost because a live game is not a scenario file. Sources move. Chunks stream in and out.
+  Doors swing while you're reading the geometry. Every one of those is a <em>cache invalidation</em>
+  problem for a per-speaker model, and the preceding week's bug list is almost entirely cache
+  staleness &mdash; including one measured case where native handed back stale geometry for
+  <strong>33 seconds straight</strong>.</p>
+  <p>The listener-anchored field doesn't solve those bugs. It makes them impossible: nothing persists
+  long enough to go stale. A door is just in the next flood. No patching, no settling gate, no
+  handover, no second model. That distinction &mdash; <em>cannot occur</em> versus <em>is fixed</em>
+  &mdash; is the most valuable sentence in the repository. And the decision cost a month of correct
+  work, which is exactly why most projects don't make it.</p>
+  <p>There's a second, quieter win in there. The field carries <strong>excess</strong> attenuation
+  only &mdash; what the building adds over a clear line &mdash; and leaves distance to the mixer. So
+  clear line of sight is 0 dB <em>by construction</em>, not by tuning. That's a whole category of "why
+  does it sound muffled standing right next to the speaker" bugs designed out rather than debugged.</p>
+</div>
+
+<h3>Doors became apertures <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; August 22</span></h3>
+
+<p>A door's leaf cannot be read while it moves: the game blanks its colliders for the entire swing.
+Measured &mdash; a door at 29.5% through its animation reports <em>no collider at all</em> while its
+leaf still fully spans the cell.</p>
+
+<p>So the door stopped being a leaf and became an <strong>aperture</strong>: the plane is measured
+once while readable and remembered, and the openness ramp supplies how much of it is blocked. Fixed
+geometry, moving number.</p>
+
+<p>The prior attempt &mdash; synthesising a leaf position from the door's rotation &mdash; was worse
+than nothing. Its guessed slab at 0.5 against a body at 0.480 put the door on the <em>wrong side of
+the listener</em>: one frame after the latch, player standing still, a far-side speaker jumped from
+14.9 dB occluded to 0.0 dB.</p>
+
+<blockquote><p>A door with no remembered plane now gets NO plane &mdash; the isotropic lump is blunt
+but symmetric, and a guessed plane is confidently wrong in the one direction you are
+listening.</p></blockquote>
+
+<p>The project notes, correctly, that fixed-geometry-moving-number is what Wwise, FMOD and Project
+Acoustics all do. It arrived there independently, by measurement.</p>
+
+<h3>The defects, which are excellent on their own</h3>
+
+<div class="log">
+  <div>Furniture is not air: a model entity's collision flags and bounds both lie</div>
+  <div>An unloaded chunk is not open sky: the scene was rebuilding into a different world</div>
+  <div>A week on the wrong speaker: the nearest-point diagnostic reported the LAST station</div>
+  <div>The listener was half a block off: 4 dB of occlusion standing next to a speaker</div>
+  <div>A floor is not decorative trim: 90% of every partial floor plate was being discounted</div>
+  <div>woodShapes:cube was charged HALF a wall: ask the variant, not the shape class</div>
+  <div>A metal door is not a metal wall: cap what a shut door is made of</div>
+  <div>My earlier "open air" tests floated 4 blocks up &mdash; the version of open air nobody stands in</div>
+</div>
+
+<p>That last one is the most instructive failure in the project: the test was passing because the
+test was wrong, in a way that only a human standing on the ground in-game would ever notice.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="act6">
+<div class="actnum"><span>Act VI</span><span class="dates">August 20 &ndash; August 23 &middot; interleaved</span></div>
+<h2>The library, and the things that take longest</h2>
+
+<h3>Every track plays before any track repeats</h3>
+
+<p>The old <code>RandomNoRepeat</code> remembered exactly <strong>one</strong> track. Over a
+200-track folder that lets a track return on the very next pick, and the birthday effect makes an
+early repeat likely within a session. Measured over 400 runs: the old behaviour repeated something
+after an average of 18 tracks, and as soon as 3. A large soundtrack didn't <em>feel</em> large.</p>
+
+<p>The replacement is a per-context shuffled bag. Three details are worth the detail:</p>
+
+<ul>
+<li><strong>It commits at PLAY, not at pick.</strong> Three of the six callers that pick a track are
+speculative &mdash; the staged pin, the pre-staged advance, the missing-file replacement walk &mdash;
+and their picks are routinely discarded. A bag consumed at pick time would drain without a note being
+heard.</li>
+<li><strong><code>FavouriteWeight</code> now scales with folder size.</strong> As a raw multiplier it
+meant "every 45 minutes" at 40 tracks and "every 19 hours" at 1000. Now measured constant at
+<strong>5.7% of airtime from 50 tracks to 5000</strong>.</li>
+<li><strong>Selection allocates nothing.</strong> It walks the pool twice rather than building a
+candidate array, which past ~10,600 tracks was a large-object-heap allocation on every pick.</li>
+</ul>
+
+<div class="why">
+  <span class="tag">Why the FavouriteWeight fix is the most user-respecting change in the release</span>
+  <p>A setting must mean the same thing regardless of library size. If "favourite" means
+  noticeably-more-often at 40 tracks and never at 1000, then the setting is lying to the larger half
+  of the userbase &mdash; and worse, it's lying <em>silently</em>, in a way no user could diagnose.
+  Scaling it against a 50-track reference makes the promise size-independent.</p>
+</div>
+
+<h3>Config files stopped being shipped</h3>
+
+<p>Updating the mod had been overwriting every setting the player had chosen. Now the files are
+generated on first run and migrated by schema &mdash; today <strong>202 settings across two files,
+one table describing all of them</strong>, with <code>since:</code> for additions and
+<code>changedIn:</code>/<code>was:</code> for changed defaults. A changed default is applied only to
+users still sitting on the old one; comparison is on the <em>parsed</em> value, so <code>0.50</code>
+and <code>0.5</code> count as the same untouched setting.</p>
+
+<h3>Music packs became ordinary mods</h3>
+
+<p>Requested by a soundtrack author, who called it <em>"the single feature I'd request."</em>
+Previously a soundtrack had to be copied <em>into</em> CMM's own music folder, which made CMM and the
+soundtrack one blob on disk &mdash; exactly what a mod manager cannot cope with. Now every installed
+mod's <code>Music</code> folder feeds the rotation. Under MO2 or Wabbajack, CMM and a soundtrack stay
+separate mods with independent pages, versions and provenance.</p>
+
+<p>Notably, the planned design had mods <em>declare</em> a music root via a small XML. The shipped
+version has no registration file at all.</p>
+
+<h3>The radio dial, and knowing when to stop</h3>
+
+<div class="log">
+  <div>The radio click was a pop, not a switch: rebuild it out of damped modes</div>
+  <div>Clicks were tonal because I was hitting the resonators with an impulse</div>
+  <div>Put the contact back: a deterministic strike on top of the noise</div>
+  <div>Chatter and saturation for grit &mdash; and four measurement bugs found on the way</div>
+  <div>Fit the clicks to two reference recordings, and lift the clamp that made it impossible</div>
+  <div>Recorded clicks: a Sounds folder, and a different rate every firing</div>
+</div>
+
+<p>Synthesis got close and then stopped converging, so the final answer is <strong>recorded
+samples</strong> &mdash; held in RAM, varied &plusmn;2000 Hz per firing so no two are identical, and
+sitting in a <code>Sounds/</code> folder players can replace with their own. The synthesised click
+remains as a fallback if a file is missing: a sound file can quieten the radio, never break it.</p>
+
+<h3>Tuning between stations</h3>
+
+<div class="log">
+  <div>The station was fading up out of the noise, which is the one thing a radio never does</div>
+  <div>The arriving station is MANGLED, not faded</div>
+  <div>Between stations is a ROAR, not a hiss: drop the low cut that was killing its body</div>
+  <div>A receiver's noise floor is FIXED: stop scaling the static by the track's loudness gain</div>
+</div>
+
+<p>Getting there required building <code>CmmRadioSim</code> (renders a station change offline through
+the <em>shipping</em> DLL in four seconds) and <code>CmmRadioLab</code> (a UI that renders game
+against reference and A/Bs them). Settled numbers: leave 700 ms, static floor 100 ms, arrive 1000 ms,
+knee 0.90, noise 0.15. Press to tuned &asymp; 1.8 s, with break-up starting <strong>75 ms</strong>
+after the key.</p>
+
+<div class="why">
+  <span class="tag">Why build a whole offline simulator for a sound effect</span>
+  <p>Because in-game listening had already cost weeks &mdash; twice &mdash; and the project worked
+  out why.</p>
+  <p>The first cause: <code>Config/radio.xml</code> held hand-edited values that <em>no migration
+  could ever reach</em>, because migration only rewrites a key still holding a recognised former
+  default. Every in-game listening round for weeks was spent judging a sound <em>nobody had
+  approved</em>.</p>
+  <p>The second: <em>"A demo is not a keypress."</em> The tuning had been settled on rendered demos,
+  where nobody presses a button and waits &mdash; so the two-thirds of a second of dead air after the
+  keypress was invisible in every test that approved it.</p>
+</div>
+
+<p><strong>v1.0.5-rc1 is tagged on August 23.</strong> On the same day, the project writes its own
+development history to that point &mdash; <code>docs/HISTORY.md</code>, 40 KB. This document is its
+successor.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="act7">
+<div class="actnum"><span>Act VII</span><span class="dates">August 24 &ndash; August 30 &middot; 220 commits</span></div>
+<h2>The last week</h2>
+
+<p class="lede">The single densest stretch in the project: five release candidates in seven days, 76
+commits on August 29 alone. Nominally this is "polish before 1.0.5 final." In practice three genuinely
+new subsystems land, and the project discovers a bug shape it had been fighting since June without
+naming.</p>
+
+<h3>Doors, finished <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; Aug 24&ndash;26</span></h3>
+
+<p>The August 22 aperture rebuild made doors <em>correct</em>. This week made them <em>good</em>, and
+the log is a compressed course in how to measure a moving object you are not allowed to look at:</p>
+
+<div class="log">
+  <div>A door is a leaf, not a solid block the size of its multiblock</div>
+  <div>The latch flips before the leaf moves, and a constant radius cannot cover a big door</div>
+  <div>A double door has two leaves; the model only ever remembered one</div>
+  <div>A tilted plate is not its bounding box</div>
+  <div>A cell the leaf has swung out of is air, and it was charging 26.8 dB</div>
+  <div>A threshold in metres, divided by a seven-metre span, is a door that is open at 10%</div>
+  <div>Doors: ask how many square metres are open, not how far through the swing</div>
+  <div>On most door rigs the collider lies; believe the renderer</div>
+  <div>Read the leaf's real travel, not the clip's clock</div>
+  <div>Lead the door by the pipeline's own latency</div>
+  <div>A closing door can only get more shut</div>
+  <div>One time constant, in seconds, the same for every door and every listening position</div>
+</div>
+
+<p>Three of those are worth unpacking, because each replaces a proxy with a measurement.</p>
+
+<p><strong>Open area, not swing fraction.</strong> A door's gap had been measured along its largest
+dimension &mdash; which for an ordinary door is its <em>height</em>, so it read acoustically fully
+open at 40% of its swing, and a seven-metre drawbridge read open at 10%. The threshold moved from
+metres of gap to <em>fraction of the aperture's area</em>, and every override in the config was
+converted with it.</p>
+
+<p><strong>Believe the renderer.</strong> On most door rigs the collider lies during animation, so
+the leaf's real travel is read from the renderer transform rather than the animation clip's clock.
+A door that bounces at the end of its swing is not "at the open pose"; a leaf that slides rather than
+turning is not rotating at all.</p>
+
+<p><strong>Lead by the pipeline's own latency.</strong> Because the field publishes at 4 Hz and the
+audio slews behind that, a door's acoustic change arrives late. So the model <em>leads</em> the door
+by the measured latency of its own pipeline &mdash; and a set of commits exists purely to find out
+what that latency is:</p>
+
+<div class="log">
+  <div>The door stopwatch was timing floods that had never seen the door</div>
+  <div>A stopwatch that runs all the way to the ear</div>
+  <div>Having computed the answer, do not sit on it for a tick</div>
+  <div>Collapsing the tick did not move the number, so split the stage that holds it</div>
+  <div>Count the ticks, because 110 ms inside one of them would have been felt</div>
+  <div>Speeding the tick up made the limiter throttle harder</div>
+  <div>Put a clock on the half of the door's journey nobody has ever timed</div>
+</div>
+
+<div class="why">
+  <span class="tag">Why the stopwatch commits matter more than the fixes</span>
+  <p>Four wrong diagnoses in one session, all of them arithmetic over an untimed chain. The pattern
+  the project names afterwards is <em>measure, don't estimate</em>: when a stage's cost is unknown,
+  a plausible number gets substituted for it, and the resulting total is confidently wrong. The
+  answer was to put a stopwatch on <em>every</em> stage and, where a stage was still opaque, to split
+  it in half and time the halves.</p>
+  <p>Note also the ordering of the last two: speeding the tick up made things worse, because the rate
+  limiter downstream throttled harder. That's a system where the obvious knob has the opposite sign
+  &mdash; the exact case where estimating fails and only instrumentation survives.</p>
+</div>
+
+<h3>The coverage panel <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; Aug 26</span></h3>
+
+<p>A new HUD on <code>Alt+Numpad8</code>, cycling off &rarr; everything &rarr; gaps only. One row per
+context: whether it has music of its own, how many tracks, and &mdash; when it has none &mdash; the
+fallback chain it walks, with the context that will <em>actually</em> be heard marked at the end of
+it. Radio stations are listed individually, since a station with no tracks is dead air rather than
+something a fallback covers.</p>
+
+<p>Two follow-up commits are the interesting part. <em>"Measure the coverage panel, do not estimate
+it"</em> and <em>"The panel showed the engine's stale snapshot instead of the disk it had just
+read."</em> The panel reads <strong>disk</strong>, not the engine's cached snapshot &mdash; because
+a diagnostic that reports the engine's opinion cannot tell you the engine's opinion is wrong.</p>
+
+<div class="why">
+  <span class="tag">Why this is a release blocker disguised as a HUD</span>
+  <p>The mod's central failure mode is <em>silence</em>, and silence has many causes that all look
+  identical from the player's chair: no files, wrong folder, a context that never resolves, a
+  fallback chain ending nowhere, a station folder that's empty. Every one of those is a support
+  ticket that costs an exchange of logs.</p>
+  <p>The coverage panel converts all of them into one glance. It is the first tool in the project
+  aimed at <em>the user's</em> debugging rather than the author's, and it arrives immediately after
+  the release-candidate line opens &mdash; which is the moment a project stops asking "does it work
+  for me" and starts asking "can a stranger tell me what went wrong."</p>
+</div>
+
+<h3>World speakers on 2.6, and the end of hand-surveying <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; Aug 29</span></h3>
+
+<p>Every speaker on game version 2.6 had been silent since the feature shipped. The cause is one of
+the best-shaped bugs in the repository:</p>
+
+<blockquote><p>The capability check required a composite tile-entity door &mdash; a type that only
+exists from 3.0 &mdash; as a belt-and-braces test, which is a check for DOORS standing in for a whole
+subsystem.</p></blockquote>
+
+<p>Doors became a <em>capability</em> (<code>HasCompositeDoors</code>) rather than a requirement, and
+2.6 immediately gained stations, tuning, the acoustic field, reverb, the tuner menu and the craftable
+blocks. What it does not get is doors modulating occlusion mid-swing, because 2.6 models doors as
+block metadata with no tile entity and no animator &mdash; there is no swing to read.</p>
+
+<p>Behind it sat a second divergence of the shape Act II catalogued: 3.x has
+<code>void GetWorldPrefabs(List)</code> which fills your list; 2.6 has
+<code>List GetDynamicPrefabs()</code> which returns the live one. A member-shape split that no
+per-version compile can see.</p>
+
+<p>Three of these got through hand-surveys of decompiled source in a row, each through the gap the
+previous method left &mdash; name exists, then declaring type, then signature, then a type nobody
+thought to check. So the project stopped hand-surveying:</p>
+
+<div class="log">
+  <div>Stop hand-surveying the game API; ask the DLL what it calls <span class="d">&mdash; Aug 29</span></div>
+</div>
+
+<p><code>tools/CmmApiDiff</code> reads the shipped assembly's own <em>member references</em> out of
+its metadata &mdash; no assembly is loaded or executed &mdash; and diffs them against what each game
+version actually declares. The question stops being "did I remember to look here" and becomes "what
+does it call", which is not a matter of opinion.</p>
+
+<h3>Tuning a speaker by looking at it <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; Aug 29</span></h3>
+
+<p>Until this week, which station a building's speakers played was <em>derived and unchangeable</em>:
+the POI's prefab instance id hashed into the sorted station list. Deterministic, identical for every
+player on a server, and free of persistence &mdash; all deliberate &mdash; but the answer to "I don't
+want this station in this house" was to go and rename folders on disk.</p>
+
+<div class="log">
+  <div>Look at a speaker, press a key, choose its station</div>
+  <div>The tuner stops imitating the game's UI and becomes part of it</div>
+  <div>Two arrows instead of one More, and the page belongs to the menu</div>
+  <div>Four characters for a station, and the rules came from the worked list</div>
+  <div>Lit FM is LiFM: the rule that existed to explain one entry is gone</div>
+  <div>Every radio saves its own station, and the static goes</div>
+</div>
+
+<p>The mod draws nothing. It answers the four questions the game already asks of every block you look
+at, so the prompt, the hold timing, the radial menu and the mouse tracking are the vanilla ones. The
+station list pages with arrows, station names are abbreviated to four characters by rules derived from
+a worked list rather than invented, and the entries are <code>Automatic</code>, every station, and
+<code>Silent</code>.</p>
+
+<p>The persistence question &mdash; which the TODO had flagged as "the whole design" &mdash; resolved
+to <code>Cache/emitters.xml</code>, sectioned <strong>by save</strong>. A prefab instance id is stable
+within a world and identical on every client, but it is an index, not a name: id 47 in one save is a
+different building in another. Other saves' sections are preserved verbatim on write, so playing world
+A never discards world B's choices.</p>
+
+<p>And the key was moved from <em>building</em> to <em>individual radio</em>, for a reason worth
+quoting:</p>
+
+<blockquote><p>This was keyed by BUILDING at first, on the reasoning that a POI's speakers already
+shared one station. That holds right up until somebody builds a base inside a POI &mdash; which people
+do &mdash; and then their own radio is welded to the derelict hospital's, and neither can be set
+without moving the other.</p></blockquote>
+
+<h3>Craftable speakers, built in code <span class="mono" style="font-size:15px;color:var(--muted)">&mdash; Aug 29</span></h3>
+
+<p>A shelf speaker and a ham radio, craftable in the backpack. It started as a
+<code>Config/recipes.xml</code> patch and moved into C# for two reasons, the second fatal:</p>
+
+<ul>
+<li>An XPath patch cannot ask whether the session is single player. It is applied at config load,
+long before there is a session &mdash; so an XML version had to add the recipes always and take them
+away afterwards.</li>
+<li><strong>Alpha 20 has no ham radio block at all.</strong> And <code>RecipesFromXml</code> does not
+skip a recipe whose output it cannot resolve &mdash; it <em>throws</em>, taking recipe loading down
+with it. One payload ships to all four versions, so an XML recipe naming a block A20 lacks would have
+bricked crafting on A20 for anyone who installed the build.</li>
+</ul>
+
+<p>Built in code, a missing block is simply a recipe quietly not offered. And single player is checked
+as a <em>state on a timer</em>, not a launch option, because a host who started alone can have someone
+join at any moment &mdash; at which point the recipes are withdrawn, because the blocks they make are
+only heard by the machine that placed them.</p>
+
+<h3>The carrier, and 76 commits in one day</h3>
+
+<p>August 29 is the largest day in the project's history, and almost all of it is one subsystem: what
+a world speaker does while it is <em>changing station</em>, and what it does when the station it is
+tuned to has nothing to play.</p>
+
+<p>The second of those is the <strong>carrier</strong> &mdash; a real radio tuned to a dead frequency
+does not go silent, it sits on a tone. CMM's carrier is a minor triad (440 / 523.25 / 659.25 Hz) whose
+root is displaced by up to <code>WorldEmitterOffAirVarianceHz</code>, <em>seeded from the station's
+name</em>. So a dead channel keeps the same pitch on every client and across restarts: something you
+can learn, rather than a pitch that moves under you. The upper partials are quieter than the root,
+because a carrier is a tone with harmonics and not a chord.</p>
+
+<p>The retune is the harder half, and reading the day's log in order is the clearest picture of how
+this project debugs anything:</p>
+
+<div class="log">
+  <div>Static that never stops, and static that stops too early</div>
+  <div>The no-static gate excluded the two commonest retunes</div>
+  <div>Retuning twice quickly flushed the static out from under itself</div>
+  <div>A station shutting down silenced whichever slot had taken its place</div>
+  <div>One owner for the receiver, instead of three</div>
+  <div>The ghost: a station's advance decision was overwritten every tick</div>
+  <div>Three real causes of the silence, found by two independent audits</div>
+  <div>It did not. Silence survived the reload; the way back on did not</div>
+  <div>The borrow was waiting for a station it was preventing from opening</div>
+  <div>The static was being switched off by a lock left behind by a dead station</div>
+  <div>The audio device was being closed underneath the sweep</div>
+  <div>Two rules, stated as rules: hold to full, and never cut</div>
+  <div>One decode, two lanes: the borrow finally has music under it <span class="d">(ABI 56)</span></div>
+  <div>Measured: the tone is 10.7 dB LOUDER than the static, and never reaches a device</div>
+  <div>Broken FM is Ready. That is why none of the dead-air tests could see it</div>
+  <div>Six lanes, three of them reserved for tuning <span class="d">(ABI 59)</span></div>
+</div>
+
+<p>Six ABI revisions in one day (56 &rarr; 59, then 60&ndash;62 the next). The architectural
+resolution is <em>"one decode, two lanes"</em>: a speaker changing station borrows a second render
+lane so the outgoing and incoming sound are the same decode crossing over, rather than a fade-out with
+nothing underneath it. Three of the six emitter slots are reserved for tuning so a retune can never
+starve a station that is playing.</p>
+
+<div class="panel fault">
+  <span class="tag">The bug that names the week</span>
+  <h4>The ghost: a station's advance decision was overwritten every tick</h4>
+  <p>A function called <code>MaintainOnAir</code> re-derived whether a station was on air, every tick,
+  <em>over a decision that had just been made</em> &mdash; so a track that had been told to advance
+  looped its own tail instead. The same shape appears four more times in the same week: a carrier with
+  an owner, a receiver with three owners, a lane index stranded on a dead station, a cached block-id
+  table that outlived the world it was resolved against.</p>
+  <p>The project's own conclusion, written down on August 30: <strong>derive, do not latch.</strong>
+  Nine reports from one shape &mdash; an owner plus event triggers, where the answer should have been
+  derived from the world each tick. The carrier's final commit is literally
+  <em>"The carrier stops being a machine with an owner and becomes derived state."</em></p>
+</div>
+
+<div class="why">
+  <span class="tag">Why this shape kept recurring, and what it costs</span>
+  <p>Ownership is the natural way to model a scarce resource: something holds the lane, something owns
+  the carrier, something remembers which blocks are speakers. It is also the natural way to model it
+  <em>wrong</em> in a system where the world changes underneath you &mdash; a station's folder is
+  deleted, a radio is broken with a pickaxe, a world unloads and block ids are reassigned.</p>
+  <p>Every one of those makes an owner stale, and a stale owner in an audio system is silent by
+  construction: the code path that would have made noise returns early. That is why these took a week
+  and the acoustics took a day per bug &mdash; a wrong number is audible, a missing owner is not.</p>
+  <p>The listener-anchored acoustic field is the same lesson learned nine days earlier in a different
+  subsystem. It is striking that the project had to learn it twice, and mildly encouraging that the
+  second time it wrote the rule down.</p>
+</div>
+
+<h3>Robustness, and a library that moves underneath you</h3>
+
+<p>Woven through the same week is a set of fixes that all share one premise: <em>the music library is
+on a drive that may not be there.</em> The author's own library lives on an exFAT external disk, which
+is why several of these exist at all.</p>
+
+<div class="log">
+  <div>A drive hiccup marked radio tracks dead for the rest of the process</div>
+  <div>An unplugged drive is not an empty playlist</div>
+  <div>Replace a file, keep the name, and it played at the old file's volume</div>
+  <div>Playlists exported by VLC resolved to nothing, and said nothing about it</div>
+  <div>A FLAC with an ID3 tag in front of it was unopenable, which is 1.5% of a real library</div>
+  <div>Fragmented MP4 now plays: the container half of every podcast file</div>
+  <div>A long track is normalized a second in, not nine</div>
+  <div>Measurements last the session; only the user's own choices reach disk</div>
+  <div>A 24-hour play session with the library moving underneath it</div>
+  <div>25 tracks that will never play, and nothing ever said so</div>
+</div>
+
+<p>The last of those is the most characteristic thing in the release. A file that is present and
+readable but that <em>nothing can decode</em> was recorded as unplayable and skipped &mdash; correct
+behaviour, and completely silent. Every instrument agreed with the silence: the file is on disk, so
+the coverage panel counted it; the playlist entry resolved, so the missing-entry report said nothing;
+the station had other tracks, so the "no playable tracks" warning never fired.</p>
+
+<p>It was found by probing a real 3,381-track library through the shipping decoder. Twenty-five files
+were Apple Lossless inside an <code>.m4a</code> container, which is not a supported format. Each such
+file now gets one warning naming it, capped at twelve before it summarises &mdash; and a drive that has
+merely gone away still says nothing, because that distinction already existed and this was built on
+top of it.</p>
+
+<h3>Where it stands today</h3>
+
+<p>Five release candidates: RC1 (Aug 23), RC2 (Aug 26), RC3 (Aug 27), RC4 (Aug 30), RC5 (Aug 30). The
+version string in <code>ModInfo.xml</code> reads <code>1.0.5</code>, because a late discovery is that
+the 3.x mod loader runs <code>Version.TryParse</code> on it and warns in every user's log for anything
+non-numeric &mdash; <code>1.0.2a</code>, <code>1.0.3a</code> and <code>1.0.5RC1/2/3</code> all tripped
+it, silently, for months. Point releases now go in a fourth numeric component.</p>
+
+<p>The last commit in the log, on August 30, is <em>"Upgrade the file that actually shipped, not a
+two-line stand-in"</em> &mdash; which is the project's recurring lesson about opening the artifact,
+learned once more.</p>
+</section>
+
+<div class="scale tall"></div>
+
+<section id="arch">
+<div class="actnum"><span>The machine</span><span class="dates">As of 2026-08-30</span></div>
+<h2>How it works today</h2>
+
+<p class="lede">What follows is the system as it stands, rather than how it got there. Nine
+subsystems, of which the first three are the mod and the rest are the engine underneath it.</p>
+
+<div class="tw"><table>
+<thead><tr><th>Layer</th><th>Lives in</th><th>Runs at</th></tr></thead>
+<tbody>
+<tr><td>Detection &amp; snapshot</td><td class="nw">ContextResolver.cs</td><td>10 Hz, Unity coroutine</td></tr>
+<tr><td>Policy</td><td class="nw">Config/context.lua</td><td>10 Hz, MoonSharp</td></tr>
+<tr><td>Stack &amp; selection</td><td class="nw">ContextStack, TrackRotation</td><td>on change</td></tr>
+<tr><td>Decode &amp; buffering</td><td class="nw">CMM_Decoder.dll</td><td>per track, off-thread</td></tr>
+<tr><td>Mix &amp; output</td><td class="nw">cmm_mix.c, cmm_out.c</td><td>per sample, own thread</td></tr>
+<tr><td>Loudness</td><td class="nw">cmm_loudness.c, LoudnessStore</td><td>once per file, cached</td></tr>
+<tr><td>Acoustic field</td><td class="nw">FieldOcclusion.cs, cmm_field.c</td><td>3.3 Hz flood, 4 Hz publish</td></tr>
+<tr><td>Emitters</td><td class="nw">EmitterAudioLayer.cs (4,212 lines)</td><td>10 Hz</td></tr>
+<tr><td>Radio</td><td class="nw">RadioStationCatalog, PersonalRadio</td><td>world clock</td></tr>
+</tbody>
+</table></div>
+
+<h3 id="resolve">The resolve tick</h3>
+
+<p>Ten times a second, on a Unity coroutine, three things happen in order.</p>
+
+<p><strong>1. Detection builds a snapshot.</strong> <code>BuildSnapshot()</code> reads the world into
+a flat <code>GameState</code>: biome, time of day, weather, health, vehicle, swimming, POI identity
+and tier and infestation, trader identity, nearby players, and the set of enemies currently targeting
+you with their class names and states. The marshal into Lua is change-gated &mdash; each scalar is
+cached and only the ones that moved are re-sent &mdash; which took the steady roaming tick from about
+twenty allocations to about one.</p>
+
+<p><strong>2. Policy decides which contexts are active.</strong> <code>resolve(gameState, cfg)</code>
+in <code>context.lua</code> returns a list of context tokens. The combat model is a weighted threat
+score: a standard walker is 1.0, a crawler 0.6, a dire wolf 4.5, a demolisher 8.0, matched by
+longest-substring against the entity class name so modded enemies fall through to a default weight.
+State multipliers stack on top (feral &times;1.5, radiated &times;2.0, charged &times;2.75, infernal
+&times;3.25). The total picks the highest tier whose threshold it reaches &mdash;
+<code>Combat_Low</code> at 0.5, <code>Combat_High</code> at 6, <code>Combat_Boss</code> at 18 &mdash;
+and the biome suffix is appended from the biome that was locked when the fight started.</p>
+
+<p><strong>3. The stack decides what plays.</strong> Active tokens are matched against
+<code>contexts.xml</code>, which carries priority, fallback mode, warm-up dwell, staleness, cooldown,
+fade-in time and per-context volume for 71 contexts. The highest-priority context that is
+<em>playable</em> wins; a context with no music of its own walks its fallback chain until it finds
+one that does.</p>
+
+<div class="panel">
+  <span class="tag">Two numbers in tension</span>
+  <h4>1.5 seconds of hysteresis against a 2.0 second crossfade</h4>
+  <p>A context must be <em>absent</em> for 1.5 s before it is dropped from the stack &mdash; that's the
+  debounce that answers day four's "contexts changing too quickly". <code>CrossFadeDuration</code>
+  defaults to 2.0 s. So even the best case &mdash; a context appears, vanishes, and is evicted as fast
+  as the rules allow &mdash; puts the out-transition <em>inside</em> the previous fade.</p>
+  <p>Measured in a 12-hour simulated session: <strong>39.1% of all context transitions interrupt an
+  in-flight crossfade</strong> (1,525 of 3,882), stable over 48 hours. Worst burst: three transitions
+  in one 2.0 s window, with the mixer pinned at its four-voice cap.</p>
+  <p>The partial answer shipped is a per-context rule rather than a global one: a context driven by
+  something that can vanish in seconds (enemies, nearby players, POI state) gets a fade that fits
+  <em>inside</em> the hysteresis &mdash; 1.2 s with margin. A context driven by where you are or what
+  time it is cannot flicker, and keeps its 5 s fade. The structural question &mdash; raise the
+  hysteresis or refuse a transition mid-fade &mdash; is still open in the TODO.</p>
+</div>
+
+<h3 id="audio">The audio path</h3>
+
+<p>Everything below the decision is native. <code>CMM_Decoder.dll</code> is about 16,400 lines of C
+across five translation units, at ABI revision 62.</p>
+
+<h4>Decoding</h4>
+<p>Every supported format is decoded by a vendored library behind one uniform five-function shape
+(<code>open_file</code> / <code>open_memory</code> / <code>read_float</code> / <code>seek</code> /
+<code>close</code>):</p>
+
+<div class="tw"><table>
+<thead><tr><th>Format</th><th>Backend</th><th>Note</th></tr></thead>
+<tbody>
+<tr><td>ogg vorbis</td><td>libvorbisfile</td><td>swapped from stb_vorbis for streaming parity</td></tr>
+<tr><td>opus</td><td>libopusfile</td><td>resume seek was the A20 trader-silence root cause</td></tr>
+<tr><td>flac</td><td>dr_flac</td><td>opened on raw Win32 handles, not the CRT</td></tr>
+<tr><td>mp3 / wav</td><td>dr_mp3 / dr_wav</td><td></td></tr>
+<tr><td>m4a / aac</td><td>fdk-aac + minimp4</td><td>fragmented MP4 supported since Aug 28</td></tr>
+<tr><td>mkv / webm / mp4 / m4v</td><td>own Matroska reader</td><td>lazy pull-remux, streaming</td></tr>
+</tbody>
+</table></div>
+
+<p>The container reader is worth a note of its own. It was originally eager &mdash; it read the whole
+file before playing &mdash; which stalls the game for a multi-gigabyte video. It was rewritten to
+stream: a lazy pull-remux with per-codec callback opens and AAC refill, where a seek rebuilds from
+zero. That is how a podcast in an <code>.mkv</code> plays without a hitch.</p>
+
+<h4>Buffering</h4>
+<p>Files under a size cap are read entirely into off-GC native memory on open and the handle is closed
+immediately, so the folder is never pinned and you can reorganise your library while it plays. Larger
+files stream. This is the direct descendant of week one's hot-reload promise.</p>
+
+<h4>Mixing and output</h4>
+<p><code>cmm_mix.c</code> holds the producer loop: four simultaneous music voices with array headroom
+to twenty for emitter lanes and effects, per-voice gain and fade state, and eviction of the most-faded
+voice when the cap is reached. <code>cmm_out.c</code> is miniaudio on the mod's own thread. Neither
+touches the managed heap, so neither can be stopped by a GC pause.</p>
+
+<p>Because the audio leaves through its own device rather than Unity's <code>AudioListener</code>, the
+game's volume sliders do not apply automatically &mdash; so CMM applies them by hand. Context music
+takes Overall &times; Music; world emitters take Overall &times; <em>Ambient</em> &times;
+<code>WorldEmitterVolume</code>, because a radio playing out of a block is an environmental sound and
+turning the <em>music</em> down should not silence the POI. The masters are slewed rather than
+stepped, so dragging a slider no longer clicks. Overall 70% with Music 20% lands at 14%, matching
+vanilla to well under a tenth of a decibel.</p>
+
+<h4>Loudness</h4>
+<p>EBU R128 integrated loudness, measured natively, keyed by content hash in
+<code>Cache/loudness.xml</code>. The store holds only what the user has actually touched &mdash;
+adjusted, banned or favourited &mdash; while live measurements last the session; an earlier version
+gained an entry for every track ever played and grew far past its intent. A long track is measured a
+second in rather than nine, so a podcast does not play at a guess for its opening. Death and spawn
+stingers bypass the gate entirely, because a measurement can never arrive for audio that short and
+waiting for one delayed them by up to three seconds.</p>
+
+<h3 id="field">The acoustic field</h3>
+
+<p>One field, flooded outward from the listener, read by every source. This is the piece the project
+threw a month of more-correct work away to get.</p>
+
+<div class="tw"><table>
+<thead><tr><th>Property</th><th>Value</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Cell size</td><td class="nw">1 &times; 1 &times; 1 block</td><td>Two blocks cannot seal a one-block wall</td></tr>
+<tr><td>Window</td><td class="nw">&plusmn;32 horizontal, 16 up / 16 down</td><td>What the finer grid is paid for with</td></tr>
+<tr><td>Flood</td><td class="nw">~30.8 ms, 3.3 Hz, scheduler thread</td><td>Pure arithmetic over a native arena</td></tr>
+<tr><td>Publish</td><td class="nw">4 Hz, plus urgent door/block events</td><td>Doors jump the cadence</td></tr>
+<tr><td>Source lookup</td><td class="nw">0.11 &micro;s</td><td>The hundredth source costs one lookup</td></tr>
+<tr><td>Outside the window</td><td class="nw">reads clear, not sealed</td><td>A fade to "no opinion", never a cut-off</td></tr>
+</tbody>
+</table></div>
+
+<p>Three properties are load-bearing and each replaced a whole class of bug:</p>
+
+<ul>
+<li><strong>It carries excess attenuation only</strong> &mdash; what the building adds over a clear
+line. Distance stays with the mixer, so line of sight is 0 dB by construction.</li>
+<li><strong>It is rebuilt whole, never patched.</strong> A door that opens is simply in the next
+flood. There is no settling gate, no handover, no second model.</li>
+<li><strong>Cells carry six half-faces, not three faces.</strong> A cell's material used to live on
+its three negative faces, which meant the face between C and C+X belonged to C+X &mdash; so a route
+entering through one positive face and leaving through another paid nothing at all. A plane wall
+survived it, which is why every wall test passed; anything you can get <em>around</em> did not. A
+speaker walled in on four sides with open corners measured 0.1 dB where it should have measured
+58.6.</li>
+</ul>
+
+<p>The cell-size history is the clearest example of the project's measurement habit. Cells were
+3&times;1&times;3, then 2&times;1&times;2, then 1&times;1&times;1, and each step was forced by the
+same failure on a different axis: a cell taller or wider than the thing it must represent cannot
+represent it. The bathroom test, reported by the user as <em>"I'm in a bathroom, and closing and
+opening the door does nothing"</em>:</p>
+
+<div class="tw"><table>
+<thead><tr><th>Cell size</th><th class="num">Door open</th><th class="num">Door shut</th><th class="num">Difference</th></tr></thead>
+<tbody>
+<tr><td>3 &times; 1 &times; 3</td><td class="num">9.5 dB</td><td class="num">11.6 dB</td><td class="num">2.1 dB</td></tr>
+<tr><td>2 &times; 1 &times; 2</td><td class="num">9.3 dB</td><td class="num">56.4 dB</td><td class="num">47.1 dB</td></tr>
+<tr><td>1 &times; 1 &times; 1</td><td class="num">0.0 dB</td><td class="num">56.8 dB</td><td class="num">56.8 dB</td></tr>
+</tbody>
+</table></div>
+
+<p>Going to one-block cells looked unaffordable at 819 ms a flood over the old window. It became
+affordable by shrinking the window &mdash; and geometry reads got roughly four times <em>cheaper</em>,
+because they track blocks rather than cells.</p>
+
+<h4>Doors</h4>
+<p>A door is an <strong>aperture</strong>: a plane measured once while the colliders are readable and
+remembered, plus an openness ramp derived from the leaf's real travel read off the renderer. The
+threshold is a fraction of the aperture's open <em>area</em>, so a garage door and a closet door
+behave consistently. Only hinged doors are treated as swinging. The model leads the door by the
+measured latency of its own pipeline, and a closing door can only ever get more shut.</p>
+
+<p>On 2.6 none of this exists &mdash; doors are block metadata with no tile entity and no animator
+&mdash; so the swing machinery is disabled rather than fed constants. A door that changes instantly is
+honest there; one that pretends to swing is not. That work is scoped but not built.</p>
+
+<h3 id="emitters">The emitter layer</h3>
+
+<p><code>EmitterAudioLayer.cs</code> is the largest file in the project at 4,212 lines, and it is
+essentially a small broadcast plant.</p>
+
+<p><strong>Detection.</strong> <code>EmitterRegistry</code> resolves speaker block names to block ids
+&mdash; <em>per world load</em>, never per process, because block ids are assigned per world and
+caching them across a world change is why "a speaker is never detected, and placing more doesn't help"
+was a real bug that only a full game restart cleared. Prefabs are enumerated through
+<code>EmitterCompat</code>, which binds the diverging 2.6/3.x method by name.</p>
+
+<p><strong>Grouping.</strong> Every speaker belongs to a group keyed by its POI. A large POI made of
+several RWG tiles is one building for station purposes, because thirteen radios inheriting a tile id
+made a house disagree with itself.</p>
+
+<p><strong>Station assignment.</strong> Pin, then cache, then hash. A player's explicit choice
+(<code>Cache/emitters.xml</code>, sectioned by save, keyed per radio) wins; otherwise the POI's prefab
+instance id hashes into the sorted station list, which is deterministic and identical on every client.
+Assignment is pinned by station <em>name</em>, so removing a folder means dead air rather than a silent
+retune. A radio you place yourself starts off.</p>
+
+<p><strong>Rendering.</strong> Six native slots, three reserved for tuning. Every speaker on the same
+station is one source at the right places rather than many decodes. A station's audio is mono-downmixed
+per slot, coloured, spatialised through the native spatializer, and given reverb graded by how much
+energy survives the bounces.</p>
+
+<p><strong>Voicing.</strong> <code>WorldEmitterColorVoice</code> (0.5) band-limits hard at both ends
+and adds the boxy resonance a cheap cone has; <code>ColorDrive</code> adds the crunch of one pushed
+too hard; <code>ColorStatic</code> a bed of hiss. Ham radios carry their own harder set at 0.9, because
+a communications speaker is smaller and nastier than a shelf unit. Every speaker has its own receiver,
+so the static comes out of the radio rather than out of the bus.</p>
+
+<p><strong>The carrier.</strong> A station that cannot play sits on a minor triad seeded from its
+name, at <code>WorldEmitterOffAirLevel</code> 0.04. It is derived state with no owner: every tick, the
+set of speakers listening to an unplayable station is worked out afresh, and the tone exists if that
+set is non-empty.</p>
+
+<h3 id="radio">The radio</h3>
+
+<p><strong>Stations are folders.</strong> Subfolders of the Radio source, merged across every installed
+music pack that supplies the same folder name.</p>
+
+<p><strong>The schedule is anchored, gapless and computed, not stored.</strong> Each station is a fixed
+name-seeded permutation with an anchor time; where a station is <em>right now</em> is arithmetic over
+the shared world clock, so it is instantly Ready at any pool size with no length scanning, identical on
+every client, and tuning in joins a broadcast already in progress mid-track. A background chain walk
+fills in the detail behind it. Deliberately, the anti-repeat bag that governs context music never
+touches stations &mdash; a fixed permutation already has the guarantee, and bans and favourites do not
+reach the radio.</p>
+
+<p><strong>The clock</strong> (<code>CmmClock</code>) is anchored to <code>worldTime</code> at world
+entry and then runs at realtime rate, freezing on single-player pause and carrying worldTime jumps,
+because the game's own clock runs at 0.89&times; realtime.</p>
+
+<p><strong>The dial.</strong> <code>Alt+PgUp</code> / <code>Alt+PgDn</code> walk Off &rarr; station
+&rarr; &hellip; &rarr; Off, wrapping both ways, so two keys give on, off, next and previous. Recorded
+detent and power samples live in <code>Sounds/</code>, held in RAM and rate-varied &plusmn;2000 Hz per
+firing. A retune leaves the old station <em>under</em> rising static rather than cutting it, passes
+through noise, and reveals the new station band-limited and distorted before it opens out. World
+speakers now run the pocket radio's exact instrument and timings, after a week of them being two
+implementations that disagreed.</p>
+
+<h3 id="config">Config and schema</h3>
+
+<p>Three files, all generated rather than shipped, all hot-reloading.</p>
+
+<ul>
+<li><code>Config/settings.xml</code> and <code>Config/radio.xml</code> &mdash; 202 settings at schema
+revision 56, described by one table in <code>CMMSettingsSchema.cs</code>. Every entry carries
+<code>since:</code> (which schema added it) and, where a default has moved,
+<code>changedIn:</code>/<code>was:</code>. Both files are read as one chain, and a setting found in
+<code>settings.xml</code> still wins.</li>
+<li><code>Config/contexts.xml</code> &mdash; 71 contexts with their priority, source, fallback,
+warm-up, staleness and volume. A source may be a folder, a folder tree, or an <code>.m3u</code>
+playlist naming files anywhere on disk.</li>
+<li><code>Config/context.lua</code> &mdash; the policy, with a pristine copy embedded in the assembly
+as the fallback.</li>
+</ul>
+
+<p>Migration rules: an added setting is appended under a banner naming the version that added it; a
+changed default is applied only if you were still on the old one, compared on the <em>parsed</em>
+value; a setting you delete stays deleted and follows the compiled default; files are written only at
+startup, never while you have them open.</p>
+
+<h3 id="compat">Four games, one binary</h3>
+
+<p>One DLL loads on Alpha 20.7, Alpha 21.2, 2.6 and 3.2. The build fans out over an MSBuild
+<code>GameVersion</code> property that selects the game's <code>Managed</code> folder and stamps a
+per-version compile symbol; Debug deploys into that game's Mods folder, Release produces one zip in
+<code>dist/</code>.</p>
+
+<p>The divergences the single binary must bridge are handled three ways:</p>
+
+<ul>
+<li><strong>Reflection bridges</strong> for field-versus-property and renamed-method splits, so neither
+token reaches a call site.</li>
+<li><strong>Name resolution</strong> for enums whose ordinals drift (<code>GamePrefsCompat</code>) and
+for types that only exist on one version (<code>EmitterCompat.IsSeeThrough</code>,
+<code>BlockDoor.IsDoorOpen</code>).</li>
+<li><strong>Runtime capability checks</strong> rather than version checks. This is the lesson of
+August 29: <code>RuntimeSupported</code> asking for a 3.0-only door type silenced every speaker on 2.6.
+Doors are now recorded as a capability, and a version missing one capability loses that feature rather
+than the subsystem it happened to be checked through.</li>
+</ul>
+
+<p>Verification is <code>tools/CmmApiDiff</code>, which reads the shipped assembly's member references
+straight out of its metadata &mdash; without loading it, so it does not care that these are Unity
+assemblies for another runtime &mdash; and diffs them against what each game declares.</p>
+
+<h3 id="instruments">The instruments</h3>
+
+<p>Twenty-eight purpose-built tools, roughly a third of the repository's own line count. They exist
+because in-game listening cost the project weeks, repeatedly, and because several of the hardest
+defects were only visible to something that could measure.</p>
+
+<div class="tw"><table>
+<thead><tr><th>Tool</th><th>Answers</th></tr></thead>
+<tbody>
+<tr><td class="nw">CmmSession / CmmSoak</td><td>A virtualised 12&ndash;48 h play session: resolve, select, decode, mix, emitters, loudness, hot-reload, MP</td></tr>
+<tr><td class="nw">CmmSessionView</td><td>Top-down renderer over that session &mdash; watch the harness play</td></tr>
+<tr><td class="nw">CmmBench / CmmScaleBench</td><td>Decode and selection cost at library scale; <code>--probe</code> / <code>--seektest</code></td></tr>
+<tr><td class="nw">CmmRadioSim / CmmRadioLab</td><td>A station change rendered offline through the shipping DLL in four seconds, A/B'd against a reference</td></tr>
+<tr><td class="nw">CmmEmitSim / CmmEmitLab</td><td>The real emitter audio layer, offline; the retune measured rather than listened to</td></tr>
+<tr><td class="nw">CmmTuneWeb / CmmTuneLab / CmmDialLab</td><td>Tune the retune by ear, with the real library, without the game</td></tr>
+<tr><td class="nw">CmmAcousticsJudge</td><td>3D judge over game-truth voxel dumps; <code>check.js --regions</code> is the acceptance gate</td></tr>
+<tr><td class="nw">CmmApiDiff</td><td>What the shipped DLL calls, versus what each game declares</td></tr>
+<tr><td class="nw">CmmRotationTest</td><td>231 checks on the anti-repeat bag, including a real-filesystem section</td></tr>
+<tr><td class="nw">CmmScheduleTest</td><td>The station schedule and emitter slot ownership, driven directly as plain functions</td></tr>
+<tr><td class="nw">CmmPlaylistTest / CmmRootsTest / CmmConfigTest</td><td>Playlists, music roots, and 202 settings against their schema</td></tr>
+<tr><td class="nw">CmmLoudnessTest / CmmResumeTest</td><td>R128 correctness; an edge-case table for resume that would have caught the radio bug</td></tr>
+</tbody>
+</table></div>
+
+<p>Several files exist in the shape they do <em>so that</em> a harness can reach them.
+<code>EmitterSlots.cs</code> and <code>ResumePolicy.cs</code> are plain functions over state, with no
+Unity types and no game types, specifically because the code they were extracted from could not be
+linked into a test and a timing test for an interleaving would have passed by luck.</p>
+</section>
+
+<div class="scale tall"></div>
+
+<section id="principles">
+<h2>Principles it actually follows</h2>
+
+<p>Not stated as a manifesto anywhere. Inferred from what the code does &mdash; and in five cases now
+written down in the project's own review notes and memory.</p>
+
+<h4>1 &middot; Make bugs impossible, don't fix them</h4>
+<p>The listener-anchored field's real argument is that nothing lives long enough to go stale. The
+embedded fallback <code>context.lua</code> means a bad edit <em>can't</em> kill audio. Excess-only
+attenuation means clear line of sight is 0 dB by construction. Building the craft recipes in code
+rather than XML means a block a version lacks is a recipe quietly not offered instead of a crash.</p>
+
+<h4>2 &middot; Derive, do not latch</h4>
+<p>The newest of the six, and the one that cost the most. Nine separate reports in one week resolved
+to the same shape: an owner, plus event triggers to keep it fresh, where the answer should have been
+derived from the world each tick. Block ids cached per process against ids assigned per world.
+A carrier with an owner. A receiver with three. An advance decision overwritten by a tick that
+re-derived a stale answer over a fresh one.</p>
+
+<h4>3 &middot; One model, never two that can disagree</h4>
+<p>The C# resolver was <em>deleted</em> at the Lua cutover rather than kept as a fallback. The
+acoustics audit's recorded verdict: <em>"a fallback must be 'freeze the last published value', never
+'compute the same quantity a different way'"</em> &mdash; after three uncalibrated models switching
+live were measured <strong>14 dB apart</strong> on the same wall. The August 29 rewrite of the world
+speaker retune is the same move: one instrument, one set of timings, the pocket radio's.</p>
+
+<h4>4 &middot; No compensation constants</h4>
+<p>From the same review: <em>"If it sounds wrong, find the wrong thing; never add a coefficient."</em>
+Followed through in August, when four shape discounts were deleted at once because <em>"all four were
+smuggling WHERE into HOW MUCH."</em> And inverted into a warning: every world-emitter level knob set
+by ear while occlusion was leaking is a compensation for a bug that no longer exists, so those numbers
+are not preferences and are all wrong in the same direction.</p>
+
+<h4>5 &middot; Nothing may vanish</h4>
+<p>Every term has a value or fades to one. This came from a real defect: the diffuse term switched off
+entirely at a threshold, producing 8&ndash;12 dB on/off from a <code>floor()</code>. The same rule
+produces "outside the field window reads clear, not sealed" and "hold to full, and never cut."</p>
+
+<h4>6 &middot; The filesystem is the data model</h4>
+<p>Stations are folders. Music packs are folders. No manifest can disagree with the disk if there is no
+manifest. Both features shipped with <em>less</em> configuration than their own design documents
+planned for.</p>
+
+<h4>7 &middot; A setting must mean the same thing everywhere</h4>
+<p><code>FavouriteWeight</code> scaling with library size. Occlusion expressed in dB rather than
+virtual-distance units, so it doesn't change meaning when range changes. Door thresholds expressed as
+a fraction of open area rather than metres, so a closet and a drawbridge behave alike.</p>
+
+<h4>8 &middot; Measure, don't estimate</h4>
+<p>The most recent addition, from the door-latency week: four wrong diagnoses in one session, all of
+them arithmetic over an untimed chain. The remedy is a stopwatch on every stage, and where a stage is
+still opaque, split it and time the halves.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="failures">
+<h2>The recurring failure modes</h2>
+
+<p>The project is unusually candid about these, and the same shapes keep coming back.</p>
+
+<div class="panel fault">
+  <span class="tag">Mode 1</span>
+  <h4>A changed default reaches nobody who already has the file</h4>
+  <p>It bit three times in one day across three config files. <code>WorldEmitterDoorMaxLoss</code> was
+  added with <code>since: 1</code> against files already at schema 17, so it <em>has never existed in
+  any upgraded install</em> &mdash; which is almost certainly why that knob "was never heard" despite
+  being tried repeatedly. <code>DetourDb 3</code> was agreed by ear and then never left the author's
+  own config file. Radio tuning was judged for weeks against hand-edited values no migration could
+  reach.</p>
+</div>
+
+<div class="panel fault">
+  <span class="tag">Mode 2</span>
+  <h4>A guard nobody reads is worse than no guard</h4>
+  <p>The config test printed the DoorMaxLoss bug hours before it was found by hand, and it was waved
+  off as stale-baseline noise &mdash; because 34 <em>other</em> failures were also noise. The schema
+  guard was later found to be checking a schema from three weeks earlier, and to crash on the first
+  multi-valued <code>was:</code> that mattered. The project's own conclusion: <em>"Fix the baseline or
+  the net is decorative."</em></p>
+</div>
+
+<div class="panel fault">
+  <span class="tag">Mode 3</span>
+  <h4>Silent fallbacks hide shipping bugs</h4>
+  <p>The release zip went out without the dial sounds for want of one
+  <code>CopyToOutputDirectory</code> &mdash; and failed silently <em>by design</em>, because a missing
+  sound falls back to the synthesised click. Debug installs force-copy them, so every machine anyone
+  tested on was fine and only the zip was wrong. The same week: two dark harnesses, and a guard that
+  always failed.</p>
+</div>
+
+<div class="panel fault">
+  <span class="tag">Mode 4</span>
+  <h4>The instrument measured itself</h4>
+  <p>Every emitters-on soak run reported "STILL CLIMBING &mdash; leak suspect"; every emitters-off run
+  of the same code said "PLATEAUED." The harness was holding three <code>List&lt;double&gt;</code>
+  taking one entry per acoustics run &mdash; 79,498 runs over 12 hours &mdash; while the gauge measured
+  managed-heap growth from a post-warmup baseline. It was reporting its own telemetry as the leak. The
+  verdict then read one difference over four samples of an RSS number that bounces tens of megabytes on
+  Windows' own schedule; it now takes 16 checkpoints and a least-squares slope.</p>
+</div>
+
+<div class="why">
+  <span class="tag">Why these four are one bug</span>
+  <p>All of them are cases where <strong>the system's default behaviour on failure is to look
+  fine.</strong> A missing setting runs on a compiled default. A noisy test suite reads as "known
+  noise." A missing asset falls back to a synthesised one. A harness's own allocation is
+  indistinguishable from the thing it is watching.</p>
+  <p>Each is individually a reasonable robustness decision, and collectively they form a system that
+  cannot tell you when it is wrong. The 25 undecodable tracks found on August 30 are the purest
+  instance: three separate diagnostics all agreed with the silence, because each was answering a
+  slightly different question and every answer was correct.</p>
+  <p>The generalisation the project has recorded &mdash; <em>"open the artifact"</em>, meaning list the
+  actual shipped archive rather than trusting the build &mdash; is right, and understates the case. The
+  broader version is: every fallback needs a way to say it fired.</p>
+</div>
+</section>
+
+<div class="scale"></div>
+
+<section id="future">
+<h2>Where it's going</h2>
+
+<p class="lede">Drawn from <code>TODO.md</code>, the release-candidate handoffs, the shape of the
+code, and &mdash; for the last part &mdash; inference.</p>
+
+<h3>Immediately: 1.0.5 final</h3>
+
+<p>The candidate line has run RC1 &rarr; RC5 in eight days and the remaining blockers are almost all
+<em>listening</em>, not building. A recurring phrase in the TODO is "built, deployed, in-game test
+pending" &mdash; a large amount of shipped work has been verified offline and not yet heard by a human
+in a running game. The named risks:</p>
+
+<ul>
+<li><strong>A levels pass.</strong> Every world-emitter level knob was set by ear while occlusion was
+leaking. Measured at one speaker: 2.3 dB before the fix, 9.0 dB after, same spot. Two have already been
+corrected; the rest need ears.</li>
+<li><strong>The context-music loudness hold</strong>, flagged as the highest-risk shipped change, for an
+exact reason: <em>"A fault here is silence, the worst failure this mod has."</em></li>
+<li><strong>Door timing on 2.6</strong>, which is structural rather than tuning &mdash; every input the
+3.x swing model needs is absent, and the honest answer is a binary at-rest aperture with the swing
+machinery disabled outright.</li>
+</ul>
+
+<h3>1.0.6, as currently scoped</h3>
+
+<ul>
+<li><strong>Occlusion output shaping ported into the field</strong> &mdash; described in the TODO as
+<em>"THE LAST THING the audio engine needs."</em> Two curves: a soft knee so detour and gaps can never
+fully silence a speaker (stand behind a crate, still hear it), and a hard gate on the <em>solid</em>
+term only, so enough material produces true silence (a sealed vault). Detour can never silence;
+material can.</li>
+<li><strong>Stereo pairs.</strong> Lone speakers are already mono. What's unbuilt is two speakers of the
+same station close together each taking one channel, L/R assigned by lexicographic world position so
+it's stable across ticks, sessions and multiplayer clients. The render-flag bits were reserved for it
+back in July; the newest note reframes it correctly &mdash; <em>channel is a lane property, not a point
+flag; a stereo pair is one tuner with two outputs.</em></li>
+<li><strong>Emitter squelch</strong> &mdash; a distance- or signal-dependent breakup so a distant world
+radio degrades <em>like a radio</em> rather than merely getting quieter.</li>
+<li><strong>A continuous FM dial</strong> &mdash; sweeping into a station rather than stepping, with
+partial signal and partial noise following how close you are. Scoped as 1.0.5a.</li>
+<li><strong>The fade-versus-hysteresis question</strong> &mdash; 39% of transitions interrupt a
+crossfade, and the structural choice between raising the 1.5 s eviction hysteresis and refusing a
+transition mid-fade has not been made.</li>
+<li><strong>Native heap accounting</strong>, so the soak becomes a real gate instead of an inconclusive
+one. Managed heap is provably flat; the native allocators are the only unverified surface and there is
+currently no instrument that can see them.</li>
+<li><strong>A DJ system</strong>, Fallout-style, listed as an idea.</li>
+</ul>
+
+<h3>What the system is quietly built for</h3>
+
+<div class="why">
+  <span class="tag">Speculation &mdash; the trajectory</span>
+  <p><strong>The stated 1.0.6 list is polish. The interesting signal is one line in a design note:</strong>
+  <em>"it must handle MOVING sources, because zombies get sound later."</em></p>
+  <p>That requirement is why the per-speaker acoustic model was abandoned after reaching 0.02 dB parity
+  in native C. Nothing in the shipped feature set needs it &mdash; speaker blocks don't walk. It was a
+  constraint imposed on the architecture for something that has not been built.</p>
+  <p>Everything around it points the same way. The field is source-agnostic and costs 0.11 &micro;s per
+  lookup, so the fiftieth source is free. The spatializer and reverb are source-agnostic. The mixer's
+  voice array has headroom to twenty. The TODO's standing item is <em>"convert anything to C that can
+  be converted."</em> The acoustic model does not care whether the thing making noise is a jukebox or a
+  zombie behind a door.</p>
+  <p>The conclusion is hard to avoid: <strong>CMM is becoming a general game-audio engine that
+  currently happens to play music.</strong> The <em>diegetic authenticity</em> pass on the roadmap
+  &mdash; <em>"emitters are functional but far from satisfactory as in-world objects"</em> &mdash;
+  is not a music goal. It is a world-simulation goal.</p>
+</div>
+
+<div class="why">
+  <span class="tag">Speculation &mdash; the second trajectory, which is newer</span>
+  <p>The last fortnight added something the first ten weeks did not have: <strong>features aimed at the
+  player's agency rather than the author's fidelity.</strong> The coverage panel exists so a stranger
+  can diagnose their own silence. The tuner exists so a player can overrule a deterministic assignment.
+  The craftable blocks exist so a player can put a speaker where no level designer did. Music packs
+  exist so a third party can publish content for it.</p>
+  <p>Those four are a different kind of work from acoustic calibration, and they arrived together, at
+  the release-candidate boundary. If the first ten weeks were about making the thing correct, the last
+  two are the first evidence of making it <em>somebody else's</em>. The natural continuation is a
+  content ecosystem: soundtrack packs as ordinary mods (already shipped), a DJ layer, stations that
+  other mods can register, and eventually an emitter API that a different mod could drive.</p>
+  <p>Both trajectories share a dependency, and it is the unglamorous item on the list: the project must
+  be able to trust its own instruments. Every one of the four recurring failure modes is a
+  <em>feedback</em> problem, not a capability problem. As the surface grows from "music" to "all audio"
+  and from "my install" to "other people's", the number of knobs that can be silently wrong grows with
+  it. Regenerating the schema baseline so the config test stops crying wolf, and exporting native heap
+  counters so the soak can certify, are worth more than any feature on the roadmap &mdash; because
+  everything else is downstream of being able to tell when you are wrong.</p>
+</div>
+
+<h3>The open question</h3>
+
+<p>If the trajectory holds, the interesting question for the project isn't which features land in
+1.0.6. It's whether a mod can replace a game's entire audio presentation from the outside, across four
+game versions spanning years of API drift, without the game's cooperation.</p>
+
+<p>The last ninety days say the hard parts &mdash; threading, decoding, spatialisation, occlusion,
+calibration, cross-version binding &mdash; are already solved.</p>
+</section>
+
+<div class="scale"></div>
+
+<section id="timeline">
+<h2>Timeline</h2>
+
+<div class="tw"><table>
+<thead><tr><th>Date</th><th>Milestone</th></tr></thead>
+<tbody>
+<tr><td class="nw">Jun 2</td><td>First commit &mdash; a C# class library and a .gitignore</td></tr>
+<tr><td class="nw">Jun 5</td><td><em>"Contexts changing too quickly"</em> &mdash; the core problem, on day four</td></tr>
+<tr><td class="nw">Jun 6</td><td>POI detection, sleepers, blood moon; hot-reload promoted from bug to feature</td></tr>
+<tr><td class="nw">Jun 10</td><td>NAudio added <em>(removed eighteen days later)</em></td></tr>
+<tr><td class="nw">Jun 20</td><td>Modularised into partial classes; XML-driven config</td></tr>
+<tr><td class="nw">Jun 21</td><td>Weighted combat-threat model, Combat_Boss tier, debug HUD</td></tr>
+<tr><td class="nw">Jun 23</td><td><strong>1.0.1</strong> &mdash; one binary for A20 / A21 / 2.6 / 3.0</td></tr>
+<tr><td class="nw">Jun 26</td><td><strong>1.0.2a/b</strong> &mdash; biome combat music; day/night warm-up groups</td></tr>
+<tr><td class="nw">Jun 26</td><td>Context resolution ported to Lua and cut over in a single day</td></tr>
+<tr><td class="nw">Jun 26</td><td><strong>1.0.3</strong> &mdash; EBU R128 loudness normalization</td></tr>
+<tr><td class="nw">Jun 28</td><td>NAudio replaced by native <code>CMM_Decoder.dll</code></td></tr>
+<tr><td class="nw">Jun 29</td><td>Tracks buffered to native memory; folders no longer pinned</td></tr>
+<tr><td class="nw">Jun 30</td><td><strong>1.0.4</strong> &mdash; the native mixer becomes the sole audio output</td></tr>
+<tr><td class="nw">Jul 1</td><td>Mixer and loudness ported to C; music survives loading freezes</td></tr>
+<tr><td class="nw">Jul 2</td><td>Reflection bridges; the last per-version fork removed</td></tr>
+<tr><td class="nw">Jul 3</td><td><strong>1.0.5 line opens</strong> &mdash; playlists, incremental crawling, per-section vanilla control</td></tr>
+<tr><td class="nw">Jul 4</td><td>Music plays from speakers and radios in the world</td></tr>
+<tr><td class="nw">Jul 8</td><td>Door acoustics</td></tr>
+<tr><td class="nw">Jul 10</td><td>Personal radio; stations as folders; server-synchronised broadcast</td></tr>
+<tr><td class="nw">Jul 11</td><td>Radio sync root-caused &mdash; <code>worldTime</code> runs at 0.89&times; realtime</td></tr>
+<tr><td class="nw">Jul 13&ndash;14</td><td>Ham radios voiced separately; synthesised tuning static and power clicks</td></tr>
+<tr><td class="nw">Jul 18</td><td>Dedicated-server join freeze fixed; patch containment convention</td></tr>
+<tr><td class="nw">Aug 8</td><td>Retarget to 3.1.0 b14; the game's Overall slider finally reaches CMM</td></tr>
+<tr><td class="nw">Aug 13&ndash;19</td><td>Acoustics rebuilt from spec; ported to native C at 0.02 dB parity</td></tr>
+<tr><td class="nw">Aug 20</td><td>The listener-anchored field replaces it and becomes the default</td></tr>
+<tr><td class="nw">Aug 21</td><td>Anti-repeat bag; config files stop being overwritten; music packs as mods</td></tr>
+<tr><td class="nw">Aug 22</td><td>Doors become apertures rather than leaves</td></tr>
+<tr><td class="nw">Aug 23</td><td><strong>v1.0.5-rc1</strong> &mdash; radio tuning settled against an offline reference</td></tr>
+<tr><td class="nw">Aug 24&ndash;26</td><td>Door swing measured by open area; the coverage panel; <strong>RC2</strong></td></tr>
+<tr><td class="nw">Aug 27</td><td>Per-world block ids; native heap accounting; <strong>RC3</strong></td></tr>
+<tr><td class="nw">Aug 28</td><td>Playlist and drive-loss robustness; fragmented MP4; 24-hour soak</td></tr>
+<tr><td class="nw">Aug 29</td><td>World speakers on 2.6; the tuner radial; craftable blocks; the carrier rebuilt &mdash; <strong>76 commits</strong></td></tr>
+<tr><td class="nw">Aug 30</td><td>Carrier becomes derived state; <strong>RC4</strong> and <strong>RC5</strong>; 25 silent tracks found</td></tr>
+</tbody>
+</table></div>
+
+<h4>A note on version numbers</h4>
+<p>The public upload numbers and the mod's own version don't line up. Uploads 1&ndash;8 track version
+bumps roughly 1:1; uploads 9&ndash;14 are all one line, informally "1.0.4b", because 1.0.5 has now
+spent nearly two months in development. <code>ModInfo.xml</code> has read <code>1.0.5</code> since
+<strong>July 3</strong>, which means a July development build and an August release candidate report
+the same version string. Worth knowing before quoting a version number, or before trusting one in a
+bug report.</p>
+</section>
+
+<footer>
+<p><strong>Sources.</strong> The CMM git history (623 commits, 2026-06-02 &rarr; 2026-08-30),
+<code>CHANGELOG.md</code>, <code>TODO.md</code>, <code>ModInfo.xml</code>, the release notes for
+RC3&ndash;RC5, the design notes in <code>docs/</code>, and the source itself &mdash; whose comment
+blocks are, in this codebase, the primary design record.</p>
+<p>Every line set in the amber log style is a verbatim commit subject. Every figure is taken from the
+repository or from a measurement recorded in it. Sections marked <em>Why</em> are the analysis and
+speculation of an outside reader, not the author's stated reasoning, and are offered as inference
+rather than testimony.</p>
+<p>This document supersedes <code>docs/HISTORY.md</code>, which covered the first 403 commits to
+August 23.</p>
+</footer>
+
+</main>
+</div>
+</div>
