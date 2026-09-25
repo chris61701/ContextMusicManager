@@ -15,7 +15,7 @@ If you put your own music pack together with your own composition, or royalty-fr
 **Requirements**
 
 - EAC must be OFF
-- **7 Days to Die** version 3.2.0 b9 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)
+- **7 Days to Die** version 3.2.0 b10 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)
 - Windows. The native audio engine ships as a Windows library; Linux support is planned for 1.0.6
 
 ---
@@ -274,6 +274,7 @@ If a context's folder is **empty**, it doesn't go silent — it follows that con
 
 - **WorldEmitterEnabled / WorldEmitterVolume / WorldEmitterRange** - world speakers on/off, their own volume trim (they follow the **Ambient** slider, not Music), and how far they carry
 - **WorldEmitterColorVoice / ColorDrive / ColorStatic** - how much like a small cheap speaker they sound, with a separate set for ham radios
+- **WorldEmitterActiveByDefaultPercent** - how many of the radios that come with POIs are playing when you find them (default **10**%); the rest start switched off until you turn them on from the radial
 - The rest of the acoustic model (occlusion, doors, reverb) and every knob of the station-change sound
 
 ---

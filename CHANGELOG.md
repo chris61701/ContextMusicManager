@@ -2,12 +2,40 @@
 
 All notable changes to Context Music Manager are documented here.
 
-## 1.0.5a — unreleased
+## 1.0.5a — RC1 built 2026-09-25, unreleased
 
-Revisions since 1.0.5 shipped. ModInfo carries `1.0.5.1`, because the game runs
+Revisions since 1.0.5 shipped, packaged for testing as **RC1**
+(`ContextMusicManager V1.0.5a RC1 for A20-A21-2.6-3.2.zip`). ModInfo carries `1.0.5.1`, because the game runs
 `Version.TryParse` over that field and warns in every user's log for anything non-numeric —
 1.0.2a, 1.0.2b, 1.0.3a and the RC builds all tripped it. The letter is the name people read;
 the fourth component is the number the game reads.
+
+### Added
+
+- **Only some of the world's radios are playing** (`WorldEmitterActiveByDefaultPercent`,
+  radio.xml, default **10**). Every speaker that came with a POI used to be on, so a building
+  with fifteen of them was fifteen radios at once and the whole map was wall-to-wall music. Now
+  a percentage of them are active by default and the rest start switched off. It is decided per
+  speaker from its block position, so the same radios are dark on every visit and for every
+  player in multiplayer with nothing to synchronise, and a building can have one radio playing
+  among several that are dark. Turn any of them on from the radial and that choice is kept.
+  It is never stored: editing the number applies on the next tick, lowering it only ever
+  switches more off, and 100 restores the old behaviour. Radios you place are unaffected —
+  `WorldEmitterPlacedStartsOff` still decides those. Settings schema 58; an existing radio.xml
+  gets the setting added on the next launch.
+
+### Changed
+
+- **7 Days to Die 3.2.0 b10**, the current release. The mod builds against it with no source
+  changes; the supported list is now 3.2.0 b10, 2.6 b12, A21.2 b37 and A20.7 b1.
+- **A setting added by an update now appears where it belongs**, not at the bottom of the file.
+  An existing settings.xml or radio.xml used to get each release's new settings appended at the
+  end under an "Added in schema N" banner, so a radio setting could end up hundreds of lines away
+  from the ones it goes with. Each one is now inserted next to its neighbours, with its
+  documentation, exactly where a freshly written file has it, and marked with a short
+  `<!-- added in schema N -->` on its line so what an update added is still easy to find.
+  Nothing already in the file moves, and settings a previous update put at the bottom stay
+  there. contexts.xml is unchanged.
 
 ### Fixed
 

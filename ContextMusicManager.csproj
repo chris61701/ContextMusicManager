@@ -33,7 +33,7 @@
        reflection; ModInfo.xml is dual-format), so neither the staging folder nor the
        zip name encodes a version. Add a version by copying a block below. -->
   <PropertyGroup>
-    <GameVersion Condition="'$(GameVersion)' == ''">3.2.0 b9</GameVersion>
+    <GameVersion Condition="'$(GameVersion)' == ''">3.2.0 b10</GameVersion>
     <!-- Debug builds rewrite MusicPath in the deployed build/settings.dev.xml (the dev
          override file at the front of CMM's settings chain) to this; override with
          -p:DebugMusicPath=... . Release ships no settings file at all — CMM generates one
@@ -48,11 +48,11 @@
     <CMMDeployAll Condition="'$(CMMDeployAll)' == ''">true</CMMDeployAll>
   </PropertyGroup>
 
-  <!-- The Steam install tracks the CURRENT release; it is 3.2.0 b9 today. Steam upgrades
+  <!-- The Steam install tracks the CURRENT release; it is 3.2.0 b10 today. Steam upgrades
        in place, so each release replaces the last and there is no 3.0 or 3.1 install left
        to build against — the version name here just follows the Steam copy. Decompiled
        sources for reference live in H:\_Games\7D2DAssembly - 3.2. -->
-  <PropertyGroup Condition="'$(GameVersion)' == '3.2.0 b9'">
+  <PropertyGroup Condition="'$(GameVersion)' == '3.2.0 b10'">
     <GameInstallDir>C:\_Games\Steam\steamapps\common\7 Days To Die</GameInstallDir>
     <GameVersionDefine>GV_V3</GameVersionDefine>
   </PropertyGroup>
@@ -388,7 +388,7 @@
        'type not found' errors from missing game assemblies. -->
   <Target Name="ValidateGameVersion" BeforeTargets="Build">
     <Error Condition="'$(GameInstallDir)' == ''"
-           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.2.0 b9', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
+           Text="Unknown GameVersion '$(GameVersion)'. Valid values: '3.2.0 b10', '2.6 b12', 'Alpha 20.7 b1', 'Alpha 21.2 b37'." />
     <Error Condition="!Exists('$(GameManagedDir)')"
            Text="Game Managed folder not found for GameVersion '$(GameVersion)': $(GameManagedDir)" />
     <Warning Condition="!Exists('$(HarmonyHintPath)')"
@@ -453,7 +453,14 @@
            in the very build being tested. This never touches ModInfo:
                msbuild -p:Configuration=Release -p:RcLabel=RC4
            gives 'ContextMusicManager V1.0.5RC4 for ...zip' with ModInfo still saying 1.0.5. -->
-      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ModVersion)$(RcLabel) for A20-A21-2.6-3.2.zip</_ZipPath>
+      <!-- THE NAME PEOPLE READ, when it is not the number the game reads. A point release is
+           1.0.5.1 in ModInfo (it must parse) and "1.0.5a" everywhere else, so the zip takes
+           the published name when one is given:
+               msbuild -t:Package -p:ReleaseName="1.0.5a RC1"
+           gives 'ContextMusicManager V1.0.5a RC1 for ...zip'. Unset, it is the ModInfo version. -->
+      <_ZipVersion>$(_ModVersion)$(RcLabel)</_ZipVersion>
+      <_ZipVersion Condition="'$(ReleaseName)' != ''">$(ReleaseName)</_ZipVersion>
+      <_ZipPath>$(MSBuildProjectDirectory)\dist\ContextMusicManager V$(_ZipVersion) for A20-A21-2.6-3.2.zip</_ZipPath>
     </PropertyGroup>
     <Delete Files="$(_ZipPath)" />
     <!-- SourceDirectory is the parent of ContextMusicManager\, so the folder itself
@@ -466,7 +473,7 @@
        to fan a Debug build/deploy out across every install for compile-testing. Keep in
        sync with the GameVersion PropertyGroups near the top. -->
   <ItemGroup>
-    <CMMGameVersions Include="3.2.0 b9" />
+    <CMMGameVersions Include="3.2.0 b10" />
     <CMMGameVersions Include="2.6 b12" />
     <CMMGameVersions Include="Alpha 21.2 b37" />
     <CMMGameVersions Include="Alpha 20.7 b1" />
