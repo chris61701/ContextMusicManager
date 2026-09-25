@@ -123,7 +123,7 @@ namespace CMM
                     }
                 }
 
-                if (added.Count > 0) AppendNewSettings(doc, root, entries, added, fileSchema, currentSchema);
+                if (added.Count > 0) AddNewSettings(doc, root, entries, added, currentSchema);
                 root.SetAttribute(StampAttr, currentSchema.ToString());
 
                 if (!WriteAtomicXml(path, doc, label)) return;
@@ -154,56 +154,217 @@ namespace CMM
             return int.TryParse(raw, out int v) && v > 0 ? v : 0;
         }
 
-        // Append the new settings at the END, under a banner, each with its own
-        // documentation from the schema. Appending rather than slotting each one into
-        // its group keeps every existing byte where the user left it — and the banner
-        // means "what did this update add?" is answerable by opening the file.
-        private static void AppendNewSettings(XmlDocument doc, XmlElement root,
-                                              SchemaEntry[] entries, List<SettingDef> added,
-                                              int fileSchema, int currentSchema)
+        // SLOT EACH NEW SETTING INTO ITS OWN GROUP, documented, where a fresh file would have it.
+        //
+        // This used to append them all at the END under an "Added in schema N" banner, on the
+        // reasoning that nothing the user had would move. Nothing moves this way either -- every
+        // existing node stays where it was and new ones are only inserted between them -- but a
+        // setting now sits beside the ones it belongs with instead of hundreds of lines away.
+        // What the banner answered ("what did this update add?") is kept by a short trailing
+        // note on each inserted line.
+        //
+        // Placed AFTER the nearest earlier schema setting the file still has (and after that
+        // setting's own trailing comments). When the file has none of the earlier ones, BEFORE
+        // the nearest later one and its documentation. When it has neither, at the end, which
+        // is all the old code ever did. Walked in schema order, so a setting inserted a moment
+        // ago is the anchor for the next one.
+        private static void AddNewSettings(XmlDocument doc, XmlElement root,
+                                           SchemaEntry[] entries, List<SettingDef> added,
+                                           int currentSchema)
         {
             string indent = DetectIndent(root);
-            var pending = new List<XmlNode>();
-
-            pending.Add(doc.CreateWhitespace(CMMSettingsWriter.NL));
-            pending.Add(doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
-            pending.Add(doc.CreateComment($" Added in schema {currentSchema} "
-                                        + $"(this file was at {fileSchema}). "
-                                        + "Edit freely — CMM will not rewrite these again. "));
-
             var wanted = new HashSet<string>(StringComparer.Ordinal);
             foreach (SettingDef s in added) wanted.Add(s.Name);
 
-            // Walk the schema so a new setting carries the comment block that documents
-            // it, in table order, rather than an undocumented bare element.
-            string carried = null;
-            foreach (SchemaEntry e in entries)
+            for (int i = 0; i < entries.Length; i++)
             {
-                if (e.Comment != null) { carried = e.Comment; continue; }
-                if (e.Gap) { continue; }
-                if (e.Setting == null || !wanted.Contains(e.Setting.Name)) continue;
+                SettingDef s = entries[i].Setting;
+                if (s == null || !wanted.Contains(s.Name)) continue;
 
-                if (carried != null)
+                // The span of comments and blank lines between the previous table entry that is
+                // a setting (or raw block) and this one: its documentation and its grouping.
+                int first = i;
+                while (first > 0 && entries[first - 1].Setting == null && entries[first - 1].Raw == null)
+                    first--;
+
+                XmlElement el = doc.CreateElement(s.Name);
+                el.InnerText = CMMSettingsIO.Format(s, s.Default);
+
+                XmlNode anchor = PreviousPresent(root, entries, i, out int anchorIdx);
+                if (anchor != null)
                 {
-                    pending.Add(doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
-                    pending.Add(doc.CreateComment(" " + Flatten(carried, indent) + " "));
-                    carried = null;
-                }
-                XmlElement el = doc.CreateElement(e.Setting.Name);
-                el.InnerText = CMMSettingsIO.Format(e.Setting, e.Setting.Default);
-                pending.Add(doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
-                pending.Add(el);
-            }
+                    // A comment of this span already in the file after the anchor is a trailing
+                    // hint of the anchor's (WorldEmitterSource has one) -- step past it, and do not
+                    // write it a second time.
+                    var present = new HashSet<string>(StringComparer.Ordinal);
+                    XmlNode after = SkipTrailing(anchor, entries, anchorIdx, i, present);
 
-            // Go in BEFORE the trailing whitespace so the closing tag keeps its own line.
-            XmlNode trail = root.LastChild;
-            bool haveTrail = trail != null && (trail.NodeType == XmlNodeType.Whitespace
-                                            || trail.NodeType == XmlNodeType.SignificantWhitespace);
-            foreach (XmlNode n in pending)
-            {
-                if (haveTrail) root.InsertBefore(n, trail);
-                else           root.AppendChild(n);
+                    var nodes = new List<XmlNode>();
+                    for (int k = first; k < i; k++)
+                    {
+                        if (entries[k].Gap) nodes.Add(doc.CreateWhitespace(CMMSettingsWriter.NL));
+                        else if (entries[k].Comment != null && !present.Contains(Squash(entries[k].Comment)))
+                        {
+                            nodes.Add(doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
+                            nodes.Add(doc.CreateComment(" " + Flatten(entries[k].Comment, indent) + " "));
+                        }
+                    }
+                    nodes.Add(doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
+                    nodes.Add(el);
+                    AddNote(doc, nodes, currentSchema);
+
+                    // THE BREAK THAT FOLLOWED THE ANCHOR NOW FOLLOWS US, re-derived: the blank line
+                    // (or not) the anchor had before whatever came next was about the anchor and
+                    // that, and the new setting sits between them. Its own span above supplies
+                    // the break before it; the table decides the one after it. Left alone at the
+                    // end of the file, where it is the closing tag's line.
+                    var ws = new List<XmlNode>();
+                    XmlNode probe = after.NextSibling;
+                    while (probe != null && (probe.NodeType == XmlNodeType.Whitespace
+                                          || probe.NodeType == XmlNodeType.SignificantWhitespace))
+                    { ws.Add(probe); probe = probe.NextSibling; }
+                    if (probe != null)
+                    {
+                        foreach (XmlNode w in ws) root.RemoveChild(w);
+                        NextPresent(root, entries, i, out int followIdx);
+                        nodes.Add(doc.CreateWhitespace((GapBetween(entries, i, followIdx) ? CMMSettingsWriter.NL : "")
+                                                       + CMMSettingsWriter.NL + indent));
+                    }
+                    foreach (XmlNode n in nodes) { root.InsertAfter(n, after); after = n; }
+                    continue;
+                }
+
+                // Before everything it follows in the table: put it above the next setting's
+                // documentation, not between that setting and its comment.
+                var lead = new List<XmlNode>();
+                for (int k = first; k < i; k++)
+                    if (entries[k].Comment != null)
+                    {
+                        lead.Add(doc.CreateComment(" " + Flatten(entries[k].Comment, indent) + " "));
+                        lead.Add(doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
+                    }
+                lead.Add(el);
+                AddNote(doc, lead, currentSchema);
+
+                XmlNode next = NextPresent(root, entries, i, out int nextIdx);
+                if (next != null)
+                {
+                    XmlNode before = SkipLeading(next, entries, i, nextIdx);
+                    lead.Add(doc.CreateWhitespace((GapBetween(entries, i, nextIdx) ? CMMSettingsWriter.NL : "")
+                                                  + CMMSettingsWriter.NL + indent));
+                    foreach (XmlNode n in lead) root.InsertBefore(n, before);
+                    continue;
+                }
+
+                // The file holds none of this schema's settings at all. End of the file.
+                XmlNode trail = root.LastChild;
+                bool haveTrail = trail != null && (trail.NodeType == XmlNodeType.Whitespace
+                                                || trail.NodeType == XmlNodeType.SignificantWhitespace);
+                lead.Insert(0, doc.CreateWhitespace(CMMSettingsWriter.NL + indent));
+                foreach (XmlNode n in lead)
+                {
+                    if (haveTrail) root.InsertBefore(n, trail);
+                    else           root.AppendChild(n);
+                }
             }
+        }
+
+        // The trailing mark on an inserted line, and how placement recognises one -- so a setting
+        // inserted after a line does not land between that line and its own note.
+        private const string AddedNote = "added in schema";
+
+        private static void AddNote(XmlDocument doc, List<XmlNode> nodes, int schema)
+        {
+            nodes.Add(doc.CreateWhitespace(" "));
+            nodes.Add(doc.CreateComment(" " + AddedNote + " " + schema + " "));
+        }
+
+        // Whether the table puts a blank line anywhere strictly between two positions.
+        private static bool GapBetween(SchemaEntry[] entries, int from, int to)
+        {
+            for (int k = from + 1; k < to && k < entries.Length; k++) if (entries[k].Gap) return true;
+            return false;
+        }
+
+        private static XmlNode PreviousPresent(XmlElement root, SchemaEntry[] entries, int i, out int idx)
+        {
+            for (idx = i - 1; idx >= 0; idx--)
+            {
+                SettingDef s = entries[idx].Setting;
+                if (s != null && root.SelectSingleNode(s.Name) is XmlElement el) return el;
+            }
+            return null;
+        }
+
+        private static XmlNode NextPresent(XmlElement root, SchemaEntry[] entries, int i, out int idx)
+        {
+            for (idx = i + 1; idx < entries.Length; idx++)
+            {
+                SettingDef s = entries[idx].Setting;
+                if (s != null && root.SelectSingleNode(s.Name) is XmlElement el) return el;
+            }
+            return null;
+        }
+
+        // Past the anchor's own note and any schema comments that sit between the anchor and the
+        // new setting. Stops at the first thing that belongs to whatever comes next.
+        private static XmlNode SkipTrailing(XmlNode anchor, SchemaEntry[] entries, int from, int to,
+                                            HashSet<string> present)
+        {
+            XmlNode after = anchor;
+            for (XmlNode n = anchor.NextSibling; n != null; n = n.NextSibling)
+            {
+                if (n.NodeType == XmlNodeType.Whitespace || n.NodeType == XmlNodeType.SignificantWhitespace)
+                    continue;
+                if (n.NodeType != XmlNodeType.Comment) break;
+                if (IsAddedNote(n)) { after = n; continue; }
+                if (!IsSchemaComment(n, entries, from, to)) break;
+                present.Add(Squash(n.Value));
+                after = n;
+            }
+            return after;
+        }
+
+        // Back from the later setting over its own documentation, so the new setting goes above
+        // that whole block.
+        private static XmlNode SkipLeading(XmlNode next, SchemaEntry[] entries, int from, int to)
+        {
+            XmlNode before = next;
+            for (XmlNode n = next.PreviousSibling; n != null; n = n.PreviousSibling)
+            {
+                if (n.NodeType == XmlNodeType.Whitespace || n.NodeType == XmlNodeType.SignificantWhitespace)
+                    continue;
+                if (n.NodeType != XmlNodeType.Comment || !IsSchemaComment(n, entries, from, to)) break;
+                before = n;
+            }
+            return before;
+        }
+
+        private static bool IsAddedNote(XmlNode c)
+        {
+            string t = c.Value.Trim();
+            return t.StartsWith(AddedNote, StringComparison.Ordinal)
+                && int.TryParse(t.Substring(AddedNote.Length).Trim(), out _);
+        }
+
+        // Whether a comment in the file is one of the schema's own, strictly between two table
+        // positions. Compared with all whitespace removed: the file's copy was re-indented when
+        // it was written, and an editor may have re-wrapped it since.
+        private static bool IsSchemaComment(XmlNode c, SchemaEntry[] entries, int from, int to)
+        {
+            string have = Squash(c.Value);
+            for (int k = from + 1; k < to; k++)
+                if (entries[k].Comment != null && Squash(entries[k].Comment) == have) return true;
+            return false;
+        }
+
+        private static string Squash(string s)
+        {
+            if (s == null) return "";
+            while (s.Contains("--")) s = s.Replace("--", "—");
+            var sb = new StringBuilder(s.Length);
+            foreach (char ch in s) if (!char.IsWhiteSpace(ch)) sb.Append(ch);
+            return sb.ToString();
         }
 
         // Re-indent a multi-line schema comment for the position it is being inserted at,

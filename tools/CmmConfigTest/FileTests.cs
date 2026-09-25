@@ -95,7 +95,8 @@ namespace CMM
             Is(Stamp("a.xml") == 2, "file is re-stamped to the new schema");
             Is(Read("a.xml").Contains("How loud, 0..1"), "existing comments survive the rewrite");
             Is(Read("a.xml").Contains("Brand new in v2"), "the new setting arrives documented");
-            Is(Read("a.xml").Contains("Added in schema 2"), "new settings sit under a banner");
+            Is(Read("a.xml").Contains("<NewThing>7</NewThing> <!-- added in schema 2 -->"),
+               "a new setting carries a note saying when it arrived");
 
             // ── 4. a DELETED key is not resurrected ──────────────────────────
             var doc = new XmlDocument { PreserveWhitespace = true };
@@ -177,8 +178,153 @@ namespace CMM
             }
             Ok("every rewritten file still parses");
 
+            Placement();
+
             try { Directory.Delete(_dir, true); } catch { }
             return _fail;
+        }
+
+        // ── placement: a new setting lands where a fresh file would have it ──────
+        //
+        // The property: take a file written at an older schema, upgrade it, strip the
+        // "added in schema N" notes, and it reads the same as a file written fresh at the
+        // new schema. Synthetic cases are compared byte for byte; the REAL schemas are
+        // replayed from every version they ever shipped at and compared by element order
+        // and comment order (the old files' blank lines are a guess, so they are ignored).
+        static void Placement()
+        {
+            Console.WriteLine("── placement " + new string('─', 41));
+
+            var full = new[]
+            {
+                Cmt("A doc"),
+                Set("A", SettingKind.Int, 1, since: 2),
+                Gap(),
+                Cmt("B doc\nsecond line"),
+                Set("B", SettingKind.Int, 2, since: 2),
+                Set("C", SettingKind.Int, 3, since: 2),
+                Cmt("a hint that trails C"),
+                Set("D", SettingKind.Int, 4, since: 2),
+                Gap(),
+                Cmt("E doc"),
+                Set("E", SettingKind.Int, 5, since: 2),
+            };
+            string fresh = CMMSettingsWriter.Render(full, "CMMSettings", 2);
+
+            string[][] cases =
+            {
+                new[] { "B" },            // middle, opens a group
+                new[] { "C" },            // middle, no doc of its own
+                new[] { "D" },            // after a setting with a trailing hint
+                new[] { "E" },            // last
+                new[] { "A" },            // first: no earlier anchor (the stand-in old file
+                                          // opens on B's blank line, which a real one would not)
+                new[] { "B", "C" },       // consecutive: the first inserted anchors the second
+                new[] { "A", "B", "E" },
+            };
+            foreach (string[] drop in cases)
+            {
+                string name = "p_" + string.Join("", drop) + ".xml";
+                File.WriteAllText(Path_(name), CMMSettingsWriter.Render(
+                    Without(full, drop, 2), "CMMSettings", 1));
+                CMMSettingsFile.Ensure(Path_(name), "CMMSettings", full, name, 2);
+                string got = StripNotes(Read(name));
+                bool exact = got == fresh;
+                bool loose = NoBlankLines(got) == NoBlankLines(fresh);
+                Is(exact || (drop.Length == 1 && drop[0] == "A" && loose),
+                   "new " + string.Join("+", drop) + " lands where a fresh file has it"
+                   + (exact ? "" : " (blank lines aside)"));
+                if (!exact && !(drop.Length == 1 && drop[0] == "A" && loose))
+                    Console.WriteLine("        got:\n" + got + "\n        want:\n" + fresh);
+            }
+
+            // Every schema version the real files ever shipped at, upgraded to today.
+            Replay("settings.xml", "CMMSettings", CMMSettingsSchema.Settings);
+            Replay("radio.xml", "CMMRadioSettings", CMMSettingsSchema.Radio);
+        }
+
+        static void Replay(string label, string root, SchemaEntry[] entries)
+        {
+            int cur = CMMSettingsSchema.CurrentSchema;
+            string want = CMMSettingsWriter.Render(entries, root, cur);
+            var versions = new SortedSet<int>();
+            foreach (SchemaEntry e in entries)
+                if (e.Setting != null && e.Setting.Since > 1) versions.Add(e.Setting.Since - 1);
+
+            int bad = 0;
+            foreach (int v in versions)
+            {
+                var drop = new List<string>();
+                foreach (SchemaEntry e in entries)
+                    if (e.Setting != null && e.Setting.Since > v) drop.Add(e.Setting.Name);
+                string name = "r_" + v + "_" + label;
+                File.WriteAllText(Path_(name), CMMSettingsWriter.Render(
+                    Without(entries, drop.ToArray(), v), root, v));
+                CMMSettingsFile.Ensure(Path_(name), root, entries, name, cur);
+                string got = StripNotes(Read(name));
+                if (Shape(got) != Shape(want))
+                {
+                    if (bad++ == 0) Console.WriteLine("        first mismatch at schema " + v + ":\n"
+                                                      + FirstDiff(Shape(got), Shape(want)));
+                }
+            }
+            Is(bad == 0, label + ": upgraded from each of " + versions.Count
+                       + " older schemas, every setting and comment is in fresh-file order");
+        }
+
+        // The table as it stood before `drop` existed: each dropped setting goes with the
+        // comments and blank lines directly above it (its documentation and its grouping).
+        static SchemaEntry[] Without(SchemaEntry[] entries, string[] drop, int _)
+        {
+            var gone = new HashSet<string>(drop);
+            var outp = new List<SchemaEntry>();
+            var pending = new List<SchemaEntry>();
+            foreach (SchemaEntry e in entries)
+            {
+                if (e.Setting == null && e.Raw == null) { pending.Add(e); continue; }
+                if (e.Setting != null && gone.Contains(e.Setting.Name)) { pending.Clear(); continue; }
+                outp.AddRange(pending); pending.Clear();
+                outp.Add(e);
+            }
+            outp.AddRange(pending);
+            return outp.ToArray();
+        }
+
+        static string StripNotes(string s)
+            => System.Text.RegularExpressions.Regex.Replace(s, @" <!-- added in schema \d+ -->", "")
+                   .Replace(" schema=\"1\"", " schema=\"2\"");
+
+        static string NoBlankLines(string s)
+            => string.Join("\n", s.Replace("\r\n", "\n").Split('\n').Where(l => l.Trim().Length > 0));
+
+        // Element names and comment texts, in document order.
+        static string Shape(string xml)
+        {
+            var doc = new XmlDocument();
+            doc.LoadXml(xml.TrimStart('﻿'));
+            var sb = new System.Text.StringBuilder();
+            foreach (XmlNode n in doc.DocumentElement.ChildNodes)
+            {
+                if (n.NodeType == XmlNodeType.Element) sb.Append("<").Append(n.Name).Append(">\n");
+                else if (n.NodeType == XmlNodeType.Comment)
+                    sb.Append("#").Append(string.Concat(n.Value.Where(c => !char.IsWhiteSpace(c)))).Append("\n");
+            }
+            return sb.ToString();
+        }
+
+        static string FirstDiff(string a, string b)
+        {
+            string[] x = a.Split('\n'), y = b.Split('\n');
+            for (int i = 0; i < Math.Max(x.Length, y.Length); i++)
+            {
+                string l = i < x.Length ? x[i] : "(end)", r = i < y.Length ? y[i] : "(end)";
+                if (l != r)
+                {
+                    string Cut(string t) => t.Length > 90 ? t.Substring(0, 90) + "…" : t;
+                    return "          line " + i + "\n          got  " + Cut(l) + "\n          want " + Cut(r);
+                }
+            }
+            return "          (identical)";
         }
     }
 }
