@@ -406,3 +406,11 @@ CMM_Decoder/CMM_Decoder.dll
 CMM_Decoder/clicks.tuned.xml
 tools/CmmEmitLab/emitlab.exe
 tools/CmmTuneWeb/static.wav
+
+# Stray native test/bench binaries (sources are committed; builds are not)
+/*.exe
+/CMM_Decoder/dist/*.exe
+/tools/CmmLoopback/*.exe
+
+# Claude Code's local settings (tooling, not part of the mod)
+/.claude/
