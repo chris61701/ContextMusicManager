@@ -34,6 +34,7 @@
     <Compile Include="SchemaGuard.cs" />
     <Compile Include="XmlHealth.cs" />
     <Compile Include="ContextTests.cs" />
+    <Compile Include="ContextUpgradeTests.cs" />
     <Compile Include="UpgradeMatrix.cs" />
     <Compile Include="RealUpgrade.cs" />
     <Compile Include="..\..\Harmony\CMMSettingsSchema.cs" Link="linked\CMMSettingsSchema.cs" />

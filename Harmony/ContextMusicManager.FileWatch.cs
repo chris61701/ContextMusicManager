@@ -137,7 +137,7 @@ namespace CMM
                         {
                             bool goneR = false, pingDoneR = false;
                             string pf = playingFile;
-                            ThreadPool.QueueUserWorkItem(_ =>
+                            CMMPerf.QueueIo(CMMPerf.IoKind.FileWatchPing, _ =>
                             {
                                 try { goneR = !File.Exists(pf); } catch { }
                                 pingDoneR = true;
@@ -153,7 +153,7 @@ namespace CMM
                     SourceScan.WatchSig sig = default(SourceScan.WatchSig);
                     bool playingFileGone = false;
                     bool statDone = false;
-                    ThreadPool.QueueUserWorkItem(_ =>
+                    CMMPerf.QueueIo(CMMPerf.IoKind.FileWatchSig, _ =>
                     {
                         try
                         {
@@ -272,7 +272,7 @@ namespace CMM
             string[] discoveredPlaylistFiles = cache.playlistFiles ?? _noPlaylistFiles;
             // Set by the worker when a playlist's entries name a volume that is not mounted.
             bool unresolvedPlaylist = false;
-            ThreadPool.QueueUserWorkItem(_ =>
+            CMMPerf.QueueIo(CMMPerf.IoKind.FileWatchScan, _ =>
             {
                 try
                 {

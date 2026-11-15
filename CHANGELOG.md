@@ -2,6 +2,71 @@
 
 All notable changes to Context Music Manager are documented here.
 
+## 1.0.5b — RC1 built 2026-11-06, unreleased
+
+Packaged for testing as **RC1**. ModInfo carries `1.0.5.2` (the letter is the name people read,
+the fourth component is the number the game reads; see 1.0.5a below). Everything listed under
+1.0.5a is included.
+
+**Cooldowns ship switched off** (`TrackCooldownsEnabled` = `false`): the feature is in, the
+contexts.xml values below are what it uses, and nothing changes until you turn it on.
+
+### Added
+
+- **Silence between tracks** (`cooldown` in contexts.xml, `DefaultTrackCooldown` in
+  settings.xml, default **180 s**). When a track ends, a context with a cooldown waits that long
+  before playing the next one, instead of crossfading straight into it — so exploring has room
+  to breathe rather than being wall-to-wall music. `0` = off (the old behaviour), `-1` = use
+  `DefaultTrackCooldown`, any number above 0 = that many seconds. All the Ambient, Home and POI
+  contexts ship at `-1`; everything else at `0`.
+  - The silence belongs to the context. Anything else that takes over — combat, a stinger, night
+    falling, walking into another biome — plays straight away, and when you come back you only
+    wait out what is left of it.
+  - Only a track that genuinely **ends** starts it. Music that stops for any other reason (a file
+    that fails mid-play, the audio device resetting) moves straight on to the next track, as
+    before. The silence is timed from what you actually hear stop.
+  - **Next / Prev track** ends it immediately. The clock stops while the game is paused. Dying
+    and leaving the world clear it. Editing the number (or the default) re-times a silence
+    already in progress.
+  - Deleting the track that just played, or the one lined up next, does not restart the music
+    early, and the next pick is always a track that still exists. Emptying a context's folder
+    falls back as usual; putting music back before the silence is over resumes the silence.
+  - The debug HUD shows a `Resting:` line with each context's time left.
+  - **`TrackCooldownsEnabled`** in settings.xml (default **`false`**) is the master switch. Off,
+    every cooldown counts as 0 whatever contexts.xml says, and every context crossfades as
+    before; on, the contexts.xml values apply. It takes effect live, and switching it off while a
+    context is silent ends the silence straight away.
+- **`cooldownreset`** (contexts.xml, default `true`). Leaving a context clears its silence, so
+  coming back plays at once. Leaving means it drops off the stack — you walk out of the POI,
+  cross into another biome, night ends — or, for POI music, you move into a different POI,
+  including straight into the next building of the same tier. Combat starting while you are
+  still there is not leaving. `false` = the silence runs its full length wherever you go.
+  Home and the Ambient contexts ship `false`: their silence follows you, so walking in and out
+  of your base or across a biome border does not restart their music.
+- **`cooldownyield`** (contexts.xml, default `false`; Home and Home_Night ship `true`). While
+  the context is silent between tracks, music already playing underneath it carries on instead
+  of being faded out. Walk home while Home is resting and the biome ambient keeps playing; the
+  moment Home's silence is over, Home crossfades in. If a fight at home interrupts that ambient,
+  it picks up where it left off once the fight is over. It never starts a new track: if Home's
+  own track ends while you are home, or nothing underneath is playing, the silence is silence.
+
+### Changed
+
+- **7 Days to Die 3.4.0 b10**, the current release. The mod builds and runs against it with no
+  source changes; the supported list is now 3.4.0 b10, 2.6 b12, A21.2 b37 and A20.7 b1, and the
+  zip is named `... for A20-A21-2.6-3.4.zip`.
+- **`cool` is now called `reentry`** in contexts.xml, because "cooldown" now means the new
+  silence between tracks. It does exactly what it did: seconds before a context can fire again
+  after you leave it. The old name still loads.
+- **contexts.xml is upgraded in place on the first launch** (schema 1 → 2): every `cool` becomes
+  `reentry` with your value kept, `cooldown`, `cooldownreset` and `cooldownyield` are added to
+  each line (the shipped value for CMM's own contexts; for any you made, `cooldown` off,
+  `cooldownreset` on, `cooldownyield` off), and the header documentation is
+  refreshed. Nothing else in the file changes — comments, your edits and the column alignment
+  all survive — and the original is kept beside it as `contexts.xml.schema1.bak`. Settings
+  schemas 59 and 60 add `DefaultTrackCooldown` and `TrackCooldownsEnabled` to an existing
+  settings.xml.
+
 ## 1.0.5a — RC1 built 2026-09-25, unreleased
 
 Revisions since 1.0.5 shipped, packaged for testing as **RC1**

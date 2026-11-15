@@ -1,0 +1,15 @@
+1.0.5b RC1
+Silence between tracks, switched off by default. Set TrackCooldownsEnabled to true in settings.xml and, when a track ends, the context waits before playing the next one instead of crossfading straight into it, so exploring has room to breathe. DefaultTrackCooldown sets the length, 180 seconds by default, and it takes effect without a restart.
+Each context sets its own silence with the new cooldown attribute in contexts.xml: 0 is off, -1 uses DefaultTrackCooldown, and any other number is that many seconds. The Ambient, Home and POI contexts ship at -1; everything else at 0.
+The silence belongs to the context. Combat, a stinger, night falling or a new biome still play straight away, and when you come back you only wait out what is left.
+Only a track that actually finishes starts the silence. Music that stops for any other reason moves straight on, as before, and the silence is timed from what you hear stop.
+Next and Prev end the silence at once. It pauses with the game, and dying or leaving the world clears it.
+New cooldownreset attribute: leaving a context clears its silence, so coming back plays at once. Home and the Ambient contexts ship with it off, so walking in and out of your base or across a biome border does not restart their music.
+New cooldownyield attribute, on for Home: while Home is silent between tracks, the ambient you walked in with keeps playing, and Home crossfades in the moment its silence is over. A fight at home picks the ambient up where it left off afterwards. It never starts a new track, so when Home's own song ends you get the silence.
+7 Days to Die 3.4.0 b10 is supported. The full list is 3.4.0 b10, 2.6 b12, A21.2 b37 and A20.7 b1, from one build.
+cool is now called reentry in contexts.xml, because cooldown now means the silence between tracks. It does exactly what it did, and the old name still loads.
+Your contexts.xml is upgraded in place on first launch: cool becomes reentry with your value kept, and the three new attributes are added to each line. Comments, your edits and the column alignment survive, and the original is kept beside it as contexts.xml.schema1.bak.
+Only some of the world's radios play now. Every speaker that came with a POI used to be on, which made the map wall-to-wall music; now 10 percent are on by default (WorldEmitterActiveByDefaultPercent in radio.xml). The same radios are dark on every visit and for every player, any of them can be turned on from the radial and stays on, and 100 brings back the old behaviour. Radios you place are unaffected.
+A setting added by an update now appears next to the settings it belongs with, with its description, instead of at the bottom of the file. Nothing already in your file moves.
+A track that will not decode now says so in the log, by name, instead of silently never playing. The usual cause is Apple Lossless audio inside an .m4a file, which is not supported.
+The crafting diagnostic now works on Alpha 20, the version it was written for.

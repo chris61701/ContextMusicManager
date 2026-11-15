@@ -156,16 +156,22 @@ namespace CMM
                         canberesumed:          BoolAttr(el, "resume",   true),
                         timeuntilcontextstale: IntAttr (el, "stale",    120),
                         loop:                  BoolAttr(el, "loop",     false),
-                        cooldown:              IntAttr (el, "cool",     5),
+                        // `reentry` was `cool` until schema 2; the old name still loads.
+                        reentry:               el.HasAttribute("reentry") ? IntAttr(el, "reentry", 5)
+                                                                          : IntAttr(el, "cool", 5),
                         fadeInDuration:        FloatAttr(el, "fadeintime", 5f),
-                        bypassescooldown:      BoolAttr(el, "bypass",   false),
+                        bypassesreentry:       BoolAttr(el, "bypass",   false),
                         priority:              IntAttr (el, "priority", 0),
                         playOnce:              BoolAttr(el, "once",     false),
                         volumeOverride:        FloatAttr(el, "volume",  -1f),
                         warmup:                IntAttr (el, "warmup",   0),
                         warmGroup:             StrAttr (el, "warmgroup", null),
                         includeSubfolders:     BoolAttr(el, "subfolders", false),
-                        link:                  StrAttr (el, "link",     null)
+                        link:                  StrAttr (el, "link",     null),
+                        // Absent = off. The schema-2 upgrade writes it into existing files.
+                        trackCooldown:         FloatAttr(el, "cooldown", 0f),
+                        cooldownReset:         BoolAttr(el, "cooldownreset", true),
+                        cooldownYield:         BoolAttr(el, "cooldownyield", false)
                     );
                 }
 

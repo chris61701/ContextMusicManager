@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 58;
+        internal const int CurrentSchema = 60;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -174,6 +174,19 @@ from zero. false = the older reload-from-resume behaviour."),
             Gap(),
             Cmt(@"Fade duration when a track ends naturally and transitions to the next"),
             F("TrackTransitionFadeDuration",         "ContextMusicManager.TrackTransitionFadeDuration", 5f),
+
+            Gap(),
+            Cmt(@"Silence between tracks (the `cooldown` attribute in contexts.xml) on or off for
+every context at once. Off by default: every cooldown counts as 0, whatever contexts.xml
+says, and tracks crossfade into each other as they always have. true = the contexts.xml
+values apply (Ambient, Home and the POI contexts rest DefaultTrackCooldown seconds)."),
+            B("TrackCooldownsEnabled",               "CMMConfig.TrackCooldownsEnabled",             false, since: 60),
+            Cmt(@"Seconds of silence between tracks for every context whose cooldown is -1 in
+contexts.xml (Ambient, Home and the POI contexts ship that way). When a track ends,
+the context rests this long before playing the next one; anything else that takes
+over meanwhile plays straight away. 0 turns the silence off for all of them.
+A context can set its own number instead, e.g. cooldown=""120""."),
+            F("DefaultTrackCooldown",                "CMMConfig.DefaultTrackCooldown",              180f, since: 59),
 
             Gap(),
             Cmt(@"How often to scan for active context changes (seconds)"),

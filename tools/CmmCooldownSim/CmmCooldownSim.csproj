@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ───────────────────────────────────────────────────────────────────────
+       CmmCooldownSim — the track cooldown (contexts.xml cooldown / cooldownreset)
+       driven through its edge cases offline, in seconds of wall time.
+
+       LINKS the shipped rules (Harmony/TrackCooldown.cs), the resume rule
+       (ResumePolicy.cs) and the real per-context state (DataStructures.cs,
+       TrackRotation.cs). The Unity-side WIRING — the gate in StartNativeContext, the
+       advance poll, the pre-staged dispatch, the scan loop's eviction and convergence
+       net, the file watcher's reactions — cannot be linked (MonoBehaviour, coroutines,
+       the game), so World.cs MIRRORS it, method for method and in the same order, and
+       says where each piece comes from. Keep it in step with
+       ContextMusicManager.Cooldown.cs / AudioPlayer.cs.
+
+       Music folders are REAL files in a temp directory, so adding, deleting and
+       refilling tracks goes through the same File.Exists / listing paths as the game.
+
+         dotnet run (project tools/CmmCooldownSim) -c Release            all scenarios + fuzz
+         dotnet run ... (args: only F3)                                     one scenario
+         dotnet run ... (args: trace S6)                                    one scenario, with its log
+       Exit code 0 = all pass.
+  ─────────────────────────────────────────────────────────────────────────── -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CmmCooldownSim</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Harmony\TrackCooldown.cs"  Link="linked\TrackCooldown.cs" />
+    <Compile Include="..\..\Harmony\ResumePolicy.cs"   Link="linked\ResumePolicy.cs" />
+    <Compile Include="..\..\Harmony\DataStructures.cs" Link="linked\DataStructures.cs" />
+    <Compile Include="..\..\Harmony\TrackRotation.cs"  Link="linked\TrackRotation.cs" />
+  </ItemGroup>
+
+</Project>

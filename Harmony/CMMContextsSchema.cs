@@ -30,7 +30,9 @@ namespace CMM
     {
         // Bump when contexts are added or their built-in attributes change. Stamped
         // into the written file as <Contexts schema="N">.
-        internal const int CurrentSchema = 1;
+        // 2 = `cool` renamed `reentry`; `cooldown`, `cooldownreset`, `cooldownyield` added (1.0.5b).
+        //     CMMContextsFile.MigrateTo2 rewrites an existing file in place.
+        internal const int CurrentSchema = 2;
 
         static ContextEntry Cmt(string t) => new ContextEntry { Comment = t };
         static ContextEntry Ctx(string n) => new ContextEntry { Name = n };
@@ -48,7 +50,10 @@ namespace CMM
             "resume",
             "stale",
             "loop",
-            "cool",
+            "reentry",
+            "cooldown",
+            "cooldownreset",
+            "cooldownyield",
             "fadeintime",
             "warmup",
             "warmgroup",
@@ -69,7 +74,10 @@ namespace CMM
             { "resume", 14 },
             { "stale", 11 },
             { "loop", 12 },
-            { "cool", 8 },
+            { "reentry", 12 },
+            { "cooldown", 14 },
+            { "cooldownreset", 21 },
+            { "cooldownyield", 21 },
             { "fadeintime", 16 },
             { "warmup", 11 },
             { "warmgroup", 16 },
@@ -116,7 +124,31 @@ Attributes:
   resume    - continue from where we left off when re-entering  (default: true)
   stale     - seconds before an abandoned resume position is forgotten  (0 = never resume)
   loop      - loop the clip rather than picking a new track on end
-  cool      - seconds before this context can fire again after leaving
+  reentry   - seconds before this context can fire again after you LEAVE it — an
+              anti-flicker lockout. (Named `cool` before 1.0.5b; that name still loads.)
+  cooldown  - seconds of SILENCE between one track ending and the next one starting in
+              this context. 0 = off (tracks crossfade into each other, as before);
+              -1 = use DefaultTrackCooldown from settings.xml; any number above 0 = that
+              many seconds (fractions allowed). The silence is per context: another
+              context taking over (combat, night falling, a different biome) plays at
+              once, and when you come back you only wait out what is left of it. The
+              clock stops while the game is paused. Next/Prev track ends it immediately.
+              Only a track that genuinely ENDS starts it — music that stops for any
+              other reason moves straight on. Death and leaving the world clear it.
+              Cooldowns only apply while TrackCooldownsEnabled is true in settings.xml
+              (it ships false, so this attribute does nothing until you turn that on).
+  cooldownreset - true = leaving this context clears its silence, so coming back plays
+              straight away. Leaving means it drops off the stack (you walk out of the
+              POI, change biome, night ends) or, for POI music, you move into a different
+              POI; being outranked while you are still there (combat starting inside) is
+              not leaving. false = the silence runs its full length wherever you go.
+              Home and the Ambient contexts ship false.  (default: true)
+  cooldownyield - true = while this context is silent between tracks, music that is
+              ALREADY playing underneath it carries on instead of being faded out. Home
+              ships it: walk in while Home is resting and the biome ambient keeps playing,
+              and Home's next track crossfades in the moment its silence ends. It never
+              starts anything — if nothing underneath is playing, the silence is silence.
+              (default: false)
   fadeintime - fade-in duration in seconds (the crossfade ramp when this context's music starts);
                fractional values allowed, e.g. 0.5
   warmup    - seconds this context must remain CONTINUOUSLY active before it becomes
@@ -129,7 +161,7 @@ Attributes:
               out for the full warmup and letting a lower context play briefly. Each
               context still uses its OWN warmup value; keep group members' warmups
               equal for a predictable dwell.
-  bypass    - skip cooldown check on entry  (use for stingers/events)
+  bypass    - skip the reentry check on entry  (use for stingers/events)
   priority  - higher value wins; equal priority never interrupts a playing context
   once      - play to completion then automatically return to previous context
   volume    - per-context volume multiplier (0.0–1.0) that replaces the global

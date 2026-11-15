@@ -967,6 +967,14 @@ namespace CMM
         public static float CombatExitDelay = 2f;
         public static float CombatCooldown = 10f;
 
+        // Silence between tracks, in seconds, for contexts with cooldown="-1" (contexts.xml).
+        // Read live by TrackCooldown, so a settings hot-reload re-times a rest in progress.
+        public static float DefaultTrackCooldown = 180f;
+        // Master switch, SHIPS OFF (1.0.5b). false = every context's cooldown counts as 0,
+        // whatever contexts.xml says: tracks crossfade, nothing rests, and so nothing yields
+        // (cooldownyield). Read live, so turning it off mid-rest ends the rest at once.
+        public static bool TrackCooldownsEnabled = false;
+
         // ── Playback keybinds (Config/settings.xml) ────────────────────────────
         // Live controls for whatever music is actually playing (menu or in-game).
         // Gated behind Alt by default so they don't collide with game/chat input.

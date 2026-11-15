@@ -491,7 +491,7 @@ namespace CMM
 
         internal void StartNativeContext(string contextName, bool isSameContextSwitchingToNextTrack,
                                          int transitionId, string forcedFile, float fadeOverride = -1f,
-                                         bool skipLoudnessHold = false)
+                                         bool skipLoudnessHold = false, bool overrideRest = false)
         {
             if (transitionId != _transitionId) return;
             Contexts ctx = GetContext(contextName);
@@ -530,6 +530,12 @@ namespace CMM
                 ReleaseNativeVoiceForRadio(CrossFadeDuration);
                 return;
             }
+
+            // ── TRACK COOLDOWN: a resting context starts nothing, whoever asked ──────────
+            // Same choke point as the radio gate above, for the same reason: every way music
+            // starts arrives here. Next/Prev passes overrideRest and ends the rest instead.
+            // See ContextMusicManager.Cooldown.cs.
+            if (RestGate(contextName, transitionId, overrideRest)) return;
 
             // Remember the voice of the context we're leaving so a quick flip back can reclaim
             // its still-fading track (and so a stinger's ducked bed can be reclaimed after).
@@ -580,7 +586,7 @@ namespace CMM
                 ctx.CanBeResumed, cache.resumePosition, cache.lastPlayedFile, cache.lastLeftTime,
                 Time.realtimeSinceStartup, ctx.TimeUntilContextStale,
                 isSameContextSwitchingToNextTrack, forcedFile != null,
-                f => !_invalidFiles.Contains(f) && File.Exists(f));
+                f => !_invalidFiles.Contains(f) && CMMPerf.TimedExists(f));
             float startSeconds = rd.StartSeconds;
             string resumeFile  = rd.ResumeFile;            // replay the exact track the position belongs to
             if (rd.ClearPosition) cache.resumePosition = 0f;   // stale (or file gone) → fresh pick from 0
@@ -660,6 +666,8 @@ namespace CMM
 #endif
             cache.resumePosition     = 0f;
             cache.lastLeftTime       = -1f;
+            _trackCooldown.TrackStarted(contextName);      // a track is playing: any rest is spent
+            CMMPerf.NoteTrackStart();
             _nativeActiveContext = contextName;
             Interlocked.Exchange(ref _nativeVoiceId, 0);   // the worker sets the real id once Play succeeds
             CmmMixer.MasterVolume = CMMConfig.GetVolume(inGame, ctx.VolumeOverride);
@@ -740,6 +748,7 @@ namespace CMM
         private void ArmNativeAutoAdvance(string contextName, int transitionId, bool shouldAdvance, string currentFile)
         {
             if (_trackEndCoroutine != null) { CMM_CoRoutines.StopCoroutine(_trackEndCoroutine); _trackEndCoroutine = null; }
+            ArmAdvanceCooldown(contextName, shouldAdvance);   // rests between tracks ⇒ wait for the END
             if (CMMConfig.NativeScheduler)
             {
                 _advancePending = false;             // fresh track: no advance in flight
@@ -933,7 +942,11 @@ namespace CMM
         internal static void NativeAdvanceTick()
         {
             if (_functionallyDormant) return;   // A/B dormant arm: no track auto-advance
-            if (!_nativeAdvanceArmed || _advancePending || _pauseDucked) return;
+            if (!_nativeAdvanceArmed || _advancePending) return;
+            // A context that rests between tracks keeps WATCHING its voice through a pause (the
+            // mixer plays on under the duck, so the track can end there); everything else
+            // freezes as before.
+            if (_pauseDucked && !_advanceAwaitsEnd) return;
 
             string ctx = _nativeActiveContext;
             if (ctx == null) return;
@@ -944,6 +957,20 @@ namespace CMM
             if (mx == null) return;
 
             int tid = _transitionId;                     // capture for the main-thread re-validation
+
+            // ── Cooldown context: no crossfade — wait for the voice to END, then let the main
+            // thread decide between a rest and an immediate advance (OnAwaitedTrackEnd). The
+            // pre-stage is not dispatched from here; it is still the pick the rest ends on.
+            if (_advanceAwaitsEnd)
+            {
+                bool got = mx.TryGetState(vid, out double p0, out double l0, out bool a0);
+                if (!PollAwaitedEnd(got, a0, p0, l0, out bool natural)) return;
+                if (_pauseDucked) return;                // ended under the pause: hand off on resume
+                _advancePending = true;
+                MainThreadDispatcher.Post(() => OnAwaitedTrackEnd(ctx, tid, natural));
+                return;
+            }
+
             bool advance;
             if (!mx.TryGetState(vid, out double posSec, out double lenSec, out bool active) || !active)
                 advance = true;                          // voice ended → advance now
@@ -1009,6 +1036,26 @@ namespace CMM
             {
                 if (transitionId != _transitionId || _nativeActiveContext != contextName) yield break;
                 long vid = Interlocked.Read(ref _nativeVoiceId);
+                if (vid != 0 && _advanceAwaitsEnd && CmmMixer.Instance != null)
+                {
+                    // Cooldown context (see NativeAdvanceTick): watch for the END, in real time so
+                    // a track that finishes under the pause is still seen as finishing.
+                    bool got = CmmMixer.Instance.TryGetState(vid, out double p0, out double l0, out bool a0);
+                    if (PollAwaitedEnd(got, a0, p0, l0, out bool natural))
+                    {
+                        while (_pauseDucked)
+                        {
+                            yield return null;
+                            if (transitionId != _transitionId) yield break;
+                        }
+                        if (transitionId != _transitionId || _nativeActiveContext != contextName) yield break;
+                        _trackEndCoroutine = null;          // this coroutine is finishing; don't count it live
+                        OnAwaitedTrackEnd(contextName, transitionId, natural);
+                        yield break;
+                    }
+                    yield return new WaitForSecondsRealtime(TrackEndPollInterval);
+                    continue;
+                }
                 if (vid != 0)                                                // worker has committed the voice
                 {
                     if (CmmMixer.Instance == null) break;
@@ -1056,7 +1103,7 @@ namespace CMM
                 && !_invalidFiles.Contains(ps.NextFile)
                 && !LoudnessStore.IsBannedPath(ps.NextFile)   // staged before the ban keypress
                 && !string.Equals(ps.NextFile, cache.lastPlayedFile, StringComparison.OrdinalIgnoreCase)
-                && File.Exists(ps.NextFile))
+                && CMMPerf.TimedExists(ps.NextFile))
                 return ps.NextFile;
             return PickNextFile(contextName, cache.lastPlayedFile);
         }
@@ -1092,8 +1139,10 @@ namespace CMM
                     // guard when the same failure was found there; contexts kept the bug.
                     // Reading as NOT READY instead lets the resolver fall back for now and try
                     // again next time, which is what happens while a folder is still scanning.
-                    files = PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(ctx.Source),
-                                                      out bool plUnresolved);
+                    bool plUnresolved;
+                    using (CMMPerf.Measure(CMMPerf.Phase.MainIo))   // a whole playlist read + a stat per entry
+                        files = PlaylistSource.ReadTracks(PlaylistSource.ResolveFullPath(ctx.Source),
+                                                          out plUnresolved);
                     if (plUnresolved) return null;
                     cache.directorySnapshot = files;
                 }
@@ -1108,7 +1157,9 @@ namespace CMM
                     // incremental publish will make this context playable within a second or two.
                     if (ctx.IncludeSubfolders) return null;
 
-                    files = EnumerateContextRoots(ctx, out string[] pf);
+                    string[] pf;
+                    using (CMMPerf.Measure(CMMPerf.Phase.MainIo))   // a synchronous folder listing
+                        files = EnumerateContextRoots(ctx, out pf);
                     cache.directorySnapshot = files;
                     cache.playlistFiles = pf;   // flat folder's in-folder .m3u list (for the watch)
                 }

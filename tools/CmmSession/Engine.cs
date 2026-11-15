@@ -164,7 +164,7 @@ namespace CMM
             foreach (var c in contexts.Values.Where(c => !string.IsNullOrEmpty(c.Source) && HasDescendantContext(c)).ToList())
                 contexts[c.Context] = new Contexts(context: c.Context, source: c.Source, fallback: c.Fallback,
                     canberesumed: c.CanBeResumed, timeuntilcontextstale: c.TimeUntilContextStale, loop: c.Loop,
-                    cooldown: c.Cooldown, fadeInDuration: c.FadeInDuration, bypassescooldown: c.BypassesCooldown,
+                    reentry: c.Reentry, fadeInDuration: c.FadeInDuration, bypassesreentry: c.BypassesReentry,
                     priority: c.Priority, playOnce: c.PlayOnce,
                     volumeOverride: c.VolumeOverride, warmup: c.WarmUp, warmGroup: c.WarmGroup,
                     includeSubfolders: true);

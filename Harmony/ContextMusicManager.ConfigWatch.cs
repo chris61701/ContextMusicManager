@@ -171,6 +171,8 @@ namespace CMM
                         movedCache.rotation.Reset();
                         movedCache.rotation.Cycle = 1;
                     }
+                    // Its rest was for music it no longer plays.
+                    _trackCooldown.Clear(ctx.Context);
                     // Covers a flip in EITHER direction (folder→playlist, playlist→folder,
                     // or a change of playlist file / folder); MakeScanItem branches on the
                     // new source kind.

@@ -273,7 +273,7 @@ namespace CMM
 
             var completed = new List<CompletedDir>();
             bool done = false;
-            ThreadPool.QueueUserWorkItem(_ =>
+            CMMPerf.QueueIo(CMMPerf.IoKind.Crawler, _ =>
             {
                 int fileBudget = CrawlChunkFiles;
                 int dirBudget  = CrawlChunkDirs;

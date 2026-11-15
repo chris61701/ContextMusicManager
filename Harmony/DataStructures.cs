@@ -163,9 +163,23 @@ namespace CMM
         public bool CanBeResumed { get; private set; }
         public int TimeUntilContextStale { get; private set; }
         public bool Loop { get; private set; }
-        public int Cooldown { get; private set; }
+        // contexts.xml `reentry` (formerly `cool`): seconds after this context is LEFT
+        // before it may fire again — an anti-flicker lockout. `bypass` skips it.
+        public int Reentry { get; private set; }
         public float FadeInDuration { get; private set; }
-        public bool BypassesCooldown { get; private set; }
+        public bool BypassesReentry { get; private set; }
+        // contexts.xml `cooldown`: seconds of silence between one track ENDING and the
+        // next starting in this context. 0 = off, -1 = settings.xml DefaultTrackCooldown.
+        // Stored as written; TrackCooldown.Effective resolves it. See TrackCooldown.cs.
+        public float TrackCooldown { get; private set; }
+        // contexts.xml `cooldownreset` (default true): leaving this context (it drops off
+        // the active stack, or — POI music — the player moves to a different POI) clears its rest.
+        public bool CooldownReset { get; private set; }
+        // contexts.xml `cooldownyield` (default false): while this context RESTS, music that is
+        // already playing beneath it (the stack under it, its own fallback chain excluded)
+        // carries on instead of being faded out — Home over the biome ambient. It never STARTS
+        // anything; with nothing beneath it playing, the rest is silent as usual.
+        public bool CooldownYield { get; private set; }
         public int Priority { get; private set; }
         public bool PlayOnce { get; private set; }
         // Per-context replacement for the global VolumeModifier. Negative means
@@ -203,11 +217,12 @@ namespace CMM
         // readers, which must be kept in sync with each other.
         public Contexts(string context = "None", string source = "", string fallback = "None",
             bool canberesumed = false, int timeuntilcontextstale = 120,
-            bool loop = false, int cooldown = 5, float fadeInDuration = 3f,
-            bool bypassescooldown = false,
+            bool loop = false, int reentry = 5, float fadeInDuration = 3f,
+            bool bypassesreentry = false,
             int priority = 0, bool playOnce = false, float volumeOverride = -1f,
             int warmup = 0, string warmGroup = null, bool includeSubfolders = false,
-            string link = null)
+            string link = null, float trackCooldown = 0f, bool cooldownReset = true,
+            bool cooldownYield = false)
         {
             Context = context;
             Source = source;
@@ -215,9 +230,12 @@ namespace CMM
             CanBeResumed = canberesumed;
             TimeUntilContextStale = timeuntilcontextstale;
             Loop = loop;
-            Cooldown = cooldown;
+            Reentry = reentry;
             FadeInDuration = fadeInDuration;
-            BypassesCooldown = bypassescooldown;
+            BypassesReentry = bypassesreentry;
+            TrackCooldown = trackCooldown < 0f ? -1f : trackCooldown;   // any negative = "the default"
+            CooldownReset = cooldownReset;
+            CooldownYield = cooldownYield;
             Priority = priority;
             PlayOnce = playOnce;
             VolumeOverride = volumeOverride;

@@ -85,10 +85,12 @@ namespace CMM
                 // going to be reset by FadeOutAndCleanup anyway; doing it here just can't touch
                 // the output gain, so the exit fade is unaffected.
                 if (_pauseDucked) { _pauseDucked = false; CmmMixer.Instance?.HoldOutputGain(false); }
+                _trackCooldown.SetPaused(false);
                 return;
             }
             if (paused == _pauseDucked) return;          // no edge — cheap per-frame guard
             _pauseDucked = paused;
+            _trackCooldown.SetPaused(paused);            // a track cooldown does not run while paused
             // Order matters on the PAUSE edge: assert the hold BEFORE ducking, so a voice add
             // racing the edge (EOF advance on the scheduler thread) can't slip a revive in
             // between. On UNPAUSE the gain target returns to 1 first (adds then have nothing

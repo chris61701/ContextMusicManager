@@ -471,7 +471,7 @@ namespace CMM
                 // every LATER context in this scan or leave SnapshotsReady unable to latch.
                 var results = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
                 bool done = false;
-                ThreadPool.QueueUserWorkItem(_ =>
+                CMMPerf.QueueIo(CMMPerf.IoKind.Presence, _ =>
                 {
                     foreach (var item in toScan)
                         results[item.Name] = EnumerateScanItem(item);

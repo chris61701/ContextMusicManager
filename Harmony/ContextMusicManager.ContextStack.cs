@@ -32,8 +32,18 @@ namespace CMM
         public void InitContexts()
         {
             // Defaults:
-            // fallback="Stack", resume=true, stale=120, loop=false, cool=5, fadeintime=5, bypass=false,
-            // once=false, warmup=0.  fadeintime = fade-in seconds; warmup = dwell seconds before viable.
+            // fallback="Stack", resume=true, stale=120, loop=false, reentry=5, fadeintime=5, bypass=false,
+            // once=false, warmup=0, cooldown=0, cooldownreset=true, cooldownyield=false.
+            // fadeintime = fade-in seconds; warmup = dwell seconds before viable.
+            //
+            // COOLDOWN (1.0.5b): Ambient, Home and every POI context rest between tracks for
+            // DefaultTrackCooldown seconds (cooldown -1). A context clears its rest when it leaves
+            // the stack (cooldownreset, default true), so coming back plays at once; a POI context
+            // also clears it on moving into a different POI. Home and Ambient do NOT reset (the
+            // user's call, 2026-11-07): their rest runs its length wherever you go. Home also
+            // YIELDS while it rests (cooldownyield): walk in mid-ambient and the ambient carries on
+            // until Home's rest is over, then Home crossfades in.
+            // See TrackCooldown.cs for the rules.
             //
             // FADE-IN vs THE 1.5 s EVICTION HYSTERESIS. A context absent for 1.5 s is dropped from
             // the stack (the RemoveAll in ContextMusicManager.cs), so any fade LONGER than that is
@@ -56,14 +66,16 @@ namespace CMM
             // config-defaults-don't-reach-installs trap.
             void Add(string name, string path, string fallback = "Stack",
                      bool resume = true, int stale = 120, bool loop = false,
-                     int cool = 5, float fadeintime = 5f, bool bypass = false,
+                     int reentry = 5, float fadeintime = 5f, bool bypass = false,
                      int priority = 0, bool once = false, float volume = -1f,
                      int warmup = 0, string warmgroup = null, bool subfolders = false,
-                     string link = null, bool combat = false)
+                     string link = null, bool combat = false,
+                     float cooldown = 0f, bool cooldownreset = true, bool cooldownyield = false)
             {
                 contexts[name] = new Contexts(name, path, fallback, resume, stale,
-                                              loop, cool, fadeintime, bypass, priority, once, volume,
-                                              warmup, warmgroup, subfolders, link);
+                                              loop, reentry, fadeintime, bypass, priority, once, volume,
+                                              warmup, warmgroup, subfolders, link, cooldown, cooldownreset,
+                                              cooldownyield);
                 // Explicitly-marked FIGHT music, same meaning as combat="true" in contexts.xml.
                 // The naming convention catches Combat_*; this is for the ones it cannot, like
                 // Low_Health_Panic — a fight sting in everything but its name. Without it here,
@@ -71,44 +83,44 @@ namespace CMM
                 if (combat) MarkCombatContext(name);
             }
 
-            Add("Death",               "events/death",          resume:false, stale:0,  cool:3, fadeintime:0.1f, bypass:true, priority:100, once:true);
-            Add("Low_Health_Panic",    "events/low_health",     stale:30,     cool:5,   fadeintime:2, bypass:true, priority:90, combat:true);
-            Add("Blood_Moon_Combat",   "combat/blood_moon",     "Combat_Boss", stale:20, cool:3, fadeintime:3, bypass:true, priority:71, link:"Bloodmoon");
-            Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
-            Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
-            Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
-            Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
-            Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, cool:5, fadeintime:3, bypass:true, priority:70, warmup:1);
-            Add("Vehicle",             "vehicle",               stale:30,     cool:5,   fadeintime:3, bypass:true, priority:69, warmup:1);
+            Add("Death",               "events/death",          resume:false, stale:0,  reentry:3, fadeintime:0.1f, bypass:true, priority:100, once:true);
+            Add("Low_Health_Panic",    "events/low_health",     stale:30,     reentry:5,   fadeintime:2, bypass:true, priority:90, combat:true);
+            Add("Blood_Moon_Combat",   "combat/blood_moon",     "Combat_Boss", stale:20, reentry:3, fadeintime:3, bypass:true, priority:71, link:"Bloodmoon");
+            Add("Vehicle_Gyrocopter",  "vehicle/gyrocopter",    "Vehicle",    stale:30, reentry:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_Bicycle",     "vehicle/bicycle",       "Vehicle",    stale:30, reentry:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_Minibike",    "vehicle/minibike",      "Vehicle",    stale:30, reentry:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_Motorcycle",  "vehicle/motorcycle",    "Vehicle",    stale:30, reentry:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle_4x4",         "vehicle/4x4",           "Vehicle",    stale:30, reentry:5, fadeintime:3, bypass:true, priority:70, warmup:1);
+            Add("Vehicle",             "vehicle",               stale:30,     reentry:5,   fadeintime:3, bypass:true, priority:69, warmup:1);
             Add("POI_Cleared",         "events/poi_cleared",    stale:60,                        bypass:true, priority:91, once:true, fadeintime:0);
             // Three combat tiers. The combat/ root folder IS the base (Low) tier; _high and
             // _boss subfolders hold the escalations (underscore-prefixed so the top-level
             // directory scan never confuses them with the per-biome subfolders). Low bridges
             // to vanilla via VanillaIfPanicked. Mirrors contexts.xml.
-            Add("Combat_Boss",         "combat/_boss",          "Combat_High",       stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:52);
-            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:51, link:"Combat");
-            Add("Combat_Low",          "combat",                "VanillaIfPanicked", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:50);
+            Add("Combat_Boss",         "combat/_boss",          "Combat_High",       stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:52);
+            Add("Combat_High",         "combat/_high",          "Combat_Low",        stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:51, link:"Combat");
+            Add("Combat_Low",          "combat",                "VanillaIfPanicked", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:50);
             // Biome-specific combat tiers (mirror contexts.xml). Each biome's combat/<biome>
             // folder mirrors the generic layout (root = Low, _high / _boss = escalations).
             // Each variant outranks its generic counterpart so biome combat music wins when
             // its folder has tracks, else falls back to the matching generic tier. The resolver
             // only stacks the variant for the one active tier, so the 60–62 band never inverts.
-            Add("Combat_Boss_Burnt_Forest", "combat/burnt_forest/_boss", "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
-            Add("Combat_High_Burnt_Forest", "combat/burnt_forest/_high", "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
-            Add("Combat_Low_Burnt_Forest",  "combat/burnt_forest",       "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
-            Add("Combat_Boss_Desert",       "combat/desert/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
-            Add("Combat_High_Desert",       "combat/desert/_high",       "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
-            Add("Combat_Low_Desert",        "combat/desert",             "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
-            Add("Combat_Boss_Forest",       "combat/forest/_boss",       "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
-            Add("Combat_High_Forest",       "combat/forest/_high",       "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
-            Add("Combat_Low_Forest",        "combat/forest",             "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
-            Add("Combat_Boss_Snow",         "combat/snow/_boss",         "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
-            Add("Combat_High_Snow",         "combat/snow/_high",         "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
-            Add("Combat_Low_Snow",          "combat/snow",               "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
-            Add("Combat_Boss_Wasteland",    "combat/wasteland/_boss",    "Combat_Boss", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:62);
-            Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:61);
-            Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, cool:3, fadeintime:1.2f, bypass:true, priority:60);
-            Add("Spawn",               "events/spawn",          resume:false, stale:0,  cool:3, fadeintime:0.1f, bypass:true, priority:45, once:true);
+            Add("Combat_Boss_Burnt_Forest", "combat/burnt_forest/_boss", "Combat_Boss", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Burnt_Forest", "combat/burnt_forest/_high", "Combat_High", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Burnt_Forest",  "combat/burnt_forest",       "Combat_Low",  stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Desert",       "combat/desert/_boss",       "Combat_Boss", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Desert",       "combat/desert/_high",       "Combat_High", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Desert",        "combat/desert",             "Combat_Low",  stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Forest",       "combat/forest/_boss",       "Combat_Boss", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Forest",       "combat/forest/_high",       "Combat_High", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Forest",        "combat/forest",             "Combat_Low",  stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Snow",         "combat/snow/_boss",         "Combat_Boss", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Snow",         "combat/snow/_high",         "Combat_High", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Snow",          "combat/snow",               "Combat_Low",  stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Combat_Boss_Wasteland",    "combat/wasteland/_boss",    "Combat_Boss", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:62);
+            Add("Combat_High_Wasteland",    "combat/wasteland/_high",    "Combat_High", stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:61);
+            Add("Combat_Low_Wasteland",     "combat/wasteland",          "Combat_Low",  stale:20, reentry:3, fadeintime:1.2f, bypass:true, priority:60);
+            Add("Spawn",               "events/spawn",          resume:false, stale:0,  reentry:3, fadeintime:0.1f, bypass:true, priority:45, once:true);
             Add("Tension",             "tension",               stale:30,                                      priority:30, fadeintime:1.2f, warmup:2, link:"Suspense");
             Add("Trader_Joel",         "trader/joel",           "Trader",                                      priority:26, link:"TraderJoel");
             Add("Trader_Jen",          "trader/jen",            "Trader",                                      priority:26, link:"TraderJen");
@@ -116,8 +128,8 @@ namespace CMM
             Add("Trader_Bob",          "trader/bob",            "Trader",                                      priority:26, link:"TraderBob");
             Add("Trader_Hugh",         "trader/hugh",           "Trader",                                      priority:26, link:"TraderHugh");
             Add("Trader",              "trader",                "VanillaIfDMS",                                priority:25);
-            Add("Home_Night",          "home/night",            "Home",                                        priority:19, warmup:5, warmgroup:"home", link:"HomeNight");
-            Add("Home",                "home",                                                                 priority:19, warmup:5, warmgroup:"home", link:"HomeDay");
+            Add("Home_Night",          "home/night",            "Home",                                        priority:19, warmup:5, warmgroup:"home", link:"HomeNight", cooldown:-1, cooldownreset:false, cooldownyield:true);
+            Add("Home",                "home",                                                                 priority:19, warmup:5, warmgroup:"home", link:"HomeDay", cooldown:-1, cooldownreset:false, cooldownyield:true);
             Add("Swimming",            "swimming",                                                            priority:23, warmup:5);
             // A TIER FALLS BACK TO THE GENERIC INFESTED BED, and the un-infested POI context of
             // the same tier is on the stack UNDERNEATH it (see context.lua -- the two are no
@@ -128,36 +140,36 @@ namespace CMM
             // Briefly (d9d1283) these pointed at POI_Tn directly. That was the wrong lever: it
             // reached the same music by hard-wiring one context to another, where letting both be
             // active gets there through the stack that already exists.
-            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi");
-            Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, fadeintime:1.2f, warmup:10, warmgroup:"poi");
-            Add("POI_Infested",        "poi/infested",          priority:20, fadeintime:1.2f, warmup:10, warmgroup:"poi");
+            Add("POI_Infested_T5",     "poi/infested/t5",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_Infested_T4",     "poi/infested/t4",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_Infested_T3",     "poi/infested/t3",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_Infested_T2",     "poi/infested/t2",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_Infested_T1",     "poi/infested/t1",       "POI_Infested", priority:22, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_Infested_T0",     "poi/infested/t0",       priority:21, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_Infested",        "poi/infested",          priority:20, fadeintime:1.2f, warmup:10, warmgroup:"poi", cooldown:-1);
             // WARMUP 10, MATCHING THE INFESTED TIERS. Both are on the stack together now, so a
             // 5-vs-10 split meant the plain tier became eligible five seconds before the infested
             // one covering the same POI -- the lower-priority context arriving FIRST and then
             // being displaced, which is an audible swap for nothing.
-            Add("POI_T5",              "poi/t5",                "POI",        priority:18, warmup:10, warmgroup:"poi");
-            Add("POI_T4",              "poi/t4",                "POI",        priority:18, warmup:10, warmgroup:"poi");
-            Add("POI_T3",              "poi/t3",                "POI",        priority:18, warmup:10, warmgroup:"poi");
-            Add("POI_T2",              "poi/t2",                "POI",        priority:18, warmup:10, warmgroup:"poi");
-            Add("POI_T1",              "poi/t1",                "POI",        priority:18, warmup:10, warmgroup:"poi");
-            Add("POI_T0",              "poi/t0",                priority:17, warmup:10, warmgroup:"poi");
-            Add("POI",                 "poi",                   priority:16, warmup:10, warmgroup:"poi");
-            Add("Ambient_Forest_Night",      "ambient/forest/_night",       "Ambient_Night",             priority:12);
-            Add("Ambient_Forest",            "ambient/forest",              "Ambient",                   priority:11);
-            Add("Ambient_Burnt_Forest_Night","ambient/burnt_forest/_night", "Ambient_Night",             priority:12);
-            Add("Ambient_Burnt_Forest",      "ambient/burnt_forest",        "Ambient",                   priority:11);
-            Add("Ambient_Desert_Night",      "ambient/desert/_night",       "Ambient_Night",             priority:12);
-            Add("Ambient_Desert",            "ambient/desert",              "Ambient",                   priority:11);
-            Add("Ambient_Snow_Night",        "ambient/snow/_night",         "Ambient_Night",             priority:12);
-            Add("Ambient_Snow",              "ambient/snow",                "Ambient",                   priority:11);
-            Add("Ambient_Wasteland_Night",   "ambient/wasteland/_night",    "Ambient_Night",             priority:12);
-            Add("Ambient_Wasteland",         "ambient/wasteland",           "Ambient",                   priority:11);
-            Add("Ambient_Night",             "ambient/_night",              "Stack",                     priority:11);
-            Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10, link:"Exploration");
+            Add("POI_T5",              "poi/t5",                "POI",        priority:18, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_T4",              "poi/t4",                "POI",        priority:18, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_T3",              "poi/t3",                "POI",        priority:18, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_T2",              "poi/t2",                "POI",        priority:18, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_T1",              "poi/t1",                "POI",        priority:18, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI_T0",              "poi/t0",                priority:17, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("POI",                 "poi",                   priority:16, warmup:10, warmgroup:"poi", cooldown:-1);
+            Add("Ambient_Forest_Night",      "ambient/forest/_night",       "Ambient_Night",             priority:12, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Forest",            "ambient/forest",              "Ambient",                   priority:11, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Burnt_Forest_Night","ambient/burnt_forest/_night", "Ambient_Night",             priority:12, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Burnt_Forest",      "ambient/burnt_forest",        "Ambient",                   priority:11, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Desert_Night",      "ambient/desert/_night",       "Ambient_Night",             priority:12, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Desert",            "ambient/desert",              "Ambient",                   priority:11, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Snow_Night",        "ambient/snow/_night",         "Ambient_Night",             priority:12, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Snow",              "ambient/snow",                "Ambient",                   priority:11, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Wasteland_Night",   "ambient/wasteland/_night",    "Ambient_Night",             priority:12, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Wasteland",         "ambient/wasteland",           "Ambient",                   priority:11, cooldown:-1, cooldownreset:false);
+            Add("Ambient_Night",             "ambient/_night",              "Stack",                     priority:11, cooldown:-1, cooldownreset:false);
+            Add("Ambient",                   "ambient",                    "VanillaIfDMS", fadeintime:4,            priority:10, link:"Exploration", cooldown:-1, cooldownreset:false);
 
             // Multiplayer presence. Detection is relationship-only and ignores the server's
             // PvP mode; the warmup dwell keeps someone merely passing through from
@@ -171,9 +183,9 @@ namespace CMM
             // install with no contexts.xml would otherwise have the radio aimed at nothing.
             Add("Radio",                     "Radio",                      priority:10, volume:0.5f);
             // Sentinels — no path, no files
-            Add("Silence",  "", "Silence",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:0, link:"None");
-            Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, cool:0, fadeintime:0, bypass:true, priority:-1);
-            Add("Menu",     "menu", "Vanilla", resume:false, stale:0, cool:5, fadeintime:2, bypass:true, priority:0);
+            Add("Silence",  "", "Silence",  resume:false, stale:0, reentry:0, fadeintime:0, bypass:true, priority:0, link:"None");
+            Add("Vanilla",  "", "Vanilla",  resume:false, stale:0, reentry:0, fadeintime:0, bypass:true, priority:-1);
+            Add("Menu",     "menu", "Vanilla", resume:false, stale:0, reentry:5, fadeintime:2, bypass:true, priority:0);
 
             // Build the vanilla section→context reverse map from the built-in Links (the
             // external contexts.xml load, when present, rebuilds it again with its own),
@@ -399,11 +411,17 @@ namespace CMM
             string current = contextName;
             for (int i = 0; i < 5; i++)
             {
+                // A resting context looking beneath itself (cooldownyield) has taken itself and
+                // its own chain off the stack for the length of that look.
+                if (_restYieldExcluded.Count > 0 && _restYieldExcluded.Contains(current)) return null;
                 // A combat context muted by the keybind never plays its own files; it
                 // falls through its fallback chain like an empty folder, and any
                 // Vanilla handoff it reaches is separately gated by governance
                 // (VanillaSectionSuppressed), so its linked section stays quiet too.
-                if (!IsUserDisabled(current) && ContextHasFiles(current)) return current;
+                // A RESTING context with cooldownyield resolves to the music already playing
+                // beneath it, if any (RestYieldTarget) — as if its folder were empty.
+                if (!IsUserDisabled(current) && ContextHasFiles(current))
+                    return RestYieldTarget(current) ?? current;
                 Contexts ctx = GetContext(current);
                 string fallback = ctx?.Fallback ?? "Silence";
                 if (fallback == "Vanilla") return "Vanilla";
@@ -916,6 +934,7 @@ namespace CMM
             _invalidFiles.Clear();
             _validatedFiles.Clear();
             _contextsWithFilesDirty = true;
+            ClearAllTrackCooldowns("left the world");
         }
 
         // ── Manual push/pop ───────────────────────────────────────────────────

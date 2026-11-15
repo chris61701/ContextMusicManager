@@ -135,7 +135,18 @@ namespace CMM
             // Per-frame stutter watchdog (no-op unless PerfTiming is on). Runs first so
             // it times the full frame-to-frame gap, including everything below it.
             CMMPerf.FrameTick(LiveMusicCoroutineCount);
+            long selfT0 = CMMPerf.SelfBegin();
+            try { UpdateBody(); }
+            finally { CMMPerf.SelfEnd(selfT0, "Update"); }
+        }
 
+        // The nested `yield return StartCoroutine(...)` calls inside this class run on THIS
+        // MonoBehaviour, not on CMM_CoRoutines, so they get the same per-step timing hook.
+        public new Coroutine StartCoroutine(System.Collections.IEnumerator routine)
+            => base.StartCoroutine(CMMPerf.Enabled ? CMMPerf.Timed(routine) : routine);
+
+        private void UpdateBody()
+        {
             HandleMusicKeybinds();
             // Personal radio (all versions): self-throttled; no-op while dialed Off.
             PersonalRadio.Tick();
@@ -152,6 +163,13 @@ namespace CMM
         }
 
         private void OnGUI()
+        {
+            long selfT0 = CMMPerf.SelfBegin();
+            try { OnGUIBody(); }
+            finally { CMMPerf.SelfEnd(selfT0, "OnGUI"); }
+        }
+
+        private void OnGUIBody()
         {
             // The SP pause menu's options live in the same top-left corner as our overlays —
             // hide BOTH while the game is paused. Draw-time gate ONLY: NowPlaying/notice/HUD
@@ -299,7 +317,9 @@ namespace CMM
             {
                 int natId = ++_transitionId;
                 Log.Out($"[CMM] {(forcedFile != null ? "Prev" : "Next")} track [{contextName}] (native)");
-                StartNativeContext(contextName, true, natId, forcedFile, CMMConfig.ManualSkipFadeDuration);
+                // overrideRest: the player asked for music — a track cooldown in progress ends here.
+                StartNativeContext(contextName, true, natId, forcedFile, CMMConfig.ManualSkipFadeDuration,
+                                   overrideRest: true);
             }
             else
             {

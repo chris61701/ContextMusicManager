@@ -247,6 +247,23 @@ namespace CMM
             }
             lines.Add(Row("Playing:", playLine));
 
+            // Rest: a track cooldown holding the layer silent, and any others still counting
+            // down underneath. Without this a rest reads exactly like a silent strand.
+            {
+                string held = _trackCooldown.Waiting;
+                var restParts = new List<string>();
+                foreach (var kv in _trackCooldown.Snapshot())
+                {
+                    string tag = string.Equals(kv.Key, held, StringComparison.OrdinalIgnoreCase)
+                        ? $"<color=#ffd27f>{kv.Key} {Clock((float)kv.Value)}</color>"
+                        : $"{kv.Key} {Clock((float)kv.Value)}";
+                    restParts.Add(tag);
+                }
+                if (restParts.Count > 0)
+                    lines.Add(Row("Resting:", string.Join("  •  ", restParts.ToArray())
+                                             + (_trackCooldown.Paused ? "  (paused)" : "")));
+            }
+
             // Buffer: live native output-ring depth / adaptive target, the min-watermark since
             // the last poll (red when near underrun), voice count (2 mid-crossfade), the cushion
             // mode, and the cumulative underrun counter. The payoff metric — it should hold near

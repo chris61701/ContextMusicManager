@@ -283,9 +283,12 @@ namespace CMM
             bool ok = true;
             try
             {
-                var fi = new FileInfo(filePath);
-                if (!fi.Exists) ok = false;
-                else { size = fi.Length; mtime = fi.LastWriteTimeUtc.Ticks; }
+                using (CMMPerf.Measure(CMMPerf.Phase.MainIo))
+                {
+                    var fi = new FileInfo(filePath);
+                    if (!fi.Exists) ok = false;
+                    else { size = fi.Length; mtime = fi.LastWriteTimeUtc.Ticks; }
+                }
             }
             catch { ok = false; }
             if (!ok) yield break;
@@ -731,8 +734,8 @@ namespace CMM
             {
                 try
                 {
-                    if (serialize) lock (_measureGate) { h.Result = AudioDecoder.MeasureLoudness(path, chunk, onPartial); }
-                    else h.Result = AudioDecoder.MeasureLoudness(path, chunk, onPartial);
+                    if (serialize) lock (_measureGate) { CMMPerf.DecodeBegin(); try { h.Result = AudioDecoder.MeasureLoudness(path, chunk, onPartial); } finally { CMMPerf.DecodeEnd(); } }
+                    else { CMMPerf.DecodeBegin(); try { h.Result = AudioDecoder.MeasureLoudness(path, chunk, onPartial); } finally { CMMPerf.DecodeEnd(); } }
                 }
                 catch { }
                 h.Done = true;
@@ -793,7 +796,7 @@ namespace CMM
             while (true)
             {
                 yield return new WaitForSeconds(LoudnessSaveDebounce);
-                if (LoudnessStore.Dirty) LoudnessStore.Save();
+                if (LoudnessStore.Dirty) using (CMMPerf.Measure(CMMPerf.Phase.MainIo)) LoudnessStore.Save();
             }
         }
 

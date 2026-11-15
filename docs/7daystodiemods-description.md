@@ -15,7 +15,7 @@ If you put your own music pack together with your own composition, or royalty-fr
 **Requirements**
 
 - EAC must be OFF
-- **7 Days to Die** version 3.2.0 b10 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)
+- **7 Days to Die** version 3.4.0 b10 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)
 - Windows. The native audio engine ships as a Windows library; Linux support is planned for 1.0.6
 
 ---

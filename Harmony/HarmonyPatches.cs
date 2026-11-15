@@ -47,7 +47,18 @@ namespace CMM
     // control plane.
     public class CoRoutine : MonoBehaviour
     {
-        void Update() => MainThreadDispatcher.Drain();
+        void Update()
+        {
+            long t0 = CMMPerf.SelfBegin();
+            try { MainThreadDispatcher.Drain(); }
+            finally { CMMPerf.SelfEnd(t0, "Dispatch"); }
+        }
+
+        // Every CMM coroutine starts here (CMM_CoRoutines is typed CoRoutine, so this hides
+        // MonoBehaviour.StartCoroutine for them). With PerfTiming on, each step is timed into
+        // CMM's per-frame self time; off, it is the plain call.
+        public new Coroutine StartCoroutine(System.Collections.IEnumerator routine)
+            => base.StartCoroutine(CMMPerf.Enabled ? CMMPerf.Timed(routine) : routine);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -485,6 +496,8 @@ namespace CMM
                 if (!ContextMusicManager.playerIsDead)
                 {
                     ContextMusicManager.playerIsDead = true;
+                    // A respawn is a fresh start: no context comes back still resting.
+                    ContextMusicManager.ClearAllTrackCooldowns("died");
                     ContextMusicManager.SendContextUpdate("Death");
                 }
             }

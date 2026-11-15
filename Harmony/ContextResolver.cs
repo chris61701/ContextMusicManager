@@ -23,6 +23,10 @@ namespace CMM
         // scratch list, and a pool of EnemyInfo objects let the whole per-tick poll
         // run without allocating after warmup.
         static readonly GameState _gameState = new GameState();
+
+        // The POI instance the player was in at the last snapshot ("None" outside one). Read by
+        // the track cooldown's cooldownreset rule. Main thread, like the snapshot itself.
+        internal static string CurrentPoiId => _gameState.PoiId ?? "None";
         static readonly List<Entity> _entityScratch = new List<Entity>();
         static readonly List<EnemyInfo> _enemyPool = new List<EnemyInfo>();
         // Reused entity-list snapshot for the pre-3.0 trader fallback (see FindTraderForArea).

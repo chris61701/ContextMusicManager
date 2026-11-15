@@ -55,16 +55,19 @@ namespace CMM
                     canberesumed:          Bool(el, "resume", true),
                     timeuntilcontextstale: Int(el, "stale", 120),
                     loop:                  Bool(el, "loop", false),
-                    cooldown:              Int(el, "cool", 5),
+                    reentry:               el.HasAttribute("reentry") ? Int(el, "reentry", 5) : Int(el, "cool", 5),
                     fadeInDuration:        Flt(el, "fadeintime", 5f),
-                    bypassescooldown:      Bool(el, "bypass", false),
+                    bypassesreentry:       Bool(el, "bypass", false),
                     priority:              Int(el, "priority", 0),
                     playOnce:              Bool(el, "once", false),
                     volumeOverride:        Flt(el, "volume", -1f),
                     warmup:                Int(el, "warmup", 0),
                     warmGroup:             Str(el, "warmgroup", null),
                     includeSubfolders:     Bool(el, "subfolders", false),
-                    link:                  Str(el, "link", null));
+                    link:                  Str(el, "link", null),
+                    trackCooldown:         Flt(el, "cooldown", 0f),
+                    cooldownReset:         Bool(el, "cooldownreset", true),
+                    cooldownYield:         Bool(el, "cooldownyield", false));
             }
 
             string rendered = CMMContextsFile.Render(table, combat.Contains, CMMContextsSchema.CurrentSchema);

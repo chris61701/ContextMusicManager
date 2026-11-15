@@ -19,7 +19,7 @@ If you put your own pack together — your own composition, or royalty-free and 
 [size=5][b]Requirements[/b][/size]
 [list]
 [*]EAC must be OFF[/*]
-[*][b]7 Days to Die[/b] 3.2.0 b10 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)[/*]
+[*][b]7 Days to Die[/b] 3.4.0 b10 - 2.6 b12 - A21.2 b37 - A20.7 b1 (one build runs on all of them)[/*]
 [*]Windows. The native audio engine ships as a Windows library; Linux support is planned for 1.0.6[/*]
 [/list]
 

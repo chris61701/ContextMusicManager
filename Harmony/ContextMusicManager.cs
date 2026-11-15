@@ -345,7 +345,7 @@ namespace CMM
             }
 
             Contexts candidate = GetContext(contextToPlay);
-            bool bypassCooldown = incoming.BypassesCooldown || candidate.BypassesCooldown;
+            bool bypassCooldown = incoming.BypassesReentry || candidate.BypassesReentry;
             bool onCooldown = !bypassCooldown
                               && bypassPriority < 0
                               && _contextsOnCooldown.Contains(contextToPlay);
@@ -377,8 +377,8 @@ namespace CMM
         // its timer before the Remove ran, permanently blocking that context).
         private static void ArmContextCooldown(Contexts leaving)
         {
-            if (leaving == null || leaving.Cooldown <= 0 || CMM_CoRoutines == null || Instance == null) return;
-            CMM_CoRoutines.StartCoroutine(Instance.ContextCooldownTimer(leaving.Context, leaving.Cooldown));
+            if (leaving == null || leaving.Reentry <= 0 || CMM_CoRoutines == null || Instance == null) return;
+            CMM_CoRoutines.StartCoroutine(Instance.ContextCooldownTimer(leaving.Context, leaving.Reentry));
         }
 
         public static void TriggerMusic(string contextName)
@@ -412,6 +412,9 @@ namespace CMM
         // runs forever at ContextScanCooldown, so per-tick allocations here are the
         // mod's dominant steady-state GC churn (see _scanAllocBytes).
         private readonly Dictionary<string, string> _currentlyPlayable = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Context name → Time.realtimeSinceStartup it was last detected (every tick). See the
+        // eviction log ("[CMM] Left:").
+        private readonly Dictionary<string, float> _lastDetected = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         private IEnumerator ContextScanLoop()
         {
             while (true)
@@ -420,12 +423,23 @@ namespace CMM
                 if (!inGame || playerIsDead) continue;
                 if (_functionallyDormant) continue;   // A/B: dormant arm skips resolve+gate (the dominant allocator)
 
+                // Track cooldown: start a rest that has run out, clear rests for a POI the player
+                // has left. Before the early-out below, which a rest running out cannot trip.
+                CooldownTick();
+
                 // GC instrumentation: bracket the per-tick resolve + change-detection work
                 // below (no yields in this window, so the main-thread heap delta is CMM's
                 // own allocation). Reported and reset by StalenessCheckLoop.
                 long scanAllocBefore = GC.GetTotalMemory(false);
 
                 List<string> activeContexts = ContextResolver.ResolveContext();
+
+                // When each context was last DETECTED, refreshed every tick — before the early-out
+                // below, unlike ActivatedAt. Only read by the eviction log, to measure whether a
+                // context is being dropped inside its 1.5 s grace (ActivatedAt goes stale while the
+                // early-out skips its refresh, so after a calm stretch one missed tick can evict).
+                float seenNow = Time.realtimeSinceStartup;
+                for (int i = 0; i < activeContexts.Count; i++) _lastDetected[activeContexts[i]] = seenNow;
 
                 // Time the synchronous change-detection gate (no yields here, so this is
                 // the steady-state per-tick cost that runs whether or not we transition).
@@ -485,6 +499,16 @@ namespace CMM
                     // storms TriggerMusic ~10×/s for as long as the radio plays (the
                     // Ambient_Desert→Ambient_Desert TX-INTERRUPT storm, log 16-23-19).
                     && !PersonalRadio.SuppressesMusic
+                    // A context RESTING between tracks (TrackCooldown) is silent on purpose, and
+                    // the rest's own tick starts it. Re-asserting it here would hit the gate every
+                    // pass — harmless, but the same storm shape the radio exclusion above fixed.
+                    && !IsHeldForRest(currentContext.Context)
+                    // …and the moment BEFORE the rest: the voice has just played out, the mixer has
+                    // dropped it, and the advance poll (every TrackEndPollInterval, 0.25 s) has not
+                    // looked yet. This loop runs every 0.1 s, so without this it usually got there
+                    // first, read the gap as a strand, and started the next track — no rest at all.
+                    // Found by tools/CmmCooldownSim (S1), not by reading.
+                    && !AwaitingTrackEnd
                     && _crossFadeCoroutine == null
                     && _trackEndCoroutine == null
                     && !_advancePending          // an off-frame-loop advance is in flight (NativeScheduler)
@@ -569,6 +593,21 @@ namespace CMM
                 {
                     if (!ac.Manual && activeContexts.Contains(ac.ContextName))
                         ac.ActivatedAt = now;
+                }
+                // cooldownreset: a context that LEAVES clears its rest (and that of whatever it
+                // was resolving to). Reported before the removal so the resolution still exists.
+                for (int ei = 0; ei < _contextStack.Count; ei++)
+                {
+                    ActiveContext ev = _contextStack[ei];
+                    if (!ev.Manual && !activeContexts.Contains(ev.ContextName) && (now - ev.ActivatedAt) >= 1.5f)
+                    {
+                        // MEASUREMENT (2026-11-07): how long it had really been gone. Under 1.5 s =
+                        // dropped inside the grace that is meant to absorb a one-tick detection miss.
+                        float absent = _lastDetected.TryGetValue(ev.ContextName, out float seen) ? now - seen : -1f;
+                        CMMConfig.D($"[CMM] Left: {ev.ContextName} — absent {absent:F2}s"
+                                  + (absent >= 0f && absent < 1.5f ? " — EARLY, inside the 1.5 s grace" : ""));
+                        NoteContextEvicted(ev.ContextName);
+                    }
                 }
                 _contextStack.RemoveAll(c => !c.Manual
                     && !activeContexts.Contains(c.ContextName)
@@ -796,7 +835,7 @@ namespace CMM
                     string[] fresh = null;
                     string[] freshPlaylistFiles = _noPlaylistFiles;
                     bool scanDone = false;
-                    ThreadPool.QueueUserWorkItem(_ =>
+                    CMMPerf.QueueIo(CMMPerf.IoKind.Reload, _ =>
                     {
                         try
                         {
