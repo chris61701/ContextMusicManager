@@ -10,7 +10,7 @@
  *   up/down      pick a parameter          left/right   adjust      shift+left/right  x5
  *   space        fire the selected click   S            eight in a row (a dial spin)
  *   tab          switch kind: on / off / dial
- *   1..5         load one of the five dial characters (A=current .. E=ratchet)
+ *   1..6         load a whole-radio character, A (old, metallic) .. F (muted)
  *   W            write the XML to clicks.tuned.xml (paste into Config/radio.xml)
  *   R            reset this kind to the shipped defaults
  *   Q            quit
@@ -56,17 +56,21 @@ static const float DEF[3][6] = {
 };
 static float vary = 0.5f;
 
-/* The five dial characters that were rendered for the listening choice, so the tuner starts from
- * one of them instead of from nowhere. Order is by brightness, which is the axis that turned out
- * to matter: the shipped A puts 92% of its energy in one band at 926 Hz, and D spreads a third
- * of it above 3 kHz. */
-static const char* PRESET_NAME[5] = { "fitted", "darker", "old A", "brighter", "ratchet" };
-static const float PRESET[5][6] = {
-    {  8187.f, 0.84f, 44.f, 0.50f, 5949.f, 0.52f },   /* the fit to your mouse-click reference */
-    {  7000.f, 0.80f, 36.f, 0.45f, 3400.f, 0.45f },
-    {  4200.f, 0.80f, 24.f, 0.30f,  950.f, 0.15f },   /* where this started, for comparison */
-    { 10000.f, 0.86f, 44.f, 0.52f, 7200.f, 0.55f },
-    {  9000.f, 0.78f, 50.f, 0.55f, 6400.f, 0.85f },
+/* The six whole-radio characters from render_click_candidates (same numbers, so what you heard in
+ * those WAVs is what each key loads), for all three kinds at once. A is the old fit to the removed
+ * recordings and the reason this list exists: its shell rings at 5-6 kHz for up to 40 ms, which
+ * is a struck piece of metal -- a pitch you can hear -- not a plastic housing. B-F put the shell
+ * at 0.5-2.5 kHz and let it die in a couple of cycles. */
+#define NPRESET 6
+static const char* PRESET_NAME[NPRESET] = { "A metal (old)", "B bakelite", "C light plastic",
+                                            "D soft detent", "E chunky switch", "F muted" };
+static const float PRESET[NPRESET][3][6] = {
+    { { 8722, .72f, 60, .37f, 5100, .80f }, { 8722, .70f, 68, .40f, 4350, .80f }, { 8187, .84f, 44, .50f, 5949, .52f } },
+    { { 4500, .50f, 18, .65f, 1200, .25f }, { 4300, .48f, 20, .65f, 1050, .25f }, { 5000, .55f, 12, .55f, 1800, .15f } },
+    { { 6000, .65f, 12, .50f, 2000, .20f }, { 5800, .62f, 13, .50f, 1800, .20f }, { 6500, .70f,  8, .40f, 2600, .10f } },
+    { { 3200, .40f, 22, .70f,  800, .15f }, { 3000, .38f, 24, .70f,  720, .15f }, { 3500, .45f, 14, .60f, 1100, .05f } },
+    { { 5000, .55f, 26, .75f,  650, .35f }, { 4800, .52f, 28, .75f,  600, .30f }, { 4500, .60f, 10, .50f, 1500, .10f } },
+    { { 2600, .35f, 16, .75f,  600, .10f }, { 2500, .33f, 18, .75f,  560, .10f }, { 2800, .35f, 10, .65f,  900, .00f } },
 };
 
 static void push(void) {
@@ -152,8 +156,8 @@ int main(void) {
         printf("\n  last peak %.2f%s\n", lastPeak, lastPeak > 0.95f ? "   *** CLIPPING ***" : "");
         printf("\n  %s\n", note);
         printf("  up/down pick   left/right adjust (shift = x5)   W write xml   R reset   Q quit\n");
-        printf("  dial presets:  ");
-        for (int i = 0; i < 5; i++) printf("%d=%s   ", i + 1, PRESET_NAME[i]);
+        printf("  characters (all three kinds):  ");
+        for (int i = 0; i < NPRESET; i++) printf("%d=%s   ", i + 1, PRESET_NAME[i]);
         printf("\n");
 
         int c = _getch();
@@ -163,9 +167,9 @@ int main(void) {
         if (c == 's' || c == 'S') { lastPeak = spin(kind); note = "eight in a row"; continue; }
         if (c == 'w' || c == 'W') { writexml(); note = "written to clicks.tuned.xml"; continue; }
         if (c == 'r' || c == 'R') { memcpy(P[kind], DEF[kind], sizeof P[kind]); push(); note = "reset"; continue; }
-        if (c >= '1' && c <= '5') {
-            memcpy(P[2], PRESET[c - '1'], sizeof P[2]);
-            kind = 2; push(); lastPeak = spin(2);
+        if (c >= '1' && c < '1' + NPRESET) {
+            memcpy(P, PRESET[c - '1'], sizeof P);
+            push(); lastPeak = spin(kind);
             note = PRESET_NAME[c - '1'];
             continue;
         }
