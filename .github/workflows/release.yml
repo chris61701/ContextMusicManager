@@ -111,10 +111,22 @@ jobs:
           (Get-FileHash CMM_Decoder\dist\CMM_Decoder.dll -Algorithm SHA256).Hash
 
       - uses: microsoft/setup-msbuild@v2
-      - uses: NuGet/setup-nuget@v2
 
-      - name: Restore MoonSharp
-        run: nuget restore packages.config -PackagesDirectory packages
+      - name: MoonSharp 2.0.0 (from nuget.org, where the csproj HintPath expects it)
+        shell: pwsh
+        run: |
+          # Fetched directly rather than through `nuget restore`, which reported success here
+          # without leaving the DLL at the HintPath. The package is a zip.
+          $ErrorActionPreference = 'Stop'
+          $pkg = 'packages\MoonSharp.2.0.0'
+          Invoke-WebRequest https://www.nuget.org/api/v2/package/MoonSharp/2.0.0 -OutFile "$env:RUNNER_TEMP\moonsharp.zip"
+          Expand-Archive "$env:RUNNER_TEMP\moonsharp.zip" $pkg -Force
+          $dll = "$pkg\lib\net40-client\MoonSharp.Interpreter.dll"
+          if (-not (Test-Path $dll)) {
+            Get-ChildItem $pkg -Recurse | ForEach-Object { Write-Host "::error::$($_.FullName)" }
+            throw "MoonSharp.Interpreter.dll not at $dll"
+          }
+          (Get-FileHash $dll -Algorithm SHA256).Hash
 
       - name: Build and package
         shell: pwsh
