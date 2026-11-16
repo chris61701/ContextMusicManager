@@ -421,7 +421,7 @@ namespace CmmScaleBench
 
         // AudioDecoder.IsSupported — AudioDecoder.cs:41-52.
         static readonly HashSet<string> _supportedExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".mp4", ".aac", ".m4v", ".3gp", ".mkv", ".webm" };
+            { ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac", ".m4a", ".mp4", ".aac", ".m4v", ".3gp", ".mov", ".mkv", ".webm" };
         static bool IsSupported(string filePath) => _supportedExts.Contains(Path.GetExtension(filePath));
 
         // ════════════════════════════════════════════════════════════════════════

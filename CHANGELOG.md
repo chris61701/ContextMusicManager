@@ -50,8 +50,19 @@ contexts.xml values below are what it uses, and nothing changes until you turn i
   it picks up where it left off once the fight is over. It never starts a new track: if Home's
   own track ends while you are home, or nothing underneath is playing, the silence is silence.
 
+- **Apple Lossless (ALAC) plays.** An `.m4a` holding ALAC rather than AAC used to be skipped
+  every time, with nothing but a log warning to say so; it now plays like any other track, 16 or
+  24 bit.
+- **`.mov` files are read**, for the audio track inside them, like `.mp4`, `.m4v` and `.3gp`.
+
 ### Changed
 
+- **AAC and MP4 are now decoded by FFmpeg** (its MP4 demuxer and AAC/ALAC decoders, built
+  minimal and linked into CMM_Decoder.dll), replacing fdk-aac and minimp4. Every bundled library
+  is now under an OSI-approved open-source license, which free code signing requires.
+  Decoding matches the old decoder to within 0.01 dB of loudness, seeking stays sample-exact,
+  and MP4s that record their encoder delay (iTunes, qaac, FFmpeg) now play gapless: the silent
+  lead-in and tail padding are trimmed instead of played.
 - **7 Days to Die 3.4.0 b10**, the current release. The mod builds and runs against it with no
   source changes; the supported list is now 3.4.0 b10, 2.6 b12, A21.2 b37 and A20.7 b1, and the
   zip is named `... for A20-A21-2.6-3.4.zip`.
@@ -66,6 +77,16 @@ contexts.xml values below are what it uses, and nothing changes until you turn i
   all survive — and the original is kept beside it as `contexts.xml.schema1.bak`. Settings
   schemas 59 and 60 add `DefaultTrackCooldown` and `TrackCooldownsEnabled` to an existing
   settings.xml.
+
+### Fixed
+
+- **The last 38 ms of every AAC track were cut off.** The old decoder delayed its output by
+  1,685 samples without lengthening the track, so the end never played.
+- **HE-AAC inside an `.mkv`** whose header names SBR or PS explicitly was framed as "AAC Main"
+  and could not decode.
+- **MP4 decoding no longer goes through the C runtime's file functions** while a track plays.
+  Opens were already serialized, but reads were not; MP4/M4A now use the same race-free whole-file
+  read (or, above 100 MB, raw Windows handle) as every other format.
 
 ## 1.0.5a — RC1 built 2026-09-25, unreleased
 

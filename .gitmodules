@@ -1,9 +1,3 @@
-[submodule "CMM_Decoder/third_party/fdk-aac"]
-	path = CMM_Decoder/third_party/fdk-aac
-	url = https://github.com/mstorsjo/fdk-aac.git
-[submodule "CMM_Decoder/third_party/minimp4"]
-	path = CMM_Decoder/third_party/minimp4
-	url = https://github.com/lieff/minimp4.git
 [submodule "CMM_Decoder/third_party/ogg"]
 	path = CMM_Decoder/third_party/ogg
 	url = https://github.com/xiph/ogg.git
@@ -13,3 +7,7 @@
 [submodule "CMM_Decoder/third_party/opusfile"]
 	path = CMM_Decoder/third_party/opusfile
 	url = https://github.com/xiph/opusfile.git
+[submodule "CMM_Decoder/third_party/ffmpeg"]
+	path = CMM_Decoder/third_party/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
+	shallow = true

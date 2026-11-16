@@ -24,7 +24,7 @@ using CMM;
 
 internal static class Program
 {
-    static readonly string[] Exts = { ".mp3", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aiff", ".aif", ".flac", ".m4a", ".mp4", ".aac", ".m4v", ".3gp", ".mkv", ".webm" };
+    static readonly string[] Exts = { ".mp3", ".ogg", ".oga", ".opus", ".wav", ".wave", ".aiff", ".aif", ".flac", ".m4a", ".mp4", ".aac", ".m4v", ".3gp", ".mov", ".mkv", ".webm" };
 
     static int Main(string[] args)
     {
@@ -253,6 +253,7 @@ internal static class Program
             case ".aac":
             case ".m4v":
             case ".3gp":
+            case ".mov":
                 return new Codec { OpenMem = NativeAac.cmm_aac_open_memory, OpenFile = NativeAac.cmm_aac_open_file,
                                    Read = NativeAac.cmm_aac_read_float, Close = NativeAac.cmm_aac_close };
             case ".mkv":

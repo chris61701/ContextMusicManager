@@ -126,12 +126,11 @@ static unsigned char* cmm_read_whole_file(const wchar_t* path, long long maxByte
  * FILE* callbacks (race-free — no msvcrt fd table) instead of buffering whole. */
 #include <vorbis/vorbisfile.h>
 
-/* AAC: fdk-aac decoder (libfdk-aac.a) + minimp4 MP4/M4A demuxer. The minimp4
- * IMPLEMENTATION lives in minimp4_impl.c; here we only pull its MP4D_* demux
- * declarations + structs. fdk-aac decodes to interleaved INT16 (SAMPLE_BITS 16),
- * which the read path converts to f32 like every other codec. */
-#include <aacdecoder_lib.h>
-#include "minimp4.h"
+/* AAC + ALAC: FFmpeg's mov demuxer and aac/alac decoders, built minimal and static by
+ * build_ffmpeg.sh (LGPL-2.1-or-later). See the AAC section below. */
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
 
 /* Container (Matroska/WebM) demux + remux: matroska.c extracts the audio track;
  * libogg re-pages Opus/Vorbis packets; libopus gives exact per-packet sample
@@ -168,36 +167,29 @@ struct cmm_decoder {
     long long      mpos;   /* read cursor for the Vorbis in-memory callback stream (buf/fsize) */
     int            channels;
 
-    /* ── AAC (fdk-aac + minimp4) ──────────────────────────────────────────
-     * Two source shapes share one decoder: an MP4/M4A container (demuxed by
-     * minimp4 — random-access reads via cmm_mp4_read over buf OR fp, so even a
-     * huge movie file is read on demand, never fully buffered) and a raw ADTS
-     * stream (.aac — fdk-aac frames it internally; always over an in-memory
-     * buffer, which the file open reads whole since ADTS music files are small). */
-    HANDLE_AACDECODER aac;        /* fdk-aac handle */
-    MP4D_demux_t*     mp4;        /* minimp4 demux (MP4 container; NULL for raw ADTS) */
-    /* FRAGMENTED-MP4 sample index. minimp4 reads sample tables out of 'moov' ('stsz'/'stco'),
-     * which a fragmented file does not have -- its samples live in 'trun' boxes inside each
-     * 'moof'. Then we build the table ourselves and this stands in for MP4D_frame_offset.
-     * NULL for ordinary MP4s. */
-    struct cmm_frag_s { long long off; unsigned size; }* frag;
-    long long         srclen;     /* length of buf (memory open) for cmm_mp4_read bounds */
-    unsigned          aac_track;  /* index of the chosen audio track (MP4) */
-    unsigned          aac_sample; /* next MP4 sample (access unit) index to decode */
-    unsigned          aac_count;  /* total MP4 samples in the audio track */
-    long long         adts_pos;   /* read cursor into buf for raw ADTS */
-    unsigned char*    aubuf;      /* scratch for one access unit (MP4 file path) */
-    unsigned          aubuf_cap;  /* capacity of aubuf */
-    unsigned char*    moov_buf;   /* cached MP4 'moov' box (file path); NULL if not cached */
-    long long         moov_off;   /* file offset where moov_buf begins */
-    long long         moov_len;   /* length of moov_buf */
-    short*            i16;        /* one decoded frame, interleaved int16 (fdk output) */
-    float*            pcm;        /* same frame converted to interleaved float */
-    int               pcm_fill;   /* valid floats in pcm */
-    int               pcm_pos;    /* floats already handed out from pcm */
-    int               frame_size; /* output frame size per channel (from CStreamInfo) */
-    long long         seek_skip;  /* output frames still to discard after a seek (to reach exact frame) */
-    int               clr_hist;   /* 1 = pass AACDEC_CLRHIST on the next DecodeFrame (post-seek) */
+    /* ── AAC / ALAC (FFmpeg) ── see the AAC section for how these fit together. */
+    AVFormatContext*  fmt;          /* mov demuxer (MP4 family); NULL for ADTS */
+    AVIOContext*      avio;         /* our race-free I/O under fmt */
+    AVCodecContext*   avc;          /* aac or alac decoder */
+    AVPacket*         pkt;
+    AVFrame*          frm;
+    int               stream_index; /* the audio stream in fmt */
+    AVRational        st_tb;        /* its time base */
+    long long         pts0;         /* timestamp of output sample 0 */
+    int               have_pts0;
+    long long         srclen;       /* length of buf */
+    long long         adts_start;   /* first ADTS frame (after any ID3 tag) */
+    long long         adts_pos;     /* ADTS read cursor into buf */
+    float*            pcm;          /* one decoded frame, interleaved float */
+    int               pcm_cap, pcm_fill, pcm_pos;   /* in floats */
+    int               out_rate;     /* output sample rate, from the first decoded frame */
+    int               frame_size;   /* output frames per access unit */
+    long long         frame_pos;    /* output position of the frame in pcm */
+    long long         next_pos;     /* output position of the frame after it */
+    long long         seek_target;  /* discard output before this frame; -1 = none */
+    long long         total;        /* total output frames, -1 if unknown */
+    int               draining;     /* end of input reached, decoder being flushed */
+    int               bad;          /* consecutive undecodable packets */
 
     /* ── Container (Matroska/WebM) ────────────────────────────────────────
      * A .mkv/.webm handle owns a real decoder for the remuxed audio stream:
@@ -220,25 +212,16 @@ struct cmm_decoder {
     int            src_eof;
 };
 
-/* Generous one-frame scratch: HE-AAC frameSize is up to 2048, up to 8 channels. */
-#define CMM_AAC_MAX_SAMPLES (2048 * 8)
-
-/* Upper bound on the MP4 'moov' (index) we will pull into RAM to serve minimp4's
- * open-time sample-table parse from memory instead of a per-read syscall storm.
- * A music moov is a few MB, but a LONG VIDEO's is not: a 10 h AAC track carries a
- * ~36 MB sample table (one stsz/stco/stts entry per ~23 ms access unit), and past
- * the cap the streamed fallback parses it via millions of tiny fseek+fread calls —
- * seconds-to-minutes of stall on a multi-GB file (the in-game "video freezes the
- * game" case). So the cap is sized to comfortably hold even very long videos'
- * indexes (256 MB ≈ ~70 h of AAC); the box is validated to fit inside the file
- * before this and freed on close, and 'mdat' (the audio) is NEVER buffered — only
- * the index. Above the cap we still fall back to streamed reads (correct, just slow
- * to open — a hard parse guard covers that pathological tail separately).
- * Overridable at build time (e.g. -DCMM_MP4_MOOV_CACHE_MAX=0 disables the cache
- * for an A/B benchmark). */
-#ifndef CMM_MP4_MOOV_CACHE_MAX
-#define CMM_MP4_MOOV_CACHE_MAX (256 * 1024 * 1024)
+/* AVIO read window for the MP4 demuxer. The index ('moov') of a long video runs to tens of MB
+ * and is parsed field by field; this window turns that into one ReadFile per 64 KB instead of
+ * a syscall per field (the old minimp4 path hung for seconds on exactly that: bd27bd2). */
+#ifndef CMM_AVIO_BUF
+#define CMM_AVIO_BUF (64 * 1024)
 #endif
+
+/* Access units decoded and thrown away before a seek target, so the MDCT overlap of the
+ * target frame is rebuilt from real audio rather than silence. */
+#define CMM_AAC_PREROLL_FRAMES 2
 
 CMM_API int CMM_Decoder_abi(void) { return CMM_DECODER_ABI; }
 
@@ -1284,494 +1267,485 @@ CMM_API cmm_decoder* cmm_wav_open_file(const wchar_t* path, int* channels,
     return d;
 }
 
-/* ── AAC (fdk-aac + minimp4) ──────────────────────────────────────────────────
- * Covers AAC-LC + HE-AAC in either an MP4/M4A container (demuxed by minimp4 — it
- * also transparently finds the audio track inside an MP4 that has video, which is
- * the future "audio out of a movie" path) or a raw ADTS .aac stream (fdk-aac
- * frames those itself). One cmm_aac_open_{memory,file} detects the container from
- * the leading bytes; everything below shares the read/seek/close family. fdk-aac
- * emits interleaved INT16 PCM; we convert to f32 so the managed side sees IEEE
- * float exactly like the other codecs. */
+/* ── AAC / ALAC (FFmpeg: libavformat mov + libavcodec aac/alac) ─────────────────
+ * Two source shapes, one read/seek/close family:
+ *
+ *   MP4 / M4A / M4V / 3GP -- demuxed by FFmpeg's mov demuxer. That covers ordinary MP4s,
+ *     FRAGMENTED MP4 (moof/trun: podcasts, NotebookLM, DASH-derived tools -- see 4d4a545),
+ *     the audio track of a video file, edit lists (encoder priming is trimmed, so the
+ *     output is gapless) and ALAC, which the old minimp4 + fdk-aac pair could not decode
+ *     at all (52c5577: 104 files in one library silently never played).
+ *   Raw ADTS (.aac) and AAC inside Matroska -- framed by our own code (the ADTS headers
+ *     carry exact frame lengths, which gives an exact duration with no index), each frame
+ *     handed to FFmpeg's AAC decoder as one packet.
+ *
+ * Replaces fdk-aac + minimp4, whose licenses are not OSI-approved. Things the old path
+ * learned the hard way, and where each one is honoured here:
+ *   - HE-AAC's SBR doubles the output rate over what the container says, so rate and
+ *     channels come from the FIRST DECODED FRAME, never the header (cmm_aac_first_frame).
+ *   - Concurrent opens through msvcrt stdio returned wrong bytes (bcc062b). FFmpeg never
+ *     touches a file: it reads through cmm_av_* callbacks over a whole-file buffer read
+ *     with raw Win32 calls, or, above CMM_BUFFER_MAX, over a raw Win32 HANDLE.
+ *   - A huge 'moov' read in tiny pieces stalled the game for seconds (bd27bd2, 8294eed).
+ *     AVIO reads through a CMM_AVIO_BUF window, so the index parse is never a syscall
+ *     per field.
+ *   - A video file must not be read whole for its audio (8294eed): every non-audio
+ *     stream is set to AVDISCARD_ALL, which makes the mov demuxer skip its samples
+ *     without reading them.
+ *   - A seek needs the access unit BEFORE the target to rebuild the MDCT overlap, then a
+ *     sample-exact discard: seeks land CMM_AAC_PREROLL_FRAMES early and discard forward.
+ *   - FFmpeg's default log callback writes to stderr; inside the game that is noise, so
+ *     logging is silenced once, process-wide (cmm_ff_init).
+ * ────────────────────────────────────────────────────────────────────────── */
 
 CMM_API void cmm_aac_close(cmm_decoder* d);   /* fwd: open paths free via close on error */
 
-/* minimp4 random-access read callback. Serves the demuxer from either the owned
- * in-memory copy (buf) or the owned FILE* (fp) — so an MP4/movie is read on
- * demand and never has to be fully buffered. Returns nonzero on failure. */
-static int cmm_mp4_read(int64_t offset, void* buffer, size_t size, void* token)
+static volatile LONG g_ffInit = 0;
+static void cmm_ff_init(void)
 {
-    cmm_decoder* d = (cmm_decoder*)token;
-    if (d->buf) {
-        if (offset < 0 || (long long)offset + (long long)size > d->srclen) return 1;
-        memcpy(buffer, d->buf + offset, size);
-        return 0;
-    }
-    /* Serve any read wholly inside the cached 'moov' from RAM — this is where the
-     * open-time sample-table parse hammers the file with tiny reads. mdat reads
-     * (playback) fall through to the FILE* path below. */
-    if (d->moov_buf && (long long)offset >= d->moov_off &&
-        (long long)offset + (long long)size <= d->moov_off + d->moov_len) {
-        memcpy(buffer, d->moov_buf + (offset - d->moov_off), size);
-        return 0;
-    }
-    if (d->fp) {
-        if (CMM_FSEEK(d->fp, (long long)offset, SEEK_SET) != 0) return 1;
-        return fread(buffer, 1, size, d->fp) != size;
-    }
-    return 1;
-}
-
-/* Walk the top-level ISOBMFF boxes to locate 'moov' and, if it is within the cap,
- * read the whole box into d->moov_buf in a single fread. minimp4's sample-table
- * parse then hits RAM (memcpy) instead of thousands of tiny seek+read syscalls.
- * Best-effort: any failure just leaves moov_buf NULL and the streamed path stands.
- * File opens only (memory opens already serve from d->buf). */
-static void cmm_mp4_prime_moov(cmm_decoder* d, long long filesize)
-{
-    if (!d->fp || d->buf) return;
-    long long pos = 0;
-    while (pos + 8 <= filesize) {
-        unsigned char h[16];
-        if (CMM_FSEEK(d->fp, pos, SEEK_SET) != 0) return;
-        if (fread(h, 1, 8, d->fp) != 8) return;
-        long long boxsize = ((long long)h[0] << 24) | ((long long)h[1] << 16) |
-                            ((long long)h[2] << 8)  |  (long long)h[3];
-        long long hdr = 8;
-        if (boxsize == 1) {                    /* 64-bit largesize follows the type */
-            if (fread(h + 8, 1, 8, d->fp) != 8) return;
-            boxsize = ((long long)h[8]  << 56) | ((long long)h[9]  << 48) |
-                      ((long long)h[10] << 40) | ((long long)h[11] << 32) |
-                      ((long long)h[12] << 24) | ((long long)h[13] << 16) |
-                      ((long long)h[14] << 8)  |  (long long)h[15];
-            hdr = 16;
-        } else if (boxsize == 0) {
-            boxsize = filesize - pos;          /* box runs to EOF */
-        }
-        if (boxsize < hdr || pos + boxsize > filesize) return;   /* malformed → bail */
-
-        if (h[4] == 'm' && h[5] == 'o' && h[6] == 'o' && h[7] == 'v') {
-            if (boxsize <= CMM_MP4_MOOV_CACHE_MAX) {
-                unsigned char* mb = (unsigned char*)malloc((size_t)boxsize);
-                if (mb) {
-                    if (CMM_FSEEK(d->fp, pos, SEEK_SET) == 0 &&
-                        fread(mb, 1, (size_t)boxsize, d->fp) == (size_t)boxsize) {
-                        d->moov_buf = mb; d->moov_off = pos; d->moov_len = boxsize;
-                    } else {
-                        free(mb);
-                    }
-                }
-            }
-            return;   /* found moov (cached or too big) — done either way */
-        }
-        pos += boxsize;
+    if (InterlockedCompareExchange(&g_ffInit, 1, 0) == 0) {
+        av_log_set_level(AV_LOG_QUIET);
+        InterlockedExchange(&g_ffInit, 2);
+    } else {
+        while (g_ffInit != 2) Sleep(0);
     }
 }
 
-/* ── Fragmented MP4 (fMP4 / DASH) ─────────────────────────────────────────────
- * A fragmented file carries a nearly empty 'moov' -- track metadata and the decoder config,
- * but NO sample tables -- and then repeats 'moof'+'mdat' pairs, each 'moof' describing the
- * samples in the 'mdat' that follows. minimp4 knows those box types only for WRITING; its
- * demuxer parses 'stbl' alone, so it reports the track with sample_count 0, cmm_aac_init's
- * first decode returns EOF immediately, and the open fails with no useful error.
- *
- * That is not an exotic shape. It is what NotebookLM "Audio Overview" exports and what most
- * podcast / DASH-derived tooling produces -- nine files in one user's station, none playable.
- *
- * MP4D_open still succeeds and still hands us the decoder config (verified: a 16-byte DSI that
- * fdk-aac accepts), so the ONLY missing piece is the sample table. Walk the fragments once at
- * open and build it: for every 'moof', find its 'traf', read 'tfhd' for the base offset and the
- * defaults, then each 'trun' for the per-sample sizes, accumulating offsets within a run.
- *
- * Seeking needs no special case: cmm_aac_seek already works in sample INDICES, so once
- * aac_count and this array are populated it behaves exactly as for an ordinary MP4.
- * ────────────────────────────────────────────────────────────────────────── */
-static unsigned cmm_rd32(const unsigned char* p)
-{ return ((unsigned)p[0]<<24)|((unsigned)p[1]<<16)|((unsigned)p[2]<<8)|(unsigned)p[3]; }
-static long long cmm_rd64(const unsigned char* p)
-{ return ((long long)cmm_rd32(p)<<32) | (long long)(unsigned)cmm_rd32(p+4); }
+/* ── AVIO callbacks: FFmpeg reads only through these ── */
 
-/* Append one sample; grows geometrically. 0 on success. */
-static int cmm_frag_push(cmm_decoder* d, long long* cap, long long off, unsigned size)
+static int cmm_av_read_mem(void* opaque, uint8_t* buf, int size)
 {
-    if ((long long)d->aac_count >= *cap) {
-        long long nc = *cap ? *cap * 2 : 4096;
-        void* nb = realloc(d->frag, (size_t)nc * sizeof(*d->frag));
-        if (!nb) return -1;
-        d->frag = nb; *cap = nc;
-    }
-    d->frag[d->aac_count].off  = off;
-    d->frag[d->aac_count].size = size;
-    d->aac_count++;
-    return 0;
+    cmm_decoder* d = (cmm_decoder*)opaque;
+    long long left = d->srclen - d->mpos;
+    if (left <= 0) return AVERROR_EOF;
+    if ((long long)size > left) size = (int)left;
+    memcpy(buf, d->buf + d->mpos, (size_t)size);
+    d->mpos += size;
+    return size;
 }
 
-/* Parse one 'traf' at [off, off+len) and append its samples. */
-static int cmm_frag_traf(cmm_decoder* d, long long off, long long len, long long moofOff, long long* cap)
+static int64_t cmm_av_seek_mem(void* opaque, int64_t off, int whence)
 {
-    unsigned char b[16];
-    long long p = off, end = off + len;
-    long long baseOff = moofOff;      /* default-base-is-moof, and the spec default too */
-    unsigned defSize = 0;
+    cmm_decoder* d = (cmm_decoder*)opaque;
+    whence &= ~AVSEEK_FORCE;
+    if (whence == AVSEEK_SIZE) return d->srclen;
+    long long np = whence == SEEK_SET ? off
+                 : whence == SEEK_CUR ? d->mpos + off
+                 : whence == SEEK_END ? d->srclen + off : -1;
+    if (np < 0 || np > d->srclen) return AVERROR(EINVAL);
+    d->mpos = np;
+    return np;
+}
 
-    /* Pass 1: 'tfhd' -- the base offset and the per-run defaults. */
-    while (p + 8 <= end) {
-        if (cmm_mp4_read(p, b, 8, d)) return -1;
-        long long bs = (long long)cmm_rd32(b);
-        unsigned ty = cmm_rd32(b + 4);
-        long long hdr = 8;
-        if (bs == 1) { if (cmm_mp4_read(p + 8, b, 8, d)) return -1; bs = cmm_rd64(b); hdr = 16; }
-        if (bs < hdr || p + bs > end) break;
+#ifdef _WIN32
+static int cmm_av_read_h(void* opaque, uint8_t* buf, int size)
+{
+    cmm_decoder* d = (cmm_decoder*)opaque;
+    DWORD got = 0;
+    if (!ReadFile((HANDLE)d->fh, buf, (DWORD)size, &got, NULL)) return AVERROR(EIO);
+    return got ? (int)got : AVERROR_EOF;
+}
 
-        if (ty == 0x74666864u) {      /* 'tfhd' */
-            unsigned char h[8];
-            if (cmm_mp4_read(p + hdr, h, 8, d)) return -1;
-            unsigned flags = cmm_rd32(h) & 0x00FFFFFFu;   /* top byte is the version */
-            long long q = p + hdr + 8;                    /* past version/flags + track_ID */
-            if (flags & 0x000001u) {                      /* base-data-offset-present */
-                if (cmm_mp4_read(q, h, 8, d)) return -1;
-                baseOff = cmm_rd64(h); q += 8;
-            }
-            if (flags & 0x000002u) q += 4;                /* sample-description-index */
-            if (flags & 0x000008u) q += 4;                /* default-sample-duration */
-            if (flags & 0x000010u) {                      /* default-sample-size */
-                if (cmm_mp4_read(q, h, 4, d)) return -1;
-                defSize = cmm_rd32(h); q += 4;
-            }
-        }
-        p += bs;
+static int64_t cmm_av_seek_h(void* opaque, int64_t off, int whence)
+{
+    cmm_decoder* d = (cmm_decoder*)opaque;
+    whence &= ~AVSEEK_FORCE;
+    if (whence == AVSEEK_SIZE) return d->fsize;
+    if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) return AVERROR(EINVAL);
+    LARGE_INTEGER dist, np;
+    dist.QuadPart = off;
+    DWORD m = whence == SEEK_CUR ? FILE_CURRENT : whence == SEEK_END ? FILE_END : FILE_BEGIN;
+    if (!SetFilePointerEx((HANDLE)d->fh, dist, &np, m)) return AVERROR(EIO);
+    return np.QuadPart;
+}
+#else
+static int cmm_av_read_h(void* opaque, uint8_t* buf, int size)
+{
+    cmm_decoder* d = (cmm_decoder*)opaque;
+    size_t got = fread(buf, 1, (size_t)size, d->fp);
+    return got ? (int)got : AVERROR_EOF;
+}
+
+static int64_t cmm_av_seek_h(void* opaque, int64_t off, int whence)
+{
+    cmm_decoder* d = (cmm_decoder*)opaque;
+    whence &= ~AVSEEK_FORCE;
+    if (whence == AVSEEK_SIZE) return d->fsize;
+    if (CMM_FSEEK(d->fp, off, whence) != 0) return AVERROR(EIO);
+    return (int64_t)CMM_FTELL(d->fp);
+}
+#endif
+
+/* ── Decoded frame → interleaved float in d->pcm ──────────────────────────────
+ * AAC decodes to planar float; ALAC to planar int16/int32. The output channel count is
+ * fixed at open (d->channels). A later frame with a different count is folded onto it
+ * (mono duplicated, extra channels averaged into mono or dropped) rather than changing
+ * the stream under the mixer. A different RATE cannot be folded and ends the track. */
+static float cmm_av_sample(const AVFrame* f, int fch, int c, int i)
+{
+    switch (f->format) {
+        case AV_SAMPLE_FMT_FLTP: return ((const float*)f->extended_data[c])[i];
+        case AV_SAMPLE_FMT_FLT:  return ((const float*)f->extended_data[0])[(size_t)i * fch + c];
+        case AV_SAMPLE_FMT_S16P: return ((const int16_t*)f->extended_data[c])[i] * (1.0f / 32768.0f);
+        case AV_SAMPLE_FMT_S16:  return ((const int16_t*)f->extended_data[0])[(size_t)i * fch + c] * (1.0f / 32768.0f);
+        case AV_SAMPLE_FMT_S32P: return (float)(((const int32_t*)f->extended_data[c])[i] * (1.0 / 2147483648.0));
+        case AV_SAMPLE_FMT_S32:  return (float)(((const int32_t*)f->extended_data[0])[(size_t)i * fch + c] * (1.0 / 2147483648.0));
+        case AV_SAMPLE_FMT_DBLP: return (float)((const double*)f->extended_data[c])[i];
+        case AV_SAMPLE_FMT_DBL:  return (float)((const double*)f->extended_data[0])[(size_t)i * fch + c];
+        default:                 return 0.0f;
     }
+}
 
-    /* Pass 2: every 'trun'. */
-    p = off;
-    while (p + 8 <= end) {
-        if (cmm_mp4_read(p, b, 8, d)) return -1;
-        long long bs = (long long)cmm_rd32(b);
-        unsigned ty = cmm_rd32(b + 4);
-        long long hdr = 8;
-        if (bs == 1) { if (cmm_mp4_read(p + 8, b, 8, d)) return -1; bs = cmm_rd64(b); hdr = 16; }
-        if (bs < hdr || p + bs > end) break;
+static int cmm_av_supported_fmt(int fmt)
+{
+    return fmt == AV_SAMPLE_FMT_FLTP || fmt == AV_SAMPLE_FMT_FLT ||
+           fmt == AV_SAMPLE_FMT_S16P || fmt == AV_SAMPLE_FMT_S16 ||
+           fmt == AV_SAMPLE_FMT_S32P || fmt == AV_SAMPLE_FMT_S32 ||
+           fmt == AV_SAMPLE_FMT_DBLP || fmt == AV_SAMPLE_FMT_DBL;
+}
 
-        if (ty == 0x7472756eu) {      /* 'trun' */
-            unsigned char h[8];
-            if (cmm_mp4_read(p + hdr, h, 8, d)) return -1;
-            unsigned flags = cmm_rd32(h) & 0x00FFFFFFu;
-            unsigned n     = cmm_rd32(h + 4);
-            long long q = p + hdr + 8;
-            long long dataOff = baseOff;
-            if (flags & 0x000001u) {  /* data-offset-present: SIGNED, relative to baseOff */
-                if (cmm_mp4_read(q, h, 4, d)) return -1;
-                dataOff = baseOff + (int)cmm_rd32(h); q += 4;
-            }
-            if (flags & 0x000004u) q += 4;    /* first-sample-flags */
+/* Returns frames placed in d->pcm, 0 for an empty frame, <0 if it cannot be played. */
+static int cmm_aac_take_frame(cmm_decoder* d, const AVFrame* f)
+{
+    int n = f->nb_samples, fch = f->ch_layout.nb_channels;
+    if (n <= 0 || fch <= 0) return 0;
+    if (!cmm_av_supported_fmt(f->format)) return -1;
+    if (d->out_rate > 0 && f->sample_rate != d->out_rate) return -1;
+    if (d->out_rate <= 0) d->out_rate = f->sample_rate;          /* first frame fixes both */
+    if (d->channels <= 0) d->channels = fch;
+    int och = d->channels;
 
-            int rec = 0;                       /* per-sample record width, from the flags */
-            if (flags & 0x000100u) rec += 4;   /* duration */
-            if (flags & 0x000200u) rec += 4;   /* size */
-            if (flags & 0x000400u) rec += 4;   /* flags */
-            if (flags & 0x000800u) rec += 4;   /* composition offset */
-
-            long long cur = dataOff;
-            for (unsigned i = 0; i < n; i++) {
-                unsigned sz = defSize;
-                if (rec) {
-                    unsigned char r[16];
-                    if (rec > (int)sizeof(r) || cmm_mp4_read(q, r, (size_t)rec, d)) return -1;
-                    int k = 0;
-                    if (flags & 0x000100u) k += 4;
-                    if (flags & 0x000200u) sz = cmm_rd32(r + k);
-                    q += rec;
-                }
-                if (sz == 0) return -1;        /* no size given anywhere: cannot index it */
-                if (cmm_frag_push(d, cap, cur, sz)) return -1;
-                cur += sz;
-            }
+    size_t need = (size_t)n * (size_t)och;
+    if (need > (size_t)d->pcm_cap) {
+        float* np = (float*)realloc(d->pcm, need * sizeof(float));
+        if (!np) return -1;
+        d->pcm = np; d->pcm_cap = (int)need;
+    }
+    float* o = d->pcm;
+    if (f->format == AV_SAMPLE_FMT_FLTP && fch == och) {          /* the AAC fast path */
+        for (int c = 0; c < och; c++) {
+            const float* s = (const float*)f->extended_data[c];
+            for (int i = 0; i < n; i++) o[(size_t)i * och + c] = s[i];
         }
-        p += bs;
+    } else if (och == 1 && fch > 1) {                              /* fold to mono */
+        for (int i = 0; i < n; i++) {
+            float acc = 0.0f;
+            for (int c = 0; c < fch; c++) acc += cmm_av_sample(f, fch, c, i);
+            o[i] = acc / (float)fch;
+        }
+    } else {                                                       /* same, fewer, or more */
+        for (int i = 0; i < n; i++)
+            for (int c = 0; c < och; c++)
+                o[(size_t)i * och + c] = cmm_av_sample(f, fch, c < fch ? c : fch - 1, i);
+    }
+    d->pcm_fill = n * och;
+    d->pcm_pos  = 0;
+    return n;
+}
+
+/* Place a frame and work out where it sits in the output, in output samples. MP4 frames
+ * carry a timestamp (the only reliable position after a demuxer seek); ADTS frames do not,
+ * so they are counted from the start. */
+static int cmm_aac_place_frame(cmm_decoder* d, AVFrame* f)
+{
+    int n = cmm_aac_take_frame(d, f);
+    if (n > 0) {
+        long long pos = d->next_pos;
+        int64_t pts = f->best_effort_timestamp;
+        if (d->fmt && pts != AV_NOPTS_VALUE) {
+            if (!d->have_pts0) { d->pts0 = pts; d->have_pts0 = 1; }
+            pos = av_rescale_q(pts - d->pts0, d->st_tb, (AVRational){ 1, d->out_rate > 0 ? d->out_rate : f->sample_rate });
+        }
+        d->frame_pos = pos;
+        d->next_pos  = pos + n;
+    }
+    av_frame_unref(f);
+    return n;
+}
+
+/* ── ADTS framing (raw .aac in memory, or the Matroska stream) ── */
+
+static int cmm_adts_len(const unsigned char* b)
+{
+    if (b[0] != 0xFF || (b[1] & 0xF6) != 0xF0) return 0;          /* syncword + layer 0 */
+    int flen = ((b[3] & 0x03) << 11) | (b[4] << 3) | (b[5] >> 5);
+    return flen >= 7 ? flen : 0;
+}
+
+/* Next whole frame from the in-memory buffer, resyncing past junk. 1 = got one, 0 = end. */
+static int cmm_adts_next_mem(cmm_decoder* d, const unsigned char** p, int* len)
+{
+    while (d->adts_pos + 7 <= d->srclen) {
+        int flen = cmm_adts_len(d->buf + d->adts_pos);
+        if (flen) {
+            if (d->adts_pos + flen > d->srclen) return 0;          /* truncated last frame */
+            *p = d->buf + d->adts_pos; *len = flen;
+            d->adts_pos += flen;
+            return 1;
+        }
+        d->adts_pos++;
     }
     return 0;
 }
 
-/* Walk the top-level boxes and index every fragment. 0 on success. */
-static int cmm_mp4_build_fragment_index(cmm_decoder* d, long long filesize)
+/* Make n bytes available at sbuf[spos] if the source has them; returns what is there. */
+static int cmm_sbuf_need(cmm_decoder* d, int n)
 {
-    unsigned char b[16];
-    long long cap = 0, p = 0;
-    d->aac_count = 0;
-    while (p + 8 <= filesize) {
-        if (cmm_mp4_read(p, b, 8, d)) break;
-        long long bs = (long long)cmm_rd32(b);
-        unsigned ty = cmm_rd32(b + 4);
-        long long hdr = 8;
-        if (bs == 1) { if (cmm_mp4_read(p + 8, b, 8, d)) break; bs = cmm_rd64(b); hdr = 16; }
-        if (bs == 0) break;                    /* runs to EOF: nothing further to index */
-        if (bs < hdr || p + bs > filesize) break;
-
-        if (ty == 0x6d6f6f66u) {               /* 'moof' -> its 'traf' children */
-            long long q = p + hdr, qend = p + bs;
-            while (q + 8 <= qend) {
-                unsigned char c[16];
-                if (cmm_mp4_read(q, c, 8, d)) return -1;
-                long long cs = (long long)cmm_rd32(c);
-                unsigned cty = cmm_rd32(c + 4);
-                long long chdr = 8;
-                if (cs == 1) { if (cmm_mp4_read(q + 8, c, 8, d)) return -1; cs = cmm_rd64(c); chdr = 16; }
-                if (cs < chdr || q + cs > qend) break;
-                if (cty == 0x74726166u && cmm_frag_traf(d, q + chdr, cs - chdr, p, &cap)) return -1;
-                q += cs;
-            }
-        }
-        p += bs;
+    if (d->slen - d->spos >= n) return d->slen - d->spos;
+    if (d->spos > 0) {
+        memmove(d->sbuf, d->sbuf + d->spos, (size_t)(d->slen - d->spos));
+        d->slen -= d->spos; d->spos = 0;
     }
-    return d->aac_count > 0 ? 0 : -1;
+    while (!d->src_eof && d->slen < n && d->slen < d->scap) {
+        int got = d->src_read(d->src_ud, d->sbuf + d->slen, d->scap - d->slen);
+        if (got > 0) d->slen += got; else d->src_eof = 1;
+    }
+    return d->slen - d->spos;
 }
 
-/* Decode exactly one access unit into d->pcm (interleaved f32). Returns the
- * number of frames (per channel) produced, 0 at end-of-stream, <0 on error. */
-static int cmm_aac_decode_one_au(cmm_decoder* d)
+static int cmm_adts_next_stream(cmm_decoder* d, const unsigned char** p, int* len)
 {
-    if (!d->aac) return -1;
-
-    AAC_DECODER_ERROR err;
-
-    if (d->mp4) {
-        /* ── MP4: one sample == one AAC access unit ── */
-        if (d->aac_sample >= d->aac_count) return 0;   /* EOF */
-        unsigned fb; MP4D_file_offset_t ofs;
-        if (d->frag) {                                 /* fragmented: our own index */
-            ofs = (MP4D_file_offset_t)d->frag[d->aac_sample].off;
-            fb  = d->frag[d->aac_sample].size;
-        } else {
-            unsigned ts = 0, dur = 0;
-            ofs = MP4D_frame_offset(d->mp4, d->aac_track, d->aac_sample, &fb, &ts, &dur);
-        }
-        d->aac_sample++;
-        if (fb == 0) return 0;
-
-        UCHAR* au;
-        if (d->buf) {
-            au = d->buf + (size_t)ofs;
-        } else {
-            if (d->aubuf_cap < fb) {
-                unsigned char* nb = (unsigned char*)realloc(d->aubuf, fb);
-                if (!nb) return -1;
-                d->aubuf = nb; d->aubuf_cap = fb;
-            }
-            if (CMM_FSEEK(d->fp, (long long)ofs, SEEK_SET) != 0) return -1;
-            if (fread(d->aubuf, 1, fb, d->fp) != fb) return -1;
-            au = d->aubuf;
-        }
-
-        UINT insize = fb, valid = fb;
-        UCHAR* inp = au;
-        if (aacDecoder_Fill(d->aac, &inp, &insize, &valid) != AAC_DEC_OK) return -1;
-    } else if (d->src_read) {
-        /* ── Streaming ADTS (container source): pull ADTS bytes on demand into the
-         * refill window (sbuf) and frame them with fdk-aac. Never buffers the whole
-         * track. Mirrors the in-memory loop below but refills from src_read. ── */
-        for (;;) {
-            /* Top up the window: compact any leftover to the front, then read more. */
-            if (!d->src_eof && d->spos >= d->slen) {           /* window drained */
-                d->slen = d->spos = 0;
-                int got = d->src_read(d->src_ud, d->sbuf, d->scap);
-                if (got > 0) d->slen = got; else d->src_eof = 1;
-            } else if (!d->src_eof && d->spos > 0) {           /* leftover + room */
-                memmove(d->sbuf, d->sbuf + d->spos, (size_t)(d->slen - d->spos));
-                d->slen -= d->spos; d->spos = 0;
-                if (d->slen < d->scap) {
-                    int got = d->src_read(d->src_ud, d->sbuf + d->slen, d->scap - d->slen);
-                    if (got > 0) d->slen += got; else d->src_eof = 1;
-                }
-            }
-            if (d->slen > d->spos) {
-                UCHAR* inp = d->sbuf + d->spos;
-                UINT insize = (UINT)(d->slen - d->spos), valid = insize;
-                if (aacDecoder_Fill(d->aac, &inp, &insize, &valid) != AAC_DEC_OK) return -1;
-                d->spos += (int)(insize - valid);             /* bytes consumed */
-            }
-            UINT flags = d->clr_hist ? AACDEC_CLRHIST : 0;
-            err = aacDecoder_DecodeFrame(d->aac, d->i16, CMM_AAC_MAX_SAMPLES, flags);
-            if (err == AAC_DEC_NOT_ENOUGH_BITS) {
-                if (d->src_eof && d->spos >= d->slen) return 0;   /* stream drained → EOF */
-                continue;                                          /* need more bytes */
-            }
-            d->clr_hist = 0;
-            if (err != AAC_DEC_OK) return -1;
-            goto have_frame;
-        }
-    } else {
-        /* ── Raw ADTS: feed the in-memory buffer; fdk-aac frames it. Loop because
-         * a single Fill may not have handed the decoder a whole frame yet. ── */
-        for (;;) {
-            if (d->adts_pos < d->srclen) {
-                UCHAR* inp = d->buf + (size_t)d->adts_pos;
-                UINT insize = (UINT)(d->srclen - d->adts_pos), valid = insize;
-                if (aacDecoder_Fill(d->aac, &inp, &insize, &valid) != AAC_DEC_OK) return -1;
-                d->adts_pos += (long long)(insize - valid);   /* bytes consumed */
-            }
-            UINT flags = d->clr_hist ? AACDEC_CLRHIST : 0;
-            err = aacDecoder_DecodeFrame(d->aac, d->i16, CMM_AAC_MAX_SAMPLES, flags);
-            if (err == AAC_DEC_NOT_ENOUGH_BITS) {
-                if (d->adts_pos >= d->srclen) return 0;   /* fed everything → EOF */
-                continue;                                  /* need more bytes */
-            }
-            d->clr_hist = 0;
-            if (err != AAC_DEC_OK) return -1;
-            goto have_frame;   /* skip the MP4 single-decode below */
-        }
+    for (;;) {
+        if (cmm_sbuf_need(d, 7) < 7) return 0;
+        int flen = cmm_adts_len(d->sbuf + d->spos);
+        if (!flen) { d->spos++; continue; }                          /* resync */
+        if (cmm_sbuf_need(d, flen) < flen) return 0;
+        *p = d->sbuf + d->spos; *len = flen;
+        d->spos += flen;
+        return 1;
     }
-
-    {
-        UINT flags = d->clr_hist ? AACDEC_CLRHIST : 0;
-        err = aacDecoder_DecodeFrame(d->aac, d->i16, CMM_AAC_MAX_SAMPLES, flags);
-        d->clr_hist = 0;
-        if (err == AAC_DEC_NOT_ENOUGH_BITS) return 0;   /* AU produced no frame */
-        if (err != AAC_DEC_OK) return -1;
-    }
-
-have_frame:;
-    CStreamInfo* info = aacDecoder_GetStreamInfo(d->aac);
-    if (!info || info->frameSize <= 0 || info->numChannels <= 0) return -1;
-    int n = info->frameSize * info->numChannels;
-    if (n > CMM_AAC_MAX_SAMPLES) n = CMM_AAC_MAX_SAMPLES;   /* clamp to scratch */
-    const float inv = 1.0f / 32768.0f;
-    for (int i = 0; i < n; i++) d->pcm[i] = (float)d->i16[i] * inv;
-    d->pcm_fill   = n;
-    d->pcm_pos    = 0;
-    d->frame_size = info->frameSize;
-    d->channels   = info->numChannels;
-    return info->frameSize;
 }
 
-/* Shared init once buf/fp + srclen are set: detect container, open the decoder,
- * decode the first frame to learn the authoritative rate/channels/frameSize, and
- * fill the out-params. Returns 0 on success, <0 on failure (caller frees d). */
-static int cmm_aac_init(cmm_decoder* d, long long filesize, int* channels,
-                        int* sampleRate, long long* totalFrames)
+/* Consecutive undecodable packets tolerated before the track is given up. One damaged
+ * access unit should cost 23 ms of audio, not the rest of the song; a file that is all
+ * damage should stop rather than spin. */
+#define CMM_AAC_MAX_BAD 64
+
+/* Decode the next frame into d->pcm. Returns frames, 0 at end of stream, <0 on error. */
+static int cmm_aac_decode_next(cmm_decoder* d)
 {
-    /* Peek the leading bytes for container detection. */
-    unsigned char hdr[16];
-    int hdrn = 0;
-    if (d->buf) {
-        hdrn = (int)(d->srclen < (long long)sizeof(hdr) ? d->srclen : (long long)sizeof(hdr));
-        memcpy(hdr, d->buf, (size_t)hdrn);
-    } else if (d->fp) {
-        if (CMM_FSEEK(d->fp, 0, SEEK_SET) != 0) return -1;
-        hdrn = (int)fread(hdr, 1, sizeof(hdr), d->fp);
-    }
-    if (hdrn < 8) return -1;
+    for (;;) {
+        int r = avcodec_receive_frame(d->avc, d->frm);
+        if (r == 0) {
+            int n = cmm_aac_place_frame(d, d->frm);
+            if (n < 0) return -1;
+            d->bad = 0;
+            if (n == 0) continue;                    /* fully trimmed (priming) frame */
+            return n;
+        }
+        if (r == AVERROR_EOF) return 0;
+        if (r != AVERROR(EAGAIN)) return -1;
+        if (d->draining) return 0;
 
-    int is_mp4 = (hdr[4] == 'f' && hdr[5] == 't' && hdr[6] == 'y' && hdr[7] == 'p');
-
-    if (is_mp4) {
-        d->mp4 = (MP4D_demux_t*)calloc(1, sizeof(MP4D_demux_t));
-        if (!d->mp4) return -1;
-        cmm_mp4_prime_moov(d, filesize);   /* cache the index so the parse reads from RAM */
-        if (!MP4D_open(d->mp4, cmm_mp4_read, d, filesize) || d->mp4->track_count == 0)
-            return -1;
-
-        /* Pick the first AAC audio track (one carrying a decoder-config DSI). */
-        int found = -1;
-        for (unsigned t = 0; t < d->mp4->track_count; t++) {
-            MP4D_track_t* tr = &d->mp4->track[t];
-            if (tr->handler_type == MP4D_HANDLER_TYPE_SOUN && tr->dsi && tr->dsi_bytes > 0) {
-                found = (int)t; break;
+        /* The decoder wants input. */
+        if (d->fmt) {
+            r = av_read_frame(d->fmt, d->pkt);
+            if (r < 0) {                              /* end of file (or read error): drain */
+                d->draining = 1;
+                if (avcodec_send_packet(d->avc, NULL) < 0) return 0;
+                continue;
             }
+            if (d->pkt->stream_index != d->stream_index) { av_packet_unref(d->pkt); continue; }
+            r = avcodec_send_packet(d->avc, d->pkt);
+            av_packet_unref(d->pkt);
+        } else {
+            const unsigned char* p; int len;
+            int got = d->src_read ? cmm_adts_next_stream(d, &p, &len) : cmm_adts_next_mem(d, &p, &len);
+            if (!got) {
+                d->draining = 1;
+                if (avcodec_send_packet(d->avc, NULL) < 0) return 0;
+                continue;
+            }
+            av_packet_unref(d->pkt);
+            d->pkt->data = (uint8_t*)p;              /* not refcounted: FFmpeg copies it */
+            d->pkt->size = len;
+            r = avcodec_send_packet(d->avc, d->pkt);
+            d->pkt->data = NULL; d->pkt->size = 0;
         }
-        if (found < 0) return -1;
-        d->aac_track = (unsigned)found;
-        d->aac_count = d->mp4->track[found].sample_count;
-        d->aac_sample = 0;
-
-        /* No sample table in 'moov' => a FRAGMENTED file. Index its 'moof's ourselves; see
-         * cmm_mp4_build_fragment_index. Everything downstream (decode, seek, duration) then
-         * works off aac_count exactly as it does for an ordinary MP4. */
-        if (d->aac_count == 0 && cmm_mp4_build_fragment_index(d, filesize) != 0)
-            return -1;
-
-        d->aac = aacDecoder_Open(TT_MP4_RAW, 1);
-        if (!d->aac) return -1;
-        UCHAR* dsi = (UCHAR*)d->mp4->track[found].dsi;
-        UINT   dsl = d->mp4->track[found].dsi_bytes;
-        if (aacDecoder_ConfigRaw(d->aac, &dsi, &dsl) != AAC_DEC_OK) return -1;
-
-        /* The cached moov index has done its only job — feeding MP4D_open's
-         * sample-table parse from RAM. minimp4 now holds the tables (and a copy of
-         * the dsi) in its own arrays, and every read from here on is 'mdat' sample
-         * data (outside the moov offset range), so cmm_mp4_read never touches
-         * moov_buf again. Free it NOW rather than holding it for the whole track's
-         * decode: the allocation is the actual moov size (a few KB for music, tens
-         * of MB for a multi-hour video — never the 256 MB cap), and this keeps that
-         * peak transient to the open, not resident for the life of the reader. */
-        if (d->moov_buf) { free(d->moov_buf); d->moov_buf = NULL; d->moov_off = 0; d->moov_len = 0; }
-    } else {
-        /* Raw ADTS: operate over an in-memory buffer. (A file open reads the whole
-         * file in below; ADTS music files are small, and movies are always MP4.) */
-        if (!d->buf) return -1;
-        /* Skip a leading ID3v2 tag if present (its size field is syncsafe). */
-        if (d->srclen >= 10 && hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
-            long long sz = ((long long)(hdr[6] & 0x7f) << 21) |
-                           ((long long)(hdr[7] & 0x7f) << 14) |
-                           ((long long)(hdr[8] & 0x7f) << 7)  |
-                            (long long)(hdr[9] & 0x7f);
-            d->adts_pos = 10 + sz;
-            if (d->adts_pos > d->srclen) d->adts_pos = d->srclen;
+        if (r < 0 && r != AVERROR(EAGAIN)) {
+            if (++d->bad > CMM_AAC_MAX_BAD) return -1;
         }
-        /* Require an ADTS syncword at the start of the audio data. */
-        if (d->adts_pos + 2 > d->srclen ||
-            d->buf[d->adts_pos] != 0xFF || (d->buf[d->adts_pos + 1] & 0xF0) != 0xF0)
-            return -1;
+    }
+}
 
-        d->aac = aacDecoder_Open(TT_MP4_ADTS, 1);
-        if (!d->aac) return -1;
+/* Decode the first frame: it fixes the output rate, channel count and frame size (HE-AAC
+ * reports half its real rate in the container), and stays buffered as the first output. */
+static int cmm_aac_first_frame(cmm_decoder* d)
+{
+    d->seek_target = -1;
+    if (cmm_aac_decode_next(d) <= 0) return -1;
+    if (d->out_rate <= 0 || d->channels <= 0) return -1;
+    /* Output frames per access unit: 1024 (AAC-LC), 2048 (HE-AAC), 4096 (ALAC). The first
+     * decoded frame is the truth for ADTS; an MP4's first frame can be shorter (priming
+     * trimmed), so take the larger of it and what the decoder reports. */
+    int first = d->pcm_fill / d->channels;
+    d->frame_size = d->avc->frame_size > first ? d->avc->frame_size : first;
+    if (d->frame_size < 1024) d->frame_size = 1024;
+    return 0;
+}
+
+static int cmm_aac_open_codec(cmm_decoder* d, const AVCodecParameters* par, enum AVCodecID id)
+{
+    const AVCodec* codec = avcodec_find_decoder(id);
+    if (!codec) return -1;
+    d->avc = avcodec_alloc_context3(codec);
+    if (!d->avc) return -1;
+    if (par && avcodec_parameters_to_context(d->avc, par) < 0) return -1;
+    d->avc->thread_count = 1;                         /* never spawn decoder threads */
+    if (d->fmt) d->avc->pkt_timebase = d->st_tb;      /* lets FFmpeg trim priming exactly */
+    if (avcodec_open2(d->avc, codec, NULL) < 0) return -1;
+    d->pkt = av_packet_alloc();
+    d->frm = av_frame_alloc();
+    return (d->pkt && d->frm) ? 0 : -1;
+}
+
+/* Exactly how many frames the decode will deliver, in output samples. The mixer, the resume
+ * clamp and the loudness cache all take this as the track's length, and FFmpeg's demuxer has
+ * no single number for it:
+ *
+ *   - Apple-encoded files (iTunes, qaac) carry their gapless trim in an 'iTunSMPB' tag, and
+ *     the decoder honours it, but the stream duration does NOT subtract it (3088 frames long
+ *     for a 60 s AAC-LC file, 8208 for HE-AAC). The tag is applied here under the same
+ *     conditions mov.c applies it, so the two always agree.
+ *   - Fragmented MP4 has no sample table in 'moov'; the duration comes from 'mehd' in
+ *     milliseconds (16 frames short on a 60 s test file). FFmpeg indexes every fragment at
+ *     open, so the index gives the exact figure: last timestamp + one frame - first kept.
+ *   - Everything else (edit lists included) is already right in st->duration. */
+static long long cmm_mp4_total_frames(cmm_decoder* d, AVStream* st)
+{
+    AVRational out = { 1, d->out_rate };
+    long long dur = (st->duration > 0 && st->duration != AV_NOPTS_VALUE) ? st->duration : -1;
+
+    const AVDictionaryEntry* t = av_dict_get(d->fmt->metadata, "iTunSMPB", NULL, 0);
+    unsigned priming = 0, remainder = 0, samples = 0;
+    if (dur > 0 && t && t->value && sscanf(t->value, "%*X %X %X %X", &priming, &remainder, &samples) == 3) {
+        long long trimmed = dur;
+        if (priming > 0 && priming < 16384) trimmed -= priming;
+        if (remainder > 0 && dur > (long long)remainder && dur > (long long)samples) trimmed -= remainder;
+        if (trimmed > 0) return av_rescale_q(trimmed, st->time_base, out);
     }
 
-    /* One-frame scratch (interleaved int16 from fdk + the f32 conversion). */
-    d->i16 = (short*)malloc(sizeof(short) * CMM_AAC_MAX_SAMPLES);
-    d->pcm = (float*)malloc(sizeof(float) * CMM_AAC_MAX_SAMPLES);
-    if (!d->i16 || !d->pcm) return -1;
-
-    /* Decode the first frame so the rate/channels/frameSize are authoritative
-     * (HE-AAC's SBR doubles the rate vs. the container header). The decoded
-     * samples stay buffered as the first output. */
-    if (cmm_aac_decode_one_au(d) <= 0) return -1;
-
-    int sr = 0;
-    {
-        CStreamInfo* info = aacDecoder_GetStreamInfo(d->aac);
-        sr = info ? info->sampleRate : 0;
-    }
-    if (sr <= 0 || d->channels <= 0 || d->frame_size <= 0) return -1;
-
-    long long total = -1;
-    if (d->mp4) {
-        total = (long long)d->aac_count * d->frame_size;   /* output frames */
-    } else {
-        /* Walk ADTS frame headers (cheap, no decode) to count access units, then
-         * multiply by the known output frame size (already SBR-doubled for HE).
-         * Recount from the audio-data start (after any ID3), independent of the
-         * read cursor (which has already advanced past the first decoded AU). */
-        long long au = 0, p, start = 0;
-        if (d->srclen >= 10 && d->buf[0] == 'I' && d->buf[1] == 'D' && d->buf[2] == '3') {
-            start = 10 + (((long long)(d->buf[6] & 0x7f) << 21) |
-                          ((long long)(d->buf[7] & 0x7f) << 14) |
-                          ((long long)(d->buf[8] & 0x7f) << 7)  |
-                           (long long)(d->buf[9] & 0x7f));
+    int n = avformat_index_get_entries_count(st);
+    if (st->nb_frames == 0 && n >= 2) {                 /* fragmented: trust the index */
+        const AVIndexEntry* last = avformat_index_get_entry(st, n - 1);
+        const AVIndexEntry* prev = avformat_index_get_entry(st, n - 2);
+        long long first = AV_NOPTS_VALUE;
+        for (int i = 0; i < n && first == AV_NOPTS_VALUE; i++) {
+            const AVIndexEntry* e = avformat_index_get_entry(st, i);
+            if (!(e->flags & AVINDEX_DISCARD_FRAME)) first = e->timestamp;
         }
-        for (p = start; p + 7 <= d->srclen; ) {
-            if (d->buf[p] != 0xFF || (d->buf[p + 1] & 0xF0) != 0xF0) break;
-            long long flen = (((long long)(d->buf[p + 3] & 0x03)) << 11) |
-                             (((long long)d->buf[p + 4]) << 3) |
-                             (((long long)(d->buf[p + 5] >> 5)) & 0x07);
-            if (flen < 7) break;
-            au++; p += flen;
+        if (last && prev && first != AV_NOPTS_VALUE) {
+            long long span = last->timestamp + (last->timestamp - prev->timestamp) - first;
+            /* If FFmpeg ever indexes fragments lazily, the index is short; the header's
+             * duration then covers the rest. Take whichever reaches further. */
+            if (dur > span) span = dur;
+            if (span > 0) return av_rescale_q(span, st->time_base, out);
         }
-        if (au > 0) total = au * d->frame_size;
     }
+
+    if (dur > 0) return av_rescale_q(dur, st->time_base, out);
+    if (d->fmt->duration > 0 && d->fmt->duration != AV_NOPTS_VALUE)
+        return av_rescale(d->fmt->duration, d->out_rate, AV_TIME_BASE);
+    return -1;
+}
+
+/* Open an MP4-family source already attached to d (buf/srclen, or fh/fp + fsize). */
+static int cmm_mp4_open(cmm_decoder* d, int* channels, int* sampleRate, long long* totalFrames)
+{
+    cmm_ff_init();
+    unsigned char* iob = (unsigned char*)av_malloc(CMM_AVIO_BUF);
+    if (!iob) return -1;
+    d->avio = avio_alloc_context(iob, CMM_AVIO_BUF, 0, d,
+                                 d->buf ? cmm_av_read_mem : cmm_av_read_h, NULL,
+                                 d->buf ? cmm_av_seek_mem : cmm_av_seek_h);
+    if (!d->avio) { av_free(iob); return -1; }
+
+    d->fmt = avformat_alloc_context();
+    if (!d->fmt) return -1;
+    d->fmt->pb = d->avio;
+    d->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    if (avformat_open_input(&d->fmt, NULL, av_find_input_format("mov"), NULL) < 0) {
+        d->fmt = NULL;                                  /* freed by FFmpeg on failure */
+        return -1;
+    }
+
+    /* The first AAC or ALAC track; everything else is never read (AVDISCARD_ALL makes the
+     * demuxer skip a video track's samples instead of reading them). */
+    d->stream_index = -1;
+    for (unsigned i = 0; i < d->fmt->nb_streams; i++) {
+        AVStream* st = d->fmt->streams[i];
+        enum AVCodecID id = st->codecpar->codec_id;
+        if (d->stream_index < 0 && st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+            (id == AV_CODEC_ID_AAC || id == AV_CODEC_ID_ALAC))
+            d->stream_index = (int)i;
+        else
+            st->discard = AVDISCARD_ALL;
+    }
+    if (d->stream_index < 0) return -1;
+    AVStream* st = d->fmt->streams[d->stream_index];
+    d->st_tb = st->time_base;
+
+    if (cmm_aac_open_codec(d, st->codecpar, st->codecpar->codec_id) != 0) return -1;
+    if (cmm_aac_first_frame(d) != 0) return -1;
+
+    d->total = cmm_mp4_total_frames(d, st);
+    long long total = d->total;
 
     if (channels)    *channels    = d->channels;
-    if (sampleRate)  *sampleRate  = sr;
+    if (sampleRate)  *sampleRate  = d->out_rate;
     if (totalFrames) *totalFrames = total;
     return 0;
+}
+
+/* Raw ADTS over d->buf/srclen (whole file in memory; ADTS files have no index to stream). */
+static int cmm_adts_open(cmm_decoder* d, int* channels, int* sampleRate, long long* totalFrames)
+{
+    cmm_ff_init();
+    long long start = 0;
+    if (d->srclen >= 10 && d->buf[0] == 'I' && d->buf[1] == 'D' && d->buf[2] == '3') {
+        start = 10 + (((long long)(d->buf[6] & 0x7f) << 21) | ((long long)(d->buf[7] & 0x7f) << 14) |
+                      ((long long)(d->buf[8] & 0x7f) << 7)  |  (long long)(d->buf[9] & 0x7f));
+        if (start > d->srclen) start = d->srclen;
+    }
+    if (start + 7 > d->srclen || !cmm_adts_len(d->buf + start)) return -1;
+    d->adts_start = d->adts_pos = start;
+
+    if (cmm_aac_open_codec(d, NULL, AV_CODEC_ID_AAC) != 0) return -1;
+    if (cmm_aac_first_frame(d) != 0) return -1;
+
+    /* Exact duration: count frames by their headers (no decode), times the output frame
+     * size, which the first frame has already fixed (2048 for HE-AAC, 1024 otherwise). */
+    long long au = 0, p = start;
+    while (p + 7 <= d->srclen) {
+        int flen = cmm_adts_len(d->buf + p);
+        if (!flen || p + flen > d->srclen) break;
+        au++; p += flen;
+    }
+    d->total = au > 0 ? au * d->frame_size : -1;
+
+    if (channels)    *channels    = d->channels;
+    if (sampleRate)  *sampleRate  = d->out_rate;
+    if (totalFrames) *totalFrames = d->total;
+    return 0;
+}
+
+static int cmm_is_mp4(const unsigned char* h, long long n)
+{
+    return n >= 8 && h[4] == 'f' && h[5] == 't' && h[6] == 'y' && h[7] == 'p';
+}
+
+/* d->buf/srclen set: route by container. */
+static int cmm_aac_open_buffered(cmm_decoder* d, int* channels, int* sampleRate, long long* totalFrames)
+{
+    return cmm_is_mp4(d->buf, d->srclen) ? cmm_mp4_open(d, channels, sampleRate, totalFrames)
+                                         : cmm_adts_open(d, channels, sampleRate, totalFrames);
+}
+
+static cmm_decoder* cmm_aac_new(void)
+{
+    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    if (d) { d->kind = CMM_KIND_AAC; d->seek_target = -1; d->stream_index = -1; d->total = -1; }
+    return d;
 }
 
 CMM_API cmm_decoder* cmm_aac_open_memory(const unsigned char* data, long long len,
@@ -1780,18 +1754,13 @@ CMM_API cmm_decoder* cmm_aac_open_memory(const unsigned char* data, long long le
 {
     if (err) *err = 0;
     if (!data || len <= 0) { if (err) *err = -1; return NULL; }
-
-    unsigned char* copy = (unsigned char*)malloc((size_t)len);
-    if (!copy) { if (err) *err = -1; return NULL; }
-    memcpy(copy, data, (size_t)len);
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { free(copy); if (err) *err = -1; return NULL; }
-    d->kind   = CMM_KIND_AAC;
-    d->buf    = copy;
+    cmm_decoder* d = cmm_aac_new();
+    if (!d) { if (err) *err = -1; return NULL; }
+    d->buf = (unsigned char*)malloc((size_t)len);       /* the caller's buffer may be pooled */
+    if (!d->buf) { free(d); if (err) *err = -1; return NULL; }
+    memcpy(d->buf, data, (size_t)len);
     d->srclen = len;
-
-    if (cmm_aac_init(d, len, channels, sampleRate, totalFrames) != 0) {
+    if (cmm_aac_open_buffered(d, channels, sampleRate, totalFrames) != 0) {
         cmm_aac_close(d); if (err) *err = -1; return NULL;
     }
     return d;
@@ -1801,44 +1770,55 @@ CMM_API cmm_decoder* cmm_aac_open_file(const wchar_t* path, int* channels,
                                        int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
-    /* Serialize the whole open — create + demux/decoder init all read the FILE*
-     * (see cmm_openlock). AAC/MP4 is rare in a music library, so full serialization
-     * of its open is negligible. */
-    cmm_openlock();
-    FILE* fp = cmm_open_path(path);
-    if (!fp) { cmm_openunlock(); if (err) *err = -1; return NULL; }
+    cmm_decoder* d = cmm_aac_new();
+    if (!d) { if (err) *err = -1; return NULL; }
 
-    long long filesize = 0;
-    if (CMM_FSEEK(fp, 0, SEEK_END) == 0) { filesize = (long long)CMM_FTELL(fp); CMM_FSEEK(fp, 0, SEEK_SET); }
-    if (filesize <= 0) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
-
-    /* Container peek: MP4 streams from the FILE* (random-access via callback);
-     * raw ADTS is read whole into memory (small; movies are always MP4). */
-    unsigned char hdr[8];
-    if (fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr)) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
-    int is_mp4 = (hdr[4] == 'f' && hdr[5] == 't' && hdr[6] == 'y' && hdr[7] == 'p');
-
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
-    if (!d) { cmm_openunlock(); fclose(fp); if (err) *err = -1; return NULL; }
-    d->kind = CMM_KIND_AAC;
-
-    if (is_mp4) {
-        d->fp = fp;                       /* demuxer reads via cmm_mp4_read */
-    } else {
-        unsigned char* copy = (unsigned char*)malloc((size_t)filesize);
-        if (!copy) { cmm_openunlock(); fclose(fp); free(d); if (err) *err = -1; return NULL; }
-        if (CMM_FSEEK(fp, 0, SEEK_SET) != 0 ||
-            fread(copy, 1, (size_t)filesize, fp) != (size_t)filesize) {
-            cmm_openunlock(); free(copy); fclose(fp); free(d); if (err) *err = -1; return NULL;
+    /* Up to CMM_BUFFER_MAX: one race-free whole-file read, then decode from memory. */
+    long long len = 0;
+    d->buf = cmm_read_whole_file(path, CMM_BUFFER_MAX, &len);
+    if (d->buf) {
+        d->srclen = len;
+        if (cmm_aac_open_buffered(d, channels, sampleRate, totalFrames) != 0) {
+            cmm_aac_close(d); if (err) *err = -1; return NULL;
         }
-        fclose(fp);
-        d->buf = copy; d->srclen = filesize;   /* fp left NULL: ADTS works in memory */
+        return d;
     }
 
-    if (cmm_aac_init(d, filesize, channels, sampleRate, totalFrames) != 0) {
-        cmm_openunlock(); cmm_aac_close(d); if (err) *err = -1; return NULL;
+    /* Bigger: an MP4 (a long recording, a film) streams over a raw handle; a giant raw
+     * ADTS file has no index to stream by, so it is read whole (to the 2 GiB read cap). */
+#ifdef _WIN32
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { free(d); if (err) *err = -1; return NULL; }
+    LARGE_INTEGER sz; unsigned char head[8]; DWORD got = 0;
+    if (!GetFileSizeEx(h, &sz) || !ReadFile(h, head, 8, &got, NULL) || got != 8) {
+        CloseHandle(h); free(d); if (err) *err = -1; return NULL;
     }
-    cmm_openunlock();
+    if (cmm_is_mp4(head, 8)) {
+        LARGE_INTEGER zero; zero.QuadPart = 0;
+        SetFilePointerEx(h, zero, NULL, FILE_BEGIN);
+        d->fh = (void*)h; d->fsize = sz.QuadPart;
+    } else {
+        CloseHandle(h);
+    }
+#else
+    FILE* fp = cmm_open_path(path);
+    if (!fp) { free(d); if (err) *err = -1; return NULL; }
+    unsigned char head[8];
+    long long fsz = 0;
+    if (CMM_FSEEK(fp, 0, SEEK_END) == 0) { fsz = CMM_FTELL(fp); CMM_FSEEK(fp, 0, SEEK_SET); }
+    if (fread(head, 1, 8, fp) != 8) { fclose(fp); free(d); if (err) *err = -1; return NULL; }
+    CMM_FSEEK(fp, 0, SEEK_SET);
+    if (cmm_is_mp4(head, 8)) { d->fp = fp; d->fsize = fsz; } else fclose(fp);
+#endif
+    int ok;
+    if (d->fh || d->fp) {
+        ok = cmm_mp4_open(d, channels, sampleRate, totalFrames) == 0;
+    } else {
+        d->buf = cmm_read_whole_file(path, 0, &len);
+        ok = d->buf && (d->srclen = len, cmm_adts_open(d, channels, sampleRate, totalFrames) == 0);
+    }
+    if (!ok) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
     return d;
 }
 
@@ -1849,15 +1829,14 @@ CMM_API int cmm_aac_read_float(cmm_decoder* d, float* out, int maxFrames)
     int produced = 0;
     while (produced < maxFrames) {
         if (d->pcm_pos >= d->pcm_fill) {
-            int r = cmm_aac_decode_one_au(d);
+            int r = cmm_aac_decode_next(d);
             if (r < 0)  return produced > 0 ? produced : -1;
             if (r == 0) break;   /* EOF */
-            if (d->seek_skip > 0) {
-                long long avail = d->pcm_fill / d->channels;
-                long long drop  = d->seek_skip < avail ? d->seek_skip : avail;
-                d->pcm_pos += (int)(drop * d->channels);
-                d->seek_skip -= drop;
-                continue;        /* re-check (frame may be fully discarded) */
+            if (d->seek_target >= 0) {                /* discard to the exact seek frame */
+                if (d->frame_pos + r <= d->seek_target) { d->pcm_pos = d->pcm_fill; continue; }
+                long long drop = d->seek_target - d->frame_pos;
+                if (drop > 0) d->pcm_pos = (int)(drop * d->channels);
+                d->seek_target = -1;
             }
         }
         int availFrames = (d->pcm_fill - d->pcm_pos) / d->channels;
@@ -1874,51 +1853,51 @@ CMM_API int cmm_aac_read_float(cmm_decoder* d, float* out, int maxFrames)
 
 CMM_API int cmm_aac_seek(cmm_decoder* d, long long frame)
 {
-    if (!d || d->kind != CMM_KIND_AAC || d->frame_size <= 0) return -1;
+    if (!d || d->kind != CMM_KIND_AAC || !d->avc || d->out_rate <= 0) return -1;
+    if (d->src_read) return -1;   /* a Matroska stream seeks by rebuilding (cmm_container_seek) */
     if (frame < 0) frame = 0;
+    if (d->total > 0 && frame > d->total) frame = d->total;
 
     d->pcm_fill = d->pcm_pos = 0;
-    d->clr_hist = 1;   /* clear filterbank history on the next decode */
+    d->draining = 0; d->bad = 0;
+    avcodec_flush_buffers(d->avc);
 
-    if (d->mp4) {
-        long long target = frame / d->frame_size;
-        if (target >= d->aac_count) target = d->aac_count > 0 ? d->aac_count - 1 : 0;
-        long long start = target > 0 ? target - 1 : 0;   /* one AU of overlap warmup */
-        d->aac_sample = (unsigned)start;
-        d->seek_skip  = frame - start * d->frame_size;    /* discard down to exact frame */
-    } else {
-        /* ADTS has no index: restart from the audio-data origin and discard
-         * forward. Reopen the decoder to flush its internal input + history. */
-        long long start = 0;
-        if (d->srclen >= 10 && d->buf[0] == 'I' && d->buf[1] == 'D' && d->buf[2] == '3') {
-            start = 10 + (((long long)(d->buf[6] & 0x7f) << 21) |
-                          ((long long)(d->buf[7] & 0x7f) << 14) |
-                          ((long long)(d->buf[8] & 0x7f) << 7)  |
-                           (long long)(d->buf[9] & 0x7f));
+    if (d->fmt) {
+        /* Land CMM_AAC_PREROLL_FRAMES early so the frame before the target rebuilds the
+         * MDCT overlap, then discard forward to the exact frame by timestamp. */
+        long long pre = frame - (long long)CMM_AAC_PREROLL_FRAMES * d->frame_size;
+        if (pre < 0) pre = 0;
+        int64_t ts = (d->have_pts0 ? d->pts0 : 0) +
+                     av_rescale_q(pre, (AVRational){ 1, d->out_rate }, d->st_tb);
+        if (av_seek_frame(d->fmt, d->stream_index, ts, AVSEEK_FLAG_BACKWARD) < 0) {
+            if (av_seek_frame(d->fmt, d->stream_index, d->have_pts0 ? d->pts0 : 0, AVSEEK_FLAG_BACKWARD) < 0)
+                return -1;
+            pre = 0;
         }
-        d->adts_pos = start;
-        d->seek_skip = frame;
-        if (d->aac) aacDecoder_Close(d->aac);
-        d->aac = aacDecoder_Open(TT_MP4_ADTS, 1);
-        if (!d->aac) return -1;
-        d->clr_hist = 0;   /* fresh decoder; nothing to clear */
+        d->next_pos = pre;              /* used only if frames come back without timestamps */
+    } else {
+        d->adts_pos = d->adts_start;    /* ADTS has no index: restart and discard forward */
+        d->next_pos = 0;
     }
+    d->seek_target = frame;
     return 0;
 }
 
 CMM_API void cmm_aac_close(cmm_decoder* d)
 {
     if (!d) return;
-    if (d->aac)   aacDecoder_Close(d->aac);
-    if (d->mp4) { MP4D_close(d->mp4); free(d->mp4); }
-    if (d->frag)  free(d->frag);   /* fragmented-MP4 sample index */
-    if (d->moov_buf) free(d->moov_buf);
-    if (d->aubuf) free(d->aubuf);
-    if (d->sbuf)  free(d->sbuf);   /* streaming-ADTS refill window */
-    if (d->i16)   free(d->i16);
-    if (d->pcm)   free(d->pcm);
-    if (d->buf)   free(d->buf);
-    if (d->fp)    fclose(d->fp);
+    if (d->frm)  av_frame_free(&d->frm);
+    if (d->pkt)  av_packet_free(&d->pkt);
+    if (d->avc)  avcodec_free_context(&d->avc);
+    if (d->fmt)  avformat_close_input(&d->fmt);      /* leaves our custom AVIO alone */
+    if (d->avio) { av_freep(&d->avio->buffer); avio_context_free(&d->avio); }
+    if (d->sbuf) free(d->sbuf);
+    if (d->pcm)  free(d->pcm);
+    if (d->buf)  free(d->buf);
+#ifdef _WIN32
+    if (d->fh)   CloseHandle((HANDLE)d->fh);
+#endif
+    if (d->fp)   fclose(d->fp);
     free(d);
 }
 
@@ -2297,29 +2276,24 @@ static void close_inner(cmm_decoder* in)
     }
 }
 
-/* Open a streaming AAC (ADTS) inner decoder that pulls its bytes from `cs`.
- * The refill-fed ADTS branch in cmm_aac_decode_one_au does the framing. */
+/* Open a streaming AAC (ADTS) inner decoder that pulls its bytes from `cs`: our ADTS framing
+ * over the refill window, FFmpeg's decoder underneath (cmm_aac_decode_next). */
 static cmm_decoder* cmm_aac_open_stream(container_stream* cs, int* channels,
                                         int* sampleRate, long long* totalFrames, int* err)
 {
     if (err) *err = 0;
-    cmm_decoder* d = (cmm_decoder*)calloc(1, sizeof(cmm_decoder));
+    cmm_ff_init();
+    cmm_decoder* d = cmm_aac_new();
     if (!d) { if (err) *err = -1; return NULL; }
-    d->kind = CMM_KIND_AAC;
     d->src_read = cstream_read; d->src_ud = cs;
-    d->scap = 32 * 1024;
+    d->scap = 32 * 1024;                          /* > the 8191-byte ADTS frame limit */
     d->sbuf = (unsigned char*)malloc((size_t)d->scap);
-    d->i16  = (short*)malloc(sizeof(short) * CMM_AAC_MAX_SAMPLES);
-    d->pcm  = (float*)malloc(sizeof(float) * CMM_AAC_MAX_SAMPLES);
-    if (!d->sbuf || !d->i16 || !d->pcm) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
-    d->aac = aacDecoder_Open(TT_MP4_ADTS, 1);
-    if (!d->aac) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
-    if (cmm_aac_decode_one_au(d) <= 0) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
-    int sr = 0; { CStreamInfo* info = aacDecoder_GetStreamInfo(d->aac); sr = info ? info->sampleRate : 0; }
-    if (sr <= 0 || d->channels <= 0 || d->frame_size <= 0) { cmm_aac_close(d); if (err) *err = -1; return NULL; }
+    if (!d->sbuf || cmm_aac_open_codec(d, NULL, AV_CODEC_ID_AAC) != 0 || cmm_aac_first_frame(d) != 0) {
+        cmm_aac_close(d); if (err) *err = -1; return NULL;
+    }
     if (channels)    *channels    = d->channels;
-    if (sampleRate)  *sampleRate  = sr;
-    if (totalFrames) *totalFrames = cs->ai.duration_sec > 0 ? (long long)(cs->ai.duration_sec * sr) : 0;
+    if (sampleRate)  *sampleRate  = d->out_rate;
+    if (totalFrames) *totalFrames = cs->ai.duration_sec > 0 ? (long long)(cs->ai.duration_sec * d->out_rate) : 0;
     return d;
 }
 
@@ -2420,6 +2394,14 @@ static int cs_open_demux(container_stream* cs)
         int obj = (cp[0] >> 3) & 0x1F;
         int fidx = ((cp[0] & 0x07) << 1) | ((cp[1] >> 7) & 0x01);
         int ch = (cp[1] >> 3) & 0x0F;
+        /* Explicitly signalled HE-AAC (5 = SBR, 29 = PS) names the EXTENSION as its object
+         * type; the core is AAC-LC, written after the extension's rate index. ADTS has room
+         * for the core profile only, and the decoder finds the SBR/PS data on its own. Taking
+         * the 5 at face value wrote profile (5-1)&3 = 0, AAC Main, into every frame header. */
+        if ((obj == 5 || obj == 29) && fidx != 15 && ai.codec_private_len >= 3) {
+            int core = (cp[2] >> 2) & 0x1F;    /* after ext rate index: cp[1] bits 2..0 + cp[2] bit 7 */
+            obj = (core >= 1 && core <= 4) ? core : 2;
+        }
         if (obj < 1) obj = 2;
         if (ch < 1)  ch = ai.channels > 0 ? ai.channels : 2;
         cs->aac_profile  = (obj - 1) & 0x03;

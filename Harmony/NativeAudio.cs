@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace CMM
 {
     // ─────────────────────────────────────────────────────────────────────────
-    // NATIVE AUDIO  (CMM_Decoder.dll — libopusfile + libvorbisfile + dr_flac/mp3/wav + fdk-aac/minimp4)
+    // NATIVE AUDIO  (CMM_Decoder.dll — libopusfile + libvorbisfile + dr_flac/mp3/wav + FFmpeg aac/alac/mov)
     // ─────────────────────────────────────────────────────────────────────────
     // P/Invoke surface for the native decode shim, covering EVERY supported format:
     // Opus / Vorbis / FLAC / MP3 / WAV / AIFF / AAC / Matroska-WebM. Consumers work
@@ -74,8 +74,8 @@ namespace CMM
 
         // ── Native heap accounting (ABI 52, see CMM_Decoder/cmm_mem.c) ──────────────
         // The DLL links with -Wl,--wrap on malloc/free/realloc/calloc, so these counters cover
-        // every allocation in the native image -- ours and the static libs' (fdk-aac, vorbis,
-        // opus, ogg, libstdc++). `live` is the leak-hunt number the working set could never give:
+        // every allocation in the native image -- ours and the static libs' (FFmpeg, through its
+        // _aligned_* calls, vorbis, opus, ogg). `live` is the leak-hunt number the working set could never give:
         // flat across hours is a clean bill of health, rising is a real native leak. Any argument
         // may be IntPtr.Zero; the managed wrapper below passes them all.
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -252,8 +252,8 @@ namespace CMM
         public static bool Available => NativeOpus.Available;
     }
 
-    // AAC backend (fdk-aac + minimp4, one handle for MP4/M4A and raw ADTS) in the
-    // same CMM_Decoder.dll. Shares NativeOpus's load probe, so Available forwards.
+    // AAC/ALAC backend (FFmpeg: mov demuxer + aac/alac decoders; one handle for the MP4
+    // family and raw ADTS) in the same CMM_Decoder.dll. Shares NativeOpus's load probe, so Available forwards.
     internal static class NativeAac
     {
         const string Dll = "CMM_Decoder";

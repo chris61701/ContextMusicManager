@@ -106,7 +106,7 @@ foreach ($ctx in $contexts) {
     $a1    = $audioPool[$rng.Next($audioPool.Count)]
     $a2    = $audioPool[$rng.Next($audioPool.Count)]
     # '.fmp4' is guaranteed in every context alongside the video containers: fragmented mp4 is
-    # its own demux path (our fragment index, not minimp4's sample tables) and went unnoticed as
+    # its own demux path (moof/trun fragments, not 'moov' sample tables) and went unnoticed as
     # broken precisely because nothing in the corpus had that shape.
     $formats = @('.mp4','.m4v','.mkv','.fmp4', $a1, $a2)   # containers guaranteed + two rotating audio
     while ($formats.Count -lt $TracksPerContext) { $formats += $audioPool[$rng.Next($audioPool.Count)] }

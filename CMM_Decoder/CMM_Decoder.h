@@ -390,17 +390,17 @@ CMM_API int cmm_wav_seek(cmm_decoder* d, long long frame);
 /* Free the decoder and the copied source buffer. NULL-safe. */
 CMM_API void cmm_wav_close(cmm_decoder* d);
 
-/* ── AAC (fdk-aac + minimp4) ──────────────────────────────────────────────
- * Covers AAC-LC and HE-AAC in either an MP4/M4A container (demuxed by minimp4,
- * which also locates the audio track inside an MP4 that carries video) or a raw
+/* ── AAC / ALAC (FFmpeg: mov demuxer + aac/alac decoders) ──────────────────────────────────────────────
+ * Covers AAC-LC, HE-AAC (v1/v2) and ALAC in the MP4 family (.m4a/.mp4/.m4v/.3gp/.mov,
+ * ordinary or fragmented, including the audio track of a video) and AAC in a raw
  * ADTS .aac stream. A single open detects the container from the leading bytes;
- * same handle/lifetime contract as the others. fdk-aac decodes to INT16 PCM
- * which the shim converts to interleaved f32, and the native sample rate is
- * preserved (HE-AAC's SBR rate is reported after the first frame is decoded).
- * The shim COPIES `data` for memory opens; file opens stream an MP4 from disk
- * (raw ADTS is read whole into memory — those files are small). For ADTS, which
- * has no seek index, *totalFrames is estimated by walking the frame headers;
- * seeking restarts from the stream origin and decodes forward. */
+ * same handle/lifetime contract as the others. Output is interleaved f32 at the
+ * native rate (HE-AAC's SBR rate is known after the first frame is decoded), and
+ * MP4 encoder priming/padding is trimmed (gapless) when the file records it.
+ * Memory opens COPY `data`. File opens read the whole file (raw Win32) up to
+ * CMM_BUFFER_MAX and stream larger MP4s over a raw HANDLE. *totalFrames is exact:
+ * from the MP4 index / edit list / iTunSMPB, or for ADTS by walking frame headers;
+ * ADTS seeks restart from the stream origin and decode forward. */
 CMM_API cmm_decoder* cmm_aac_open_memory(const unsigned char* data, long long len,
                                          int* channels, int* sampleRate,
                                          long long* totalFrames, int* err);

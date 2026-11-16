@@ -44,11 +44,10 @@ namespace CMM
             {
                 ".mp3", ".wav", ".wave", ".aiff", ".aif", ".ogg", ".oga", ".opus", ".flac",
                 ".m4a", ".mp4", ".aac",
-                // ISO-BMFF video containers — the same box structure minimp4 already walks
-                // for .mp4, so an AAC audio track inside one decodes via the AAC reader.
-                // (.mov is QuickTime-flavoured ISO-BMFF — esds nested in a 'wave' atom that
-                // minimp4 doesn't demux — so it's intentionally excluded for now.)
-                ".m4v", ".3gp",
+                // ISO-BMFF video containers. FFmpeg's mov demuxer (inside CMM_Decoder) reads
+                // all of them, QuickTime .mov included, and plays the AAC or ALAC audio track
+                // while skipping the video without reading it.
+                ".m4v", ".3gp", ".mov",
                 // Matroska / WebM — demuxed + remuxed into an existing codec backend by
                 // the native container reader (NativeContainerReader / cmm_container_*).
                 ".mkv", ".webm",
@@ -175,7 +174,7 @@ namespace CMM
             if (ext == ".wav" || ext == ".wave" || ext == ".aiff" || ext == ".aif")
                                                  return ReaderKind.Wav;
             if (ext == ".m4a" || ext == ".mp4" || ext == ".aac" ||
-                ext == ".m4v" || ext == ".3gp")  return ReaderKind.Aac;
+                ext == ".m4v" || ext == ".3gp" || ext == ".mov") return ReaderKind.Aac;
             if (ext == ".mkv" || ext == ".webm") return ReaderKind.Container;
             return ReaderKind.Unknown;
         }

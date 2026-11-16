@@ -471,8 +471,9 @@ namespace CMM
             // the missing-entry report does not mention it; and the station has other tracks, so
             // the "no playable tracks" warning never fires.
             //
-            // Found by probing a real 3,381-track library: 25 of them are ALAC in an .m4a
-            // container, which this decoder does not handle. Nobody could have known.
+            // Found by probing a real 3,381-track library: 25 of them were ALAC in an .m4a
+            // container, which the decoder did not handle then (it does since the move to
+            // FFmpeg). Nobody could have known, and the next unsupported shape will be as quiet.
             //
             // RootReachable is already the line between "the drive went away" and "this file is
             // genuinely undecodable", and only the second is worth a word.
@@ -587,7 +588,7 @@ namespace CMM
                 if (_undecodableCount <= MaxUndecodableNamed)
                     Log.Warning($"[CMM] '{Path.GetFileName(file)}' is there but nothing could decode it — "
                               + "it will be skipped every time the station reaches it. Check the format "
-                              + "(an .m4a holding ALAC rather than AAC is the common one); `cmm roots` "
+                              + "(a video whose audio is not AAC, ALAC or a supported codec, for example); `cmm roots` "
                               + "says where the file came from.");
                 else if (_undecodableCount == MaxUndecodableNamed + 1)
                     Log.Warning($"[CMM] more than {MaxUndecodableNamed} tracks will not decode — "

@@ -175,7 +175,7 @@
 <ul>
   <li>Decoding, mixing and output all run in the mod's own engine (CMM_Decoder.dll) on threads the mod owns, completely outside the frame loop. CMM doesn't use Unity's audio system at all</li>
   <li><strong>Crossfades don't get clobbered.</strong> The mixer holds up to <strong>four simultaneous voices</strong>, so a new track can start while three older ones finish fading naturally. Ambient → tension → combat in two seconds sounds like one continuous handoff instead of an abrupt cut. If transitions pile up past the limit it drops only the <em>quietest</em> voice, already nearly silent at the tail of its fade — the incoming track is never the one sacrificed</li>
-  <li><strong>Every format decoded natively</strong> — ogg, opus, flac, mp3, wav, m4a/aac, and the audio inside mp4/m4v/mkv/webm containers</li>
+  <li><strong>Every format decoded natively</strong> — ogg, opus, flac, mp3, wav, m4a/aac (ALAC too), and the audio inside mp4/m4v/mov/mkv/webm containers</li>
   <li><strong>Per-track loudness normalization (EBU R128)</strong> — measured once per track and cached, with a manual per-track trim on a keybind</li>
   <li><strong>Music survives loading freezes</strong> — tracks keep playing, and even advance, while the game's main thread is frozen during world load</li>
   <li><strong>Device changes are handled</strong> — unplugging a headset or switching the default output no longer strands the music</li>
@@ -328,7 +328,7 @@ No. The personal radio works on every supported version, including the alphas th
 Not yet. The native audio engine currently ships as a Windows library, so Windows is the only officially supported platform. Linux support is planned for 1.0.6.</p>
 
 <p><strong>Q: What audio formats are supported?</strong><br>
-MP3, OGG (Vorbis), Opus, FLAC, WAV/AIFF, and AAC — including <em>.m4a</em> / <em>.mp4</em>, and even the audio track of an MP4/MKV/WebM video.</p>
+MP3, OGG (Vorbis), Opus, FLAC, WAV/AIFF, AAC and Apple Lossless (ALAC) — including <em>.m4a</em> / <em>.mp4</em>, and even the audio track of an MP4/MOV/MKV/WebM video.</p>
 
 <p><br>
 <strong>Q: Can I really change music without restarting?</strong><br>
@@ -396,8 +396,7 @@ AI was used to help write this description page, and it amounts to ~80% of the m
   <li><strong>libvorbis / libvorbisfile</strong> (BSD) — <a href="http://Xiph.Org">Xiph.Org</a> Foundation — OGG Vorbis decoding. <a href="https://github.com/xiph/vorbis">github.com/xiph/vorbis</a></li>
   <li><strong>libogg</strong> (BSD) — <a href="http://Xiph.Org">Xiph.Org</a> Foundation — Ogg container framing used by Opus and Vorbis. <a href="https://github.com/xiph/ogg">github.com/xiph/ogg</a></li>
   <li><strong>dr_flac / dr_mp3 / dr_wav</strong> (public domain) — David Reid (mackron) — FLAC, MP3, and WAV/AIFF decoding. <a href="https://github.com/mackron/dr_libs">github.com/mackron/dr_libs</a></li>
-  <li><strong>fdk-aac</strong> (Fraunhofer FDK AAC license) — Fraunhofer IIS — AAC-LC / HE-AAC decoding. <a href="https://github.com/mstorsjo/fdk-aac">github.com/mstorsjo/fdk-aac</a></li>
-  <li><strong>minimp4</strong> (CC0) — Lieff — MP4 / M4A container demuxing. <a href="https://github.com/lieff/minimp4">github.com/lieff/minimp4</a></li>
+  <li><strong>FFmpeg</strong> (LGPL 2.1 or later) — the FFmpeg developers — MP4 / M4A demuxing and AAC / ALAC decoding. <a href="https://ffmpeg.org">ffmpeg.org</a></li>
   <li><strong>miniaudio</strong> (public domain) — David Reid (mackron) — cross-platform audio playback. <a href="https://github.com/mackron/miniaudio">github.com/mackron/miniaudio</a></li>
 </ul>
 

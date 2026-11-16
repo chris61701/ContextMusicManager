@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>      /* _msize */
+#include <stdint.h>      /* uintptr_t */
 #include "cmm_decoder.h"
 
 void *__real_malloc(size_t n);
@@ -90,6 +91,65 @@ void __wrap_free(void *p)
 {
     if (p) note_sub(_msize(p));
     __real_free(p);
+}
+
+/* ── FFmpeg's heap (cmm_ff_*) ─────────────────────────────────────────────────
+ * FFmpeg is built with --malloc-prefix=cmm_ff_ (build_ffmpeg.sh), so every av_malloc,
+ * av_realloc and av_free in it lands here instead of in msvcrt. That matters because the
+ * obvious route does not work: left alone, FFmpeg uses msvcrt's _aligned_malloc, which mingw
+ * declares dllimport, so the call goes through __imp__aligned_malloc and -Wl,--wrap never
+ * sees it. Checked, not assumed: with that build a 4-hour MP4 open showed 8.7 KB live --
+ * our own decoder struct -- and none of FFmpeg's index, which is megabytes.
+ *
+ * Each block is carved out of __wrap_malloc, so it is counted like everything else, and a
+ * small header in front of the returned pointer keeps the raw pointer and the size. A
+ * header is safe HERE, unlike in the plain wraps above: these functions are called only by
+ * FFmpeg's mem.c, and every block it frees through cmm_ff_free was made by cmm_ff_*.
+ * Alignment is 64 bytes throughout: FFmpeg's AVX-512 code expects that from av_malloc, and
+ * giving it to realloc'd blocks too costs nothing. */
+typedef struct { void *raw; size_t size; } cmm_ff_hdr;
+#define CMM_FF_ALIGN 64
+
+static void *cmm_ff_alloc(size_t size, size_t align)
+{
+    if (align < CMM_FF_ALIGN) align = CMM_FF_ALIGN;
+    if (align & (align - 1)) return NULL;                         /* power of two only */
+    size_t slack = align - 1 + sizeof(cmm_ff_hdr);
+    if (size > (size_t)-1 - slack) return NULL;
+    unsigned char *raw = (unsigned char *)__wrap_malloc(size + slack);
+    if (!raw) return NULL;
+    uintptr_t a = ((uintptr_t)(raw + sizeof(cmm_ff_hdr)) + (align - 1)) & ~(uintptr_t)(align - 1);
+    cmm_ff_hdr *h = (cmm_ff_hdr *)a - 1;
+    h->raw = raw; h->size = size;
+    return (void *)a;
+}
+
+void cmm_ff_free(void *p)
+{
+    if (p) __wrap_free(((cmm_ff_hdr *)p - 1)->raw);
+}
+
+void *cmm_ff_malloc(size_t size)                  { return cmm_ff_alloc(size, CMM_FF_ALIGN); }
+void *cmm_ff_memalign(size_t align, size_t size)  { return cmm_ff_alloc(size, align); }
+
+int cmm_ff_posix_memalign(void **out, size_t align, size_t size)
+{
+    void *p = cmm_ff_alloc(size, align);
+    if (!p) return 12;                                            /* ENOMEM */
+    *out = p;
+    return 0;
+}
+
+void *cmm_ff_realloc(void *p, size_t size)
+{
+    if (!p) return cmm_ff_alloc(size, CMM_FF_ALIGN);
+    if (!size) { cmm_ff_free(p); return NULL; }
+    void *q = cmm_ff_alloc(size, CMM_FF_ALIGN);
+    if (!q) return NULL;                                          /* p untouched, as realloc */
+    size_t old = ((cmm_ff_hdr *)p - 1)->size;
+    memcpy(q, p, old < size ? old : size);
+    cmm_ff_free(p);
+    return q;
 }
 
 /* Live snapshot. Any pointer may be NULL. `live` is the number that matters for a leak

@@ -524,9 +524,10 @@ namespace CMM
                 case ".aiff":
                 case ".aif":  label = "AIFF"; break;
                 case ".m4a":
-                case ".mp4":  label = "AAC (MP4)"; break;
+                case ".mp4":  label = "MP4 (AAC/ALAC)"; break;
                 case ".m4v":
-                case ".3gp":  label = "AAC (video)"; break;
+                case ".3gp":
+                case ".mov":  label = "MP4 (video)"; break;
                 case ".webm": label = "WebM"; break;
                 case ".mkv":  label = "Matroska"; break;
                 case ".aac":  label = "AAC"; break;

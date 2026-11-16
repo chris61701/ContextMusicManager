@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 # Prebuild build/vorbis/libvorbis.a — the libvorbis codec + libvorbisfile
 # (ov_*) high-level file API, from the vendored third_party/vorbis source.
-# Run once (like the opus/ogg/fdk-aac cmake prebuilds); build_dll.sh just links
+# Run once (like the opus/ogg cmake prebuilds and build_ffmpeg.sh); build_dll.sh just links
 # the resulting .a. Replaces the header-only stb_vorbis (no callback/stream API).
 #
 # Source list is libvorbis_la_SOURCES + vorbisfile.c from lib/Makefile.am

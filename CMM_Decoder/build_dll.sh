@@ -10,9 +10,10 @@
 #       that SEGVs on Windows x64; must be off. -mstackrealign keeps SSE happy.
 #   -static : DLL needs only KERNEL32/ADVAPI32/msvcrt (no libgcc/ssp to ship).
 #   -DOP_DISABLE_HTTP : opusfile without the HTTP/SSL stack.
-#   -Wl,--wrap=malloc,free,realloc,calloc : routes EVERY allocation in this link --
-#       ours and the static libs' (fdk-aac, vorbis, opus, ogg, libstdc++'s operator
-#       new) -- through cmm_mem.c's counters, so cmm_meminfo() can answer whether the
+#   -Wl,--wrap=malloc,free,realloc,calloc : routes EVERY allocation in this link -- ours
+#       and the static libs' (vorbis, opus, ogg; FFmpeg's arrives through its
+#       --malloc-prefix=cmm_ff_ hooks, also in cmm_mem.c) -- through cmm_mem.c's
+#       counters, so cmm_meminfo() can answer whether the
 #       NATIVE heap is leaking. Working set could never resolve that: four seeds of
 #       identical code gave RSS slopes from -1.51 to +2.49 MB/sim-h. Drop these flags
 #       and cmm_meminfo silently reports zero rather than failing to link.
@@ -21,9 +22,9 @@
 #       _wassert → abort() → the game hard-crashes (STATUS_FATAL_APP_EXIT 0x40000015,
 #       no managed stack — confirmed from a crash dump). Release decoders MUST ship
 #       with asserts off (the upstream-intended config); recoverable errors are already
-#       reported via return values, not assert. Covers dr_flac/mp3/wav, minimp4,
-#       opusfile (every TU compiled here); libvorbis is prebuilt with NDEBUG too
-#       (build_vorbis.sh).
+#       reported via return values, not assert. Covers dr_flac/mp3/wav and opusfile
+#       (every TU compiled here); libvorbis and FFmpeg are prebuilt with NDEBUG too
+#       (build_vorbis.sh, build_ffmpeg.sh).
 # ──────────────────────────────────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")"
@@ -40,9 +41,8 @@ INC=(
   -Ibuild/ogg/include          # generated ogg/config_types.h
   -Ithird_party/dr_libs        # dr_flac.h
   -Ithird_party/vorbis/include # vorbis/vorbisfile.h
-  -Ithird_party/fdk-aac/libAACdec/include   # aacdecoder_lib.h
-  -Ithird_party/fdk-aac/libSYS/include      # FDK_audio.h / machine_type.h
-  -Ithird_party/minimp4        # minimp4.h
+  -Ithird_party/ffmpeg         # libavformat/ libavcodec/ libavutil/ headers
+  -Ibuild/ffmpeg               # generated libavutil/avconfig.h (build_ffmpeg.sh)
   -Ithird_party/miniaudio      # miniaudio.h (audio OUTPUT)
   -I.                          # CMM_Decoder.h
 )
@@ -53,7 +53,6 @@ SRC=(
   dr_flac_impl.c
   dr_mp3_impl.c
   dr_wav_impl.c
-  minimp4_impl.c
   miniaudio_impl.c             # the one MINIAUDIO_IMPLEMENTATION TU
   cmm_out.c                    # cmm_out_* playback shim
   cmm_mix.c                    # cmm_mix_* native mixer (producer loop, GC-immune)
@@ -67,8 +66,9 @@ SRC=(
   third_party/opusfile/src/stream.c
 )
 
-# libfdk-aac.a is C++ (built once via cmake; see native-audio-decode memory), so
-# the link pulls libstdc++ — kept static so the DLL still ships standalone.
+# FFmpeg (build_ffmpeg.sh) links in dependency order: avformat -> avcodec -> avutil. Its
+# system needs are bcrypt (avutil's random seed), ole32/user32 and libatomic, all static
+# or OS-provided, so the DLL still ships standalone.
 mkdir -p "$(dirname "$OUT")"
 "$GCC" -O2 -shared -o "$OUT" \
   $EXTRA_CFLAGS \
@@ -77,8 +77,10 @@ mkdir -p "$(dirname "$OUT")"
   -DMA_NO_RESOURCE_MANAGER -DMA_NO_NODE_GRAPH \
   "${INC[@]}" \
   "${SRC[@]}" \
-  build/fdk-aac/libfdk-aac.a build/vorbis/libvorbis.a build/opus/libopus.a build/ogg/libogg.a \
+  build/ffmpeg/libavformat/libavformat.a build/ffmpeg/libavcodec/libavcodec.a build/ffmpeg/libavutil/libavutil.a \
+  build/vorbis/libvorbis.a build/opus/libopus.a build/ogg/libogg.a \
   -Wl,--wrap=malloc,--wrap=free,--wrap=realloc,--wrap=calloc \
-  -lm -lstdc++ -static -fno-stack-protector -mstackrealign
+  -lbcrypt -lole32 -luser32 -latomic \
+  -lm -static -fno-stack-protector -mstackrealign
 
 echo "built: $OUT"

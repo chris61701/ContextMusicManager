@@ -162,7 +162,7 @@ Nearly the entire audio pipeline lives outside the game's managed (C#/Unity) env
 
 - Decoding, mixing and output all run in the mod's own engine (CMM_Decoder.dll) on threads the mod owns, completely outside the frame loop. CMM doesn't use Unity's audio system at all
 - **Crossfades don't get clobbered.** The mixer holds up to **four simultaneous voices**, so a new track can start while three older ones finish fading naturally. Ambient → tension → combat in two seconds sounds like one continuous handoff instead of an abrupt cut. If transitions pile up past the limit it drops only the *quietest* voice, already nearly silent at the tail of its fade — the incoming track is never the one sacrificed
-- **Every format decoded natively** — ogg, opus, flac, mp3, wav, m4a/aac, and the audio inside mp4/m4v/mkv/webm containers
+- **Every format decoded natively** — ogg, opus, flac, mp3, wav, m4a/aac (ALAC too), and the audio inside mp4/m4v/mov/mkv/webm containers
 - **Per-track loudness normalization (EBU R128)** — measured once per track and cached, with a manual per-track trim on a keybind
 - **Music survives loading freezes** — tracks keep playing, and even advance, while the game's main thread is frozen during world load
 - **Device changes are handled** — unplugging a headset or switching the default output no longer strands the music
@@ -294,7 +294,7 @@ No. The personal radio works on every supported version, including the alphas th
 Not yet. The native audio engine currently ships as a Windows library, so Windows is the only officially supported platform. Linux support is planned for 1.0.6.
 
 **Q: What audio formats are supported?**\
-MP3, OGG (Vorbis), Opus, FLAC, WAV/AIFF, and AAC — including *.m4a* / *.mp4*, and even the audio track of an MP4/MKV/WebM video.
+MP3, OGG (Vorbis), Opus, FLAC, WAV/AIFF, AAC and Apple Lossless (ALAC) — including *.m4a* / *.mp4*, and even the audio track of an MP4/MOV/MKV/WebM video.
 
 \
 **Q: Can I really change music without restarting?**\
@@ -355,8 +355,7 @@ Audio is decoded and played by a small native library (CMM_Decoder.dll) bundled 
 - **libvorbis / libvorbisfile** (BSD) — [Xiph.Org](http://Xiph.Org) Foundation — OGG Vorbis decoding. [github.com/xiph/vorbis](https://github.com/xiph/vorbis)
 - **libogg** (BSD) — [Xiph.Org](http://Xiph.Org) Foundation — Ogg container framing used by Opus and Vorbis. [github.com/xiph/ogg](https://github.com/xiph/ogg)
 - **dr_flac / dr_mp3 / dr_wav** (public domain) — David Reid (mackron) — FLAC, MP3, and WAV/AIFF decoding. [github.com/mackron/dr_libs](https://github.com/mackron/dr_libs)
-- **fdk-aac** (Fraunhofer FDK AAC license) — Fraunhofer IIS — AAC-LC / HE-AAC decoding. [github.com/mstorsjo/fdk-aac](https://github.com/mstorsjo/fdk-aac)
-- **minimp4** (CC0) — Lieff — MP4 / M4A container demuxing. [github.com/lieff/minimp4](https://github.com/lieff/minimp4)
+- **FFmpeg** (LGPL 2.1 or later) — the FFmpeg developers — MP4 / M4A demuxing and AAC / ALAC decoding. [ffmpeg.org](https://ffmpeg.org)
 - **miniaudio** (public domain) — David Reid (mackron) — cross-platform audio playback. [github.com/mackron/miniaudio](https://github.com/mackron/miniaudio)
 
 Full license texts are included in *THIRD_PARTY_NOTICES.txt* inside the mod download.
