@@ -2,9 +2,10 @@
 
 All notable changes to Context Music Manager are documented here.
 
-## 1.0.5b — RC1 built 2026-11-06, unreleased
+## 1.0.5b — RC2 built 2026-11-15, unreleased
 
-Packaged for testing as **RC1**. ModInfo carries `1.0.5.2` (the letter is the name people read,
+Packaged for testing as **RC2** (RC1 was built 2026-11-06). RC2 is the first build made on
+GitHub from the public source. ModInfo carries `1.0.5.2` (the letter is the name people read,
 the fourth component is the number the game reads; see 1.0.5a below). Everything listed under
 1.0.5a is included.
 

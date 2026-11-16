@@ -1,0 +1,155 @@
+# Builds the RELEASE ZIP on GitHub: CMM_Decoder.dll from source (build-decoder.yml, signed once
+# SignPath is set up), the mod DLL, and the packaged Mods\ContextMusicManager folder.
+#
+# The mod compiles against the game's own assemblies, which are not ours to put in a public repo.
+# They come from the 7 Days to Die DEDICATED SERVER instead (Steam app 294420), which Steam serves
+# to anonymous logins: DepotDownloader fetches just the 14 DLLs the build references, into the
+# runner's temp folder, and they are never stored or published. The server ships the same
+# Assembly-CSharp as the client, so the build is the one a local Release build produces.
+#
+# Triggers:
+#   * pushing a tag  v1.0.5b-rc2  -> builds "1.0.5b RC2" and opens a DRAFT GitHub release with the
+#     zip attached. Nothing is published until someone presses Publish on that draft.
+#   * Actions tab -> Release build -> Run workflow, with a name -> builds the zip as an artifact
+#     only, no release.
+name: Release build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: 'The name people read, e.g. 1.0.5b RC2 (the zip is named after it)'
+        required: true
+
+permissions:
+  contents: write     # the draft release
+  actions: read
+
+jobs:
+  decoder:
+    uses: ./.github/workflows/build-decoder.yml
+    secrets: inherit
+
+  mod:
+    needs: decoder
+    runs-on: windows-latest
+    env:
+      # The game version the release compiles against; must match GameVersion in the csproj.
+      # Steam's public server branch is the current release. When it moves past this version,
+      # set SERVER_BRANCH to the matching beta branch name (as shown in Steam's Betas tab).
+      SERVER_BRANCH: ''
+      DEPOTDOWNLOADER: https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-windows-x64.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release name
+        id: name
+        shell: pwsh
+        run: |
+          $n = '${{ inputs.release_name }}'
+          if (-not $n) {
+            # v1.0.5b-rc2 -> 1.0.5b RC2
+            $n = '${{ github.ref_name }}'.Substring(1) -replace '-rc', ' RC'
+          }
+          "value=$n" >> $env:GITHUB_OUTPUT
+          Write-Host "Building '$n'"
+
+      - name: Game assemblies from the dedicated server (anonymous Steam)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dd = Join-Path $env:RUNNER_TEMP 'dd'
+          Invoke-WebRequest $env:DEPOTDOWNLOADER -OutFile "$dd.zip"
+          Expand-Archive "$dd.zip" $dd
+          $list = Join-Path $env:RUNNER_TEMP 'files.txt'
+          Set-Content $list -Encoding ascii -Value @(
+            'regex:^7DaysToDieServer_Data[\\/]Managed[\\/](Assembly-CSharp|LogLibrary|UnityEngine(\.[A-Za-z]+)?)\.dll$',
+            'regex:^Mods[\\/]0_TFP_Harmony[\\/]0Harmony\.dll$')
+          $server = Join-Path $env:RUNNER_TEMP 'server'
+          $ddArgs = @('-app', '294420', '-os', 'windows', '-filelist', $list, '-dir', $server)
+          if ($env:SERVER_BRANCH) { $ddArgs += @('-beta', $env:SERVER_BRANCH) }
+          & "$dd\DepotDownloader.exe" @ddArgs
+          if ($LASTEXITCODE) { throw "DepotDownloader failed ($LASTEXITCODE)" }
+          $m = Join-Path $server '7DaysToDieServer_Data\Managed'
+          $need = 'Assembly-CSharp','LogLibrary','UnityEngine','UnityEngine.AnimationModule',
+                  'UnityEngine.AudioModule','UnityEngine.CoreModule','UnityEngine.IMGUIModule',
+                  'UnityEngine.PhysicsModule','UnityEngine.TextRenderingModule',
+                  'UnityEngine.InputLegacyModule','UnityEngine.UnityWebRequestAudioModule',
+                  'UnityEngine.UnityWebRequestModule','UnityEngine.InputModule'
+          $missing = $need | Where-Object { -not (Test-Path (Join-Path $m "$_.dll")) }
+          if (-not (Test-Path (Join-Path $server 'Mods\0_TFP_Harmony\0Harmony.dll'))) { $missing += '0Harmony' }
+          if ($missing) { throw "Missing from the server download: $($missing -join ', ')" }
+          "SERVER_DIR=$server" >> $env:GITHUB_ENV
+          "SERVER_MANAGED=$m" >> $env:GITHUB_ENV
+          Write-Host "Assembly-CSharp: $((Get-Item (Join-Path $m 'Assembly-CSharp.dll')).VersionInfo.FileVersion)"
+
+      - name: CMM_Decoder.dll (signed if available)
+        id: signed
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: CMM_Decoder-signed
+          path: decoder-signed
+
+      - name: CMM_Decoder.dll (unsigned)
+        if: steps.signed.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: CMM_Decoder-unsigned
+          path: decoder-unsigned
+
+      - name: Use the CI-built decoder
+        shell: pwsh
+        run: |
+          $src = Get-ChildItem decoder-signed, decoder-unsigned -Recurse -Filter CMM_Decoder.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $src) { throw 'no CMM_Decoder.dll artifact' }
+          Copy-Item $src.FullName CMM_Decoder\dist\CMM_Decoder.dll -Force
+          $sig = Get-AuthenticodeSignature CMM_Decoder\dist\CMM_Decoder.dll
+          Write-Host "Decoder: $($src.FullName)  signature: $($sig.Status)"
+          (Get-FileHash CMM_Decoder\dist\CMM_Decoder.dll -Algorithm SHA256).Hash
+
+      - uses: microsoft/setup-msbuild@v2
+      - uses: NuGet/setup-nuget@v2
+
+      - name: Restore MoonSharp
+        run: nuget restore packages.config -PackagesDirectory packages
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          msbuild ContextMusicManager.csproj -nologo -v:minimal `
+            -p:Configuration=Release `
+            "-p:GameInstallDir=$env:SERVER_DIR" `
+            "-p:GameManagedDir=$env:SERVER_MANAGED" `
+            "-p:ReleaseName=${{ steps.name.outputs.value }}"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem dist\*.zip | ForEach-Object { "$($_.Name)  $([math]::Round($_.Length / 1MB, 2)) MB" }
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ContextMusicManager ${{ steps.name.outputs.value }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Draft GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Notes = the newest CHANGELOG section (from its heading to the next version heading).
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern '^## ' | Select-Object -First 1).LineNumber
+          $next  = ($lines | Select-String -Pattern '^## ' | Select-Object -Skip 1 -First 1).LineNumber
+          $notes = $lines[($start - 1)..($next - 2)] -join "`n"
+          Set-Content notes.md $notes -Encoding utf8
+          $name = '${{ steps.name.outputs.value }}'
+          $zip = (Get-ChildItem dist\*.zip | Select-Object -First 1).FullName
+          $ghArgs = @('release', 'create', '${{ github.ref_name }}', $zip, '--draft',
+                      '--title', "Context Music Manager $name", '--notes-file', 'notes.md')
+          if ($name -match 'RC') { $ghArgs += '--prerelease' }
+          gh @ghArgs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

@@ -4,7 +4,8 @@
 #
 # Signing is off until the project is approved: set the repository VARIABLE
 # SIGNPATH_ORGANIZATION_ID and the SECRET SIGNPATH_API_TOKEN and the sign job runs. Its output
-# is the signed DLL as an artifact; the release zip is then built from it locally (see README).
+# is the signed DLL as an artifact. release.yml calls this workflow and packages the mod around
+# whichever DLL it produced (signed when signing is on, unsigned otherwise).
 name: Build CMM_Decoder
 
 on:
@@ -15,6 +16,7 @@ on:
       - 'ModInfo.xml'
       - '.github/workflows/build-decoder.yml'
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

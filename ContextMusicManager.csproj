@@ -169,6 +169,10 @@
     <Content Include="THIRD_PARTY_NOTICES.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- The mod's own MIT license travels with every copy of the mod, as the license asks. -->
+    <Content Include="LICENSE">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <!-- Native decode shim (libopusfile + libvorbisfile + dr_flac/mp3/wav behind a thin C ABI).
          Deployed next to the mod DLL; NativeOpus.Preload(ModPath) LoadLibrary's it by full
          path at init. Windows x64 today; per-OS builds (.dylib/.so) added here later.

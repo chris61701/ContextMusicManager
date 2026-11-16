@@ -54,6 +54,14 @@ a `settings.dev.xml` that turns on debug logging and overrides `MusicPath` with
 `DebugMusicPath`; set `-p:DebugMusicPath=<your music folder>`. That file is read before
 `settings.xml`, so in a Debug install the music folder is changed there, not in `settings.xml`.
 
+### Release builds on GitHub
+
+Official release zips are built by GitHub Actions (`.github/workflows/release.yml`), not on a
+local machine. Pushing a tag such as `v1.0.5b-rc2` builds `CMM_Decoder.dll` from source (signed
+once code signing is set up), compiles the mod, and opens a draft GitHub release with the zip
+attached. The game's assemblies come from the free 7 Days to Die dedicated server, downloaded
+anonymously from Steam during the build; they are never stored in the repository.
+
 ## License
 
 Context Music Manager is released under the [MIT License](LICENSE). Bundled and linked
