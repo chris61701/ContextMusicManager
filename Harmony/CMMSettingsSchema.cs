@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 60;
+        internal const int CurrentSchema = 61;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -656,6 +656,26 @@ unnaturally curtailed clicks as long ones, and short outliers read as a dropout 
 as variety. At the default 0.5 the dial rings between about 15 and 22 ms.
 0 = every click identical."),
             F("RadioClickVary",                      "CMMConfig.RadioClickVary",                    0.5f),
+
+            Gap(),
+            Cmt(@"── Click SHAPES (how each click is actually made) ──────────────────────────────────
+Each click is noise shaped in seven octave bands -- 60-250, 250-500, 500-1k, 1-2k, 2-4k,
+4-8k and 8-20k Hz -- driven by a list of impacts, the way a real switch sounds: broadband,
+every band dying within milliseconds, the low end swelling a little late (the weight), and
+a bounce or two after the first landing. Nothing in it rings at a pitch, which is what made
+the older clicks sound like metal. One line per click, sections separated by |:
+  levels  seven band levels in dB (0 = the loudest band)
+  decay   seven times in ms for each band to fall 20 dB
+  swell   ms the two lowest bands take to rise (more = a later, rounder thump)
+  edge    the sharpness of each contact (0 = none, 2 = default, up to 12)
+  hits    the impacts as time_ms:level_dB, up to eight, the first at 0
+  release optional second event: delay_ms level_dB tilt_dB_per_band (+ = brighter)
+These defaults were fitted to measured recordings by CMM_Decoder/fit_click.py, which can fit
+a shape to any WAV you give it. Leave a line empty to use the older knobs above for that
+click instead. Live: edits are heard on the next click."),
+            Str("RadioClickOnShape",                   "CMMConfig.RadioClickOnShape",                 @"levels -37.3 -28.9 -8.1 -7.8 -4.0 0.0 -2.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 5.9:-16 10.4:-22 15.0:-27 17.7:-26 20.0:-23 24.5:-27 | release 177 -0.2 -2.4", since: 61),
+            Str("RadioClickOffShape",                  "CMMConfig.RadioClickOffShape",                @"levels -20.3 -12.1 0.0 -22.0 -11.1 -9.5 -11.0 | decay 16.5 8.2 2.6 14.7 6.5 4.1 3.2 | swell 13.0 | edge 2.0 | hits 0.0:-0 2.2:-6 5.0:0 7.3:-5 9.8:-11 12.6:-18 14.9:-12 18.0:-21 | release 170 0.2 2.4", since: 61),
+            Str("RadioClickDialShape",                 "CMMConfig.RadioClickDialShape",               @"levels -44.5 -75.4 -59.7 -4.4 -9.2 0.0 -5.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4", since: 61),
 
             Gap(),
             Cmt(@"── Recorded clicks ────────────────────────────────────────────────────────────────────

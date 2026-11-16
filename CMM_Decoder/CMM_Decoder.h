@@ -235,8 +235,16 @@ typedef struct cmm_decoder cmm_decoder;
  *        accumulated incrementally and cmm_loudness_finish is read-only over them, so
  *        the whole change is a handle that keeps the decoder and analyzer alive between
  *        bounded decode slices and gates over everything fed so far. The value at eof is
- *        identical to the one-shot's; what is new is having a usable one before then. */
-#define CMM_DECODER_ABI 62
+ *        identical to the one-shot's; what is new is having a usable one before then.
+ *
+ *   v63: cmm_mix_set_click_shape -- BAND-NOISE CLICKS. The resonator clicks were tones (struck
+ *        metal fitted high, a pitched "tock" moved low); measured real switches are broadband
+ *        noise in which every octave decays in milliseconds and the low end swells late. A
+ *        click kind with a shape is now seven octave bands of noise, each with its own level
+ *        and 20 dB decay, driven by an impact cluster plus an optional release event. Kinds
+ *        without one keep the resonator model. Also: every rendered click draws fresh noise
+ *        (the render path had a fixed seed, so all live clicks shared one waveform). */
+#define CMM_DECODER_ABI 63
 
 /* Max speaker positions summed onto one emitter voice — shared by the mixer (voice storage) and the
  * output (consumer-side spatializer). */
@@ -804,6 +812,14 @@ CMM_API void cmm_mix_clear_emitter_recv(int slot);
  * because g_recvNoiseTrim is shared: turning that down to quieten a speaker across the room would
  * quieten the radio in your pocket too. Default 0.5. */
 CMM_API void cmm_mix_set_emitter_recv_trim(float trim);
+
+/* v63 — a click kind's BAND-NOISE shape (0 = power on, 1 = power off, 2 = dial). `p` holds up to
+ * 36 floats: [0..6] octave-band levels dB (60-250 Hz .. 8-20 kHz), [7..13] each band's ms to fall
+ * 20 dB, [14] low-band swell ms, [15] contact edge, [16] release delay ms (0 = none), [17] release
+ * level dB, [18] release tilt dB per band, [19] impact count, [20..27] impact times ms,
+ * [28..35] impact levels dB. n <= 0 clears it (the kind reverts to the tone knobs below). Returns the count the DLL
+ * understands. */
+CMM_API int  cmm_mix_set_click_shape(int which, const float* p, int n);
 
 /* v38/v39 — set the power-click TONES, both kinds at once. Per kind: `hz` = tone cap (bright
  * tick ↔ dull thud; clamped 300..10000), `snap` = 0..1 bright-noise-ping vs low-thump balance

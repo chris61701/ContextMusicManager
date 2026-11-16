@@ -424,6 +424,19 @@ typedef struct {
     int   modHold;         /* frames until the next random level draw */
     float modCur;          /* current drawn level target (biased toward dips) */
     float modLev;          /* slewed applied level (anti-click) */
+    /* v63 — BAND-NOISE CLICK (cmm_mix_set_click_shape; see sfx_capture_click_shape). Used instead
+     * of the resonator model above whenever the kind has a shape. */
+    int   bandMode;
+    float bb0[7], ba1[7], ba2[7];   /* per-band constant-peak band-pass (b1 = 0, b2 = -b0) */
+    float bz1[7], bz2[7];           /* their transposed-direct-form state */
+    float bz3[7], bz4[7];           /* ...and the second, identical section (4th-order bands) */
+    float bEnv[7], bEnvK[7];        /* per-band decay envelope and its per-frame factor */
+    float bSm[7], bSmK[7];          /* the SWELL: the envelope as heard, slewed for the low bands */
+    float bLev[7];                  /* per-band level (shape level x noise-bandwidth normalisation) */
+    float relGain[7];               /* release-event tilt per band */
+    float edge;                     /* deterministic contact impulse riding on the noise */
+    int   hitAt[16]; float hitLvl[16]; unsigned char hitRel[16];
+    int   hitN, hitNext;
 } sfx_voice;
 static sfx_voice g_sfx[SFX_MAX];
 static float sfx_click_sample(sfx_voice* v, float noise);   /* defined with the tone capture */
@@ -2313,7 +2326,9 @@ CMM_API void cmm_mix_set_static_tone(float lowHz, float highHz, float crackle) {
 /* One frame of a click. Shared by the live mixer and the offline preview render so what gets
  * tuned and what gets heard cannot drift apart -- the single most expensive recurring mistake in
  * this project has been two implementations of "the same" thing. */
+static float sfx_click_shape_sample(sfx_voice* v, float noise);   /* v63, defined below */
 static float sfx_click_sample(sfx_voice* v, float noise) {
+    if (v->bandMode) return sfx_click_shape_sample(v, noise);
     float hit = 0.0f;
     if (v->strikeNext < v->strikeN && v->pos == v->strikeAt[v->strikeNext]) {
         hit = v->strikeLvl[v->strikeNext++];
@@ -2369,7 +2384,180 @@ static float sfx_click_sample(sfx_voice* v, float noise) {
     return v->hi2;
 }
 
+/* ── v63 — BAND-NOISE CLICKS ─────────────────────────────────────────────────────────────────
+ * The resonator model above makes a click out of a handful of ringing modes, and modes are TONES:
+ * fitted to a mouse switch it came out as struck metal (energy at 5-6 kHz still ringing at one
+ * pitch 40 ms later), and moved down it came out as a pitched plastic "tock" (73-90% of the energy
+ * in one octave, one +26 dB spectral peak). Measured against two real switch recordings, a click
+ * is the opposite on every axis: BROADBAND (every octave from 0.5 to 20 kHz within ~10-15 dB in
+ * the first milliseconds), NO dominant tone (peaks +10-20 dB, many of them), each band dying 20 dB
+ * in 3-12 ms, the LOW end (60-500 Hz) swelling a few ms late and lasting longest -- the "meat" --
+ * a cluster of bounces ~2.5-3 ms apart, and a second event (release) 110-180 ms later.
+ *
+ * So the click is now noise shaped in seven octave bands, each with its own level and its own
+ * 20 dB decay time, driven by a cluster of impacts (and optionally a release cluster), the low
+ * bands slewed so they swell instead of jump. Nothing in it rings at a pitch, so nothing in it can
+ * clink. Every number is set per click kind as a SHAPE (cmm_mix_set_click_shape):
+ *   [0..6]   band level dB (60-250, 250-500, 500-1k, 1-2k, 2-4k, 4-8k, 8-20k Hz)
+ *   [7..13]  band decay: ms to fall 20 dB
+ *   [14]     swell ms (rise time of the two lowest bands; half that for 500-1k)
+ *   [15]     edge (contact impulse riding on the noise at each impact)
+ *   [16]     release delay ms (0 = none)   [17] release level dB   [18] release tilt dB per band
+ *   [19]     impact count N (1..8)
+ *   [20..27] impact times ms (the first is always 0)   [28..35] impact levels dB
+ * The impacts are a LIST, not a count and a fade: measured switches drop fast over the first
+ * landings (0, -10, -16 dB) and then rattle on at -23..-27 dB for ~25 ms, which no constant fade
+ * describes -- fitting one stretched every band's decay to cover the rattle and the click rang.
+ * Per-fire variation (RadioClickVary) moves every band's level and decay, every impact's time and
+ * level, sometimes drops the last impact, moves the release, and every firing draws fresh noise. */
+#define CLICK_BANDS   7
+#define CLICK_HITS    8
+#define CLICK_SHAPE_N 36
+static volatile float g_clickShape[SFX_CLICK_KINDS][CLICK_SHAPE_N];
+static volatile int   g_clickShapeOn[SFX_CLICK_KINDS];
+static const float k_clickLo[CLICK_BANDS] = {   60.f,  250.f,  500.f, 1000.f, 2000.f, 4000.f,  8000.f };
+static const float k_clickHi[CLICK_BANDS] = {  250.f,  500.f, 1000.f, 2000.f, 4000.f, 8000.f, 20000.f };
+/* Output trim: seven bands of unit-RMS noise sum to peaks of several units, and a click must sit
+ * under the music with headroom to spare. The soft limiter after it only rounds rare stacks. */
+#define CLICK_SHAPE_TRIM 0.22f
+
+static float sfx_rand(void)    /* -1..1, from the shared SFX seed */
+{
+    g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+    return (float)((g_sfxSeed >> 9) & 0xffff) / 32768.0f - 1.0f;
+}
+static float clampf(float x, float lo, float hi) { return x < lo ? lo : x > hi ? hi : x; }
+
+/* Band-pass section for band b at `rate`: two of these in series make one band. A single
+ * constant-peak section has 12 dB/octave skirts, so neighbouring bands overlap so much that a fit
+ * "correcting" one band distorts the others; cascading two (each widened by 1/0.6436, the factor
+ * that keeps the pair's -3 dB width at the octave) halves the overlap in dB. */
+static void click_band_coeffs(int b, float rate, float* b0, float* a1, float* a2)
+{
+    float lo = k_clickLo[b], hi = k_clickHi[b];
+    if (hi > rate * 0.45f) hi = rate * 0.45f;
+    if (lo > hi * 0.8f) lo = hi * 0.5f;
+    float fc = sqrtf(lo * hi), q = (fc / (hi - lo)) * 0.6436f;
+    float w = 6.2831853f * fc / rate, alpha = sinf(w) / (2.0f * q), a0 = 1.0f + alpha;
+    *b0 = alpha / a0; *a1 = -2.0f * cosf(w) / a0; *a2 = (1.0f - alpha) / a0;
+}
+
+/* Each band's RMS gain on the white noise the voice uses, MEASURED once per rate rather than
+ * taken from a formula: the cascade's noise bandwidth has no tidy closed form near Nyquist, and a
+ * band level only means "this band's share" if a unit level gives unit RMS. 16k frames per band,
+ * once per process per rate. */
+static float g_clickNorm[CLICK_BANDS]; static int g_clickNormRate;
+static void click_norm_for(int rate)
+{
+    if (g_clickNormRate == rate) return;
+    for (int b = 0; b < CLICK_BANDS; b++) {
+        float b0, a1, a2; click_band_coeffs(b, (float)rate, &b0, &a1, &a2);
+        float z1 = 0, z2 = 0, z3 = 0, z4 = 0; double acc = 0; unsigned s = 0x9e3779b9u;
+        for (int i = 0; i < 16384; i++) {
+            s = s * 1664525u + 1013904223u;
+            float x = (float)((int)(s >> 9) - 0x400000) * (1.0f / 0x400000);
+            float y = b0 * x + z1; z1 = -a1 * y + z2; z2 = -b0 * x - a2 * y;
+            float u = b0 * y + z3; z3 = -a1 * u + z4; z4 = -b0 * y - a2 * u;
+            if (i >= 2048) acc += (double)u * u;
+        }
+        float rms = (float)sqrt(acc / (16384 - 2048));
+        g_clickNorm[b] = rms > 1e-6f ? 1.0f / rms : 1.0f;
+    }
+    g_clickNormRate = rate;
+}
+
+static void sfx_capture_click_shape(sfx_voice* v, int which)
+{
+    float p[CLICK_SHAPE_N];
+    for (int i = 0; i < CLICK_SHAPE_N; i++) p[i] = g_clickShape[which][i];
+    float rate = (float)g_busRate;
+    float vary = clampf(g_sfxClickVary, 0.0f, 1.0f);
+    float swell = clampf(p[14], 0.0f, 60.0f);
+    float tilt = clampf(p[18], -12.0f, 12.0f);
+    float tailMs = 0.0f;
+    v->bandMode = 1;
+    click_norm_for(g_busRate);
+    for (int b = 0; b < CLICK_BANDS; b++) {
+        click_band_coeffs(b, rate, &v->bb0[b], &v->ba1[b], &v->ba2[b]);
+        v->bz1[b] = v->bz2[b] = v->bz3[b] = v->bz4[b] = 0.0f;
+        float db = clampf(p[b], -80.0f, 12.0f) + 2.5f * vary * sfx_rand();
+        v->bLev[b] = powf(10.0f, db / 20.0f) * g_clickNorm[b];
+        float t20 = clampf(p[7 + b], 0.5f, 400.0f) * (1.0f + 0.25f * vary * sfx_rand());
+        v->bEnvK[b] = powf(10.0f, -1.0f / (t20 * 0.001f * rate));
+        v->bEnv[b] = v->bSm[b] = 0.0f;
+        float sw = b <= 1 ? swell : (b == 2 ? swell * 0.5f : 0.0f);
+        v->bSmK[b] = sw > 0.05f ? 1.0f - expf(-1.0f / (sw * 0.001f * rate)) : 1.0f;
+        v->relGain[b] = powf(10.0f, tilt * (float)(b - 3) / 20.0f);
+        float t = sw + 3.0f * t20;                       /* to -60 dB */
+        if (t > tailMs) tailMs = t;
+    }
+    v->edge = clampf(p[15], 0.0f, 12.0f);
+
+    /* The impact list: a contact lands, rebounds, rattles. Each landing after the first moves by
+     * up to 40% of the gap before it and up to 3 dB per firing, and the last one is sometimes
+     * missing -- the ear reads a repeated rhythm as a designed sound. */
+    int n = (int)lroundf(clampf(p[19], 1.0f, (float)CLICK_HITS));
+    if (vary >= 0.25f && n > 2 && sfx_rand() > 0.3f) n--;
+    float tms[CLICK_HITS], lvl[CLICK_HITS], prev = 0.0f, last = 0.0f;
+    for (int k = 0; k < n; k++) {
+        float t = k ? clampf(p[20 + k], prev + 0.3f, 400.0f) : 0.0f;
+        if (k) t += 0.4f * vary * sfx_rand() * (t - prev);
+        if (k && t < prev + 0.3f) t = prev + 0.3f;
+        tms[k] = t; prev = clampf(p[20 + k], 0.0f, 400.0f);
+        lvl[k] = powf(10.0f, (clampf(p[28 + k], -60.0f, 12.0f) + (k ? 3.0f * vary * sfx_rand() : 0.0f)) / 20.0f);
+    }
+    v->hitN = v->hitNext = 0;
+    for (int k = 0; k < n; k++) {
+        v->hitAt[v->hitN] = (int)(tms[k] * 0.001f * rate); v->hitLvl[v->hitN] = lvl[k]; v->hitRel[v->hitN] = 0;
+        v->hitN++; last = tms[k];
+    }
+    float rel = clampf(p[16], 0.0f, 400.0f);
+    if (rel > 0.5f) {
+        rel *= 1.0f + 0.12f * vary * sfx_rand();
+        float rl = powf(10.0f, (clampf(p[17], -40.0f, 12.0f) + 2.0f * vary * sfx_rand()) / 20.0f);
+        for (int k = 0; k < n && v->hitN < 16; k++) {
+            v->hitAt[v->hitN] = (int)((rel + tms[k]) * 0.001f * rate);
+            v->hitLvl[v->hitN] = rl * lvl[k];
+            v->hitRel[v->hitN] = 1;
+            v->hitN++; last = rel + tms[k];
+        }
+    }
+    float lenMs = last + tailMs + 5.0f;
+    v->len = (int)(lenMs * 0.001f * rate);
+    if (v->len > (int)(0.9f * rate)) v->len = (int)(0.9f * rate);
+    if (v->len < 1) v->len = 1;
+    v->strikeN = v->strikeNext = 0;
+}
+
+static float sfx_click_shape_sample(sfx_voice* v, float noise)
+{
+    float imp = 0.0f;
+    while (v->hitNext < v->hitN && v->pos >= v->hitAt[v->hitNext]) {
+        float L = v->hitLvl[v->hitNext];
+        int rel = v->hitRel[v->hitNext];
+        for (int b = 0; b < CLICK_BANDS; b++) v->bEnv[b] += rel ? L * v->relGain[b] : L;
+        imp += L;
+        v->hitNext++;
+    }
+    float in = noise + v->edge * imp;
+    float out = 0.0f;
+    for (int b = 0; b < CLICK_BANDS; b++) {
+        float y = v->bb0[b] * in + v->bz1[b];
+        v->bz1[b] = -v->ba1[b] * y + v->bz2[b];
+        v->bz2[b] = -v->bb0[b] * in - v->ba2[b] * y;
+        float u = v->bb0[b] * y + v->bz3[b];
+        v->bz3[b] = -v->ba1[b] * u + v->bz4[b];
+        v->bz4[b] = -v->bb0[b] * y - v->ba2[b] * u;
+        v->bSm[b] += v->bSmK[b] * (v->bEnv[b] - v->bSm[b]);
+        out += u * v->bSm[b] * v->bLev[b];
+        v->bEnv[b] *= v->bEnvK[b];
+    }
+    out *= CLICK_SHAPE_TRIM;
+    return out / (1.0f + 0.35f * fabsf(out));
+}
+
 static void sfx_capture_click_tone(sfx_voice* v, int which) {
+    if (g_clickShapeOn[which]) { sfx_capture_click_shape(v, which); return; }
     float rate = (float)g_busRate;
     float hz = g_sfxClickHz[which], snap = g_sfxClickSnap[which], ms = g_sfxClickLenMs[which];
     float body = g_sfxClickBody[which], bodyHz = g_sfxClickBodyHz[which], dbl = g_sfxClickDouble[which];
@@ -2578,7 +2766,11 @@ CMM_API int cmm_mix_render_click(int kind, int rate, float* out, int maxFrames) 
     g_busRate = rate;
     sfx_voice v;
     memset(&v, 0, sizeof v);
-    v.kind = kind; v.pos = 0; v.gain = 1.0f; v.rng = 0x1234567u;
+    /* Fresh noise every firing. This was a fixed seed, and since v45 every live click goes through
+     * here (rendered whole and injected), so every click had the SAME noise waveform and only the
+     * parameter jitter told them apart -- the opposite of what the variation is for. */
+    g_sfxSeed = g_sfxSeed * 1664525u + 1013904223u;
+    v.kind = kind; v.pos = 0; v.gain = 1.0f; v.rng = g_sfxSeed | 1u;
     /* Same decision the live mixer makes, through the same function: recorded sound if the kind
      * has one, synthesis otherwise. An audition that could differ from what ships would be the
      * fifth copy-of-the-same-thing in this project to start lying. */
@@ -2614,6 +2806,20 @@ CMM_API void cmm_mix_set_click_tone_kind(int which, float hz, float snap, float 
     g_sfxClickHz[which] = hz;   g_sfxClickSnap[which] = snap;  g_sfxClickLenMs[which] = lenMs;
     g_sfxClickBody[which] = body; g_sfxClickBodyHz[which] = bodyHz; g_sfxClickDouble[which] = dbl;
     if (vary >= 0.0f) g_sfxClickVary = vary;
+}
+
+/* v63 — set one click kind's band-noise SHAPE (0 = power on, 1 = power off, 2 = dial): up to
+ * CLICK_SHAPE_N floats in the order documented at sfx_capture_click_shape. n <= 0 or p == NULL
+ * clears the shape, and that kind goes back to the resonator model and its tone knobs. Missing
+ * trailing values take their defaults (edge 2, one impact at 0 dB). Lock-free: the next click of that kind
+ * plays with it. Returns the number of values the DLL understands. */
+CMM_API int cmm_mix_set_click_shape(int which, const float* p, int n) {
+    if (which < 0 || which >= SFX_CLICK_KINDS) return 0;
+    if (!p || n <= 0) { g_clickShapeOn[which] = 0; return CLICK_SHAPE_N; }
+    for (int i = 0; i < CLICK_SHAPE_N; i++)
+        g_clickShape[which][i] = i < n ? p[i] : (i == 15 ? 2.0f : i == 19 ? 1.0f : 0.0f);
+    g_clickShapeOn[which] = 1;
+    return CLICK_SHAPE_N;
 }
 
 /* v35 — fire one synthesized radio-UI one-shot (SFX_KIND_*: 1 = tuning static burst, 2 = power-on

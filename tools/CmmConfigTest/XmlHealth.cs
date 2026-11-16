@@ -26,8 +26,10 @@ namespace CMM
     {
         // third_party is vendored upstream source (the opus tree carries IETF drafts that
         // use HTML entities and are not well-formed XML). Not ours to fix or to gate on.
+        // build is CMM_Decoder's regenerable native build output (gitignored): FFmpeg's
+        // configure writes a shell-format ffbuild/.config there that only looks like a config.
         static readonly string[] SkipDirs =
-            { "bin", "obj", "dist", "packages", ".git", ".vs", "temp", "third_party", "node_modules" };
+            { "bin", "obj", "dist", "packages", ".git", ".vs", "temp", "third_party", "node_modules", "build" };
 
         internal static int Run(string repo)
         {

@@ -11,7 +11,7 @@
  *   zc        zero crossings per ms in the tail -- a clean tail at one pitch reads as tonal
  *
  * Build:  gcc -O2 -o render_click_candidates.exe render_click_candidates.c dist/CMM_Decoder.dll -lm
- * Run:    render_click_candidates.exe <output folder> */
+ * Run:    render_click_candidates.exe <output folder> [meat]   (meat = round 2) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +26,7 @@ extern void cmm_mix_set_click_tone_kind(int which, float hz, float snap, float l
 
 typedef struct { const char* name; const char* note; float k[3][6]; float vary; } cand;
 /* k[kind] = { Hz (tone cap), Snap, LengthMs, Body, BodyHz, Double }; kinds 0 on, 1 off, 2 dial */
-static const cand C[] = {
+static const cand FIRST[] = {
     { "A_current_metal", "the shipped defaults, fitted to the removed recordings",
       { { 8722, .72f, 60, .37f, 5100, .80f }, { 8722, .70f, 68, .40f, 4350, .80f }, { 8187, .84f, 44, .50f, 5949, .52f } }, .5f },
     { "B_bakelite", "old radio: hard plastic knob and a firm toggle",
@@ -40,7 +40,24 @@ static const cand C[] = {
     { "F_muted", "felt through the hand more than heard: very soft",
       { { 2600, .35f, 16, .75f,  600, .10f }, { 2500, .33f, 18, .75f,  560, .10f }, { 2800, .35f, 10, .65f,  900, .00f } }, .5f },
 };
-#define NC (int)(sizeof C / sizeof C[0])
+
+/* Round 2 ("plastic is close but it needs more meat"): C, then four steps that each lower the
+ * shell's pitch (BodyHz), give it more of the sound against the crack (Body up, Snap down), let
+ * it ring a few ms longer and pull the tone cap in -- weight without going back to a ring. */
+static const cand MEAT[] = {
+    { "C0_light_plastic", "round-1 C, unchanged, for reference",
+      { { 6000, .65f, 12, .50f, 2000, .20f }, { 5800, .62f, 13, .50f, 1800, .20f }, { 6500, .70f,  8, .40f, 2600, .10f } }, .5f },
+    { "C1_meat",          "a little fuller",
+      { { 5500, .55f, 15, .62f, 1700, .20f }, { 5300, .52f, 16, .62f, 1550, .20f }, { 6000, .60f, 10, .52f, 2100, .10f } }, .5f },
+    { "C2_meat",          "fuller",
+      { { 5000, .45f, 18, .72f, 1400, .22f }, { 4800, .42f, 19, .72f, 1300, .22f }, { 5500, .50f, 12, .62f, 1700, .12f } }, .5f },
+    { "C3_meat",          "solid",
+      { { 4600, .38f, 21, .80f, 1150, .25f }, { 4400, .36f, 22, .80f, 1050, .25f }, { 5000, .42f, 14, .70f, 1400, .12f } }, .5f },
+    { "C4_meat",          "heaviest: thick plastic, close to the hand",
+      { { 4200, .32f, 24, .88f,  950, .28f }, { 4000, .30f, 26, .88f,  880, .28f }, { 4600, .36f, 16, .78f, 1150, .15f } }, .5f },
+    { "B_bakelite",       "round-1 B, for reference",
+      { { 4500, .50f, 18, .65f, 1200, .25f }, { 4300, .48f, 20, .65f, 1050, .25f }, { 5000, .55f, 12, .55f, 1800, .15f } }, .5f },
+};
 
 static void put16(FILE* f, int v) { fputc(v & 255, f); fputc((v >> 8) & 255, f); }
 static void put32(FILE* f, int v) { put16(f, v & 0xffff); put16(f, (v >> 16) & 0xffff); }
@@ -68,6 +85,9 @@ static void stats(const float* s, int n, double* centroid, double* ringMs, doubl
 int main(int argc, char** argv)
 {
     const char* dir = argc > 1 ? argv[1] : ".";
+    int round2 = argc > 2 && !strcmp(argv[2], "meat");
+    const cand* C = round2 ? MEAT : FIRST;
+    int NC = round2 ? (int)(sizeof MEAT / sizeof MEAT[0]) : (int)(sizeof FIRST / sizeof FIRST[0]);
     static float clickbuf[MAXF], seq[RATE * 6];
     printf("%-16s %-5s %9s %8s %8s\n", "candidate", "kind", "centroid", "ring", "zc/ms");
     for (int c = 0; c < NC; c++) {

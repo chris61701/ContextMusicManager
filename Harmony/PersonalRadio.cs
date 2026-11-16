@@ -552,6 +552,9 @@ namespace CMM
                     if (kind == CmmMixer.SfxClickOn   && CMMConfig.RadioClickOnVolume   >= 0f) vol = CMMConfig.RadioClickOnVolume;
                     if (kind == CmmMixer.SfxClickOff  && CMMConfig.RadioClickOffVolume  >= 0f) vol = CMMConfig.RadioClickOffVolume;
                     if (kind == CmmMixer.SfxClickDial && CMMConfig.RadioClickDialVolume >= 0f) vol = CMMConfig.RadioClickDialVolume;
+                    mixer.SetClickShape(0, ClickShape.Cached(0, CMMConfig.RadioClickOnShape));
+                    mixer.SetClickShape(1, ClickShape.Cached(1, CMMConfig.RadioClickOffShape));
+                    mixer.SetClickShape(2, ClickShape.Cached(2, CMMConfig.RadioClickDialShape));
                     mixer.SetClickToneKind(0, CMMConfig.RadioClickOnHz,   CMMConfig.RadioClickOnSnap,   CMMConfig.RadioClickOnLengthMs,
                                               CMMConfig.RadioClickOnBody,   CMMConfig.RadioClickOnBodyHz,   CMMConfig.RadioClickOnDouble,
                                               CMMConfig.RadioClickVary);

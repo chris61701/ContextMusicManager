@@ -183,6 +183,9 @@ namespace CMM
         internal static extern void cmm_mix_set_sfx_rate_jitter(float hz);
 
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int cmm_mix_set_click_shape(int which, float[] p, int n);
+
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void cmm_mix_set_click_tone_kind(int which, float hz, float snap,
                                                                 float lenMs, float body,
                                                                 float bodyHz, float dbl, float vary);
@@ -619,6 +622,13 @@ namespace CMM
         }
 
         public void SetSfxRateJitter(float hz) => NativeMix.cmm_mix_set_sfx_rate_jitter(hz);
+
+        // v63 — a click kind's band-noise shape (ClickShape.Parse output). null/empty reverts that
+        // kind to the resonator knobs (SetClickToneKind).
+        public void SetClickShape(int which, float[] shape)
+        {
+            NativeMix.cmm_mix_set_click_shape(which, shape, shape == null ? 0 : shape.Length);
+        }
 
         public void SetClickToneKind(int which, float hz, float snap, float lenMs,
                                      float body, float bodyHz, float dbl, float vary)
