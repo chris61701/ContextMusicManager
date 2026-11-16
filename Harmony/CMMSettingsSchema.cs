@@ -678,9 +678,9 @@ the older clicks sound like metal. One line per click, sections separated by |:
 These defaults were fitted to measured recordings by CMM_Decoder/fit_click.py, which can fit
 a shape to any WAV you give it. Leave a line empty to use the older knobs above for that
 click instead. Live: edits are heard on the next click."),
-            Str("RadioClickOnShape",                   "CMMConfig.RadioClickOnShape",                 @"levels -37.3 -28.9 -8.1 -7.8 -4.0 0.0 -2.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 | release 177 -0.2 -2.4", since: 61),
-            Str("RadioClickOffShape",                  "CMMConfig.RadioClickOffShape",                @"levels -20.3 -12.1 0.0 -22.0 -11.1 -9.5 -11.0 | decay 16.5 8.2 2.6 14.7 6.5 4.1 3.2 | swell 13.0 | edge 2.0 | hits 0.0:-0 2.2:-6 5.0:0 7.3:-5 9.8:-11 12.6:-18 14.9:-12 18.0:-21 | release 170 0.2 2.4", since: 61),
-            Str("RadioClickDialShape",                 "CMMConfig.RadioClickDialShape",               @"levels -38.5 -71.4 -57.7 -4.4 -11.2 -4.0 -11.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4", since: 61),
+            Str("RadioClickOnShape",                   "CMMConfig.RadioClickOnShape",                 @"levels -28.3 -22.9 -5.1 -7.8 -7.0 -6.0 -11.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 | release 177 4.8 -2.4", since: 61),
+            Str("RadioClickOffShape",                  "CMMConfig.RadioClickOffShape",                @"levels -17.3 -10.1 1.0 -22.0 -12.1 -11.5 -14.0 | decay 16.5 8.2 2.6 14.7 6.5 4.1 3.2 | swell 13.0 | edge 2.0 | hits 0.0:-0 2.2:-6 5.0:0 7.3:-5 9.8:-11 12.6:-18 14.9:-12 18.0:-21 | release 135 0.2 2.4", since: 61),
+            Str("RadioClickDialShape",                 "CMMConfig.RadioClickDialShape",               @"levels -29.5 -65.4 -54.7 -4.4 -14.2 -10.0 -20.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4", since: 61),
 
             Gap(),
             Cmt(@"── Recorded clicks ────────────────────────────────────────────────────────────────────
