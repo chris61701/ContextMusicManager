@@ -349,7 +349,7 @@ namespace CMM
         //   BodyHz   = the knock's ring pitch (plastic ~900-1400, wood/bakelite ~500-800).
         //   Double   = 0..1 level of a second micro-impact ~12ms after the first (the detent's
         //              spring release then the stop landing — the mechanical "cl-ick"; 0 = single).
-        //   Volume   = that click's own level 0..4; -1 = inherit RadioSfxVolume. Default 0.8: at the
+        //   Volume   = that click's own level 0..4; -1 = inherit RadioSfxVolume. Default 1.3: at the
         //              inherited 0.5 the synthesized clicks sat too low under the music. The DLL used to
         //              cap this at 1.0, so higher values silently did nothing.
         // THREE clicks, because they are three different objects. Power on/off is a TOGGLE: a
@@ -363,21 +363,21 @@ namespace CMM
         public static float  RadioClickOnBody      = 0.37f;
         public static float  RadioClickOnBodyHz    = 5100f;
         public static float  RadioClickOnDouble    = 0.8f;
-        public static float  RadioClickOnVolume    = 0.8f;
+        public static float  RadioClickOnVolume    = 1.3f;
         public static float  RadioClickOffHz       = 8722f;
         public static float  RadioClickOffSnap     = 0.7f;
         public static float  RadioClickOffLengthMs = 68f;
         public static float  RadioClickOffBody     = 0.4f;
         public static float  RadioClickOffBodyHz   = 4350f;
         public static float  RadioClickOffDouble   = 0.8f;
-        public static float  RadioClickOffVolume   = 0.8f;
+        public static float  RadioClickOffVolume   = 1.3f;
         public static float  RadioClickDialHz       = 8187f;
         public static float  RadioClickDialSnap     = 0.84f;
         public static float  RadioClickDialLengthMs = 44f;
         public static float  RadioClickDialBody     = 0.5f;
         public static float  RadioClickDialBodyHz   = 5949f;
         public static float  RadioClickDialDouble   = 0.52f;
-        public static float  RadioClickDialVolume   = 0.8f;
+        public static float  RadioClickDialVolume   = 1.3f;
         // How much each firing differs from the last, 0..1, shared by all three. No two detents
         // on a real mechanism are identical, and a fixed waveform repeated on every notch is the
         // thing that gives a UI sound away as a sound EFFECT. 0 = every click identical.

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 62;
+        internal const int CurrentSchema = 63;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -611,7 +611,7 @@ Body     : 0..1 — the shell-knock resonator, the ""tok"" of a real dial body. 
 BodyHz   : the knock's ring pitch (200..3000; plastic ~900-1400, bakelite ~500-800).
 Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
            release then the stop landing — the mechanical ""cl-ick""). 0 = single.
-Volume   : that click's own level 0..4; -1 = inherit RadioSfxVolume. 0.8 by default, above
+Volume   : that click's own level 0..4; -1 = inherit RadioSfxVolume. 1.3 by default, above
            RadioSfxVolume: at 0.5 the synthesized clicks sat too low under the music. Above 1
            the loudest peaks are rounded off rather than clipped."),
             F("RadioClickOnHz",                      "CMMConfig.RadioClickOnHz",                    8722f),
@@ -620,16 +620,16 @@ Volume   : that click's own level 0..4; -1 = inherit RadioSfxVolume. 0.8 by defa
             F("RadioClickOnBody",                    "CMMConfig.RadioClickOnBody",                  0.37f),
             F("RadioClickOnBodyHz",                  "CMMConfig.RadioClickOnBodyHz",                5100f),
             F("RadioClickOnDouble",                  "CMMConfig.RadioClickOnDouble",                0.8f),
-            F("RadioClickOnVolume",                  "CMMConfig.RadioClickOnVolume",                0.8f,
-              changedIn: 62, was: -1f),
+            F("RadioClickOnVolume",                  "CMMConfig.RadioClickOnVolume",                1.3f,
+              changedIn: 63, was: new object[] { -1f, 0.8f }),
             F("RadioClickOffHz",                     "CMMConfig.RadioClickOffHz",                   8722f),
             F("RadioClickOffSnap",                   "CMMConfig.RadioClickOffSnap",                 0.7f),
             F("RadioClickOffLengthMs",               "CMMConfig.RadioClickOffLengthMs",             68f),
             F("RadioClickOffBody",                   "CMMConfig.RadioClickOffBody",                 0.4f),
             F("RadioClickOffBodyHz",                 "CMMConfig.RadioClickOffBodyHz",               4350f),
             F("RadioClickOffDouble",                 "CMMConfig.RadioClickOffDouble",               0.8f),
-            F("RadioClickOffVolume",                 "CMMConfig.RadioClickOffVolume",               0.8f,
-              changedIn: 62, was: -1f),
+            F("RadioClickOffVolume",                 "CMMConfig.RadioClickOffVolume",               1.3f,
+              changedIn: 63, was: new object[] { -1f, 0.8f }),
 
             Gap(),
             Cmt(@"── The DIAL DETENT: turning the tuning knob one station ───────────────────────────────
@@ -644,8 +644,8 @@ few milliseconds. Same six controls, aimed somewhere else entirely."),
             F("RadioClickDialBody",                  "CMMConfig.RadioClickDialBody",                0.5f),
             F("RadioClickDialBodyHz",                "CMMConfig.RadioClickDialBodyHz",              5949f),
             F("RadioClickDialDouble",                "CMMConfig.RadioClickDialDouble",              0.52f),
-            F("RadioClickDialVolume",                "CMMConfig.RadioClickDialVolume",              0.8f,
-              changedIn: 62, was: -1f),
+            F("RadioClickDialVolume",                "CMMConfig.RadioClickDialVolume",              1.3f,
+              changedIn: 63, was: new object[] { -1f, 0.8f }),
 
             Gap(),
             Cmt(@"How much each firing differs from the last, 0..1, shared by all three clicks. No two
