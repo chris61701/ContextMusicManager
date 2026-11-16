@@ -659,10 +659,11 @@ as variety. At the default 0.5 the dial rings between about 15 and 22 ms.
 
             Gap(),
             Cmt(@"── Recorded clicks ────────────────────────────────────────────────────────────────────
-true plays the files in the mod's Sounds/ folder instead of synthesizing:
+The radio's clicks are synthesized. To use recordings instead, put your own files in the
+mod's Sounds/ folder (none ship with the mod):
   Sounds/radio_dial.wav    one notch of the tuning dial
   Sounds/radio_power.wav   the power switch (both throws)
-Replace them with anything you like — mono or stereo, 8/16/24/32-bit PCM or float WAV.
+Mono or stereo, 8/16/24/32-bit PCM or float WAV. true plays them when they are there.
 They are read ONCE at startup and held in RAM (about 66 KB), so a swapped file needs a
 restart; the settings around them are live either way. false goes back to the synthesized
 clicks, which are also what you get automatically if a file is missing or unreadable: no

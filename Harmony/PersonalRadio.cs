@@ -442,7 +442,9 @@ namespace CMM
         {
             LoadClickSamples();
             var sb = new System.Text.StringBuilder();
-            sb.Append("radio clicks: ").Append(CMMConfig.RadioClickSamples ? "RECORDED" : "SYNTHESIZED");
+            bool anyRecorded = _sfxPcm[0] != null || _sfxPcm[2] != null;
+            sb.Append("radio clicks: ").Append(!CMMConfig.RadioClickSamples ? "SYNTHESIZED"
+                : anyRecorded ? "RECORDED (Sounds/)" : "SYNTHESIZED (no recordings in Sounds/)");
             if (!CMMConfig.RadioSfxEnabled) sb.Append("   [RadioSfxEnabled false - silent]");
             sb.Append("\n  volume:    ").Append(CMMConfig.RadioSfxVolume.ToString("0.##"));
             sb.Append("\n  variance:  ").Append(CMMConfig.RadioClickSampleJitterHz.ToString("0"))
