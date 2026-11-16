@@ -1,0 +1,102 @@
+# Builds CMM_Decoder.dll from source on a GitHub-hosted runner, so the binary that ships is one
+# anyone can trace back to this repository -- the condition for SignPath's free code signing,
+# which signs only CI builds of the project's own source (see README, "Code signing policy").
+#
+# Signing is off until the project is approved: set the repository VARIABLE
+# SIGNPATH_ORGANIZATION_ID and the SECRET SIGNPATH_API_TOKEN and the sign job runs. Its output
+# is the signed DLL as an artifact; the release zip is then built from it locally (see README).
+name: Build CMM_Decoder
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'CMM_Decoder/**'
+      - 'ModInfo.xml'
+      - '.github/workflows/build-decoder.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64            # msvcrt runtime, like the local mingw toolchain
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-nasm
+
+      - name: Static libraries (ogg, opus, vorbis, FFmpeg)
+        working-directory: CMM_Decoder
+        env:
+          CMAKE_GENERATOR: MSYS Makefiles
+        run: ./build_deps.sh
+
+      - name: CMM_Decoder.dll
+        working-directory: CMM_Decoder
+        run: ./build_dll.sh
+
+      - name: Check the DLL
+        working-directory: CMM_Decoder
+        run: |
+          set -e
+          echo "--- imports (must be Windows system DLLs only)"
+          objdump -p dist/CMM_Decoder.dll | grep "DLL Name" | tee imports.txt
+          if grep -viE "KERNEL32|msvcrt|bcrypt|USER32|ADVAPI32|ole32" imports.txt | grep -q "DLL Name"; then
+            echo "unexpected runtime dependency"; exit 1
+          fi
+          echo "--- no assert() can abort the game"
+          ! nm dist/CMM_Decoder.dll | grep -q "_wassert"
+          echo "--- exports"
+          objdump -p dist/CMM_Decoder.dll | grep -c " cmm_"
+          sha256sum dist/CMM_Decoder.dll
+
+      - name: Upload
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMM_Decoder-unsigned
+          path: CMM_Decoder/dist/CMM_Decoder.dll
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit to SignPath
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ContextMusicManager
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: cmm-decoder
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload signed DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMM_Decoder-signed
+          path: signed/
+          if-no-files-found: error

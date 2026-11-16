@@ -52,7 +52,43 @@ MSBuild ContextMusicManager.csproj -p:Configuration=Release ^
 A Debug build deploys straight into `<GameInstallDir>\Mods\ContextMusicManager` and points
 the deployed `settings.xml` at `DebugMusicPath`; set `-p:DebugMusicPath=<your music folder>`.
 
-## Third-party code
+## License
 
-Bundled and linked libraries and their licenses are listed in
-[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+Context Music Manager is released under the [MIT License](LICENSE). Bundled and linked
+libraries keep their own licenses, all of them listed with full texts in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). FFmpeg, linked statically into
+`CMM_Decoder.dll`, is LGPL 2.1 or later; this repository and `CMM_Decoder/build_*.sh` are what
+let anyone rebuild that DLL against a modified FFmpeg.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+- **What is signed:** `CMM_Decoder.dll`, the mod's native audio library, and nothing else.
+  The managed DLLs are loaded by the game's Mono runtime, which Windows does not check.
+- **How:** the DLL is built from this repository by the
+  [Build CMM_Decoder](.github/workflows/build-decoder.yml) workflow on GitHub-hosted runners,
+  from `main` or a `release/*` branch only, and every signing request is approved by hand
+  before SignPath signs it. A binary built anywhere else is never signed.
+- **Team:**
+  - Committers and reviewers: [chris61701](https://github.com/chris61701)
+  - Approvers: [chris61701](https://github.com/chris61701)
+
+  Every change from outside the team is reviewed before it is merged.
+
+## Privacy
+
+This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. In multiplayer
+it exchanges music-state messages with the game server through the game's own networking,
+which is part of playing on that server.
+
+## Uninstalling
+
+Delete the `ContextMusicManager` folder from the game's `Mods` folder. That folder holds
+everything the mod installs and everything it writes (settings, caches), and the mod changes
+nothing outside it.
+
+**If your music is in the mod's own `Music` folder** (the default location), move it somewhere
+else first: deleting the mod folder deletes it too. A library kept elsewhere is only ever read.

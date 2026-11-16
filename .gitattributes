@@ -61,3 +61,7 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+# Shell scripts run under bash on every platform, including the Windows build runner,
+# where a CRLF checkout breaks them (bash reads the CR as part of each command).
+*.sh text eol=lf

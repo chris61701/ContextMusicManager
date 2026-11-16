@@ -18,9 +18,13 @@ set -e
 cd "$(dirname "$0")"
 CMAKE=${CMAKE:-cmake}
 MAKE_BIN=$(command -v make || command -v mingw32-make)
+# Locally (Git Bash + a standalone mingw) the native make wants "MinGW Makefiles". Under
+# MSYS2 -- the GitHub build -- make is an MSYS program: set CMAKE_GENERATOR="MSYS Makefiles".
+GEN=${CMAKE_GENERATOR:-MinGW Makefiles}
 
-COMMON=(-G "MinGW Makefiles" -DCMAKE_MAKE_PROGRAM="$MAKE_BIN" -DCMAKE_C_COMPILER="${GCC:-gcc}"
+COMMON=(-G "$GEN" -DCMAKE_C_COMPILER="${GCC:-gcc}"
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF)
+[ "$GEN" = "MinGW Makefiles" ] && COMMON+=(-DCMAKE_MAKE_PROGRAM="$MAKE_BIN")
 
 "$CMAKE" -S third_party/ogg -B build/ogg "${COMMON[@]}" -DINSTALL_DOCS=OFF
 "$CMAKE" --build build/ogg -j "${JOBS:-8}"

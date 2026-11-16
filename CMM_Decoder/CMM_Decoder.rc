@@ -1,0 +1,39 @@
+/* Windows version resource for CMM_Decoder.dll. Shows in Explorer's Details tab, and code
+ * signing (SignPath) checks the product name and version against the signing policy.
+ * build_dll.sh passes the version from ModInfo.xml, so it can never drift from the mod's:
+ *   CMM_VER_COMMA  e.g. 1,0,5,2     CMM_VER_STR  e.g. "1.0.5.2" */
+#include <winver.h>
+
+#ifndef CMM_VER_COMMA
+#define CMM_VER_COMMA 0,0,0,0
+#define CMM_VER_STR "0.0.0.0"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     CMM_VER_COMMA
+PRODUCTVERSION  CMM_VER_COMMA
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Context Music Manager"
+            VALUE "FileDescription",  "Context Music Manager native audio library"
+            VALUE "FileVersion",      CMM_VER_STR
+            VALUE "InternalName",     "CMM_Decoder"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Christian Mills (Velasha). MIT License; bundled libraries keep their own licenses (THIRD_PARTY_NOTICES.txt)."
+            VALUE "OriginalFilename", "CMM_Decoder.dll"
+            VALUE "ProductName",      "Context Music Manager"
+            VALUE "ProductVersion",   CMM_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

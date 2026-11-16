@@ -65,10 +65,13 @@ sed -i -e 's/^#define HAVE_ALIGNED_MALLOC 1$/#define HAVE_ALIGNED_MALLOC 0/' \
        -e 's/^#define HAVE_POSIX_MEMALIGN 0$/#define HAVE_POSIX_MEMALIGN 1/' config.h
 grep -q '^#define HAVE_POSIX_MEMALIGN 1$' config.h || { echo "config.h: allocator switch failed"; exit 1; }
 
-# configure resolves its own location back to a /c/... path no matter how it is invoked;
-# rewrite it in the generated makefiles so the native make.exe can follow the includes.
-POSIX_SRC="$(cygpath -u "$SRC")"
-sed -i "s#$POSIX_SRC#$SRC#g" Makefile ffbuild/config.mak
+# configure resolves its own location back to a /c/... path no matter how it is invoked. A
+# native Windows make (the standalone mingw one used locally) cannot follow those includes,
+# so rewrite them to C:/...; MSYS2's make (the GitHub build) reads /c/... fine as it is.
+if make --version 2>/dev/null | grep -q 'mingw32'; then
+  POSIX_SRC="$(cygpath -u "$SRC")"
+  sed -i "s#$POSIX_SRC#$SRC#g" Makefile ffbuild/config.mak
+fi
 
 make -j"${JOBS:-8}" libavutil/libavutil.a libavcodec/libavcodec.a libavformat/libavformat.a
 

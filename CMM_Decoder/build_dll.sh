@@ -69,8 +69,17 @@ SRC=(
 # FFmpeg (build_ffmpeg.sh) links in dependency order: avformat -> avcodec -> avutil. Its
 # system needs are bcrypt (avutil's random seed), ole32/user32 and libatomic, all static
 # or OS-provided, so the DLL still ships standalone.
-mkdir -p "$(dirname "$OUT")"
+mkdir -p "$(dirname "$OUT")" build
+
+# Version resource (CMM_Decoder.rc), stamped with the mod's version from ModInfo.xml so the
+# DLL's Details tab and its code signature name the release it belongs to.
+VER=$(grep -o '<Version value="[0-9.]*"' ../ModInfo.xml | head -1 | grep -o '[0-9][0-9.]*')
+[ -n "$VER" ] || { echo "cannot read the version from ModInfo.xml"; exit 1; }
+"${WINDRES:-windres}" -DCMM_VER_COMMA="${VER//./,}" -DCMM_VER_STR="\\\"$VER\\\"" \
+  -O coff -o build/CMM_Decoder.res.o CMM_Decoder.rc
+
 "$GCC" -O2 -shared -o "$OUT" \
+  build/CMM_Decoder.res.o \
   $EXTRA_CFLAGS \
   -DOP_DISABLE_HTTP -DNDEBUG \
   -DMA_NO_DECODING -DMA_NO_ENCODING -DMA_NO_GENERATION \
