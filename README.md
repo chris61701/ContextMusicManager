@@ -50,9 +50,9 @@ MSBuild ContextMusicManager.csproj -p:Configuration=Release ^
 ```
 
 A Debug build deploys straight into `<GameInstallDir>\Mods\ContextMusicManager`, along with
-a `settings.dev.xml` that turns on debug logging. Set your music folder in the deployed
-`settings.xml` (`MusicPath`); deploys leave that file alone. To point one deploy at a test
-library without editing it, pass `-p:DebugMusicPath=<folder>`.
+a `settings.dev.xml` that turns on debug logging and overrides `MusicPath` with
+`DebugMusicPath`; set `-p:DebugMusicPath=<your music folder>`. That file is read before
+`settings.xml`, so in a Debug install the music folder is changed there, not in `settings.xml`.
 
 ## License
 

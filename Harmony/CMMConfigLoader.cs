@@ -47,10 +47,10 @@ namespace CMM
             return null;
         }
 
-        // settings.dev.xml wins over settings.xml by design, but SILENTLY winning made a hand edit
-        // to settings.xml look broken: MusicPath was changed there mid-session, the reload fired,
-        // and the dev file's value came straight back with nothing in the log to say why. So say it,
-        // on every load, for every key the two files disagree on.
+        // settings.dev.xml wins over settings.xml by design (dev builds always override), but
+        // SILENTLY winning made a hand edit to settings.xml look broken: MusicPath was changed there
+        // mid-session, the reload fired, and the dev file's value came straight back with nothing
+        // in the log to say why. So say it, on every load, for every key the two files disagree on.
         private static void WarnShadowed(XmlElement dev, XmlElement settings)
         {
             if (dev == null || settings == null) return;
