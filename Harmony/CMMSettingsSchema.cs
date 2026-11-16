@@ -611,8 +611,9 @@ Body     : 0..1 — the shell-knock resonator, the ""tok"" of a real dial body. 
 BodyHz   : the knock's ring pitch (200..3000; plastic ~900-1400, bakelite ~500-800).
 Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
            release then the stop landing — the mechanical ""cl-ick""). 0 = single.
-Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. 0.8 by default, above
-           RadioSfxVolume: at 0.5 the synthesized clicks sat too low under the music."),
+Volume   : that click's own level 0..4; -1 = inherit RadioSfxVolume. 0.8 by default, above
+           RadioSfxVolume: at 0.5 the synthesized clicks sat too low under the music. Above 1
+           the loudest peaks are rounded off rather than clipped."),
             F("RadioClickOnHz",                      "CMMConfig.RadioClickOnHz",                    8722f),
             F("RadioClickOnSnap",                    "CMMConfig.RadioClickOnSnap",                  0.72f),
             F("RadioClickOnLengthMs",                "CMMConfig.RadioClickOnLengthMs",              60f),

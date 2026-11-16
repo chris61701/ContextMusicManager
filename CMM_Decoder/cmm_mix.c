@@ -2829,7 +2829,10 @@ CMM_API int cmm_mix_set_click_shape(int which, const float* p, int n) {
 CMM_API void cmm_mix_play_sfx(int kind, float gain) {
     if (kind < SFX_KIND_STATIC || kind > SFX_KIND_CLICK_DIAL) return;
     if (gain <= 0.0f) return;
-    if (gain > 1.0f) gain = 1.0f;
+    /* Up to 4 (+12 dB), not 1: the synthesized clicks render with headroom, and at 1.0 they were
+     * still too quiet under music -- a Volume above 1 was silently clamped, so turning it up
+     * appeared to do nothing. Overs are rounded by cmm_out_inject's knee, not hard-clipped. */
+    if (gain > 4.0f) gain = 4.0f;
     mix_lock(&g_lock);
     if (!g_started) { mix_unlock(&g_lock); return; }
     /* v40: producer opens outside g_lock (was ensure_device_locked + !g_out early-out). The

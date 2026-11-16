@@ -349,8 +349,9 @@ namespace CMM
         //   BodyHz   = the knock's ring pitch (plastic ~900-1400, wood/bakelite ~500-800).
         //   Double   = 0..1 level of a second micro-impact ~12ms after the first (the detent's
         //              spring release then the stop landing — the mechanical "cl-ick"; 0 = single).
-        //   Volume   = that click's own level; -1 = inherit RadioSfxVolume. Default 0.8: at the inherited
-        //              0.5 the synthesized clicks sat too low under the music.
+        //   Volume   = that click's own level 0..4; -1 = inherit RadioSfxVolume. Default 0.8: at the
+        //              inherited 0.5 the synthesized clicks sat too low under the music. The DLL used to
+        //              cap this at 1.0, so higher values silently did nothing.
         // THREE clicks, because they are three different objects. Power on/off is a TOGGLE: a
         // lever going over centre and then the mechanism hitting its stop — two impacts, a low
         // heavy shell. A station change is a DETENT: a ball dropping into a groove — one bright

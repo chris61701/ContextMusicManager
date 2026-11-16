@@ -1238,9 +1238,18 @@ CMM_API int cmm_out_inject(cmm_out* o, const float* mono, int frames, float gain
     if (ma_pcm_rb_acquire_read(&o->rb, &n, &p) != MA_SUCCESS || p == NULL) return 0;
     if ((int)n < frames + skip) { ma_pcm_rb_commit_read(&o->rb, 0); return 0; }   /* wrapped: decline */
     float* f = (float*)p + (size_t)skip * o->channels;
+    /* The injected click lands AFTER the bus clip guard, so its overs need their own: a soft knee
+     * above 0.9 that approaches 1.0 and never passes it (slope 1 at the knee, so nothing below it
+     * changes). Music under a normal master sits well below 0.9, so in practice only the click's
+     * own peaks are rounded -- which is what lets a click Volume above 1 be loud without cracking. */
     for (int i = 0; i < frames; i++) {
         float v = mono[i] * gain;
-        for (int c = 0; c < o->channels; c++) f[(size_t)i * o->channels + c] += v;
+        for (int c = 0; c < o->channels; c++) {
+            float s = f[(size_t)i * o->channels + c] + v;
+            float a = fabsf(s);
+            if (a > 0.9f) { float e = a - 0.9f; a = 0.9f + 0.1f * e / (0.1f + e); s = s < 0.0f ? -a : a; }
+            f[(size_t)i * o->channels + c] = s;
+        }
     }
     ma_pcm_rb_commit_read(&o->rb, 0);          /* nothing consumed: we only added to it */
     return frames;

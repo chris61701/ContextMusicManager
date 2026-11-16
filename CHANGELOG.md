@@ -81,8 +81,10 @@ contexts.xml values below are what it uses, and nothing changes until you turn i
   detent are each built from seven bands of shaped noise, fitted to measured switches and tuned
   by ear, with a little variation on every press. Each has its own `RadioClick*Shape` line in
   radio.xml (schema 61). They are also louder: `RadioClickOnVolume`, `RadioClickOffVolume` and
-  `RadioClickDialVolume` default to 0.8 instead of inheriting `RadioSfxVolume` (0.5). Schema 62
-  moves anyone still on the old -1 to 0.8 and keeps any other value you set.
+  `RadioClickDialVolume` default to 0.8 instead of inheriting `RadioSfxVolume` (0.5), and now go
+  up to 4: anything above 1 used to be silently capped. Above 1 the loudest peaks are rounded off
+  rather than clipped. Schema 62 moves anyone still on the old -1 to 0.8 and keeps any other value
+  you set.
 
 ### Fixed
 

@@ -51,6 +51,7 @@ namespace CMM
         // SILENTLY winning made a hand edit to settings.xml look broken: MusicPath was changed there
         // mid-session, the reload fired, and the dev file's value came straight back with nothing
         // in the log to say why. So say it, on every load, for every key the two files disagree on.
+        private static readonly HashSet<string> _shadowWarned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static void WarnShadowed(XmlElement dev, XmlElement settings)
         {
             if (dev == null || settings == null) return;
@@ -61,6 +62,9 @@ namespace CMM
                 if (mine == null) continue;
                 string a = n.InnerText.Trim(), b = mine.InnerText.Trim();
                 if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) continue;
+                // Once per disagreement per session: every radio.xml edit reloads the whole chain,
+                // and the intended dev overrides (DebugLogging, PerfTiming) would repeat each time.
+                if (!_shadowWarned.Add(n.Name + "\u0001" + a + "\u0001" + b)) continue;
                 Log.Warning($"[CMM] {n.Name}: settings.xml says '{b}' but settings.dev.xml overrides it with '{a}'. " +
                             "Remove the line from settings.dev.xml to use settings.xml's value.");
             }
