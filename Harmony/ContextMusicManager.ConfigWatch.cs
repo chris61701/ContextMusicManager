@@ -20,11 +20,13 @@ namespace CMM
             string settingsPath = CMMConfigLoader.SettingsFile(ModPath);
             string contextsPath = CMMConfigLoader.ContextsFile(ModPath);
             string radioPath    = CMMConfigLoader.RadioSettingsFile(ModPath);   // same reload as settings
+            string devPath      = CMMConfigLoader.DevSettingsFile(ModPath);     // and so does the dev overlay
 
             // Snapshot timestamps right after init so the first poll doesn't re-fire.
             DateTime settingsTime = File.Exists(settingsPath) ? File.GetLastWriteTimeUtc(settingsPath) : DateTime.MinValue;
             DateTime contextsTime = File.Exists(contextsPath) ? File.GetLastWriteTimeUtc(contextsPath) : DateTime.MinValue;
             DateTime radioTime    = File.Exists(radioPath)    ? File.GetLastWriteTimeUtc(radioPath)    : DateTime.MinValue;
+            DateTime devTime      = StampOf(devPath);
 
             while (true)
             {
@@ -33,6 +35,7 @@ namespace CMM
 
                 bool settingsChanged = false, contextsChanged = false;
                 DateTime newSettingsTime = settingsTime, newContextsTime = contextsTime, newRadioTime = radioTime;
+                DateTime newDevTime = devTime;
                 bool done = false;
 
                 ThreadPool.QueueUserWorkItem(_ =>
@@ -49,6 +52,10 @@ namespace CMM
                             var t = File.GetLastWriteTimeUtc(radioPath);
                             if (t != radioTime) { settingsChanged = true; newRadioTime = t; }
                         }
+                        {
+                            var t = StampOf(devPath);   // created, edited or deleted
+                            if (t != devTime) { settingsChanged = true; newDevTime = t; }
+                        }
                         if (File.Exists(contextsPath))
                         {
                             var t = File.GetLastWriteTimeUtc(contextsPath);
@@ -64,6 +71,7 @@ namespace CMM
                 // Cheap stamp check on the main thread; only re-parses when it changed.
                 ScriptHost.CheckReload();
                 radioTime = newRadioTime;
+                devTime = newDevTime;
                 if (settingsChanged) settingsTime = newSettingsTime;
                 if (contextsChanged) contextsTime = newContextsTime;
                 if (settingsChanged || contextsChanged)
@@ -282,8 +290,10 @@ namespace CMM
         // settings load reads both files as one chain, so either changing means "settings changed".
         // Splitting the file would otherwise have quietly cost hot-reload for two thirds of the
         // settings, which is exactly the sort of thing nobody notices until they are mid-tuning.
-        private static string   _cfgSettingsPath, _cfgContextsPath, _cfgRadioPath;
-        private static DateTime _cfgSettingsTime, _cfgContextsTime, _cfgRadioTime;
+        // settings.dev.xml (Debug overlay) is watched too: it sits at the FRONT of the chain, so an
+        // edit to it changes what every other file means, and it used to need a restart to apply.
+        private static string   _cfgSettingsPath, _cfgContextsPath, _cfgRadioPath, _cfgDevPath;
+        private static DateTime _cfgSettingsTime, _cfgContextsTime, _cfgRadioTime, _cfgDevTime;
 
         private static DateTime StampOf(string p) =>
             !string.IsNullOrEmpty(p) && File.Exists(p) ? File.GetLastWriteTimeUtc(p) : DateTime.MinValue;
@@ -293,10 +303,12 @@ namespace CMM
             _cfgSettingsPath = CMMConfigLoader.SettingsFile(ModPath);
             _cfgContextsPath = CMMConfigLoader.ContextsFile(ModPath);
             _cfgRadioPath    = CMMConfigLoader.RadioSettingsFile(ModPath);
+            _cfgDevPath      = CMMConfigLoader.DevSettingsFile(ModPath);
             // Snapshot timestamps right after init so the first poll doesn't re-fire.
             _cfgSettingsTime = StampOf(_cfgSettingsPath);
             _cfgContextsTime = StampOf(_cfgContextsPath);
             _cfgRadioTime    = StampOf(_cfgRadioPath);
+            _cfgDevTime      = StampOf(_cfgDevPath);
         }
 
         // OUR OWN WRITE, not a hand edit. The keybind-persisted settings (CombatMusicMuted)
@@ -326,7 +338,7 @@ namespace CMM
         {
             if (_functionallyDormant) return;   // A/B dormant arm
             bool settingsChanged = false, contextsChanged = false;
-            DateTime ns = _cfgSettingsTime, nc = _cfgContextsTime, nr = _cfgRadioTime;
+            DateTime ns = _cfgSettingsTime, nc = _cfgContextsTime, nr = _cfgRadioTime, nd = _cfgDevTime;
             try
             {
                 if (File.Exists(_cfgSettingsPath))
@@ -339,6 +351,10 @@ namespace CMM
                     var t = File.GetLastWriteTimeUtc(_cfgRadioPath);
                     if (t != _cfgRadioTime) { settingsChanged = true; nr = t; }
                 }
+                {
+                    var t = StampOf(_cfgDevPath);   // created, edited or deleted
+                    if (t != _cfgDevTime) { settingsChanged = true; nd = t; }
+                }
                 if (File.Exists(_cfgContextsPath))
                 {
                     var t = File.GetLastWriteTimeUtc(_cfgContextsPath);
@@ -346,7 +362,7 @@ namespace CMM
                 }
             }
             catch { /* transient IO during an external save — retry next tick */ }
-            _cfgSettingsTime = ns; _cfgContextsTime = nc; _cfgRadioTime = nr;
+            _cfgSettingsTime = ns; _cfgContextsTime = nc; _cfgRadioTime = nr; _cfgDevTime = nd;
 
             bool scriptChanged = ScriptHost.ScriptChangedOnDisk();
             if (!settingsChanged && !contextsChanged && !scriptChanged) return;   // nothing changed — no main hop

@@ -62,7 +62,7 @@ namespace CMM
         // Bump whenever a setting is added or a default changes. Stamped into the
         // written file as <CMMSettings schema="N"> and read back to decide what to
         // backfill and which default changes still apply.
-        internal const int CurrentSchema = 61;
+        internal const int CurrentSchema = 62;
 
         // ── entry builders (keep the table below readable) ────────────────────
         static SchemaEntry Cmt(string text) => new SchemaEntry { Comment = text };
@@ -551,8 +551,8 @@ hot-reload."),
             F("RadioSfxVolume",                      "CMMConfig.RadioSfxVolume",                    0.5f),
             Cmt(@"Tuning-static character. ALL hot-reload and take effect on the very next ping — even
 mid-hash — so dial between stations while editing and hear each change immediately.
-  StaticVolume  : the static's own level 0..1; -1 = inherit RadioSfxVolume (clicks always
-                  use RadioSfxVolume, so you can run quiet static under audible clicks).
+  StaticVolume  : the static's own level 0..1; -1 = inherit RadioSfxVolume (the clicks have
+                  their own RadioClick*Volume, so you can run quiet static under audible clicks).
   StaticLowHz   : low cut (50..4000). Lower = fuller/warmer body; higher = thin AM hiss.
   StaticHighHz  : top cap (400..12000, kept above the low cut). Higher = brighter hiss;
                   lower = dull rumble.
@@ -611,21 +611,24 @@ Body     : 0..1 — the shell-knock resonator, the ""tok"" of a real dial body. 
 BodyHz   : the knock's ring pitch (200..3000; plastic ~900-1400, bakelite ~500-800).
 Double   : 0..1 — a second micro-impact ~12ms after the first (the detent's spring
            release then the stop landing — the mechanical ""cl-ick""). 0 = single.
-Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume."),
+Volume   : that click's own level 0..1; -1 = inherit RadioSfxVolume. 0.8 by default, above
+           RadioSfxVolume: at 0.5 the synthesized clicks sat too low under the music."),
             F("RadioClickOnHz",                      "CMMConfig.RadioClickOnHz",                    8722f),
             F("RadioClickOnSnap",                    "CMMConfig.RadioClickOnSnap",                  0.72f),
             F("RadioClickOnLengthMs",                "CMMConfig.RadioClickOnLengthMs",              60f),
             F("RadioClickOnBody",                    "CMMConfig.RadioClickOnBody",                  0.37f),
             F("RadioClickOnBodyHz",                  "CMMConfig.RadioClickOnBodyHz",                5100f),
             F("RadioClickOnDouble",                  "CMMConfig.RadioClickOnDouble",                0.8f),
-            F("RadioClickOnVolume",                  "CMMConfig.RadioClickOnVolume",                -1f),
+            F("RadioClickOnVolume",                  "CMMConfig.RadioClickOnVolume",                0.8f,
+              changedIn: 62, was: -1f),
             F("RadioClickOffHz",                     "CMMConfig.RadioClickOffHz",                   8722f),
             F("RadioClickOffSnap",                   "CMMConfig.RadioClickOffSnap",                 0.7f),
             F("RadioClickOffLengthMs",               "CMMConfig.RadioClickOffLengthMs",             68f),
             F("RadioClickOffBody",                   "CMMConfig.RadioClickOffBody",                 0.4f),
             F("RadioClickOffBodyHz",                 "CMMConfig.RadioClickOffBodyHz",               4350f),
             F("RadioClickOffDouble",                 "CMMConfig.RadioClickOffDouble",               0.8f),
-            F("RadioClickOffVolume",                 "CMMConfig.RadioClickOffVolume",               -1f),
+            F("RadioClickOffVolume",                 "CMMConfig.RadioClickOffVolume",               0.8f,
+              changedIn: 62, was: -1f),
 
             Gap(),
             Cmt(@"── The DIAL DETENT: turning the tuning knob one station ───────────────────────────────
@@ -640,7 +643,8 @@ few milliseconds. Same six controls, aimed somewhere else entirely."),
             F("RadioClickDialBody",                  "CMMConfig.RadioClickDialBody",                0.5f),
             F("RadioClickDialBodyHz",                "CMMConfig.RadioClickDialBodyHz",              5949f),
             F("RadioClickDialDouble",                "CMMConfig.RadioClickDialDouble",              0.52f),
-            F("RadioClickDialVolume",                "CMMConfig.RadioClickDialVolume",              -1f),
+            F("RadioClickDialVolume",                "CMMConfig.RadioClickDialVolume",              0.8f,
+              changedIn: 62, was: -1f),
 
             Gap(),
             Cmt(@"How much each firing differs from the last, 0..1, shared by all three clicks. No two
@@ -673,9 +677,9 @@ the older clicks sound like metal. One line per click, sections separated by |:
 These defaults were fitted to measured recordings by CMM_Decoder/fit_click.py, which can fit
 a shape to any WAV you give it. Leave a line empty to use the older knobs above for that
 click instead. Live: edits are heard on the next click."),
-            Str("RadioClickOnShape",                   "CMMConfig.RadioClickOnShape",                 @"levels -37.3 -28.9 -8.1 -7.8 -4.0 0.0 -2.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 5.9:-16 10.4:-22 15.0:-27 17.7:-26 20.0:-23 24.5:-27 | release 177 -0.2 -2.4", since: 61),
+            Str("RadioClickOnShape",                   "CMMConfig.RadioClickOnShape",                 @"levels -37.3 -28.9 -8.1 -7.8 -4.0 0.0 -2.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 | release 177 -0.2 -2.4", since: 61),
             Str("RadioClickOffShape",                  "CMMConfig.RadioClickOffShape",                @"levels -20.3 -12.1 0.0 -22.0 -11.1 -9.5 -11.0 | decay 16.5 8.2 2.6 14.7 6.5 4.1 3.2 | swell 13.0 | edge 2.0 | hits 0.0:-0 2.2:-6 5.0:0 7.3:-5 9.8:-11 12.6:-18 14.9:-12 18.0:-21 | release 170 0.2 2.4", since: 61),
-            Str("RadioClickDialShape",                 "CMMConfig.RadioClickDialShape",               @"levels -44.5 -75.4 -59.7 -4.4 -9.2 0.0 -5.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4", since: 61),
+            Str("RadioClickDialShape",                 "CMMConfig.RadioClickDialShape",               @"levels -38.5 -71.4 -57.7 -4.4 -11.2 -4.0 -11.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4", since: 61),
 
             Gap(),
             Cmt(@"── Recorded clicks ────────────────────────────────────────────────────────────────────

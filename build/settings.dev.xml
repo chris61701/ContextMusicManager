@@ -14,9 +14,11 @@
      toggle, most visibly) on every single build. Now the generated file is left
      alone and the dev values live here instead.
 
-     MusicPath is rewritten at deploy time from the DebugMusicPath build property,
-     so this copy keeps the harmless release value and the repo can never ship a
-     machine-specific path.
+     MusicPath is NOT overridden by default: settings.xml owns it, so editing it
+     there switches the library live and survives every deploy. A build passed
+     -p:DebugMusicPath=<folder> puts a MusicPath line where the marker below is,
+     for a one-off test library; the next plain Debug build takes it out again.
+     CMM logs a warning whenever a line here shadows a different settings.xml value.
 
      Only put things here that should differ for LOCAL TESTING. In particular do
      not override a setting a keybind persists — the keybind writes settings.xml,
@@ -24,8 +26,7 @@
 ═══════════════════════════════════════════════════════════════════════════ -->
 <CMMSettings>
 
-  <!-- Rewritten by the Debug deploy to $(DebugMusicPath). -->
-  <MusicPath>Music</MusicPath>
+  <!--CMM:DebugMusicPath-->
 
   <!-- Verbose logging and per-frame timing while testing. -->
   <DebugLogging>true</DebugLogging>

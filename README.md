@@ -49,8 +49,10 @@ MSBuild ContextMusicManager.csproj -p:Configuration=Release ^
   "-p:GameInstallDir=D:\Steam\steamapps\common\7 Days To Die"
 ```
 
-A Debug build deploys straight into `<GameInstallDir>\Mods\ContextMusicManager` and points
-the deployed `settings.xml` at `DebugMusicPath`; set `-p:DebugMusicPath=<your music folder>`.
+A Debug build deploys straight into `<GameInstallDir>\Mods\ContextMusicManager`, along with
+a `settings.dev.xml` that turns on debug logging. Set your music folder in the deployed
+`settings.xml` (`MusicPath`); deploys leave that file alone. To point one deploy at a test
+library without editing it, pass `-p:DebugMusicPath=<folder>`.
 
 ## License
 

@@ -34,11 +34,11 @@
        zip name encodes a version. Add a version by copying a block below. -->
   <PropertyGroup>
     <GameVersion Condition="'$(GameVersion)' == ''">3.4.0 b10</GameVersion>
-    <!-- Debug builds rewrite MusicPath in the deployed build/settings.dev.xml (the dev
-         override file at the front of CMM's settings chain) to this; override with
-         -p:DebugMusicPath=... . Release ships no settings file at all — CMM generates one
-         on first run with the built-in default ("Music"). -->
-    <DebugMusicPath Condition="'$(DebugMusicPath)' == ''">J:\7D2D Custom Music</DebugMusicPath>
+    <!-- Optional: -p:DebugMusicPath=<folder> makes a Debug deploy override MusicPath in the
+         deployed settings.dev.xml (the dev override file at the front of CMM's settings
+         chain), for a one-off test library. No default: without it, settings.xml owns
+         MusicPath. Release ships no settings file at all; CMM generates one on first run
+         with the built-in default ("Music"). -->
     <!-- A plain Debug build (including the VS Build button, which never passes a target)
          fans out to EVERY game install via the DebugFanout target below, so all four
          Mods folders stay in sync. Override with -p:CMMDeployAll=false for a quick
@@ -426,13 +426,22 @@
     <!-- Dev overrides go in their OWN file at the front of CMM's settings chain, instead
          of being poked into the deployed settings.xml. That file is CMM's to write now,
          and editing it here would fight the generator and clobber persisted settings. -->
-    <Copy SourceFiles="build\settings.dev.xml"
-          DestinationFiles="$(OutputPath)Config\settings.dev.xml"
-          SkipUnchangedFiles="false" />
-    <XmlPoke XmlInputPath="$(OutputPath)Config\settings.dev.xml"
-             Query="/CMMSettings/MusicPath" Value="$(DebugMusicPath)" />
+    <!-- MusicPath is only overridden when -p:DebugMusicPath is passed. It used to default to
+         the personal library and be poked in on EVERY Debug build, so a later plain build
+         silently reverted a test-library deploy, and any MusicPath edit in settings.xml was
+         shadowed with nothing to say so. Now the marker is swapped for a MusicPath line only
+         on request, and settings.xml owns the library otherwise. Escape keeps WriteLinesToFile
+         from splitting the text on semicolons or unescaping % sequences. -->
+    <PropertyGroup>
+      <_DevXml>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\build\settings.dev.xml'))</_DevXml>
+      <_DevXml Condition="'$(DebugMusicPath)' != ''">$(_DevXml.Replace('&lt;!--CMM:DebugMusicPath--&gt;', '&lt;MusicPath&gt;$(DebugMusicPath)&lt;/MusicPath&gt;   &lt;!-- from -p:DebugMusicPath; a plain Debug build removes it --&gt;'))</_DevXml>
+      <_DevMusicNote Condition="'$(DebugMusicPath)' != ''">MusicPath=$(DebugMusicPath) (overrides settings.xml)</_DevMusicNote>
+      <_DevMusicNote Condition="'$(DebugMusicPath)' == ''">MusicPath from settings.xml</_DevMusicNote>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(OutputPath)Config\settings.dev.xml"
+                      Lines="$([MSBuild]::Escape($(_DevXml)))" Overwrite="true" Encoding="utf-8" />
     <Message Importance="high"
-             Text="[CMM] Debug deploy — settings.dev.xml overrides: MusicPath=$(DebugMusicPath), DebugLogging=true, PerfTiming=true, Ctrl gate off" />
+             Text="[CMM] Debug deploy — settings.dev.xml: $(_DevMusicNote), DebugLogging=true, PerfTiming=true, Ctrl gate off" />
   </Target>
 
   <!-- Release only: zip the staged mod as

@@ -168,7 +168,7 @@ namespace CMM
         public static float  RadioSfxVolume  = 0.5f;
         // Tuning-static character (all hot-reload — heard on the very next ping, even mid-hash,
         // so you can dial between stations while editing to taste):
-        //   StaticVolume  = the static's OWN level; -1 = inherit RadioSfxVolume (clicks keep that).
+        //   StaticVolume  = the static's OWN level; -1 = inherit RadioSfxVolume (clicks have their own RadioClick*Volume).
         //   StaticLowHz   = low cut — lower = fuller/warmer body, higher = thinner.
         //   StaticHighHz  = top cap — higher = brighter hiss, lower = duller rumble.
         //   StaticCrackle = 0..1 sputter depth — 0 = smooth "shhh", 1 = full radio crackle.
@@ -349,7 +349,8 @@ namespace CMM
         //   BodyHz   = the knock's ring pitch (plastic ~900-1400, wood/bakelite ~500-800).
         //   Double   = 0..1 level of a second micro-impact ~12ms after the first (the detent's
         //              spring release then the stop landing — the mechanical "cl-ick"; 0 = single).
-        //   Volume   = that click's own level; -1 = inherit RadioSfxVolume.
+        //   Volume   = that click's own level; -1 = inherit RadioSfxVolume. Default 0.8: at the inherited
+        //              0.5 the synthesized clicks sat too low under the music.
         // THREE clicks, because they are three different objects. Power on/off is a TOGGLE: a
         // lever going over centre and then the mechanism hitting its stop — two impacts, a low
         // heavy shell. A station change is a DETENT: a ball dropping into a groove — one bright
@@ -361,21 +362,21 @@ namespace CMM
         public static float  RadioClickOnBody      = 0.37f;
         public static float  RadioClickOnBodyHz    = 5100f;
         public static float  RadioClickOnDouble    = 0.8f;
-        public static float  RadioClickOnVolume    = -1f;
+        public static float  RadioClickOnVolume    = 0.8f;
         public static float  RadioClickOffHz       = 8722f;
         public static float  RadioClickOffSnap     = 0.7f;
         public static float  RadioClickOffLengthMs = 68f;
         public static float  RadioClickOffBody     = 0.4f;
         public static float  RadioClickOffBodyHz   = 4350f;
         public static float  RadioClickOffDouble   = 0.8f;
-        public static float  RadioClickOffVolume   = -1f;
+        public static float  RadioClickOffVolume   = 0.8f;
         public static float  RadioClickDialHz       = 8187f;
         public static float  RadioClickDialSnap     = 0.84f;
         public static float  RadioClickDialLengthMs = 44f;
         public static float  RadioClickDialBody     = 0.5f;
         public static float  RadioClickDialBodyHz   = 5949f;
         public static float  RadioClickDialDouble   = 0.52f;
-        public static float  RadioClickDialVolume   = -1f;
+        public static float  RadioClickDialVolume   = 0.8f;
         // How much each firing differs from the last, 0..1, shared by all three. No two detents
         // on a real mechanism are identical, and a fixed waveform repeated on every notch is the
         // thing that gives a UI sound away as a sound EFFECT. 0 = every click identical.
@@ -384,9 +385,9 @@ namespace CMM
         // ClickShape.Parse). Each is octave-band levels and decays plus an impact list, fitted by
         // CMM_Decoder/fit_click.py to measured switch recordings that do not ship. Non-empty = the
         // click is shaped noise; empty = that kind falls back to the resonator knobs above.
-        public static string RadioClickOnShape   = @"levels -37.3 -28.9 -8.1 -7.8 -4.0 0.0 -2.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 5.9:-16 10.4:-22 15.0:-27 17.7:-26 20.0:-23 24.5:-27 | release 177 -0.2 -2.4";
+        public static string RadioClickOnShape   = @"levels -37.3 -28.9 -8.1 -7.8 -4.0 0.0 -2.6 | decay 75.3 47.2 10.4 10.4 7.3 5.8 3.2 | swell 2.0 | edge 2.0 | hits 0.0:0 2.8:-10 | release 177 -0.2 -2.4";
         public static string RadioClickOffShape  = @"levels -20.3 -12.1 0.0 -22.0 -11.1 -9.5 -11.0 | decay 16.5 8.2 2.6 14.7 6.5 4.1 3.2 | swell 13.0 | edge 2.0 | hits 0.0:-0 2.2:-6 5.0:0 7.3:-5 9.8:-11 12.6:-18 14.9:-12 18.0:-21 | release 170 0.2 2.4";
-        public static string RadioClickDialShape = @"levels -44.5 -75.4 -59.7 -4.4 -9.2 0.0 -5.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4";
+        public static string RadioClickDialShape = @"levels -38.5 -71.4 -57.7 -4.4 -11.2 -4.0 -11.4 | decay 59.6 59.6 9.2 3.6 5.2 4.1 2.9 | swell 0.0 | edge 2.0 | hits 0.0:-20 2.3:0 4.6:-8 6.8:-15 9.0:-18 11.7:-23 15.6:-26 | release 112 4.8 -2.4";
         // Play the RECORDED clicks from Sounds/ instead of synthesizing them. The synth stays in
         // the build as the fallback: a missing or unreadable file makes the radio quieter, never
         // broken, and it is still what a user gets if they delete the folder.

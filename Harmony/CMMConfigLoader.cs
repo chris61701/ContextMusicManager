@@ -47,11 +47,31 @@ namespace CMM
             return null;
         }
 
+        // settings.dev.xml wins over settings.xml by design, but SILENTLY winning made a hand edit
+        // to settings.xml look broken: MusicPath was changed there mid-session, the reload fired,
+        // and the dev file's value came straight back with nothing in the log to say why. So say it,
+        // on every load, for every key the two files disagree on.
+        private static void WarnShadowed(XmlElement dev, XmlElement settings)
+        {
+            if (dev == null || settings == null) return;
+            foreach (XmlNode n in dev.ChildNodes)
+            {
+                if (n.NodeType != XmlNodeType.Element) continue;
+                XmlNode mine = settings.SelectSingleNode(n.Name);
+                if (mine == null) continue;
+                string a = n.InnerText.Trim(), b = mine.InnerText.Trim();
+                if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) continue;
+                Log.Warning($"[CMM] {n.Name}: settings.xml says '{b}' but settings.dev.xml overrides it with '{a}'. " +
+                            "Remove the line from settings.dev.xml to use settings.xml's value.");
+            }
+        }
+
         public static void LoadSettings(string modPath)
         {
             var chain = new List<XmlElement>();
-            Add(chain, DevSettingsFile(modPath), "settings.dev.xml");   // Debug only; usually absent
-            Add(chain, SettingsFile(modPath), "settings.xml");
+            XmlElement devRoot      = Add(chain, DevSettingsFile(modPath), "settings.dev.xml");   // Debug only; usually absent
+            XmlElement settingsRoot = Add(chain, SettingsFile(modPath), "settings.xml");
+            WarnShadowed(devRoot, settingsRoot);
             XmlElement radioRoot = Add(chain, RadioSettingsFile(modPath), "radio.xml");
             if (chain.Count == 0)
             {
@@ -84,6 +104,13 @@ namespace CMM
                         ? rawMusicPath
                         : Path.Combine(modPath, rawMusicPath);
                     CMMConfig.D($"[CMM] MusicPath resolved to: {ContextMusicManager.MusicDirectory}");
+                }
+                else
+                {
+                    // Removed on a hot-reload (or never set): back to the built-in default, the same
+                    // one startup uses, instead of keeping whatever the previous load resolved.
+                    ContextMusicManager.MusicDirectory = Path.Combine(modPath, "Music");
+                    CMMConfig.D($"[CMM] MusicPath not set — using the default: {ContextMusicManager.MusicDirectory}");
                 }
 
                 // The mute STATE, not just the key, and it drives a live toggle. Applied on

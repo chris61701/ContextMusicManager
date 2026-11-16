@@ -77,6 +77,12 @@ contexts.xml values below are what it uses, and nothing changes until you turn i
   all survive — and the original is kept beside it as `contexts.xml.schema1.bak`. Settings
   schemas 59 and 60 add `DefaultTrackCooldown` and `TrackCooldownsEnabled` to an existing
   settings.xml.
+- **The radio's clicks are synthesized; no recordings ship.** Power on, power off and the dial
+  detent are each built from seven bands of shaped noise, fitted to measured switches and tuned
+  by ear, with a little variation on every press. Each has its own `RadioClick*Shape` line in
+  radio.xml (schema 61). They are also louder: `RadioClickOnVolume`, `RadioClickOffVolume` and
+  `RadioClickDialVolume` default to 0.8 instead of inheriting `RadioSfxVolume` (0.5). Schema 62
+  moves anyone still on the old -1 to 0.8 and keeps any other value you set.
 
 ### Fixed
 
@@ -87,6 +93,8 @@ contexts.xml values below are what it uses, and nothing changes until you turn i
 - **MP4 decoding no longer goes through the C runtime's file functions** while a track plays.
   Opens were already serialized, but reads were not; MP4/M4A now use the same race-free whole-file
   read (or, above 100 MB, raw Windows handle) as every other format.
+- **Removing `MusicPath` from settings.xml while the game runs** now goes back to the default
+  `Music` folder. Before, the previous folder stayed in use until a restart.
 
 ## 1.0.5a — RC1 built 2026-09-25, unreleased
 
