@@ -123,8 +123,17 @@ jobs:
             -p:Configuration=Release `
             "-p:GameInstallDir=$env:SERVER_DIR" `
             "-p:GameManagedDir=$env:SERVER_MANAGED" `
-            "-p:ReleaseName=${{ steps.name.outputs.value }}"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            "-p:ReleaseName=${{ steps.name.outputs.value }}" 2>&1 | Tee-Object -Variable out
+          $code = $LASTEXITCODE
+          if ($code) {
+            # Job logs are readable only by repo admins; annotations are public. Surface the
+            # errors and the tail of the output there so a failure can be diagnosed from outside.
+            $out | Where-Object { "$_" -match ': error |error MSB|error CS' } | Select-Object -First 20 |
+              ForEach-Object { Write-Host "::error title=MSBuild::$_" }
+            $tail = ($out | Select-Object -Last 40 | ForEach-Object { "$_" }) -join '%0A'
+            Write-Host "::error title=MSBuild output (last 40 lines)::$tail"
+            exit $code
+          }
           Get-ChildItem dist\*.zip | ForEach-Object { "$($_.Name)  $([math]::Round($_.Length / 1MB, 2)) MB" }
 
       - name: Upload the zip
