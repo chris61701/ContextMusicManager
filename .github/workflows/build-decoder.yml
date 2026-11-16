@@ -6,6 +6,9 @@
 # SIGNPATH_ORGANIZATION_ID and the SECRET SIGNPATH_API_TOKEN and the sign job runs. Its output
 # is the signed DLL as an artifact. release.yml calls this workflow and packages the mod around
 # whichever DLL it produced (signed when signing is on, unsigned otherwise).
+# Third-party actions are pinned to exact commits (the comment names the release) so an
+# action's owner cannot change what runs in this build by moving a tag. To update one,
+# look up the new release's commit and replace both.
 name: Build CMM_Decoder
 
 on:
@@ -31,11 +34,11 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MINGW64            # msvcrt runtime, like the local mingw toolchain
           update: true
@@ -73,7 +76,7 @@ jobs:
 
       - name: Upload
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CMM_Decoder-unsigned
           path: CMM_Decoder/dist/CMM_Decoder.dll
@@ -85,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Submit to SignPath
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -97,7 +100,7 @@ jobs:
           output-artifact-directory: signed
 
       - name: Upload signed DLL
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CMM_Decoder-signed
           path: signed/

@@ -12,6 +12,9 @@
 #     zip attached. Nothing is published until someone presses Publish on that draft.
 #   * Actions tab -> Release build -> Run workflow, with a name -> builds the zip as an artifact
 #     only, no release.
+# Third-party actions are pinned to exact commits (the comment names the release) so an
+# action's owner cannot change what runs in this build by moving a tag. To update one,
+# look up the new release's commit and replace both.
 name: Release build
 
 on:
@@ -42,8 +45,7 @@ jobs:
       SERVER_BRANCH: ''
       DEPOTDOWNLOADER: https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-windows-x64.zip
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Release name
         id: name
         shell: pwsh
@@ -88,14 +90,14 @@ jobs:
       - name: CMM_Decoder.dll (signed if available)
         id: signed
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CMM_Decoder-signed
           path: decoder-signed
 
       - name: CMM_Decoder.dll (unsigned)
         if: steps.signed.outcome != 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CMM_Decoder-unsigned
           path: decoder-unsigned
@@ -110,8 +112,7 @@ jobs:
           Write-Host "Decoder: $($src.FullName)  signature: $($sig.Status)"
           (Get-FileHash CMM_Decoder\dist\CMM_Decoder.dll -Algorithm SHA256).Hash
 
-      - uses: microsoft/setup-msbuild@v2
-
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2.0.0
       - name: MoonSharp 2.0.0 (from nuget.org, where the csproj HintPath expects it)
         shell: pwsh
         run: |
@@ -149,7 +150,7 @@ jobs:
           Get-ChildItem dist\*.zip | ForEach-Object { "$($_.Name)  $([math]::Round($_.Length / 1MB, 2)) MB" }
 
       - name: Upload the zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ContextMusicManager ${{ steps.name.outputs.value }}
           path: dist/*.zip
