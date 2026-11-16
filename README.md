@@ -57,9 +57,8 @@ a `settings.dev.xml` that turns on debug logging and overrides `MusicPath` with
 ### Release builds on GitHub
 
 Official release zips are built by GitHub Actions (`.github/workflows/release.yml`), not on a
-local machine. Pushing a tag such as `v1.0.5b-rc2` builds `CMM_Decoder.dll` from source (signed
-once code signing is set up), compiles the mod, and opens a draft GitHub release with the zip
-attached. The game's assemblies come from the free 7 Days to Die dedicated server, downloaded
+local machine. Pushing a tag such as `v1.0.5b-rc2` builds `CMM_Decoder.dll` from source,
+compiles the mod, and opens a draft GitHub release with the zip attached. The game's assemblies come from the free 7 Days to Die dedicated server, downloaded
 anonymously from Steam during the build; they are never stored in the repository.
 
 ## License
@@ -69,23 +68,6 @@ libraries keep their own licenses, all of them listed with full texts in
 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). FFmpeg, linked statically into
 `CMM_Decoder.dll`, is LGPL 2.1 or later; this repository and `CMM_Decoder/build_*.sh` are what
 let anyone rebuild that DLL against a modified FFmpeg.
-
-## Code signing policy
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
-[SignPath Foundation](https://signpath.org).
-
-- **What is signed:** `CMM_Decoder.dll`, the mod's native audio library, and nothing else.
-  The managed DLLs are loaded by the game's Mono runtime, which Windows does not check.
-- **How:** the DLL is built from this repository by the
-  [Build CMM_Decoder](.github/workflows/build-decoder.yml) workflow on GitHub-hosted runners,
-  from `main` or a `release/*` branch only, and every signing request is approved by hand
-  before SignPath signs it. A binary built anywhere else is never signed.
-- **Team:**
-  - Committers and reviewers: [chris61701](https://github.com/chris61701)
-  - Approvers: [chris61701](https://github.com/chris61701)
-
-  Every change from outside the team is reviewed before it is merged.
 
 ## Privacy
 

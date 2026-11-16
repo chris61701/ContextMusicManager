@@ -1,11 +1,6 @@
 # Builds CMM_Decoder.dll from source on a GitHub-hosted runner, so the binary that ships is one
-# anyone can trace back to this repository -- the condition for SignPath's free code signing,
-# which signs only CI builds of the project's own source (see README, "Code signing policy").
-#
-# Signing is off until the project is approved: set the repository VARIABLE
-# SIGNPATH_ORGANIZATION_ID and the SECRET SIGNPATH_API_TOKEN and the sign job runs. Its output
-# is the signed DLL as an artifact. release.yml calls this workflow and packages the mod around
-# whichever DLL it produced (signed when signing is on, unsigned otherwise).
+# anyone can trace back to this repository. release.yml calls this workflow and packages the mod
+# around the DLL it produced.
 # Third-party actions are pinned to exact commits (the comment names the release) so an
 # action's owner cannot change what runs in this build by moving a tag. To update one,
 # look up the new release's commit and replace both.
@@ -80,28 +75,4 @@ jobs:
         with:
           name: CMM_Decoder-unsigned
           path: CMM_Decoder/dist/CMM_Decoder.dll
-          if-no-files-found: error
-
-  sign:
-    needs: build
-    if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Submit to SignPath
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ContextMusicManager
-          signing-policy-slug: release-signing
-          artifact-configuration-slug: cmm-decoder
-          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
-
-      - name: Upload signed DLL
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: CMM_Decoder-signed
-          path: signed/
           if-no-files-found: error

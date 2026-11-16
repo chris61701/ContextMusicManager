@@ -60,7 +60,7 @@ contexts.xml values below are what it uses, and nothing changes until you turn i
 
 - **AAC and MP4 are now decoded by FFmpeg** (its MP4 demuxer and AAC/ALAC decoders, built
   minimal and linked into CMM_Decoder.dll), replacing fdk-aac and minimp4. Every bundled library
-  is now under an OSI-approved open-source license, which free code signing requires.
+  is now under an OSI-approved open-source license.
   Decoding matches the old decoder to within 0.01 dB of loudness, seeking stays sample-exact,
   and MP4s that record their encoder delay (iTunes, qaac, FFmpeg) now play gapless: the silent
   lead-in and tail padding are trimmed instead of played.

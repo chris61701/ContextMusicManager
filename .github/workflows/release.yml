@@ -1,5 +1,5 @@
-# Builds the RELEASE ZIP on GitHub: CMM_Decoder.dll from source (build-decoder.yml, signed once
-# SignPath is set up), the mod DLL, and the packaged Mods\ContextMusicManager folder.
+# Builds the RELEASE ZIP on GitHub: CMM_Decoder.dll from source (build-decoder.yml), the mod
+# DLL, and the packaged Mods\ContextMusicManager folder.
 #
 # The mod compiles against the game's own assemblies, which are not ours to put in a public repo.
 # They come from the 7 Days to Die DEDICATED SERVER instead (Steam app 294420), which Steam serves
@@ -87,29 +87,19 @@ jobs:
           "SERVER_MANAGED=$m" >> $env:GITHUB_ENV
           Write-Host "Assembly-CSharp: $((Get-Item (Join-Path $m 'Assembly-CSharp.dll')).VersionInfo.FileVersion)"
 
-      - name: CMM_Decoder.dll (signed if available)
-        id: signed
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: CMM_Decoder-signed
-          path: decoder-signed
-
-      - name: CMM_Decoder.dll (unsigned)
-        if: steps.signed.outcome != 'success'
+      - name: CMM_Decoder.dll
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CMM_Decoder-unsigned
-          path: decoder-unsigned
+          path: decoder
 
       - name: Use the CI-built decoder
         shell: pwsh
         run: |
-          $src = Get-ChildItem decoder-signed, decoder-unsigned -Recurse -Filter CMM_Decoder.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+          $src = Get-ChildItem decoder -Recurse -Filter CMM_Decoder.dll | Select-Object -First 1
           if (-not $src) { throw 'no CMM_Decoder.dll artifact' }
           Copy-Item $src.FullName CMM_Decoder\dist\CMM_Decoder.dll -Force
-          $sig = Get-AuthenticodeSignature CMM_Decoder\dist\CMM_Decoder.dll
-          Write-Host "Decoder: $($src.FullName)  signature: $($sig.Status)"
+          Write-Host "Decoder: $($src.FullName)"
           (Get-FileHash CMM_Decoder\dist\CMM_Decoder.dll -Algorithm SHA256).Hash
 
       - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2.0.0

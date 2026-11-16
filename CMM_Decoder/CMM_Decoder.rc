@@ -1,5 +1,4 @@
-/* Windows version resource for CMM_Decoder.dll. Shows in Explorer's Details tab, and code
- * signing (SignPath) checks the product name and version against the signing policy.
+/* Windows version resource for CMM_Decoder.dll. Shows in Explorer's Details tab.
  * build_dll.sh passes the version from ModInfo.xml, so it can never drift from the mod's:
  *   CMM_VER_COMMA  e.g. 1,0,5,2     CMM_VER_STR  e.g. "1.0.5.2" */
 #include <winver.h>
